@@ -111,3 +111,11 @@ The package is organized into lanes:
 - **Lane F**: CLI, watcher, status, and installation (this lane)
 
 See `docs/gstack/hermes-pipeline/design-plan.md` for the full design specification.
+
+## Contributing
+
+Found a bug? Have a feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orchestrator/issues).
+
+## License
+
+See LICENSE for details.
