@@ -27,3 +27,50 @@ The **todos-manager** skill automates the addition and management of TODOS.md en
 - Project has a canonical `TODOS.md` file at the repo root (or `docs/gstack/TODOS.md`)
 - TODOS.md follows the gstack schema (see ## TODOS.md Schema)
 - User has write access to TODOS.md and `.claude/gstack/` metadata
+
+---
+
+## TODOS.md Schema
+
+### File location and format
+
+TODOS.md is stored at the repo root. Each entry occupies a single markdown list item (`- [ ] ...`), with metadata in YAML frontmatter blocks or inline comments.
+
+### Entry structure
+
+```markdown
+- [ ] TODO-<n>: <Title>
+  - **Assigned To:** <name or @handle>
+  - **Estimate:** <Xh or Xd>
+  - **Rationale:** <One-line why this task matters>
+  - **Status:** `active` | `blocked` | `done` | `deferred`
+  - **Depends on:** [TODO-<m>, TODO-<k>]
+  - **Notes:** <Optional multi-line context>
+```
+
+### Entry template
+
+When prompting the user to add an entry, use this YAML template:
+
+```yaml
+# New TODOS.md Entry Template
+title: ""
+assigned_to: ""
+estimate: "1h"
+rationale: ""
+status: "active"
+depends_on: []
+notes: ""
+```
+
+### Example: complete entry
+
+```markdown
+- [ ] TODO-42: Refactor pipeline-watcher.py into uv modules
+  - **Assigned To:** @hyonchoi
+  - **Estimate:** 3d
+  - **Rationale:** Unblock downstream tasks (modularization, testing, CI/CD integration)
+  - **Status:** active
+  - **Depends on:** TODO-40 (design review finalized)
+  - **Notes:** Target modules: `orchestrator`, `state`, `rpc`. See design doc in PRD.
+```
