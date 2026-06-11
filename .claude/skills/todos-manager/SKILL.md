@@ -115,3 +115,97 @@ When the user invokes todos-manager for the first time on a project with no TODO
      ```
 2. **Assign TODO-1** to the first entry.
 3. **Proceed to workflow** (see ## Workflow).
+
+---
+
+## Workflow
+
+The skill follows a 9-step workflow, with a **preview/confirm gate at step 7.5**.
+
+### Step 1: Validate context
+
+- **Check:** Does TODOS.md exist? (if not, bootstrap as per ## First-run bootstrap)
+- **Check:** Is `.claude/gstack/` directory writable?
+- **Action:** If validation fails, jump to ## Error Messages.
+
+### Step 2: Compute next TODO-<n>
+
+- **Action:** Run the bootstrap algorithm (see ## Stable TODO-<n> ID Assignment).
+- **Output to user:** "Next ID will be `TODO-<n>`."
+
+### Step 3: Prompt for entry title
+
+- **Prompt:** "Enter the TODO title (required):"
+- **Validation:** Title must be 10–200 characters and non-empty.
+- **On fail:** Re-prompt with error message from ## Error Messages.
+
+### Step 4: Prompt for metadata
+
+Iterate through the template fields (see ## TODOS.md Schema):
+
+- **Title:** Already captured in step 3.
+- **Assigned To:** Prompt: "Who should own this task? (name or @handle, required):"
+  - Validation: Non-empty, recommended format is `@handle` or full name.
+- **Estimate:** Prompt: "Time estimate (e.g., `1h`, `2d`, `1w`):"
+  - Validation: Must match regex `/^\d+[hd w]$/` (no default; re-prompt if invalid).
+- **Rationale:** Prompt: "Why is this task important? (one-line, required):"
+  - Validation: Non-empty, 10–150 characters.
+- **Status:** Prompt: "Status? (`active`, `blocked`, `done`, `deferred`, default: `active`):"
+  - Validation: Must be one of the 4 enum values.
+- **Depends on:** Prompt: "Depends on which TODOs? (comma-separated IDs, e.g., `TODO-1, TODO-3`, optional):"
+  - Validation: Each ID must exist in TODOS.md. On fail, list valid IDs.
+- **Notes:** Prompt: "Additional notes (optional, multi-line, `END` to finish):"
+  - Validation: None; free text.
+
+### Step 5: Assemble entry in memory
+
+Format the captured data as a markdown list item (see ## TODOS.md Schema, Example section).
+
+Do **not** write to disk yet.
+
+### Step 6: Locate insertion point
+
+- **Action:** Scan TODOS.md for section headers (`## In Progress`, `## Blocked`, `## Done`).
+- **Prompt:** "Which section should this entry go in? (`in-progress`, `blocked`, `done`, default: `in-progress`):"
+- **Action:** Identify the line number where the new entry will be inserted (after the section header).
+
+### Step 7: Apply entry format rules
+
+- **Ensure:** Entry is formatted exactly as per ## TODOS.md Schema.
+- **Ensure:** ID is set to the computed `TODO-<n>` from step 2.
+- **Ensure:** Status field matches the user's selection from step 4 (do not hardcode `active`; use what they picked).
+
+### Step 7.5: Preview gate (T10)
+
+**Show the assembled entry exactly as it will be written:**
+
+```
+======== PREVIEW ========
+- [ ] TODO-<n>: <Title>
+  - **Assigned To:** <name>
+  - **Estimate:** <estimate>
+  - **Rationale:** <rationale>
+  - **Status:** <status>
+  - **Depends on:** <depends_on_list or "None">
+  - **Notes:** <notes or "(None)">
+======== END PREVIEW ========
+
+Proceed? [y / edit / cancel]
+```
+
+**Branches:**
+- **`y`** → Proceed to step 8.
+- **`edit`** → Jump back to step 4 (no ID burned, no files written).
+- **`cancel`** → Abort entirely (no ID burned, no Slack notify). Print: "Entry discarded."
+
+### Step 8: Write to TODOS.md
+
+- **Action:** Insert the formatted entry at the computed insertion point.
+- **Action:** Update the `Last updated` timestamp in the TODOS.md header.
+- **Verify:** File is valid markdown (no syntax errors).
+
+### Step 9: Confirm and notify
+
+- **Print:** "✓ Entry added as TODO-<n>."
+- **(Optional future):** Post to Slack (requires gstack Slack integration).
+- **Return control** to the user.
