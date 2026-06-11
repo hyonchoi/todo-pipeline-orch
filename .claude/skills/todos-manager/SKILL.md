@@ -209,3 +209,64 @@ Proceed? [y / edit / cancel]
 - **Print:** "✓ Entry added as TODO-<n>."
 - **(Optional future):** Post to Slack (requires gstack Slack integration).
 - **Return control** to the user.
+
+---
+
+## Error Messages
+
+### T8 convention: Path + remediation verb
+
+Each error message **names the absolute file path** and a one-line action verb. Examples:
+
+```
+Error: /Users/hyonchoi/Personal/todo-pipeline-orchestrator/TODOS.md does not exist.
+Remediation: Create the file or run `todos-manager --init`.
+
+Error: /Users/hyonchoi/Personal/todo-pipeline-orchestrator/.claude/gstack is not writable.
+Remediation: Check directory permissions or create the directory.
+
+Error: Title must be 10–200 characters.
+Remediation: Edit your input and re-enter the title.
+
+Error: Estimate "5" does not match expected format (e.g., "2h", "1d").
+Remediation: Set estimate to one of: 1h, 2h, 1d, 2d, 1w, etc.
+
+Error: Dependency TODO-99 does not exist in TODOS.md.
+Remediation: Check the list of valid IDs or remove TODO-99 from the depends_on list.
+
+Error: Status "in_progress" is not recognized.
+Remediation: Set status to one of: active, blocked, done, deferred.
+```
+
+### Error & Rescue Map
+
+| Error | Root Cause | Remediation |
+|-------|-----------|-------------|
+| TODOS.md not found | First-run on new project | Run `todos-manager --init` or create TODOS.md at repo root |
+| `.claude/gstack/` not writable | Permission issue | Check directory permissions with `ls -ld` |
+| Title is empty or too short | Invalid input | Re-enter title (10–200 characters) |
+| Assigned To is empty | Invalid input | Re-enter assignee (@handle or name) |
+| Estimate does not match `/^\d+[hd w]$/` | Invalid format | Re-enter estimate (e.g., "2h", "1d", "1w") |
+| Rationale is too short or too long | Invalid input | Re-enter rationale (10–150 characters) |
+| Status is not in `[active, blocked, done, deferred]` | Invalid enum | Re-enter status from allowed list |
+| Dependency TODO-<n> does not exist | Invalid reference | Verify TODO-<n> is in TODOS.md; remove or correct |
+| Entry preview differs from disk | Data corruption | Inspect TODOS.md and re-run step 8 |
+
+### Observability
+
+The skill logs the following to `.claude/gstack/todos-manager.log`:
+
+```
+[2026-06-11T10:30:45Z] todos-manager: start
+[2026-06-11T10:30:45Z] todos-manager: bootstrap - scanned 8 existing IDs
+[2026-06-11T10:30:45Z] todos-manager: next_id = TODO-9
+[2026-06-11T10:30:50Z] todos-manager: user_input - title="Refactor state module"
+[2026-06-11T10:30:55Z] todos-manager: user_input - assigned_to="@alice"
+[2026-06-11T10:31:00Z] todos-manager: preview - gate reached
+[2026-06-11T10:31:02Z] todos-manager: user_action - confirm="edit"
+[2026-06-11T10:31:05Z] todos-manager: user_input - title="Refactor state module (v2)"
+[2026-06-11T10:31:15Z] todos-manager: preview - gate reached (retry 2)
+[2026-06-11T10:31:17Z] todos-manager: user_action - confirm="y"
+[2026-06-11T10:31:17Z] todos-manager: write - inserted at line 42
+[2026-06-11T10:31:17Z] todos-manager: done - TODO-9 committed
+```
