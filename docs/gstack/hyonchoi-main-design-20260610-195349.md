@@ -250,11 +250,11 @@ the other pieces.
 
 ## Open Questions
 
-- **hermes kanban CLI interface** — exact subcommands and JSON shapes are unknown until
-  the user has access to the remote hermes environment. `HermesKanbanAdapter` should be
-  built against the `KanbanClient` interface first (`set_active_task`/`update_phase`/
-  `clear_active_task`), with `NullKanbanAdapter` as the default, and wired up once the
-  interface is confirmed.
+- ~~**hermes kanban CLI interface**~~ — **RESOLVED (CEO review, 2026-06-10).** See
+  "HermesKanbanAdapter — Confirmed CLI Mapping" below. `NullKanbanAdapter` remains the
+  default adapter (config knob to switch to `hermes` is still Deferred TODO #1), but
+  `HermesKanbanAdapter` is no longer a `NotImplementedError` placeholder — it has a
+  concrete spec.
 - **Semver bump mapping** — Phase 9 reads the bump (patch/minor/major) from the TODO's
   `Decisions` metadata, but the exact mapping rules (e.g., does "Security Review:
   required" always imply at least patch?) are not yet defined and should be nailed down
@@ -264,6 +264,47 @@ the other pieces.
   too coarse once there are deeper dependency chains; if the orchestrator starts picking
   TODOs that unblock only trivial follow-ups while a high-priority chain sits idle,
   revisit toward Approach B's downstream-unblock scoring.
+
+## HermesKanbanAdapter — Confirmed CLI Mapping (CEO review addendum, 2026-06-10)
+
+Resolves Open Question #1. The user confirmed `hermes kanban --help` directly (real CLI
+on their machine, durable SQLite-backed task board, "one board per project / workstream"
+— matches Premise 8 exactly). This session also confirmed (`docs/old-code/
+pipeline_worker.py:45-52`) that `hermes chan message <channel> <msg>` is a real, working
+pattern — de-risking the Slack-side notify calls already assumed by Premise 1 and the
+`todos-manager` skill's step 10.
+
+**Board addressing:** one `hermes kanban` board per project, `--board <project-slug>`
+(Premise 8's "one card per project" maps to "one board per project, at most one
+non-archived task on it").
+
+**`KanbanClient` → `hermes kanban` mapping:**
+
+| `KanbanClient` method | `hermes kanban` invocation | Notes |
+|---|---|---|
+| `set_active_task(project, todo_id, title, phase)` | `hermes kanban create --board <project> ...` (title/body encode `TODO-<todo_id>` + phase) | Capture the returned task id; persist `project → hermes_task_id` in `state/kanban_active_tasks.json`. If a mapping already exists for `project` (resume case), skip `create` and call `update_phase` instead. |
+| `update_phase(project, phase, status)` | `hermes kanban comment <task_id> "Phase <n>: <name> — <status>"` | `edit` is documented as "recovery fields on an **already-completed** task" only — not valid for in-progress phase updates, so `comment` is the only mutation surface while a task is active. |
+| `clear_active_task(project)` — merge | `hermes kanban complete <task_id>` | Terminal state, removes from active board. |
+| `clear_active_task(project)` — reject/abandon | `hermes kanban archive <task_id>` | **Decision (CEO review):** `archive`, not `block` — matches the approved Premise 8 ("board shows only the current active task"); `block` is for in-progress obstacles, not settled reject/abandon outcomes, and would have amended Premise 8. |
+| (all `clear_active_task` paths) | drop the `project → hermes_task_id` entry from `state/kanban_active_tasks.json` | Next `set_active_task` for this project creates a fresh card. |
+
+**Board bootstrap:** first `set_active_task` for a project that has no board yet uses
+`hermes kanban boards` (exact subcommand — `boards create <slug>` vs. checking
+`boards list` first — to be confirmed at implementation time against `hermes kanban
+boards --help`; same class of small, non-blocking detail as the semver-mapping Open
+Question below). Treat "board already exists" as success (idempotent bootstrap, same
+spirit as `todos-manager`'s First-Run Bootstrap).
+
+**Outbox unaffected:** `state/kanban_outbox.jsonl` (collapse-latest-per-project, T1)
+still applies — these CLI invocations are exactly what gets queued/retried/collapsed on
+failure. No change to the outbox design.
+
+**Updated Implementation Tasks:** Next Steps item 3 (`kanban.py`) and the
+`HermesKanbanAdapter` placeholder in Approach A are superseded by this mapping —
+`HermesKanbanAdapter` can be implemented for real (against the table above) rather than
+raising `NotImplementedError`. `NullKanbanAdapter` stays the *default* adapter; the
+`config.py` adapter-selection knob (Deferred TODO #1) is what flips it to `hermes` and
+remains deferred as originally scoped.
 
 ## Success Criteria
 
@@ -609,3 +650,322 @@ counter file — over the original Part 2 spec.)
 - On revision, you cut the kanban scope further than either model proposed — from "mirror
   every TODO" down to "show the one thing running right now." Consistently choosing the
   smaller surface area is a pattern, not a one-off.
+
+---
+
+## Eng Review Findings (2026-06-11) — Decisions
+
+These decisions amend Approach A's spec for `selection.py`, `kanban.py`, and `state.py`/
+Phase 9, found during `/plan-eng-review`. All four are accepted; fold into implementation.
+
+1. **Kanban outbox collapses to latest-per-project.** When a sync fails, if an entry for
+   the same project already exists in `state/kanban_outbox.jsonl`, replace it instead of
+   appending. Since there's only one active card per project (Premise 8), only the latest
+   state matters — older queued updates are superseded by definition. This prevents the
+   outbox from replaying a stale phase update after a newer one already synced
+   successfully (e.g., replaying "Phase 4: Development — running" after "Phase 6: CSO
+   Security Review — running" already reached the board).
+
+2. **`merge_status` gains a `failed` state with a structured `error` field**, distinct
+   from `pending`/`merged`/`rejected`/`abandoned`. If Phase 9's `git merge` step fails
+   (e.g., merge conflict) after `VERSION`/`CHANGELOG.md` have already been written,
+   `merge_status` becomes `failed` with `error: <description of what failed and at what
+   step>`. The lock stays held (prevents `--auto` from starting new work on a broken
+   branch); `pipeline-watch --merge` can be re-run after manual conflict resolution.
+
+3. **Cycle-detection Slack notifications de-duplicate on cycle composition.** Persist the
+   last-notified set of cyclic TODO IDs per project (e.g.
+   `state/last_cycle_warning.json`). Only re-notify if the set changes (new cycle
+   appears, or composition changes) — silences repeats of an identical unresolved cycle
+   across ticks while still re-alerting if the situation changes.
+
+4. **`selection.py` isolates per-project parse failures.** Each project's parse +
+   selection runs in its own try/except during the `--auto` tick. A parse error in
+   project B's `TODOS.md` logs the error and sends a Slack notification
+   (`"TODOS.md parse error in <project>: <error>"`) but does not prevent projects
+   A/C/D from being processed normally that tick.
+
+## Test Plan — selection.py, kanban.py, state.py, runner.py, Phase 9
+
+Mirrors the todos-manager test plan format (see "Test Plan" above). 100% coverage target.
+
+### selection.py
+
+| Codepath | Type | Happy path | Failure path | Edge case |
+|---|---|---|---|---|
+| `build_dependency_graph` | Unit | builds graph from `[ ]`/`[→]`/`[x]`/`[~]` TODOs | — | `[x]` dep → satisfied; `[~]` dep → unsatisfied |
+| `detect_cycles` | Unit | no cycle → all eligible for dep check | cycle found → involved TODOs marked `dependency_cycle`, ineligible | self-referencing `Depends on` (1-node cycle) |
+| cycle notify dedup | Unit | new cycle → notify + persist `last_cycle_warning.json` | — | identical cycle next tick → no notify; cycle composition changes → re-notify |
+| `filter_eligible` | Unit | deps satisfied + project unlocked → eligible | project locked → empty eligible set | `[~]` dep → ineligible until reactivated |
+| `sort_eligible` | Unit | sorts by (priority, effort, unblocks_something, TODO-<n> asc) | — | tie on all four keys → stable order (declaration order) |
+| `unblocks_something` | Unit | TODO completion satisfies another `[ ]` TODO's deps → true | no downstream TODO depends on it → false | downstream TODO already has all other deps unsatisfied (still false) |
+| per-project tick loop | Integration | all projects parse OK → all processed | one project's TODOS.md malformed → isolated (logged + Slack), others proceed | [→E2E] full `--auto` tick across 2+ projects, one with a cycle, one with a parse error |
+| no eligible TODO | Unit | no `[ ]` TODOs with satisfied deps in unlocked project → log "no eligible TODO", no action | — | project has only `[x]`/`[~]` TODOs |
+
+### kanban.py
+
+| Codepath | Type | Happy path | Failure path | Edge case |
+|---|---|---|---|---|
+| `NullKanbanAdapter.set_active_task/update_phase/clear_active_task` | Unit | each call returns success, no-op | — | called with no project state yet |
+| `HermesKanbanAdapter.*` | Unit | — | any call → `NotImplementedError` | — |
+| outbox enqueue (collapse) | Unit | sync fails → entry queued | — | second failure for same project → replaces (not appends) existing entry |
+| outbox retry — success | Integration | next tick retries queued entry → succeeds → dequeued | — | — |
+| outbox retry — still failing | Integration | entry stays queued, collapsed if a newer update arrives in the meantime | repeated failure → entry persists, capped at 500 total entries across all projects | — |
+
+### state.py (`ready_for_review` record)
+
+| Codepath | Type | Happy path | Failure path | Edge case |
+|---|---|---|---|---|
+| create record (post-Phase 8) | Unit | record written: branch, PR url, phase summaries, kanban card id, `merge_status: pending` | disk full → `OSError` | — |
+| read record by (project, todo_id) | Unit | returns record | no record found → `None`/error for `--merge` | — |
+| `merge_status` transitions | Unit | `pending` → `merged` (via Phase 9 success) | `pending` → `failed` + `error` (git merge conflict) | `pending` → `rejected`/`abandoned` (user declines e2e) |
+
+### pipeline-watch --merge (Phase 9)
+
+| Codepath | Type | Happy path | Failure path | Edge case |
+|---|---|---|---|---|
+| no `ready_for_review` record | Unit | — | `<project>/<todo_id>` has no record → error, no-op | `--merge` called for a TODO still mid-pipeline (no record yet) |
+| e2e confirmation | Integration [→E2E] | confirmed → proceed to semver/merge | declined → `merge_status: rejected`, `clear_active_task`, lock released | — |
+| abandon path | Unit | `merge_status: abandoned`, `clear_active_task`, lock released | — | abandon called on an already-`failed` record (retry-then-abandon) |
+| semver bump decision | Unit | maps `Decisions` metadata → patch/minor/major (mapping TBD, Open Questions) | — | `Decisions` missing expected fields → defaults/error (TBD with mapping) |
+| VERSION/CHANGELOG.md write | Unit | files updated per bump | disk full → `OSError`, `merge_status` unchanged (still `pending`) | — |
+| git merge | Integration [→E2E] | merge succeeds → `merge_status: merged`, `clear_active_task`, lock released | conflict → `merge_status: failed` + `error`, lock stays held | merge succeeds but `clear_active_task` sync fails → outbox-queued (kanban.py path) |
+
+### runner.py (branch naming + kanban wiring)
+
+| Codepath | Type | Happy path | Failure path | Edge case |
+|---|---|---|---|---|
+| branch naming — first attempt | Unit | `feat/{base_version}-{slug}` | — | — |
+| branch naming — rerun after abandoned/rejected | Unit | `feat/{base_version}-{slug}-attempt2` (N increments) | — | 3rd+ attempt → `-attempt3`, etc. |
+| branch naming — checkpoint resume (`from_phase`) | Unit | same branch name reused, no `-attemptN` | — | distinguishing resume vs. new attempt (per design doc def.) |
+| phase loop kanban wiring | Integration | each phase transition calls `update_phase`; sync failure → outbox enqueue (collapsed) | — | [→E2E] full phase loop from selection through Phase 8, verifying `set_active_task` at start and `update_phase` per transition |
+
+**Chaos test (carries over from todos-manager, applies to Phase 9 too):** kill the
+process between `VERSION`/`CHANGELOG.md` write and `git merge` completing — re-running
+`pipeline-watch --merge` must reach `merge_status: merged` or `failed` (with `error`),
+never leave `merge_status: pending` with already-modified `VERSION`/`CHANGELOG.md` and no
+record of what happened.
+
+## Diagrams
+
+The following files should get inline ASCII diagrams when implemented (per the
+diagram-maintenance principle — keep these accurate as the code evolves):
+
+**`selection.py` — eligibility + sort pipeline:**
+
+```
+  TODOS.md (all projects) ──▶ build_dependency_graph ──▶ detect_cycles
+                                                              │
+                                          ┌───────────────────┴───────────────────┐
+                                          │ cycle found                           │ no cycle
+                                          ▼                                       ▼
+                              mark involved TODOs                      filter_eligible:
+                              ineligible (dependency_cycle)            - project unlocked?
+                              dedupe-notify via                        - [ ] status?
+                              last_cycle_warning.json                  - all deps satisfied?
+                                          │                             ([x]=yes, [~]=no)
+                                          └───────────────┬─────────────────┘
+                                                           ▼
+                                              sort_eligible:
+                                              (priority asc, effort asc,
+                                               unblocks_something desc,
+                                               TODO-<n> asc)
+                                                           │
+                                          ┌────────────────┴────────────────┐
+                                          │ eligible TODOs found             │ none
+                                          ▼                                  ▼
+                                  select first → runner.py          log "no eligible TODO",
+                                                                      no action this tick
+```
+
+**`kanban.py` — outbox enqueue/retry flow:**
+
+```
+  set_active_task / update_phase / clear_active_task
+              │
+              ▼
+        adapter.call() ──success──▶ done
+              │
+            failure
+              ▼
+   kanban_outbox.jsonl: entry for <project> exists?
+              │                          │
+            yes                         no
+              │                          │
+   replace existing entry      append new entry
+   (collapse-latest)           (cap: 500 total)
+              │                          │
+              └────────────┬─────────────┘
+                            ▼
+                  next tick: retry queued entries
+                            │
+                  ┌─────────┴─────────┐
+                success              failure
+                  │                    │
+              dequeue          stays queued (collapsed
+                                if newer update arrives)
+```
+
+**Phase 9 (`pipeline-watch --merge`) — merge_status state machine:**
+
+```
+                        ┌─────────────┐
+            Phase 8 ───▶│   pending   │◀──── re-run --merge after fixing conflict
+                        └──────┬──────┘
+                               │ --merge invoked
+                               ▼
+                      e2e confirmation?
+              ┌────────────────┼────────────────┐
+          confirmed         declined          abandon
+              │                 │                 │
+              ▼                 ▼                 ▼
+      semver bump +     ┌──────────────┐  ┌──────────────┐
+      VERSION/CHANGELOG │   rejected   │  │   abandoned  │
+              │          │ clear_active │  │ clear_active │
+              ▼          │ lock released│  │ lock released│
+        git merge        └──────────────┘  └──────────────┘
+              │
+      ┌───────┴───────┐
+   success          conflict
+      │                 │
+      ▼                 ▼
+┌──────────────┐  ┌──────────────────────┐
+│    merged    │  │       failed          │
+│ clear_active │  │ + error field          │
+│ lock released│  │ lock STAYS held        │
+└──────────────┘  │ (re-run --merge after  │
+                   │  manual conflict fix)  │
+                   └──────────────────────┘
+```
+
+**`runner.py` — branch naming decision:**
+
+```
+  TODO selected for execution
+              │
+              ▼
+   prior attempt for this TODO-<n>?
+        │              │
+       no             yes
+        │              │
+        ▼              ▼
+  feat/{base}-{slug}   prior attempt's branch was
+                        abandoned/rejected (Phase 9)?
+                              │            │
+                             yes          no (checkpoint
+                              │            resume via from_phase)
+                              ▼            │
+                  feat/{base}-{slug}       ▼
+                  -attempt{N}        reuse same branch name
+                  (N = prior + 1)    (not a new attempt)
+```
+
+## Failure Modes
+
+| Codepath | Failure scenario | Test? | Error handling? | User sees |
+|---|---|---|---|---|
+| `selection.py` per-project tick | Malformed `TODOS.md` in one project | Yes (added above) | Yes — try/except + Slack notify | Clear: Slack message naming the project + error |
+| `selection.py` cycle detection | Circular `Depends on` | Yes (added above) | Yes — marked ineligible, deduped notify | Clear: one Slack message per cycle-composition change |
+| `kanban.py` outbox | Adapter sync fails repeatedly (e.g. hermes unreachable) | Yes (added above) | Yes — collapse + retry, never blocks pipeline | Silent at the pipeline level (by design — kanban is non-blocking); board shows stale "active task" until sync recovers |
+| Phase 9 `git merge` | Merge conflict after VERSION/CHANGELOG.md written | Yes (added above) | Yes — `merge_status: failed` + `error`, lock held | Clear: `--merge` reports the `error` field; lock prevents `--auto` from masking the broken state |
+| Phase 9 `git merge` succeeds, kanban `clear_active_task` fails | Hermes unreachable during merge completion | Yes (kanban outbox path) | Yes — outbox-queued, retried | Silent at merge level (merge already succeeded); board shows stale active task until outbox retry succeeds |
+| `runner.py` branch naming | Attempt-N collision (e.g. `-attempt2` already exists from a manual branch) | Not yet specified | Not yet specified | **Critical gap candidate — see below** |
+
+**Critical gap:** the `-attemptN` branch naming scheme assumes `feat/{base}-{slug}-attemptN`
+doesn't already exist for some other reason (manual branch, leftover from a crashed run
+that didn't clean up). No collision check is specified. This wasn't raised as a full
+review issue because it's a narrow edge case (requires a pre-existing branch with that
+exact name), but flagging it here per the Failure Modes requirement — recommend
+`runner.py` check `git branch --list` before using a computed `-attemptN` name and
+increment further on collision. Low severity (P3) — adding to Implementation Tasks below
+as a small follow-up rather than a blocking AskUserQuestion.
+
+## Worktree Parallelization Strategy
+
+| Step | Modules touched | Depends on |
+|---|---|---|
+| todos-manager skill (stable IDs, counter) | `.claude/skills/todos-manager/`, `.hermes/` | — |
+| selection.py | `hermes_pipeline/selection.py` | — |
+| kanban.py | `hermes_pipeline/kanban.py` | — |
+| state.py extension (`ready_for_review`) | `hermes_pipeline/state.py` | — |
+| Phase 9 (`pipeline-watch --merge`) | `hermes_pipeline/` (new entrypoint) | state.py extension |
+| runner.py (branch naming + kanban wiring) | `hermes_pipeline/runner.py` | kanban.py, state.py (interfaces only — can stub during parallel work) |
+| docs/configs updates | `docs/`, `configs/phases.yaml` | all of the above |
+
+**Lanes:**
+- **Lane A:** todos-manager skill (independent — separate skill directory)
+- **Lane B:** selection.py (independent module)
+- **Lane C:** kanban.py (independent module)
+- **Lane D:** state.py extension → Phase 9 (sequential, Phase 9 depends on the record shape)
+- **Lane E:** runner.py — depends on kanban.py and state.py *interfaces* (already fully specified above), so can proceed in parallel against the documented interface and integrate once B/C/D land
+- **Lane F (last):** docs/configs updates — depends on all of the above settling
+
+**Execution order:** Launch A, B, C, D, and E in parallel worktrees (E codes against the
+documented `KanbanClient` interface and `ready_for_review` schema, not against B/C/D's
+actual implementations). Merge all five. Then F.
+
+**Conflict flags:** None — each lane touches a distinct module/directory. Lane E's
+dependency on B/C/D is interface-level only (already fully specified in this design doc),
+so no file-level conflicts expected.
+
+## Deferred TODOs (pending todos-manager)
+
+`TODOS.md` doesn't exist yet in this repo, and `todos-manager` (which assigns stable
+`TODO-<n>` IDs) is itself one of the Next Steps. These three items, surfaced during
+`/plan-eng-review`, should be added to `TODOS.md` once `todos-manager` exists:
+
+1. **Kanban adapter selection config knob** — add a `config.py` setting (`null` |
+   `hermes`) to select the `KanbanClient` adapter, bundled with the
+   `HermesKanbanAdapter` implementation (NOT in scope until the hermes interface is
+   confirmed). Depends on: HermesKanbanAdapter implementation.
+2. **Counter recovery migration helper** — one-time tool to bootstrap
+   `.hermes/todo_id_counter` from existing `TODO-<n>` headings for projects with
+   hand-written TODOS.md predating `todos-manager`. Depends on: todos-manager
+   (Next Steps item 1).
+3. **`ready_for_review` record archival policy** — define what happens to records after
+   `merge_status` reaches a terminal state (`merged`/`rejected`/`abandoned`/`failed`) —
+   e.g. move to a history file, keyed by `todo_id`. Not a perf concern at personal scale,
+   but improves long-term inspectability. Depends on: Phase 9 implementation.
+
+## Implementation Tasks
+
+Synthesized from this review's findings. Each task derives from a specific finding above.
+Run with Claude Code or Codex; checkbox as you ship.
+
+- [ ] **T1 (P1, human: ~20min / CC: ~5min)** — kanban.py — Collapse outbox to
+  latest-per-project on enqueue
+  - Surfaced by: Architecture Issue 1 — outbox could replay stale phase updates after a
+    newer one synced successfully
+  - Files: `hermes_pipeline/kanban.py`
+  - Verify: unit test — second failed sync for same project replaces (not appends) the
+    queued entry
+- [ ] **T2 (P1, human: ~1h / CC: ~10min)** — state.py / Phase 9 — Add `merge_status: failed`
+  + `error` field
+  - Surfaced by: Architecture Issue 2 — no defined state for git merge conflict after
+    VERSION/CHANGELOG.md written
+  - Files: `hermes_pipeline/state.py`, Phase 9 entrypoint
+  - Verify: integration test — simulate merge conflict, assert `merge_status: failed`,
+    `error` populated, lock still held
+- [ ] **T3 (P2, human: ~30min / CC: ~10min)** — selection.py — Cycle-detection
+  notification de-dup
+  - Surfaced by: Architecture Issue 3 — repeated Slack notifications for an unresolved
+    cycle every tick
+  - Files: `hermes_pipeline/selection.py`, `state/last_cycle_warning.json`
+  - Verify: unit test — same cycle composition across two ticks → one notification;
+    changed composition → second notification
+- [ ] **T4 (P1, human: ~30min / CC: ~10min)** — selection.py — Per-project parse failure
+  isolation
+  - Surfaced by: Code Quality Issue 4 — malformed TODOS.md in one project could crash the
+    whole `--auto` tick
+  - Files: `hermes_pipeline/selection.py`
+  - Verify: integration test — one project's TODOS.md is malformed, others still process
+    normally; Slack notification names the broken project
+- [ ] **T5 (P2, human: ~30min / CC: ~5min)** — runner.py — Branch name collision check for
+  `-attemptN`
+  - Surfaced by: Failure Modes — `-attemptN` naming has no collision check against
+    existing branches
+  - Files: `hermes_pipeline/runner.py`
+  - Verify: unit test — `git branch --list` shows `-attempt2` already exists → runner
+    increments to `-attempt3`
+
+_No new tasks from Performance Review._
