@@ -8,7 +8,7 @@ In this tutorial, you'll set up your first pipeline-watched project and run all 
 
 - `todo-pipeline-orchestrator` installed (see [README prerequisites](../README.md#requirements))
 - A git repository with at least one project containing a `TODOS.md` file
-- Python 3.9+ and uv package manager
+- Python 3.12+ and uv package manager
 - Write permissions on your git repositories
 
 If you don't have a test project yet, the setup section below will guide you through creating one.

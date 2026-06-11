@@ -18,7 +18,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 
 ## Requirements
 
-- Python 3.9+
+- Python 3.12+
 - [uv](https://docs.astral.sh/uv/install/) package manager
 
 Install uv:

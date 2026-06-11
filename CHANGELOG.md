@@ -24,6 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Raised minimum Python version requirement from >=3.9 to >=3.12
+
 ### Planned
 - Dashboard UI for pipeline status
 - Slack/Discord notifications for merge events
