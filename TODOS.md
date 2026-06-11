@@ -109,3 +109,32 @@ subcommands or Hermes-mediated skill calls.
 - Security Review: 불필요
 
 Status: `[ ]`
+
+## TODO-4: build a massive integration test project for Hermes, Kanban, and Claude Code
+
+**What:** Create an automated step-by-step integration test around a dedicated test project with mock TODOs, then drive real phase progression through Hermes, Kanban, and Claude Code while tracing status changes and interaction boundaries end to end.
+
+**Why:** The current workflow is hard to debug once Kanban and Claude Code are involved, especially when Claude Code blocks on a required decision while a subagent is running. We need a reproducible test harness that exposes exactly what happens at each phase transition, with extra attention on review behavior and the user decision immediately before the last phase.
+
+**Pros:**
+- Gives a deterministic repro path for cross-system bugs that are currently hard to observe.
+- Makes status drift visible across Hermes, Kanban, and Claude Code instead of inferring it after the fact.
+- Creates a concrete debugging surface for review-phase behavior and decision-gated execution.
+
+**Cons:**
+- Expensive to build and maintain because it depends on real multi-system interaction.
+- May require dedicated fixtures, logging hooks, and non-trivial orchestration around blocking prompts.
+
+**Context:** The test should spin up a realistic mock project, seed representative TODOs, progress them through each pipeline phase, and record status transitions plus any unexpected stops, stalls, or mismatches across Hermes, Kanban, and Claude Code. The highest-risk area is the review phase and the user-decision checkpoint right before the final phase, where current behavior is still unclear.
+
+**Depends on:** TODO-2, TODO-3
+
+**Decisions:**
+- Priority: P1
+- Effort: L
+- Phase: 4 (Development)
+- Branch: feature/massive-integration-test-project
+- Test Coverage: 필요
+- Security Review: 불필요
+
+Status: `[ ]`
