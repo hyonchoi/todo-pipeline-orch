@@ -10,7 +10,7 @@ for the full plan.
 
 ## Tooling
 
-- Python >= 3.14, managed via `uv`.
+- Python 3.9+, managed via `uv`.
 - Use `uv sync` / `uv run` / `uv add` for dependency and execution management.
 
 ## Document management for gstack and superpowers
