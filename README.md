@@ -62,6 +62,43 @@ bash hermes-pipeline/scripts/install-cron.sh
 
 This will register a crontab entry to run `pipeline-watch auto` every 5 minutes and log output to `~/.hermes/cron.log`.
 
+## Configuration
+
+Set these environment variables to customize behavior:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PIPELINE_LOCK_DIR` | `~/.hermes/locks` | Directory for merge operation locks |
+| `PIPELINE_PROJECTS_DIR` | (required) | Path to scan for `TODOS.md` files |
+| `PIPELINE_CLAUDE_CMD` | `claude` | Command to invoke Claude Code |
+| `PIPELINE_KANBAN_ADAPTER` | `null` | Kanban adapter: `hermes` or `null` |
+
+Example:
+```bash
+export PIPELINE_PROJECTS_DIR=~/my-projects
+export PIPELINE_LOCK_DIR=~/.hermes/locks
+uv run pipeline-watch auto
+```
+
+## Troubleshooting
+
+**"command not found: uv"**
+- Uv is not installed or not in PATH
+- **Fix:** Run the installation command from [Requirements](#requirements)
+
+**"No pending records"**
+- No TODOs are ready for review yet
+- Check `PIPELINE_PROJECTS_DIR` is set and contains `TODOS.md` files
+- Run `uv run pipeline-watch auto` to trigger discovery
+
+**"error: argument todo_id: invalid int value"**
+- `todo_id` must be a number, e.g., `123` (not `ABC` or `some-id`)
+- **Fix:** Run `uv run pipeline-watch merge --help` to see usage
+
+**Merge operation hangs**
+- Check if another merge is already in progress (lock file in `PIPELINE_LOCK_DIR`)
+- Verify git repository is accessible and has write permissions
+
 ## Architecture
 
 The package is organized into lanes:
