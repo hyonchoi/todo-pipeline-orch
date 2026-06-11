@@ -424,3 +424,20 @@ metadata:
 3. **Slack 알림:** `hermes chan message` CLI를 통해 전송 (send_message tool 직접 호출 불가)
 4. **gstack-autoplan:** 별도 스킬이 아님 — Phase 2 prompt에서 스킬 참조 형태로 사용
 5. **TODOS.md 형식:** gstack 기준 (What/Why/Pros/Cons/Context/Depends on) 유지 + Decisions 필드 추가
+
+---
+
+## Lane F: CLI, Watcher, Status, and Installation
+
+**Status:** COMPLETE (TF.1-TF.6)
+
+Implements the final lane bringing together all pieces into executable commands:
+
+- **TF.1** `watcher.py`: Auto-tick discovery with per-project isolation. Discovers all projects with TODOS.md, detects changes via hash comparison, selects eligible TODOs, and isolates parse errors per project.
+- **TF.2** `status.py`: Pending-records table printer. Collects ready_for_review records and formats them as a human-readable table with project, TODO ID, branch, PR URL, merge status, and age.
+- **TF.3** `cli.py`: Argparse subcommands (`auto`, `merge`, `status`). Fully featured with config loading, logging setup, and per-command dispatch.
+- **TF.4** `install-cron.sh`: Idempotent 5-minute cron registration helper.
+- **TF.5** Documentation updates: README.md and this plan now document the full feature set and architecture.
+- **TF.6** Full verification: All 192 tests pass; CLI help and subcommands verified.
+
+See `docs/gstack/hermes-pipeline/design-plan.md` for architectural details.
