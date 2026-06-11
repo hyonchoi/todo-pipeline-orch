@@ -3,4 +3,9 @@ name = "todo-pipeline-orchestrator"
 version = "0.1.0"
 description = "Pipeline watcher and TODOS manager orchestration toolkit"
 requires-python = ">=3.14"
-dependencies = []
+dependencies = [
+    "hermes-pipeline",
+]
+
+[tool.uv.sources]
+hermes-pipeline = { path = "hermes-pipeline", editable = true }
