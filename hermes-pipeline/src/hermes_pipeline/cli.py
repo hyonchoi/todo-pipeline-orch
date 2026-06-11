@@ -22,6 +22,17 @@ from .watcher import auto_tick
 log = logging.getLogger(__name__)
 
 
+def _parse_todo_id(value: str) -> int:
+    """Parse todo_id argument with helpful error message."""
+    try:
+        return int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"todo_id must be a number (you provided '{value}'). "
+            f"Example: pipeline-watch merge myproject 123"
+        )
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -47,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Execute Phase 9: merge a ready TODO to main",
     )
     merge_parser.add_argument("project", help="Project name")
-    merge_parser.add_argument("todo_id", type=int, help="TODO ID to merge")
+    merge_parser.add_argument("todo_id", type=_parse_todo_id, help="TODO ID to merge (must be a number)")
     merge_parser.add_argument(
         "--abandon",
         action="store_true",
