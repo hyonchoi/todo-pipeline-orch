@@ -658,13 +658,20 @@ counter file — over the original Part 2 spec.)
 These decisions amend Approach A's spec for `selection.py`, `kanban.py`, and `state.py`/
 Phase 9, found during `/plan-eng-review`. All four are accepted; fold into implementation.
 
-1. **Kanban outbox collapses to latest-per-project.** When a sync fails, if an entry for
-   the same project already exists in `state/kanban_outbox.jsonl`, replace it instead of
-   appending. Since there's only one active card per project (Premise 8), only the latest
-   state matters — older queued updates are superseded by definition. This prevents the
-   outbox from replaying a stale phase update after a newer one already synced
-   successfully (e.g., replaying "Phase 4: Development — running" after "Phase 6: CSO
-   Security Review — running" already reached the board).
+1. **Kanban outbox collapses to latest-per-project, but never drops a pending `create`.**
+   When a sync fails, if an entry for the same project already exists in
+   `state/kanban_outbox.jsonl`, replace it instead of appending — *unless* the existing
+   entry is a `set_active_task` (a `create`) for which no `hermes_task_id` has been
+   captured yet (i.e., the project has no row in `state/kanban_active_tasks.json`). In
+   that case, the new entry must preserve the pending create: either keep the existing
+   create entry and discard the newer non-create op, or fold the newer op's phase/status
+   into the queued create's payload so the eventual `hermes kanban create` lands with the
+   latest state. Rationale: if `set_active_task` fails before `hermes_task_id` is
+   captured, a later failed `update_phase` would otherwise overwrite the queued create —
+   on retry there's no task id to `comment` against, and the project's kanban sync is
+   permanently broken until manual intervention. Since there's only one active card per
+   project (Premise 8), latest state still wins once the card exists; the carve-out only
+   guards the create→first-success window.
 
 2. **`merge_status` gains a `failed` state with a structured `error` field**, distinct
    from `pending`/`merged`/`rejected`/`abandoned`. If Phase 9's `git merge` step fails
@@ -677,7 +684,11 @@ Phase 9, found during `/plan-eng-review`. All four are accepted; fold into imple
    last-notified set of cyclic TODO IDs per project (e.g.
    `state/last_cycle_warning.json`). Only re-notify if the set changes (new cycle
    appears, or composition changes) — silences repeats of an identical unresolved cycle
-   across ticks while still re-alerting if the situation changes.
+   across ticks while still re-alerting if the situation changes. **When `detect_cycles`
+   returns no cycle for a project, clear that project's entry from
+   `state/last_cycle_warning.json` in the same tick.** Otherwise a cycle that resolves
+   and later regresses with the identical composition would be suppressed as a duplicate,
+   even though it's a fresh regression that should re-alert.
 
 4. **`selection.py` isolates per-project parse failures.** Each project's parse +
    selection runs in its own try/except during the `--auto` tick. A parse error in
@@ -707,7 +718,11 @@ Mirrors the todos-manager test plan format (see "Test Plan" above). 100% coverag
 | Codepath | Type | Happy path | Failure path | Edge case |
 |---|---|---|---|---|
 | `NullKanbanAdapter.set_active_task/update_phase/clear_active_task` | Unit | each call returns success, no-op | — | called with no project state yet |
-| `HermesKanbanAdapter.*` | Unit | — | any call → `NotImplementedError` | — |
+| `HermesKanbanAdapter.set_active_task` | Unit | first call for project → `hermes kanban create --board <project>`, captures returned id into `state/kanban_active_tasks.json` | CLI nonzero → enqueue to outbox (create-preserving collapse, T1) | resume case (mapping already exists) → routes to `update_phase`, no second `create` |
+| `HermesKanbanAdapter.update_phase` | Unit | `hermes kanban comment <task_id> "Phase <n>: <name> — <status>"` | CLI nonzero → enqueue to outbox | called before any `set_active_task` → looks up id, fails fast (no silent no-op) |
+| `HermesKanbanAdapter.clear_active_task` — merge | Unit | `hermes kanban complete <task_id>`, drops mapping from `state/kanban_active_tasks.json` | CLI nonzero → enqueue to outbox | already-completed task id → idempotent success |
+| `HermesKanbanAdapter.clear_active_task` — reject/abandon | Unit | `hermes kanban archive <task_id>`, drops mapping | CLI nonzero → enqueue to outbox | archive on already-archived task → idempotent success |
+| `HermesKanbanAdapter` board bootstrap | Unit | first `set_active_task` for a project without a board → bootstraps via `hermes kanban boards` then `create` | bootstrap CLI nonzero → enqueue to outbox | "board already exists" → treat as success (idempotent) |
 | outbox enqueue (collapse) | Unit | sync fails → entry queued | — | second failure for same project → replaces (not appends) existing entry |
 | outbox retry — success | Integration | next tick retries queued entry → succeeds → dequeued | — | — |
 | outbox retry — still failing | Integration | entry stays queued, collapsed if a newer update arrives in the meantime | repeated failure → entry persists, capped at 500 total entries across all projects | — |
@@ -719,6 +734,7 @@ Mirrors the todos-manager test plan format (see "Test Plan" above). 100% coverag
 | create record (post-Phase 8) | Unit | record written: branch, PR url, phase summaries, kanban card id, `merge_status: pending` | disk full → `OSError` | — |
 | read record by (project, todo_id) | Unit | returns record | no record found → `None`/error for `--merge` | — |
 | `merge_status` transitions | Unit | `pending` → `merged` (via Phase 9 success) | `pending` → `failed` + `error` (git merge conflict) | `pending` → `rejected`/`abandoned` (user declines e2e) |
+| `merge_status` retry from `failed` | Unit | `failed` → `merged` (re-run `pipeline-watch --merge` after manual conflict resolution, `git merge` now succeeds; `error` field cleared) | `failed` → `failed` + new `error` (retry's `git merge` still fails; lock stays held, `error` overwritten with latest) | `failed` → `abandoned` (operator gives up on conflict; lock released, `clear_active_task` archives card) |
 
 ### pipeline-watch --merge (Phase 9)
 
@@ -810,7 +826,7 @@ diagram-maintenance principle — keep these accurate as the code evolves):
 
 ```
                         ┌─────────────┐
-            Phase 8 ───▶│   pending   │◀──── re-run --merge after fixing conflict
+            Phase 8 ───▶│   pending   │
                         └──────┬──────┘
                                │ --merge invoked
                                ▼
@@ -824,18 +840,28 @@ diagram-maintenance principle — keep these accurate as the code evolves):
               │          │ clear_active │  │ clear_active │
               ▼          │ lock released│  │ lock released│
         git merge        └──────────────┘  └──────────────┘
-              │
-      ┌───────┴───────┐
-   success          conflict
-      │                 │
-      ▼                 ▼
-┌──────────────┐  ┌──────────────────────┐
-│    merged    │  │       failed          │
-│ clear_active │  │ + error field          │
-│ lock released│  │ lock STAYS held        │
-└──────────────┘  │ (re-run --merge after  │
-                   │  manual conflict fix)  │
-                   └──────────────────────┘
+              │                                   ▲
+      ┌───────┴───────┐                           │ operator abandons
+   success          conflict                      │ unresolvable conflict
+      │                 │                         │
+      ▼                 ▼                         │
+┌──────────────┐  ┌──────────────────────┐        │
+│    merged    │  │       failed          │───────┤
+│ clear_active │  │ + error field          │        │
+│ lock released│  │ lock STAYS held        │        │
+└──────────────┘  └──────┬───────────────┘        │
+        ▲                │                         │
+        │                │ re-run --merge after    │
+        │                │ manual conflict fix     │
+        │                ▼                         │
+        │       retry git merge                    │
+        │       ┌────────┴────────┐                │
+        │    success           conflict            │
+        │       │                  │                │
+        └───────┘                  ▼                │
+   (failed → merged,         stays failed,         │
+    error cleared)           error overwritten ────┘
+                              with latest
 ```
 
 **`runner.py` — branch naming decision:**
