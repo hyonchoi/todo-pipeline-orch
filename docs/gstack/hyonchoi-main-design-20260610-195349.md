@@ -164,8 +164,13 @@ model originally proposed.
   class KanbanClient:
       def set_active_task(project, todo_id, title, phase) -> SyncResult
       def update_phase(project, phase, status) -> SyncResult   # "Phase 4: Development — running"
-      def clear_active_task(project) -> SyncResult              # TODO done / abandoned / rejected
+      def clear_active_task(project, outcome: Literal["merged", "rejected", "abandoned"]) -> SyncResult
   ```
+
+  The `outcome` arg on `clear_active_task` is what lets `HermesKanbanAdapter` route
+  to `hermes kanban complete` (for `merged`) vs `archive` (for `rejected`/`abandoned`)
+  per the mapping table below — without it the Python interface can't tell the two
+  cases apart. See DevEx Review F3.
 
   The orchestrator calls `set_active_task` when a TODO is selected, `update_phase` as
   the runner advances through `phases.yaml`, and `clear_active_task` when the TODO
@@ -996,6 +1001,123 @@ Run with Claude Code or Codex; checkbox as you ship.
 
 _No new tasks from Performance Review._
 
+## DevEx Review Findings (2026-06-11) — Decisions
+
+Surfaced by `/plan-devex-review` run scoped to self-DX polish (single-user tool, no
+TTHW/competitive/persona passes — those are for adoption-shaped tools). All ten
+findings accepted; fold into implementation as T6-T15.
+
+1. **`pipeline-watch` CLI shape uses git/docker subcommand form.**
+   `pipeline-watch auto` and `pipeline-watch merge <project> <todo_id>` (both
+   positional) — replaces the mixed `--merge <project> --todo <id>` shape.
+   Argparse subparsers; consistent mental model; future-you will remember it.
+
+2. **Add `pipeline-watch status` to list pending-review records.** Reads
+   `state/` and prints a table of `(project, todo_id, branch, PR url,
+   merge_status, age)` across all projects. Without it, `ready_for_review`
+   records accumulate invisibly. No new state required.
+
+3. **`KanbanClient.clear_active_task` takes an `outcome` arg** (`Literal["merged",
+   "rejected", "abandoned"]`). The hermes mapping table routes `merged` →
+   `complete`, `rejected`/`abandoned` → `archive`. Folded into the interface
+   spec above.
+
+4. **Every error message names the absolute path and a one-line remediation.**
+   - `todo_id_counter` corrupted → "Edit `<project>/.hermes/todo_id_counter`
+     and set it to the highest existing `TODO-<n>` in TODOS.md."
+   - `.hermes/` unreadable → name the path: "Cannot read/write
+     `<project>/.hermes/` — check permissions (read+write+execute for current
+     user)."
+   - "Did you mean TODO-<m>?" suggestion uses **numeric distance on the integer
+     ID** — suggest the existing `TODO-<m>` with smallest `|m - n|`. Ties go
+     to the lower number.
+
+5. **Phase 9 e2e confirmation requires typing the TODO ID, not Y/N.** Prompt
+   shows PR url + `git diff --stat` against base, then prompts: `"Type the
+   TODO ID to confirm merge:"`. Anti-reflex; matches `kubectl delete --confirm`.
+   Typed input ≠ TODO ID → abort (no merge_status change).
+
+6. **`todos-manager` skill gains a preview/confirm gate before step 8 (ID
+   assignment).** After step 7 (sanitize), show the assembled entry and ask
+   `[y/edit/cancel]`. `cancel` = no ID burned, no Slack notify. `edit` = jump
+   back to step 4. Prevents irreversible ID burn from typos.
+
+7. **`--auto` tick gets a correlation `tick_id`** (ULID, generated at top of
+   tick). Every log line in that tick includes it. Lets you `grep tick_id=<x>`
+   to isolate one tick's events across N projects.
+
+8. **Logs route to `state/pipeline.log` (rotated daily, 7-day retention) and
+   stderr.** Without explicit routing, cron-launched runs silently lose
+   output. Use Python's `RotatingFileHandler` or `TimedRotatingFileHandler`.
+
+9. **`pipeline-watch --help` is part of the success criteria.** Top-level
+   `--help` lists subcommands (`auto`, `merge`, `status`); each subcommand's
+   `--help` includes one example invocation. argparse gives this for free if
+   subparser `description=` and `epilog=` are populated.
+
+10. **`-attemptN` collision algorithm: scan + max + 1.** `runner.py` runs
+    `git branch --list 'feat/{base}-{slug}-attempt*'`, parses out the N
+    integers, picks `max(N) + 1`. Handles the "two orphaned attempts from
+    prior crashes" case correctly (single-step incrementing would collide
+    on the second orphan). T5 updated below to spec this.
+
+## Implementation Tasks (DevEx Review)
+
+- [ ] **T6 (P1, human: ~1h / CC: ~15min)** — `pipeline-watch` CLI — Convert to
+  subcommand form (`auto`, `merge`, `status`)
+  - Surfaced by: DevEx F1, F2
+  - Files: `hermes_pipeline/` (new entrypoint shape), `docs/pipeline-modularization-plan.md`
+  - Verify: `pipeline-watch auto` runs a tick; `pipeline-watch merge <p> <id>`
+    works against a `ready_for_review` record; `pipeline-watch status` lists
+    pending records across ≥2 projects
+- [ ] **T7 (P1, human: ~15min / CC: ~5min)** — `KanbanClient.clear_active_task`
+  takes `outcome` arg
+  - Surfaced by: DevEx F3
+  - Files: `hermes_pipeline/kanban.py`, callers in `runner.py` + Phase 9 entrypoint
+  - Verify: unit test — `clear_active_task(p, "merged")` calls `hermes kanban
+    complete`; `clear_active_task(p, "abandoned")` calls `hermes kanban archive`
+- [ ] **T8 (P2, human: ~45min / CC: ~10min)** — Error messages name paths +
+  remediation
+  - Surfaced by: DevEx F4
+  - Files: `hermes_pipeline/` (everywhere errors are raised/logged), todos-manager skill
+  - Verify: unit tests assert each error message contains the absolute path
+    and a remediation verb ("Edit", "Check", "Set to", "Re-run")
+- [ ] **T9 (P2, human: ~30min / CC: ~10min)** — Phase 9 typed-confirm
+  prompt
+  - Surfaced by: DevEx F5
+  - Files: Phase 9 entrypoint
+  - Verify: integration test — wrong typed input → abort, no state change;
+    correct TODO ID → proceeds to semver/merge
+- [ ] **T10 (P2, human: ~30min / CC: ~10min)** — `todos-manager` preview gate
+  - Surfaced by: DevEx F6
+  - Files: `.claude/skills/todos-manager/SKILL.md` (workflow step 7.5)
+  - Verify: skill workflow shows assembled entry pre-assignment; `cancel`
+    leaves counter unchanged and TODOS.md untouched
+- [ ] **T11 (P3, human: ~20min / CC: ~5min)** — `tick_id` correlation in `--auto`
+  - Surfaced by: DevEx F7
+  - Files: `hermes_pipeline/watcher.py`, logging setup
+  - Verify: every log line emitted during one `--auto` tick shares the same
+    `tick_id`; two ticks have different IDs
+- [ ] **T12 (P3, human: ~20min / CC: ~5min)** — Log routing to
+  `state/pipeline.log` + stderr
+  - Surfaced by: DevEx F8
+  - Files: `hermes_pipeline/` logging setup
+  - Verify: cron-style invocation (no TTY) writes to `state/pipeline.log`;
+    rotation kicks in at midnight; 7-day-old logs purged
+- [ ] **T13 (P3, human: ~15min / CC: ~5min)** — `pipeline-watch --help`
+  populated for every subcommand
+  - Surfaced by: DevEx F9
+  - Files: `hermes_pipeline/` entrypoint argparse setup
+  - Verify: `pipeline-watch --help`, `pipeline-watch auto --help`,
+    `pipeline-watch merge --help`, `pipeline-watch status --help` all show
+    description + at least one example
+- [ ] **T14 (P3, human: ~15min / CC: ~5min)** — Update T5 algorithm to
+  scan+max+1
+  - Surfaced by: DevEx F10 (supersedes T5's "increment further on collision")
+  - Files: `hermes_pipeline/runner.py`
+  - Verify: unit test — with `-attempt2` and `-attempt3` both existing on
+    disk, runner uses `-attempt4`, not `-attempt3`
+
 ## GSTACK REVIEW REPORT
 
 | Run | Skill | Timestamp | Commit | Status | Findings |
@@ -1004,6 +1126,7 @@ _No new tasks from Performance Review._
 | 2 | plan-eng-review | 2026-06-11T02:13:14Z | fd3a3b4 | clean | 5 issues found, FULL_REVIEW |
 | 3 | codex P1/P2 fold-in | 2026-06-11 | 70bddf9 | absorbed | P1/P2 findings addressed in design doc |
 | 4 | plan-eng-review (resume) | 2026-06-11T (this run) | aabf486 | finalized | No new findings; footer appended |
+| 5 | plan-devex-review (self-DX) | 2026-06-11 | a9008e8 | finalized | 10 findings (F1-F10) folded; T6-T14 added |
 
 **Findings (plan-eng-review run 2, all accepted and folded into design):**
 1. **[P1] Kanban outbox create-preservation** — collapse-latest must not drop a pending `set_active_task` before a `hermes_task_id` is captured. Folded into Eng Review Findings §1, T1.
@@ -1020,6 +1143,18 @@ _No new tasks from Performance Review._
 
 **Worktree plan:** Six lanes (A todos-manager, B selection.py, C kanban.py, D state.py→Phase 9, E runner.py against documented interfaces, F docs/configs last). No file-level conflicts expected.
 
-**VERDICT: APPROVED — ready to implement.** All four review decisions accepted, all five Implementation Tasks (T1-T5) specified with file paths and verify steps. Codex P1/P2 findings absorbed. Test plan, diagrams, failure modes, and worktree lanes are all in place. Proceed to execution lanes A-E in parallel, then F.
+**DevEx review fold-in (run 5):** 10 self-DX findings (F1-F10) accepted and
+specified as T6-T14. Three are interface-level and worth settling before code
+lands (F1 CLI shape, F2 `status` subcommand, F3 `clear_active_task(outcome)`
+arg — the KanbanClient interface in Approach A is updated inline above). The
+rest are polish that ride along with the modules they touch.
+
+**VERDICT: APPROVED — ready to implement.** All four eng-review decisions and
+all ten devex findings accepted. Implementation Tasks T1-T14 specified with
+file paths and verify steps. Codex P1/P2 findings absorbed. Test plan,
+diagrams, failure modes, and worktree lanes are all in place. Proceed to
+execution lanes A-E in parallel, then F. Lane B (selection.py) and Lane C
+(kanban.py) pick up T7 against the updated `KanbanClient` signature; Lane E
+(runner.py) picks up T6 entrypoint shape; Lane F absorbs T8-T13 polish.
 
 NO UNRESOLVED DECISIONS
