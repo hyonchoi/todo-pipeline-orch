@@ -995,3 +995,31 @@ Run with Claude Code or Codex; checkbox as you ship.
     increments to `-attempt3`
 
 _No new tasks from Performance Review._
+
+## GSTACK REVIEW REPORT
+
+| Run | Skill | Timestamp | Commit | Status | Findings |
+|---|---|---|---|---|---|
+| 1 | plan-ceo-review | 2026-06-11T00:50:20Z | 8b8bec0 | clean | 0 unresolved, 1 scope item deferred |
+| 2 | plan-eng-review | 2026-06-11T02:13:14Z | fd3a3b4 | clean | 5 issues found, FULL_REVIEW |
+| 3 | codex P1/P2 fold-in | 2026-06-11 | 70bddf9 | absorbed | P1/P2 findings addressed in design doc |
+| 4 | plan-eng-review (resume) | 2026-06-11T (this run) | aabf486 | finalized | No new findings; footer appended |
+
+**Findings (plan-eng-review run 2, all accepted and folded into design):**
+1. **[P1] Kanban outbox create-preservation** — collapse-latest must not drop a pending `set_active_task` before a `hermes_task_id` is captured. Folded into Eng Review Findings §1, T1.
+2. **[P1] `merge_status: failed` + `error` field** — Phase 9 git-merge conflict after VERSION/CHANGELOG.md write needs a distinct terminal state with the lock held. Folded into Eng Review Findings §2, T2.
+3. **[P2] Cycle-notify dedup by composition** — persist `state/last_cycle_warning.json`, clear on resolution. Folded into Eng Review Findings §3, T3.
+4. **[P1] Per-project parse isolation in `selection.py`** — one malformed `TODOS.md` must not crash the `--auto` tick across other projects. Folded into Eng Review Findings §4, T4.
+5. **[P3] `-attemptN` branch-name collision** — narrow edge case; `runner.py` should check `git branch --list` before reusing a computed name. Flagged in Failure Modes, T5.
+
+**Codex fold-in (run 3):** P1/P2 findings from a parallel codex pass were absorbed in commit 70bddf9 and reflected in the current design doc; no residual disagreements.
+
+**Test plan coverage:** 100% target across `selection.py`, `kanban.py`, `state.py` (`ready_for_review`), `runner.py`, and `pipeline-watch --merge` (Phase 9). Includes chaos test for kill-between-VERSION-write-and-git-merge. Edge cases documented: `[~]` deps, self-cycle, kanban unreachable, merge conflict after VERSION write, attempt-N collision.
+
+**Diagrams:** Inline ASCII diagrams included for selection pipeline, kanban outbox, Phase 9 state machine, and runner branch-naming. To be embedded in code comments at implementation time per the diagram-maintenance principle.
+
+**Worktree plan:** Six lanes (A todos-manager, B selection.py, C kanban.py, D state.py→Phase 9, E runner.py against documented interfaces, F docs/configs last). No file-level conflicts expected.
+
+**VERDICT: APPROVED — ready to implement.** All four review decisions accepted, all five Implementation Tasks (T1-T5) specified with file paths and verify steps. Codex P1/P2 findings absorbed. Test plan, diagrams, failure modes, and worktree lanes are all in place. Proceed to execution lanes A-E in parallel, then F.
+
+NO UNRESOLVED DECISIONS
