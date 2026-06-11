@@ -26,7 +26,11 @@ Install uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-## Setup
+## Getting Started
+
+👉 **New to pipeline-watch?** Start with the [getting-started tutorial](docs/tutorial-getting-started.md) — walk through discovery, review, and merge in ~15 minutes.
+
+### Installation
 
 ```bash
 uv sync
