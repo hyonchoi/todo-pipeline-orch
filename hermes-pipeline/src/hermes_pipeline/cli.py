@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import os
+import signal
 import sys
 from pathlib import Path
 from typing import Optional
@@ -33,31 +35,53 @@ def _hermes_run_kill(job_id: str) -> int:
     except (_cli_sp.TimeoutExpired, FileNotFoundError):
         return 1
 
-def _release_tick_lock(state_dir: Path) -> None:
-    """Release tick.lock if held."""
+def _signal_pid(pid: int) -> bool:
+    """SIGTERM a phase subprocess. Returns True if signal delivered (or already gone)."""
+    try:
+        os.kill(pid, signal.SIGTERM)
+        return True
+    except ProcessLookupError:
+        return True  # already exited
+    except (PermissionError, OSError):
+        return False
+
+def _release_tick_lock_if_owned_by(state_dir: Path, tick_ids: set[str]) -> None:
+    """Release tick.lock only if its holder's tick_id is in tick_ids.
+
+    Refuses to release a lock held by a different tick — a mistyped kill must
+    not be able to break an unrelated in-flight tick's critical section.
+    """
     lock_dir = state_dir / "tick.lock"
-    if lock_dir.exists():
-        holder = lock_dir / "holder.json"
-        if holder.exists():
-            holder.unlink()
-        try:
-            lock_dir.rmdir()
-        except OSError:
-            pass
+    holder = lock_dir / "holder.json"
+    if not lock_dir.exists() or not holder.exists():
+        return
+    try:
+        data = json.loads(holder.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    if data.get("tick_id") not in tick_ids:
+        return
+    try:
+        holder.unlink()
+    except FileNotFoundError:
+        pass
+    try:
+        lock_dir.rmdir()
+    except OSError:
+        pass
 
 def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) -> int:
     """Kill in-flight phase(s) and write killed_by_operator outcome sidecars.
 
     - Reads phase_started/* markers
-    - Sends hermes run kill <job-id> for each
+    - SIGTERMs the recorded child_pid (and/or sends hermes run kill <job_id>)
     - Writes killed_by_operator outcome sidecars
     - Deletes markers
-    - Releases tick.lock if held
+    - Releases tick.lock ONLY if its holder is one of the killed ticks
     """
     ps_dir = state_dir / "phase_started"
     if not ps_dir.exists():
         print("no in-flight phases")
-        _release_tick_lock(state_dir)
         return 0
 
     targets = []
@@ -67,7 +91,6 @@ def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) ->
             targets.append(p)
         else:
             print(f"no in-flight phase for {todo}")
-            _release_tick_lock(state_dir)
             return 2
     elif all_:
         targets = [f for f in ps_dir.iterdir() if f.is_file() and f.suffix == ".json"]
@@ -75,25 +98,39 @@ def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) ->
         print("error: specify --all or --todo TODO-N")
         return 2
 
+    killed_tick_ids: set[str] = set()
     for p in targets:
-        data = json.loads(p.read_text())
+        try:
+            data = json.loads(p.read_text())
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            print(f"warning: unreadable marker {p.name}: {e}")
+            continue
         job_id = data.get("job_id")
+        child_pid = data.get("child_pid")
         tick_id = data.get("tick_id", "")
 
+        if child_pid:
+            _signal_pid(int(child_pid))
         if job_id:
             _hermes_run_kill(job_id)
+        if not child_pid and not job_id:
+            print(f"warning: no child_pid or job_id on marker {p.name}; phase may keep running")
 
         if tick_id:
-            _cli_dec_store.append_outcome(
-                state_dir, tick_id,
-                outcome="killed_by_operator",
-                detail={"todo_id": p.stem},
-            )
+            try:
+                _cli_dec_store.append_outcome(
+                    state_dir, tick_id,
+                    outcome="killed_by_operator",
+                    detail={"todo_id": p.stem},
+                )
+            except FileExistsError:
+                # Outcome already terminal — fine, marker cleanup still proceeds.
+                pass
+            killed_tick_ids.add(tick_id)
 
         p.unlink()
 
-    # Release tick.lock if held
-    _release_tick_lock(state_dir)
+    _release_tick_lock_if_owned_by(state_dir, killed_tick_ids)
     return 0
 
 def _parse_todo_id(value: str) -> int:

@@ -44,9 +44,47 @@ def test_kill_specific_todo(tmp_path):
     assert not (tmp_path / "phase_started" / "TODO-1.json").exists()
     assert (tmp_path / "phase_started" / "TODO-2.json").exists()
 
-def test_kill_releases_tick_lock(tmp_path):
+def test_kill_releases_tick_lock_when_holder_matches(tmp_path):
+    _marker(tmp_path, "TODO-1", tick_id="01JA", job_id="job-A")
     (tmp_path / "tick.lock").mkdir()
-    (tmp_path / "tick.lock" / "holder.json").write_text('{}')
+    (tmp_path / "tick.lock" / "holder.json").write_text('{"tick_id": "01JA"}')
     with patch("hermes_pipeline.cli._hermes_run_kill", lambda jid: 0):
         rc = cmd_kill(state_dir=tmp_path, all_=True, todo=None)
+    assert rc == 0
     assert not (tmp_path / "tick.lock").exists()
+
+def test_kill_does_not_release_unrelated_tick_lock(tmp_path):
+    """A typo in --todo must not break an unrelated tick's critical section."""
+    _marker(tmp_path, "TODO-1", tick_id="01JA", job_id="job-A")
+    (tmp_path / "tick.lock").mkdir()
+    (tmp_path / "tick.lock" / "holder.json").write_text('{"tick_id": "01JOTHER"}')
+    with patch("hermes_pipeline.cli._hermes_run_kill", lambda jid: 0):
+        rc = cmd_kill(state_dir=tmp_path, all_=True, todo=None)
+    assert rc == 0
+    assert (tmp_path / "tick.lock").exists(), "kill must not steal locks it does not own"
+
+def test_kill_missing_todo_does_not_touch_lock(tmp_path):
+    """A no-op kill (target missing) must not touch tick.lock at all."""
+    _marker(tmp_path, "TODO-1", tick_id="01JA", job_id="job-A")
+    (tmp_path / "tick.lock").mkdir()
+    (tmp_path / "tick.lock" / "holder.json").write_text('{"tick_id": "01JLIVE"}')
+    with patch("hermes_pipeline.cli._hermes_run_kill", lambda jid: 0):
+        rc = cmd_kill(state_dir=tmp_path, all_=False, todo="TODO-999")
+    assert rc == 2
+    assert (tmp_path / "tick.lock" / "holder.json").exists()
+
+def test_kill_uses_child_pid_when_present(tmp_path):
+    p = tmp_path / "phase_started" / "TODO-1.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({
+        "todo_id": "TODO-1",
+        "tick_id": "01JA",
+        "child_pid": 99999,
+        "started_at": "2026-06-13T00:00:00Z",
+        "phase_key": "autoplan",
+    }))
+    sent = []
+    with patch("hermes_pipeline.cli._signal_pid", lambda pid: sent.append(pid) or True):
+        rc = cmd_kill(state_dir=tmp_path, all_=True, todo=None)
+    assert rc == 0
+    assert sent == [99999]
