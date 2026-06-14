@@ -3,6 +3,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
+import tomllib
 
 KanbanAdapterName = Literal["null", "hermes"]
 
@@ -46,3 +47,42 @@ class Config:
             return c
         from dataclasses import replace
         return replace(c, **overrides)
+
+@dataclass(frozen=True)
+class SelectionConfig:
+    model: str = "claude-opus-4-7"
+    max_tokens: int = 4000
+    auto_execute: bool = False
+    prompt_path: str = ".hermes/prompts/selection.md"
+    expected_prompt_sha: str | None = None
+
+@dataclass(frozen=True)
+class CircuitBreakerConfig:
+    no_progress_threshold: int = 3
+    backoff_interval_min: int = 30
+    alert_dedup_hours: int = 24
+    max_phase_timeout_min: int = 120
+    max_tick_duration_min: int = 10
+
+@dataclass(frozen=True)
+class FullConfig:
+    base: Config
+    selection: SelectionConfig = field(default_factory=SelectionConfig)
+    circuit_breaker: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
+
+    def __getattr__(self, name):
+        return getattr(self.base, name)
+
+def _coerce_section(cls, data: dict):
+    fields = {f.name for f in cls.__dataclass_fields__.values()}
+    return cls(**{k: v for k, v in data.items() if k in fields})
+
+def load_toml_overlay(base: Config, path: Path) -> FullConfig:
+    p = Path(path)
+    try:
+        data = tomllib.loads(p.read_text())
+    except tomllib.TOMLDecodeError as e:
+        raise ValueError(f"malformed TOML at {p}: {e}") from e
+    sel = _coerce_section(SelectionConfig, data.get("selection", {}))
+    cb = _coerce_section(CircuitBreakerConfig, data.get("circuit_breaker", {}))
+    return FullConfig(base=base, selection=sel, circuit_breaker=cb)
