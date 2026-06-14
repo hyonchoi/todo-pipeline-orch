@@ -7,11 +7,13 @@ Scheduling is owned by the Hermes command repo.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import logging
 import os
 import signal
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -44,6 +46,68 @@ def _signal_pid(pid: int) -> bool:
         return True  # already exited
     except (PermissionError, OSError):
         return False
+
+def _process_alive(pid: int) -> bool:
+    """Return True iff pid names a live process this user can signal."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Process exists but is owned by another user; treat as alive (we can't
+        # confirm exit). Caller will surface this as kill-unconfirmed.
+        return True
+    except OSError as e:
+        if e.errno == errno.ESRCH:
+            return False
+        return True
+
+def _kill_session_group(pid: int, sig: int) -> bool:
+    """Signal the entire session group rooted at pid (phases.py uses start_new_session)."""
+    try:
+        pgid = os.getpgid(pid)
+    except ProcessLookupError:
+        return True
+    except OSError:
+        pgid = pid
+    try:
+        os.killpg(pgid, sig)
+        return True
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+
+def _confirm_pid_exited(pid: int, *, term_grace_s: float = 5.0, kill_grace_s: float = 2.0) -> bool:
+    """SIGTERM → poll → SIGKILL → poll. Return True iff the pid is gone afterwards.
+
+    Targets the session group so children spawned by Claude don't survive the
+    parent's death. The marker stays on disk until this returns True; if it
+    returns False the caller MUST leave the marker in place so future ticks
+    still see the TODO as in-flight.
+    """
+    if not _process_alive(pid):
+        return True
+    _signal_pid(pid)
+    _kill_session_group(pid, signal.SIGTERM)
+    deadline = time.monotonic() + term_grace_s
+    while time.monotonic() < deadline:
+        if not _process_alive(pid):
+            return True
+        time.sleep(0.1)
+    # Escalate.
+    _kill_session_group(pid, signal.SIGKILL)
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        pass
+    deadline = time.monotonic() + kill_grace_s
+    while time.monotonic() < deadline:
+        if not _process_alive(pid):
+            return True
+        time.sleep(0.1)
+    return not _process_alive(pid)
 
 def _release_tick_lock_if_owned_by(state_dir: Path, tick_ids: set[str]) -> None:
     """Release tick.lock only if its holder's tick_id is in tick_ids.
@@ -99,6 +163,7 @@ def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) ->
         return 2
 
     killed_tick_ids: set[str] = set()
+    unconfirmed: list[str] = []
     for p in targets:
         try:
             data = json.loads(p.read_text())
@@ -109,12 +174,32 @@ def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) ->
         child_pid = data.get("child_pid")
         tick_id = data.get("tick_id", "")
 
+        # Verify the phase actually died before we declare it killed. A
+        # SIGTERM-ignoring or already-detached Claude process must NOT be
+        # recorded as killed_by_operator while it keeps mutating the repo;
+        # if confirmation fails, leave the marker in place so future ticks
+        # still see the TODO as in-flight.
+        exit_confirmed = True
         if child_pid:
-            _signal_pid(int(child_pid))
-        if job_id:
+            exit_confirmed = _confirm_pid_exited(int(child_pid))
+        elif job_id:
+            # hermes run kill is the only handle we have; trust its return code.
+            exit_confirmed = (_hermes_run_kill(job_id) == 0)
+        else:
+            print(f"warning: no child_pid or job_id on marker {p.name}; cannot confirm kill")
+            exit_confirmed = False
+
+        # Best-effort secondary kill via hermes runner even when we had a pid.
+        if child_pid and job_id:
             _hermes_run_kill(job_id)
-        if not child_pid and not job_id:
-            print(f"warning: no child_pid or job_id on marker {p.name}; phase may keep running")
+
+        if not exit_confirmed:
+            print(
+                f"error: failed to confirm exit for {p.name} "
+                f"(pid={child_pid} job={job_id}); leaving marker in place"
+            )
+            unconfirmed.append(p.name)
+            continue
 
         if tick_id:
             try:
@@ -131,7 +216,7 @@ def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) ->
         p.unlink()
 
     _release_tick_lock_if_owned_by(state_dir, killed_tick_ids)
-    return 0
+    return 1 if unconfirmed else 0
 
 def _parse_todo_id(value: str) -> int:
     """Parse todo_id argument with helpful error message."""

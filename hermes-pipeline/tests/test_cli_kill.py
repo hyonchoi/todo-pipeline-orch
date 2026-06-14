@@ -84,7 +84,50 @@ def test_kill_uses_child_pid_when_present(tmp_path):
         "phase_key": "autoplan",
     }))
     sent = []
-    with patch("hermes_pipeline.cli._signal_pid", lambda pid: sent.append(pid) or True):
+    with patch(
+        "hermes_pipeline.cli._confirm_pid_exited",
+        lambda pid, **kw: sent.append(pid) or True,
+    ):
         rc = cmd_kill(state_dir=tmp_path, all_=True, todo=None)
     assert rc == 0
     assert sent == [99999]
+    assert not (tmp_path / "phase_started" / "TODO-1.json").exists()
+    assert (tmp_path / "outcomes" / "01JA.json").exists()
+
+def test_kill_leaves_marker_when_pid_does_not_exit(tmp_path):
+    """A SIGTERM-ignoring Claude process must NOT be recorded as
+    killed_by_operator while it keeps running. The marker stays, no
+    outcome sidecar is written, and rc=1 surfaces the failure."""
+    p = tmp_path / "phase_started" / "TODO-1.json"
+    p.parent.mkdir(parents=True)
+    p.write_text(json.dumps({
+        "todo_id": "TODO-1",
+        "tick_id": "01JA",
+        "child_pid": 99999,
+        "started_at": "2026-06-13T00:00:00Z",
+        "phase_key": "autoplan",
+    }))
+    with patch(
+        "hermes_pipeline.cli._confirm_pid_exited",
+        lambda pid, **kw: False,
+    ):
+        rc = cmd_kill(state_dir=tmp_path, all_=True, todo=None)
+    assert rc == 1
+    assert (tmp_path / "phase_started" / "TODO-1.json").exists(), \
+        "marker must stay so next tick still sees TODO as in-flight"
+    assert not (tmp_path / "outcomes" / "01JA.json").exists(), \
+        "killed_by_operator outcome must NOT be written if exit unconfirmed"
+
+def test_kill_does_not_release_lock_when_exit_unconfirmed(tmp_path):
+    _marker(tmp_path, "TODO-1", tick_id="01JA", job_id="job-A")
+    (tmp_path / "phase_started" / "TODO-1.json").write_text(json.dumps({
+        "todo_id": "TODO-1", "tick_id": "01JA",
+        "child_pid": 99999, "phase_key": "autoplan",
+    }))
+    (tmp_path / "tick.lock").mkdir()
+    (tmp_path / "tick.lock" / "holder.json").write_text('{"tick_id": "01JA"}')
+    with patch("hermes_pipeline.cli._confirm_pid_exited", lambda pid, **kw: False):
+        rc = cmd_kill(state_dir=tmp_path, all_=True, todo=None)
+    assert rc == 1
+    assert (tmp_path / "tick.lock").exists(), \
+        "unconfirmed kill must NOT release the tick lock"
