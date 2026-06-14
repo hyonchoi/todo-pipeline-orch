@@ -1,7 +1,7 @@
-"""Lane F.3: CLI subcommands for auto/merge/status.
+"""Hermes pipeline orchestrator CLI.
 
-Implements:
-  TF.3: cli.py — argparse subcommands: auto/merge/status (T6, T13)
+Subcommands: merge, status, kill.
+Scheduling is owned by the Hermes command repo.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from .kanban import NullKanbanAdapter, HermesKanbanAdapter
 from .logging_setup import configure as configure_logging
 from .merge import run_phase9, make_default_bump_fn
 from .status import collect_pending, format_table
-from .watcher import auto_tick
 
 log = logging.getLogger(__name__)
 
@@ -112,20 +111,13 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
         prog="pipeline-watch",
-        description="Hermes pipeline orchestrator: auto-tick, merge, and status commands.",
+        description="Hermes pipeline orchestrator: merge, status, and kill commands.",
     )
     parser.add_argument(
         "--version", action="version", version="%(prog)s 0.1.0"
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
-
-    # auto: Run one tick
-    auto_parser = subparsers.add_parser(
-        "auto",
-        help="Run one auto-tick: discover projects, detect changes, select eligible TODOs",
-    )
-    auto_parser.set_defaults(func=_cmd_auto)
 
     # merge: Phase 9 merge
     merge_parser = subparsers.add_parser(
@@ -159,30 +151,6 @@ def build_parser() -> argparse.ArgumentParser:
     kill_parser.set_defaults(func=_cmd_kill)
 
     return parser
-
-
-def _cmd_auto(args, config: Config) -> int:
-    """Handle 'auto' subcommand."""
-    try:
-        # Placeholder callbacks
-        def on_selected(project: str, todo_id: int) -> None:
-            log.info(f"Selected {project}/{todo_id} for pipeline execution")
-
-        def notify_fn(msg: str) -> None:
-            log.error(f"Notification: {msg}")
-
-        auto_tick(
-            projects_dir=config.projects_dir,
-            lock_dir=config.lock_dir,
-            state_dir=config.state_dir,
-            on_selected=on_selected,
-            notify_fn=notify_fn,
-            slack_channel=config.slack_channel,
-        )
-        return 0
-    except Exception as e:
-        log.error(f"auto command failed: {e}", exc_info=True)
-        return 2
 
 
 def _cmd_merge(args, config: Config) -> int:
