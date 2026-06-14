@@ -29,6 +29,19 @@ Install uv:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
+## Documentation
+
+| Doc | Quadrant | When to read |
+|---|---|---|
+| [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `pipeline-watch` end-to-end |
+| [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
+| [Selection seat contract](hermes-pipeline/src/hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
+| [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
+| [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
+| [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
+| [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
+| [Kill a stuck in-flight phase](docs/howto-kill-stuck-phase.md) | How-to | A phase is wedged past `max_phase_timeout_min` |
+
 ## Getting Started
 
 👉 **New to pipeline-watch?** Start with the [getting-started tutorial](docs/tutorial-getting-started.md) — walk through discovery, review, and merge in ~15 minutes.
