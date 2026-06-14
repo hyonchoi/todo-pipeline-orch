@@ -3,6 +3,7 @@ import datetime as _dt
 import json as _json
 from dataclasses import dataclass
 from pathlib import Path
+import subprocess as _sp
 import yaml
 
 @dataclass(frozen=True)
@@ -49,10 +50,71 @@ def _delete_marker(state_dir: Path, todo_id: str) -> None:
     if p.exists():
         p.unlink()
 
-def _invoke_claude(*, todo_id: str, phase_key: str, **kw) -> dict:
-    """Placeholder seam. The actual invocation logic lands in Task 9 when
-    we lift it out of watcher.py. Tests patch this seam."""
-    raise NotImplementedError("populated in Task 9 (watcher extraction)")
+def _run_claude_subprocess(
+    *,
+    claude_cmd: str,
+    prompt: str,
+    tools: str,
+    turns: int,
+    timeout: int,
+    cwd,
+) -> dict:
+    """Run the Claude CLI as a subprocess.
+
+    Returns a dict with returncode, stdout, stderr keys.
+    Tests monkey-patch this function to avoid hitting the real CLI.
+    """
+    r = _sp.run(
+        [claude_cmd, "-p", prompt, "--tools", tools, "--turns", str(turns)],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        cwd=cwd,
+        check=False,
+    )
+    return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+
+def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
+    """Execute a single phase via Claude subprocess and write ready_for_review on terminal success."""
+    phases_cfg = {p.phase_key: p for p in load_phases()}
+    phase = phases_cfg.get(phase_key)
+
+    result = _run_claude_subprocess(
+        claude_cmd=kw.get("claude_cmd", "claude"),
+        prompt=phase.prompt if phase else f"Phase: {phase_key}",
+        tools=phase.tools if phase else "none",
+        turns=phase.turns if phase else 1,
+        timeout=phase.timeout if phase else 1800,
+        cwd=kw.get("project_dir"),
+    )
+
+    if result["returncode"] != 0:
+        raise RuntimeError(
+            f"phase failed: rc={result['returncode']} stdout={result['stdout'][:200]}"
+        )
+
+    # Write ready_for_review on terminal phase (phase9_*)
+    is_terminal = phase_key.startswith("phase9")
+    if is_terminal:
+        todo_num = int(todo_id.removeprefix("TODO-"))
+        from .state import ReadyForReview
+
+        rec = ReadyForReview(
+            project=project_slug,
+            todo_id=todo_num,
+            branch=f"todo-{todo_num}-{phase_key}",
+            pr_url="",
+            phase_summaries={phase_key: result["stdout"][:200]},
+            kanban_task_id=None,
+            merge_status="pending",
+            created_at=_now_iso(),
+        )
+        sd = Path(state_dir)
+        rfr_dir = sd / "ready_for_review"
+        rfr_dir.mkdir(parents=True, exist_ok=True)
+        (rfr_dir / f"{todo_num}.json").write_text(rec.to_json())
+
+    return {"status": "success", "phase_key": phase_key, "tick_id": tick_id}
 
 def run(
     *,
