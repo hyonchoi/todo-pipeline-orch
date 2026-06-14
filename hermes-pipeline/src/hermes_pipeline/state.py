@@ -8,7 +8,26 @@ from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional, Literal
 
+from hermes_pipeline.decision import store as _decision_store
+
 MergeStatus = Literal["pending", "merged", "rejected", "abandoned", "failed"]
+
+# -- Outcome mapping ---------------------------------------------------------
+
+_STATUS_TO_OUTCOME = {
+    "merged": "merged",
+    "rejected": "discarded",
+    "abandoned": "discarded",
+    # "failed" is computed dynamically
+    # "pending" is no-op (not terminal)
+}
+
+def _failed_outcome(rec: ReadyForReview) -> str:
+    """Derive failed_at_phase_<key> from the last phase summary key."""
+    keys = list(rec.phase_summaries.keys())
+    if not keys:
+        return "failed_at_phase_unknown"
+    return f"failed_at_phase_{keys[-1]}"
 
 
 @dataclass
@@ -23,6 +42,7 @@ class ReadyForReview:
     merge_status: MergeStatus = "pending"
     error: str | None = None
     created_at: str = ""
+    tick_id: str = ""  # Empty when written outside the agent path.
 
     def to_json(self) -> str:
         """Serialize to JSON."""
@@ -211,6 +231,10 @@ class State:
         except (json.JSONDecodeError, KeyError):
             return None
 
+    def _state_dir(self) -> Path:
+        """Derive the .hermes state root from ready_dir."""
+        return self.ready_dir.parent
+
     def set_merge_status(
         self,
         todo_id: int,
@@ -220,10 +244,18 @@ class State:
         """
         Update the merge_status of a ready-for-review record.
 
+        On terminal transitions (merged, rejected, abandoned, failed) also
+        writes an outcome sidecar at `.hermes/outcomes/<tick_id>.json` if
+        the record carries a `tick_id`.
+
         Args:
             todo_id: TODO ID.
             status: New merge status.
             error: Optional error message if status is "failed".
+
+        Raises:
+            FileExistsError: If an outcome sidecar was already written for
+                this tick_id (write-once invariant).
         """
         rec = self.read_ready_for_review(todo_id)
         if rec is None:
@@ -231,6 +263,21 @@ class State:
         rec.merge_status = status
         rec.error = error
         self.write_ready_for_review(rec)
+
+        # Write outcome sidecar on terminal transitions (if we have a tick_id)
+        if not rec.tick_id:
+            return
+        outcome = _STATUS_TO_OUTCOME.get(status)
+        if outcome is None and status == "failed":
+            outcome = _failed_outcome(rec)
+        if outcome is None:
+            return  # pending — not terminal, skip sidecar
+        _decision_store.append_outcome(
+            self._state_dir(),
+            rec.tick_id,
+            outcome=outcome,
+            detail={"todo_id": todo_id, "error": error},
+        )
 
     def list_ready_for_review_pending(self) -> list[ReadyForReview]:
         """
