@@ -23,8 +23,8 @@ def _prompt(tmp_path: Path) -> Path:
     p.write_text("PROMPT")
     return p
 
-def _ctx() -> SelectionContext:
-    return SelectionContext("- TODO-1", [], [], {}, "demo")
+def _ctx(todos_md: str = "- TODO-1\n- TODO-2", in_flight: list[str] | None = None) -> SelectionContext:
+    return SelectionContext(todos_md, in_flight or [], [], {}, "demo")
 
 def test_happy_path_persists_decision(tmp_path):
     state = tmp_path / "state"
@@ -47,14 +47,16 @@ def test_happy_path_persists_decision(tmp_path):
     assert d.picked == "TODO-1"
     assert (state / "decisions" / "01JA.json").exists()
 
-def test_picked_not_in_candidates_is_rejected(tmp_path):
-    """LLM-output trust boundary: picked must be in candidates_considered."""
+def test_picked_not_in_todos_md_is_rejected(tmp_path):
+    """LLM-output trust boundary: picked must appear in TODOS.md (NOT in the
+    model's self-reported candidates_considered, which is also LLM output)."""
     state = tmp_path / "state"; state.mkdir()
     p = _prompt(tmp_path)
     fake = AgentResult(
         parsed={
-            "candidates_considered": ["TODO-1", "TODO-2"],
-            "picked": "TODO-999",  # hallucinated
+            # Model agrees with itself — but TODO-999 is not in TODOS.md.
+            "candidates_considered": ["TODO-999"],
+            "picked": "TODO-999",
             "rationale": "I like this one",
             "blocked_reasons": {},
             "in_flight": [],
@@ -64,7 +66,56 @@ def test_picked_not_in_candidates_is_rejected(tmp_path):
     with patch("hermes_pipeline.decision.call_agent", return_value=fake):
         d = run_selection(tick_id="01JC", ctx=_ctx(), cfg=_cfg(state, p))
     assert d.picked is None
-    assert "pick_not_in_candidates" in d.rationale
+    assert "pick_not_in_todos_md" in d.rationale
+
+def test_picked_already_in_flight_is_rejected(tmp_path):
+    state = tmp_path / "state"; state.mkdir()
+    p = _prompt(tmp_path)
+    fake = AgentResult(
+        parsed={
+            "candidates_considered": ["TODO-1"],
+            "picked": "TODO-1",
+            "rationale": "go",
+            "blocked_reasons": {},
+            "in_flight": ["TODO-1"],
+        },
+        prompt_sha="sha", raw_response="{}",
+    )
+    with patch("hermes_pipeline.decision.call_agent", return_value=fake):
+        d = run_selection(
+            tick_id="01JE",
+            ctx=_ctx(in_flight=["TODO-1"]),
+            cfg=_cfg(state, p),
+        )
+    assert d.picked is None
+    assert "pick_already_in_flight" in d.rationale
+
+def test_api_error_persists_decision_with_picked_none(tmp_path):
+    state = tmp_path / "state"; state.mkdir()
+    p = _prompt(tmp_path)
+    class FakeAPIError(Exception):
+        pass
+    with patch(
+        "hermes_pipeline.decision.call_agent",
+        side_effect=FakeAPIError("429 rate limited"),
+    ):
+        d = run_selection(tick_id="01JF", ctx=_ctx(), cfg=_cfg(state, p))
+    assert d.picked is None
+    assert "api_error" in d.rationale
+    assert "FakeAPIError" in d.rationale
+    assert (state / "decisions" / "01JF.json").exists()
+
+def test_missing_api_key_persists_config_error(tmp_path):
+    state = tmp_path / "state"; state.mkdir()
+    p = _prompt(tmp_path)
+    with patch(
+        "hermes_pipeline.decision.call_agent",
+        side_effect=KeyError("ANTHROPIC_API_KEY"),
+    ):
+        d = run_selection(tick_id="01JG", ctx=_ctx(), cfg=_cfg(state, p))
+    assert d.picked is None
+    assert "config_error" in d.rationale
+    assert "ANTHROPIC_API_KEY" in d.rationale
 
 def test_picked_with_invalid_shape_is_rejected(tmp_path):
     """A picked value not matching TODO-N shape is rejected."""

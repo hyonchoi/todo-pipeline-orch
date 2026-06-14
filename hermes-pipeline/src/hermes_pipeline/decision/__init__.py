@@ -9,6 +9,11 @@ from .agent import call_agent, compute_prompt_sha, PromptShaMismatch
 from . import store as _store
 
 _TODO_ID_RE = _re.compile(r"^TODO-\d+$")
+# Pulls every `TODO-N` token out of TODOS.md. Header lines, body references,
+# checkbox lists — anything formatted as the canonical id. The agent's
+# `candidates_considered` and `picked` fields are checked against THIS set,
+# not the model's self-reported set (which is also LLM output).
+_TODOS_ID_RE = _re.compile(r"\bTODO-\d+\b")
 
 __all__ = [
     "HermesSelectionDecision",
@@ -71,20 +76,57 @@ def run_selection(
             "in_flight": ctx.in_flight,
         }
         prompt_sha = e.actual
+    except KeyError as e:
+        # ANTHROPIC_API_KEY missing — config fault, not a stall. Persist a
+        # decision so the next tick's `recent_decisions` carries the cause,
+        # but do not crash the cron entrypoint.
+        parsed = {
+            "candidates_considered": [],
+            "picked": None,
+            "rationale": f"config_error: missing env var {e.args[0]!r}",
+            "blocked_reasons": {},
+            "in_flight": ctx.in_flight,
+        }
+        prompt_sha = ""
+    except Exception as e:
+        # Anthropic API surface — 401/429/5xx/network/timeout/SDK errors —
+        # plus any other transport error. The plan's edge-case contract:
+        # produce picked=None with a distinct rationale; the circuit breaker
+        # treats it as no-progress (caller responsibility).
+        rationale = f"api_error: {type(e).__name__}: {str(e)[:200]}"
+        try:
+            prompt_sha = compute_prompt_sha(prompt_path)
+        except OSError:
+            prompt_sha = ""
+        parsed = {
+            "candidates_considered": [],
+            "picked": None,
+            "rationale": rationale,
+            "blocked_reasons": {},
+            "in_flight": ctx.in_flight,
+        }
 
-    # LLM-output trust boundary: the model is free to return anything for
-    # `picked`. Reject values that don't match the TODO-N shape or that
-    # aren't in the candidate set we presented. On reject, null `picked`
-    # and prepend the reason to `rationale` so downstream sees a "no pick"
-    # config-fault tick rather than a hallucinated TODO id.
+    # LLM-output trust boundary. Three failure modes to gate against:
+    #   1. `picked` doesn't match the TODO-N shape (model returned a string,
+    #      a dict, a hallucinated value).
+    #   2. `picked` is shaped correctly but doesn't appear in TODOS.md at
+    #      all — a hallucinated TODO id the model invented.
+    #   3. `picked` is in TODOS.md but was filtered out (e.g., it's already
+    #      in_flight from a prior tick).
+    # Validate against the server-parsed TODO ids in `ctx.todos_md`, NOT
+    # against the LLM-supplied `candidates_considered` (which is itself
+    # untrusted output and can be made to agree with `picked` by injection).
+    real_ids = set(_TODOS_ID_RE.findall(ctx.todos_md))
+    in_flight_set = set(ctx.in_flight)
     picked = parsed.get("picked")
     if picked is not None:
-        candidates = parsed.get("candidates_considered") or []
         reason = None
         if not isinstance(picked, str) or not _TODO_ID_RE.match(picked):
             reason = f"invalid_pick_shape: picked={picked!r}"
-        elif picked not in candidates:
-            reason = f"pick_not_in_candidates: picked={picked!r} candidates={candidates}"
+        elif picked not in real_ids:
+            reason = f"pick_not_in_todos_md: picked={picked!r} known={sorted(real_ids)}"
+        elif picked in in_flight_set:
+            reason = f"pick_already_in_flight: picked={picked!r}"
         if reason is not None:
             parsed["picked"] = None
             parsed["rationale"] = f"{reason} | {parsed.get('rationale', '')}".rstrip(" |")
