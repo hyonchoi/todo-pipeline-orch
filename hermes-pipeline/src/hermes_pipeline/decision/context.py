@@ -1,14 +1,36 @@
 """Build SelectionContext per tick. Owns stale-marker sweep."""
 from __future__ import annotations
 import json
+import os
 import subprocess
 import time
 from pathlib import Path
 from .schema import SelectionContext
 from . import store as _store
 
+def _pid_alive(pid: int) -> bool:
+    """True iff `pid` is a live process this user can see."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Other user owns it; conservatively assume alive — better to leave
+        # the marker in place than re-pick a TODO that might still be running.
+        return True
+    except OSError:
+        return True
+
 def _rfr_ids(state_dir: Path) -> list[str]:
-    """Extract TODO IDs from ready_for_review/*.json files."""
+    """Extract TODO IDs from ready_for_review/todo-<n>.json files.
+
+    Normalizes to the canonical `TODO-N` form so the union with
+    `phase_started/*` markers (which already use `TODO-N`) actually dedupes.
+    Accepts both `todo-7.json` (the State writer's format) and a bare
+    `7.json` legacy form so a pre-rename state dir doesn't drop in-flight
+    work on the floor.
+    """
     d = state_dir / "ready_for_review"
     if not d.exists():
         return []
@@ -16,15 +38,25 @@ def _rfr_ids(state_dir: Path) -> list[str]:
     for p in d.iterdir():
         if not p.is_file() or p.suffix != ".json":
             continue
+        stem = p.stem
+        if stem.startswith("todo-"):
+            stem = stem[len("todo-"):]
         try:
-            tid = int(p.stem)
-            out.append(f"TODO-{tid}")
+            tid = int(stem)
         except ValueError:
-            out.append(p.stem)
+            continue
+        out.append(f"TODO-{tid}")
     return out
 
 def _phase_started_ids(state_dir: Path, *, max_phase_timeout_min: int) -> list[str]:
-    """Extract TODO IDs from phase_started/ markers, sweeping stale files."""
+    """Extract TODO IDs from phase_started/ markers, sweeping stale + dead.
+
+    A marker is swept only if BOTH conditions hold: (a) older than
+    `max_phase_timeout_min`, AND (b) the recorded `child_pid` is no longer
+    alive (or unrecorded). A wedged-but-alive Claude run must remain
+    visible — otherwise the next tick would re-pick the same TODO and we'd
+    have two phases mutating the same repo.
+    """
     d = state_dir / "phase_started"
     if not d.exists():
         return []
@@ -33,10 +65,26 @@ def _phase_started_ids(state_dir: Path, *, max_phase_timeout_min: int) -> list[s
     for p in d.iterdir():
         if not p.is_file():
             continue
-        if p.stat().st_mtime < cutoff:
-            p.unlink()
+        stale_mtime = p.stat().st_mtime < cutoff
+        if not stale_mtime:
+            out.append(p.stem)
             continue
-        out.append(p.stem)
+        # Past the timeout — but verify the process is actually dead before
+        # sweeping. If we can't read the marker, fall back to mtime alone.
+        child_pid = None
+        try:
+            data = json.loads(p.read_text())
+            child_pid = data.get("child_pid")
+        except (FileNotFoundError, json.JSONDecodeError):
+            pass
+        if child_pid is not None and _pid_alive(int(child_pid)):
+            # Wedged but alive. Surface as in-flight; do NOT sweep.
+            out.append(p.stem)
+            continue
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
     return out
 
 def build_in_flight(state_dir: Path, *, max_phase_timeout_min: int) -> list[str]:
