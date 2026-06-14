@@ -7,12 +7,16 @@ Implements:
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from pathlib import Path
 from typing import Optional
 
+import subprocess as _cli_sp
+
 from .config import Config
+from .decision import store as _cli_dec_store
 from .kanban import NullKanbanAdapter, HermesKanbanAdapter
 from .logging_setup import configure as configure_logging
 from .merge import run_phase9, make_default_bump_fn
@@ -21,6 +25,77 @@ from .watcher import auto_tick
 
 log = logging.getLogger(__name__)
 
+
+def _hermes_run_kill(job_id: str) -> int:
+    """Send hermes run kill for a job."""
+    try:
+        r = _cli_sp.run(["hermes", "run", "kill", job_id], timeout=10, check=False)
+        return r.returncode
+    except (_cli_sp.TimeoutExpired, FileNotFoundError):
+        return 1
+
+def _release_tick_lock(state_dir: Path) -> None:
+    """Release tick.lock if held."""
+    lock_dir = state_dir / "tick.lock"
+    if lock_dir.exists():
+        holder = lock_dir / "holder.json"
+        if holder.exists():
+            holder.unlink()
+        try:
+            lock_dir.rmdir()
+        except OSError:
+            pass
+
+def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) -> int:
+    """Kill in-flight phase(s) and write killed_by_operator outcome sidecars.
+
+    - Reads phase_started/* markers
+    - Sends hermes run kill <job-id> for each
+    - Writes killed_by_operator outcome sidecars
+    - Deletes markers
+    - Releases tick.lock if held
+    """
+    ps_dir = state_dir / "phase_started"
+    if not ps_dir.exists():
+        print("no in-flight phases")
+        _release_tick_lock(state_dir)
+        return 0
+
+    targets = []
+    if todo:
+        p = ps_dir / f"{todo}.json"
+        if p.exists():
+            targets.append(p)
+        else:
+            print(f"no in-flight phase for {todo}")
+            _release_tick_lock(state_dir)
+            return 2
+    elif all_:
+        targets = [f for f in ps_dir.iterdir() if f.is_file() and f.suffix == ".json"]
+    else:
+        print("error: specify --all or --todo TODO-N")
+        return 2
+
+    for p in targets:
+        data = json.loads(p.read_text())
+        job_id = data.get("job_id")
+        tick_id = data.get("tick_id", "")
+
+        if job_id:
+            _hermes_run_kill(job_id)
+
+        if tick_id:
+            _cli_dec_store.append_outcome(
+                state_dir, tick_id,
+                outcome="killed_by_operator",
+                detail={"todo_id": p.stem},
+            )
+
+        p.unlink()
+
+    # Release tick.lock if held
+    _release_tick_lock(state_dir)
+    return 0
 
 def _parse_todo_id(value: str) -> int:
     """Parse todo_id argument with helpful error message."""
@@ -72,6 +147,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Display pending ready-for-review records",
     )
     status_parser.set_defaults(func=_cmd_status)
+
+    # kill: Kill in-flight phases
+    kill_parser = subparsers.add_parser(
+        "kill",
+        help="Kill in-flight phase(s)",
+    )
+    kill_group = kill_parser.add_mutually_exclusive_group(required=True)
+    kill_group.add_argument("--all", dest="all_", action="store_true", help="Kill all in-flight phases")
+    kill_group.add_argument("--todo", help="Kill a specific TODO (e.g., TODO-1)")
+    kill_parser.set_defaults(func=_cmd_kill)
 
     return parser
 
@@ -167,6 +252,14 @@ def _cmd_status(args, config: Config) -> int:
     except Exception as e:
         log.error(f"status command failed: {e}", exc_info=True)
         return 2
+
+def _cmd_kill(args, config: Config) -> int:
+    """Handle 'kill' subcommand."""
+    return cmd_kill(
+        state_dir=config.state_dir,
+        all_=args.all_,
+        todo=args.todo,
+    )
 
 
 def main(argv: Optional[list[str]] = None) -> int:
