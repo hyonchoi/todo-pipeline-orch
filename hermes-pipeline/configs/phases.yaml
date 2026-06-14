@@ -45,3 +45,4 @@ phases:
     tools: "Read,Write,Bash"
     turns: 15
     timeout: 1800
+    terminal: true

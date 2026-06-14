@@ -15,6 +15,7 @@ class Phase:
     tools: str
     turns: int
     timeout: int = 1800
+    terminal: bool = False
 
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:
     if config_path is None:
@@ -134,22 +135,59 @@ def _run_claude_subprocess(
         stdout, stderr = proc.communicate()
         return {"returncode": -1, "stdout": stdout, "stderr": stderr, "timed_out": True}
 
+class UnknownPhaseError(KeyError):
+    """phase_key is not defined in phases.yaml."""
+
+def _render_phase_prompt(template: str, *, todo_id: str, tick_id: str, project_slug: str) -> str:
+    """Inject the pipeline context the phase prompt needs.
+
+    A picked TODO must be visible to Claude — otherwise a TODO-7 pick can
+    silently produce work for whatever TODO Claude latches onto next. We
+    prepend a non-templated context header and ALSO support `{todo_id}` /
+    `{tick_id}` / `{project_slug}` substitution for phases that want to
+    weave the values into prose. `.format()` with named-only fields is safe
+    here because every prompt in configs/phases.yaml is repo-owned.
+    """
+    header = (
+        f"Pipeline context:\n"
+        f"- todo_id: {todo_id}\n"
+        f"- tick_id: {tick_id}\n"
+        f"- project_slug: {project_slug}\n"
+        f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
+    )
+    try:
+        body = template.format(todo_id=todo_id, tick_id=tick_id, project_slug=project_slug)
+    except (KeyError, IndexError):
+        # Template uses a `{name}` we don't supply — fall back to verbatim
+        # body. The header still scopes the run to this TODO.
+        body = template
+    return header + body
+
 def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
     """Execute a single phase via Claude subprocess and write ready_for_review on terminal success."""
     phases_cfg = {p.phase_key: p for p in load_phases()}
     phase = phases_cfg.get(phase_key)
+    if phase is None:
+        raise UnknownPhaseError(
+            f"phase_key {phase_key!r} not found in phases.yaml; "
+            f"known keys: {sorted(phases_cfg)}"
+        )
 
     sd = Path(state_dir)
 
     def _record_child_pid(pid: int) -> None:
         _update_marker_pid(sd, todo_id, pid)
 
+    prompt = _render_phase_prompt(
+        phase.prompt, todo_id=todo_id, tick_id=tick_id, project_slug=project_slug,
+    )
+
     result = _run_claude_subprocess(
         claude_cmd=kw.get("claude_cmd", "claude"),
-        prompt=phase.prompt if phase else f"Phase: {phase_key}",
-        tools=phase.tools if phase else "none",
-        turns=phase.turns if phase else 1,
-        timeout=phase.timeout if phase else 1800,
+        prompt=prompt,
+        tools=phase.tools,
+        turns=phase.turns,
+        timeout=phase.timeout,
         cwd=kw.get("project_dir"),
         on_pid=_record_child_pid,
     )
@@ -159,11 +197,9 @@ def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
             f"phase failed: rc={result['returncode']} stdout={result['stdout'][:200]}"
         )
 
-    # Write ready_for_review on terminal phase (phase9_*)
-    is_terminal = phase_key.startswith("phase9")
-    if is_terminal:
+    if phase.terminal:
         todo_num = int(todo_id.removeprefix("TODO-"))
-        from .state import ReadyForReview
+        from .state import ReadyForReview, State
 
         rec = ReadyForReview(
             project=project_slug,
@@ -176,11 +212,15 @@ def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
             created_at=_now_iso(),
             tick_id=tick_id,
         )
-        from .state import _atomic_write_text
-        sd = Path(state_dir)
-        rfr_dir = sd / "ready_for_review"
-        rfr_dir.mkdir(parents=True, exist_ok=True)
-        _atomic_write_text(rfr_dir / f"{todo_num}.json", rec.to_json())
+        # Write through State so the file lands at the same path
+        # `State.read_ready_for_review` (and merge.run_phase9) will look at.
+        state = State(
+            project=project_slug,
+            lock_dir=sd / "pipeline_locks",
+            checkpoint_dir=sd / "pipeline_checkpoints",
+            ready_dir=sd / "ready_for_review",
+        )
+        state.write_ready_for_review(rec)
 
     return {"status": "success", "phase_key": phase_key, "tick_id": tick_id}
 
