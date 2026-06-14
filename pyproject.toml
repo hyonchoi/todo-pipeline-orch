@@ -15,3 +15,8 @@ dev = [
 
 [tool.uv.sources]
 hermes-pipeline = { path = "hermes-pipeline", editable = true }
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+]
