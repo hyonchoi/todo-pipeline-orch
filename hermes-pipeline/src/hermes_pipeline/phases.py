@@ -108,6 +108,7 @@ def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
             kanban_task_id=None,
             merge_status="pending",
             created_at=_now_iso(),
+            tick_id=tick_id,
         )
         sd = Path(state_dir)
         rfr_dir = sd / "ready_for_review"

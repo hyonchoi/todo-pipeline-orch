@@ -30,6 +30,7 @@ def test_invoke_writes_ready_for_review_on_success(state_dir, monkeypatch):
     rfr = json.loads((state_dir / "ready_for_review" / "7.json").read_text())
     assert rfr["todo_id"] == 7
     assert rfr["merge_status"] == "pending"
+    assert rfr["tick_id"] == "01JT"
 
 def test_invoke_propagates_subprocess_failure(state_dir, monkeypatch):
     monkeypatch.setattr(
