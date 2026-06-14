@@ -23,25 +23,41 @@ class AgentResult:
 def compute_prompt_sha(prompt_path: Path) -> str:
     return hashlib.sha256(Path(prompt_path).read_bytes()).hexdigest()
 
+_FENCE_TAGS = ("</todos_md_content>", "</recent_decisions>", "</in_flight>", "</kanban_snapshot>")
+
+def _fence_safe(s: str) -> str:
+    """Neutralize any closing fence tag inside untrusted content.
+
+    The prompt template anchors LLM-untrusted regions inside `<tag>...</tag>`
+    fences. A TODOS.md containing the literal closing tag would let an
+    attacker break out of the fenced region and inject instructions. We
+    inject a zero-width space after the leading `<` so the string is
+    visibly identical but no longer matches the parser's closing tag.
+    """
+    out = s
+    for tag in _FENCE_TAGS:
+        out = out.replace(tag, tag[0] + "​" + tag[1:])
+    return out
+
 def build_prompt(prompt_path: Path, ctx: SelectionContext) -> str:
     body = Path(prompt_path).read_text()
     parts = [
         body,
         "",
         "<todos_md_content>",
-        ctx.todos_md,
+        _fence_safe(ctx.todos_md),
         "</todos_md_content>",
         "",
         "<recent_decisions>",
-        json.dumps(ctx.recent_decisions, indent=2, sort_keys=True),
+        _fence_safe(json.dumps(ctx.recent_decisions, indent=2, sort_keys=True)),
         "</recent_decisions>",
         "",
         "<in_flight>",
-        json.dumps(ctx.in_flight),
+        _fence_safe(json.dumps(ctx.in_flight)),
         "</in_flight>",
         "",
         "<kanban_snapshot>",
-        json.dumps(ctx.kanban_snapshot, indent=2, sort_keys=True),
+        _fence_safe(json.dumps(ctx.kanban_snapshot, indent=2, sort_keys=True)),
         "</kanban_snapshot>",
         "",
         f"project_slug: {ctx.project_slug}",
