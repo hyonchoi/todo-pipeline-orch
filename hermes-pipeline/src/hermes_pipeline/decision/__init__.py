@@ -1,11 +1,14 @@
 """Hermes-agent selection sub-package — public API."""
 from __future__ import annotations
 import datetime as _dt
+import re as _re
 import subprocess
 from pathlib import Path as _P
 from .schema import HermesSelectionDecision, SelectionContext, Outcome
 from .agent import call_agent, compute_prompt_sha, PromptShaMismatch
 from . import store as _store
+
+_TODO_ID_RE = _re.compile(r"^TODO-\d+$")
 
 __all__ = [
     "HermesSelectionDecision",
@@ -68,6 +71,23 @@ def run_selection(
             "in_flight": ctx.in_flight,
         }
         prompt_sha = e.actual
+
+    # LLM-output trust boundary: the model is free to return anything for
+    # `picked`. Reject values that don't match the TODO-N shape or that
+    # aren't in the candidate set we presented. On reject, null `picked`
+    # and prepend the reason to `rationale` so downstream sees a "no pick"
+    # config-fault tick rather than a hallucinated TODO id.
+    picked = parsed.get("picked")
+    if picked is not None:
+        candidates = parsed.get("candidates_considered") or []
+        reason = None
+        if not isinstance(picked, str) or not _TODO_ID_RE.match(picked):
+            reason = f"invalid_pick_shape: picked={picked!r}"
+        elif picked not in candidates:
+            reason = f"pick_not_in_candidates: picked={picked!r} candidates={candidates}"
+        if reason is not None:
+            parsed["picked"] = None
+            parsed["rationale"] = f"{reason} | {parsed.get('rationale', '')}".rstrip(" |")
 
     decision = HermesSelectionDecision(
         tick_id=tick_id,
