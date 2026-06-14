@@ -35,3 +35,14 @@ def test_release_on_exception(tmp_path):
         with lk.acquire("01JA"):
             raise RuntimeError("boom")
     assert not (tmp_path / "tick.lock").exists()
+
+def test_lock_dir_without_holder_is_not_swept_eagerly(tmp_path):
+    """Regression: a contender must not rmdir a freshly-mkdir'd lock_dir
+    before the owner has written holder.json. Doing so allowed two ticks
+    to both pass acquire()."""
+    (tmp_path / "tick.lock").mkdir()  # owner mid-bootstrap; no holder yet
+    lk = TickLock(tmp_path, max_age_min=10)
+    with pytest.raises(TickLockHeld):
+        with lk.acquire("01JB"):
+            pass
+    assert (tmp_path / "tick.lock").exists(), "contender must not steal a bootstrapping lock"

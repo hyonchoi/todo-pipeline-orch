@@ -27,11 +27,23 @@ class TickLock:
             return
         holder = self._holder_path()
         if not holder.exists():
-            self.lock_dir.rmdir()
+            # Holder absent can mean: (a) a contender is bootstrapping in the
+            # window between mkdir() and write_text(), or (b) a process crashed
+            # between those two calls. Treat as held-by-starter unless the
+            # lock_dir itself is older than max_age. Immediately rmdir()-ing
+            # here would let two ticks both enter the critical section.
+            if time.time() - self.lock_dir.stat().st_mtime > self._max_age_s:
+                try:
+                    self.lock_dir.rmdir()
+                except OSError:
+                    pass
             return
         if time.time() - holder.stat().st_mtime > self._max_age_s:
             holder.unlink()
-            self.lock_dir.rmdir()
+            try:
+                self.lock_dir.rmdir()
+            except OSError:
+                pass
 
     @contextlib.contextmanager
     def acquire(self, tick_id: str):
