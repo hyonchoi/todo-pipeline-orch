@@ -1,6 +1,7 @@
 from __future__ import annotations
 import datetime as _dt
 import json as _json
+import os as _os
 from dataclasses import dataclass
 from pathlib import Path
 import subprocess as _sp
@@ -35,20 +36,65 @@ def _marker_path(state_dir: Path, todo_id: str) -> Path:
     d.mkdir(parents=True, exist_ok=True)
     return d / f"{todo_id}.json"
 
+class MarkerHeld(Exception):
+    """Raised when a phase_started marker for this todo_id is already present."""
+
 def _write_marker(state_dir: Path, *, todo_id: str, tick_id: str, phase_key: str) -> Path:
+    """Atomically claim a phase marker. Refuses to overwrite an existing one."""
     p = _marker_path(state_dir, todo_id)
-    p.write_text(_json.dumps({
+    payload = _json.dumps({
         "todo_id": todo_id,
         "tick_id": tick_id,
         "phase_key": phase_key,
         "started_at": _now_iso(),
-    }, sort_keys=True))
+        "pid": _os.getpid(),
+    }, sort_keys=True)
+    try:
+        fd = _os.open(str(p), _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o644)
+    except FileExistsError as e:
+        raise MarkerHeld(f"phase marker held for {todo_id}") from e
+    try:
+        with _os.fdopen(fd, "w") as f:
+            f.write(payload)
+    except Exception:
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+        raise
     return p
 
-def _delete_marker(state_dir: Path, todo_id: str) -> None:
+def _update_marker_pid(state_dir: Path, todo_id: str, child_pid: int) -> None:
+    """Record the subprocess PID into an already-written marker."""
     p = _marker_path(state_dir, todo_id)
-    if p.exists():
+    if not p.exists():
+        return
+    try:
+        data = _json.loads(p.read_text())
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return
+    data["child_pid"] = child_pid
+    p.write_text(_json.dumps(data, sort_keys=True))
+
+def _delete_marker(state_dir: Path, todo_id: str, *, tick_id: str | None = None) -> None:
+    """Delete a marker only if it belongs to the given tick_id.
+
+    Passing tick_id=None deletes unconditionally — reserved for the kill path.
+    """
+    p = _marker_path(state_dir, todo_id)
+    if not p.exists():
+        return
+    if tick_id is not None:
+        try:
+            data = _json.loads(p.read_text())
+        except (FileNotFoundError, _json.JSONDecodeError):
+            return
+        if data.get("tick_id") != tick_id:
+            return
+    try:
         p.unlink()
+    except FileNotFoundError:
+        pass
 
 def _run_claude_subprocess(
     *,
@@ -58,26 +104,45 @@ def _run_claude_subprocess(
     turns: int,
     timeout: int,
     cwd,
+    on_pid=None,
 ) -> dict:
     """Run the Claude CLI as a subprocess.
 
-    Returns a dict with returncode, stdout, stderr keys.
-    Tests monkey-patch this function to avoid hitting the real CLI.
+    Returns a dict with returncode, stdout, stderr keys. The optional
+    `on_pid(pid)` callback fires immediately after spawn so the caller can
+    record the child PID for kill routing. Tests monkey-patch this function
+    to avoid hitting the real CLI.
     """
-    r = _sp.run(
+    proc = _sp.Popen(
         [claude_cmd, "-p", prompt, "--tools", tools, "--turns", str(turns)],
-        capture_output=True,
+        stdout=_sp.PIPE,
+        stderr=_sp.PIPE,
         text=True,
-        timeout=timeout,
         cwd=cwd,
-        check=False,
+        start_new_session=True,
     )
-    return {"returncode": r.returncode, "stdout": r.stdout, "stderr": r.stderr}
+    if on_pid is not None:
+        try:
+            on_pid(proc.pid)
+        except Exception:
+            pass
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr}
+    except _sp.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+        return {"returncode": -1, "stdout": stdout, "stderr": stderr, "timed_out": True}
 
 def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
     """Execute a single phase via Claude subprocess and write ready_for_review on terminal success."""
     phases_cfg = {p.phase_key: p for p in load_phases()}
     phase = phases_cfg.get(phase_key)
+
+    sd = Path(state_dir)
+
+    def _record_child_pid(pid: int) -> None:
+        _update_marker_pid(sd, todo_id, pid)
 
     result = _run_claude_subprocess(
         claude_cmd=kw.get("claude_cmd", "claude"),
@@ -86,6 +151,7 @@ def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
         turns=phase.turns if phase else 1,
         timeout=phase.timeout if phase else 1800,
         cwd=kw.get("project_dir"),
+        on_pid=_record_child_pid,
     )
 
     if result["returncode"] != 0:
@@ -110,10 +176,11 @@ def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
             created_at=_now_iso(),
             tick_id=tick_id,
         )
+        from .state import _atomic_write_text
         sd = Path(state_dir)
         rfr_dir = sd / "ready_for_review"
         rfr_dir.mkdir(parents=True, exist_ok=True)
-        (rfr_dir / f"{todo_num}.json").write_text(rec.to_json())
+        _atomic_write_text(rfr_dir / f"{todo_num}.json", rec.to_json())
 
     return {"status": "success", "phase_key": phase_key, "tick_id": tick_id}
 
@@ -129,11 +196,30 @@ def run(
 
     Marker write must happen BEFORE any Claude invocation so that the next
     pipeline-tick sees this TODO as in-flight even if we crash mid-phase.
+
+    On failure, writes a `failed_at_phase_<phase_key>` outcome sidecar so the
+    decision is not left perpetually `in_flight` after the marker is cleared.
     """
     sd = Path(state_dir)
     _write_marker(sd, todo_id=todo_id, tick_id=tick_id, phase_key=phase_key)
     try:
         result = _invoke_claude(todo_id=todo_id, phase_key=phase_key, tick_id=tick_id, state_dir=sd, **kw)
-    finally:
-        _delete_marker(sd, todo_id)
+    except Exception as e:
+        # Record the failure outcome before the marker disappears. The
+        # decision/store path is write-once; swallow FileExistsError so we
+        # don't mask the original exception with a sidecar collision.
+        try:
+            from .decision import store as _decision_store
+            _decision_store.append_outcome(
+                sd, tick_id,
+                outcome=f"failed_at_phase_{phase_key}",
+                detail={"todo_id": todo_id, "error": str(e)[:500]},
+            )
+        except FileExistsError:
+            pass
+        except Exception:
+            pass
+        _delete_marker(sd, todo_id, tick_id=tick_id)
+        raise
+    _delete_marker(sd, todo_id, tick_id=tick_id)
     return result
