@@ -441,3 +441,16 @@ Implements the final lane bringing together all pieces into executable commands:
 - **TF.6** Full verification: All 192 tests pass; CLI help and subcommands verified.
 
 See `docs/gstack/hermes-pipeline/design-plan.md` for architectural details.
+
+---
+
+## 2026-06-13 update
+
+- Open Q1 — Hermes command repo path: **resolved.** `pipeline-tick` and
+  `pipeline-phase` command defs live at `~/.hermes/commands/` (the user's
+  local Hermes config repo). Cross-repo contract is the Python schema
+  imports from `hermes_pipeline.decision`.
+- Open Q3 — log routing: **resolved.** stdout-only. Hermes is the log sink;
+  no local file logging from the pipeline package.
+
+Both removed from "Open Questions".
