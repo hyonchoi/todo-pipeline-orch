@@ -11,7 +11,7 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** none
   - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Branch `feature/todos-manager-counter-recovery`, Test Coverage `필요`, Security Review `불필요`
 
-- [ ] **TODO-2: use Hermes agent for TODO parsing and selection** — Agent-first parsing for irregular TODO files
+- [x] **TODO-2: use Hermes agent for TODO parsing and selection** — Agent-first parsing for irregular TODO files
   - **What:** Make TODO parsing and task selection rely on the Hermes agent with an explicit instruction layer instead of assuming a fully strict file schema.
   - **Why:** The project must extract useful task data from irregular TODO formats and still select the correct task even when structure is partial.
   - **Pros:** Handles real-world TODO files, improves selection accuracy for noisy structure, and aligns behavior with project requirements.
@@ -20,7 +20,7 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** none
   - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-todo-selection`, Test Coverage `필요`, Security Review `불필요`
 
-- [ ] **TODO-3: route non-Hermes process spawning through Hermes commands** — Hermes as the only process control surface
+- [x] **TODO-3: route non-Hermes process spawning through Hermes commands** — Hermes as the only process control surface
   - **What:** Require all process-spawning paths, except direct execution of `hermes ...` itself, to route through Hermes commands instead of invoking tools directly.
   - **Why:** Direct non-Hermes process execution creates behavior drift, bypasses intended control surfaces, and weakens the Hermes-centered execution model.
   - **Pros:** Keeps orchestration aligned with the Hermes contract, centralizes execution policy, and reduces hidden shell integrations.
