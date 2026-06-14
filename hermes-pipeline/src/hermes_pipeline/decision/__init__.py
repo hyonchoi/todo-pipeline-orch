@@ -1,16 +1,11 @@
-"""Hermes-agent selection sub-package — public API.
-
-Imports:
-    from hermes_pipeline.decision import (
-        HermesSelectionDecision, SelectionContext, run_selection,
-    )
-
-`run_selection(tick_id, ctx, *, cfg)` is the orchestration entrypoint
-called by the Hermes `pipeline-tick` command. It builds the prompt, calls
-the Anthropic API, parses the response, persists an immutable decision,
-and returns it.
-"""
+"""Hermes-agent selection sub-package — public API."""
+from __future__ import annotations
+import datetime as _dt
+import subprocess
+from pathlib import Path as _P
 from .schema import HermesSelectionDecision, SelectionContext, Outcome
+from .agent import call_agent, compute_prompt_sha, PromptShaMismatch
+from . import store as _store
 
 __all__ = [
     "HermesSelectionDecision",
@@ -19,6 +14,72 @@ __all__ = [
     "run_selection",
 ]
 
-def run_selection(tick_id, ctx, *, cfg):
-    """Stub — implemented in Task 6 once agent.py + store.py exist."""
-    raise NotImplementedError("implemented in Task 6")
+def _now_iso() -> str:
+    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _emit_sha_mismatch_alert(*, tick_id: str, expected: str, actual: str) -> None:
+    msg = (
+        f"[pipeline-tick {tick_id}] PROMPT SHA MISMATCH: "
+        f"expected={expected[:12]} actual={actual[:12]}. "
+        "Selection skipped (NOT counted as no-progress). "
+        "Check Hermes config repo for prompt drift."
+    )
+    try:
+        subprocess.run(
+            ["hermes", "chan", "message", "alerts", msg],
+            timeout=10, check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+
+def run_selection(
+    *,
+    tick_id: str,
+    ctx: SelectionContext,
+    cfg,
+) -> HermesSelectionDecision:
+    """Build prompt -> call agent -> persist immutable decision -> return.
+
+    On `PromptShaMismatch`: return `picked=None`, fire Slack alert, do NOT
+    raise. The caller treats this as a config-fault tick (not a no-progress
+    tick) by inspecting the rationale prefix.
+    """
+    state_dir = _P(cfg.base.state_dir)
+    prompt_path = _P(cfg.selection.prompt_path)
+    model = cfg.selection.model
+
+    try:
+        result = call_agent(
+            ctx=ctx,
+            prompt_path=prompt_path,
+            model=model,
+            max_tokens=cfg.selection.max_tokens,
+            expected_sha=cfg.selection.expected_prompt_sha,
+        )
+        parsed = result.parsed
+        prompt_sha = result.prompt_sha
+    except PromptShaMismatch as e:
+        _emit_sha_mismatch_alert(tick_id=tick_id, expected=e.expected, actual=e.actual)
+        parsed = {
+            "candidates_considered": [],
+            "picked": None,
+            "rationale": f"prompt_sha_mismatch: expected={e.expected[:12]} actual={e.actual[:12]}",
+            "blocked_reasons": {},
+            "in_flight": ctx.in_flight,
+        }
+        prompt_sha = e.actual
+
+    decision = HermesSelectionDecision(
+        tick_id=tick_id,
+        timestamp=_now_iso(),
+        model=model,
+        prompt_sha=prompt_sha,
+        candidates_considered=parsed["candidates_considered"],
+        picked=parsed["picked"],
+        rationale=parsed["rationale"],
+        blocked_reasons=parsed["blocked_reasons"],
+        in_flight=ctx.in_flight,
+    )
+    _store.persist(state_dir, decision)
+    _store.rotate_if_needed(state_dir, hot_cap=50)
+    return decision
