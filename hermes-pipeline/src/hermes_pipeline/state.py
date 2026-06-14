@@ -274,7 +274,11 @@ class State:
         rec.error = error
         self.write_ready_for_review(rec)
 
-        # Write outcome sidecar on terminal transitions (if we have a tick_id)
+        # Write outcome sidecar on terminal transitions (if we have a tick_id).
+        # Best-effort: a sidecar collision (decision was already terminal —
+        # e.g. operator-killed-then-resurrected-then-merged) must not unwind
+        # the merge_status write above, which has already persisted to disk
+        # and is visible to the operator.
         if not rec.tick_id:
             return
         outcome = _STATUS_TO_OUTCOME.get(status)
@@ -282,12 +286,15 @@ class State:
             outcome = _failed_outcome(rec)
         if outcome is None:
             return  # pending — not terminal, skip sidecar
-        _decision_store.append_outcome(
-            self._state_dir(),
-            rec.tick_id,
-            outcome=outcome,
-            detail={"todo_id": todo_id, "error": error},
-        )
+        try:
+            _decision_store.append_outcome(
+                self._state_dir(),
+                rec.tick_id,
+                outcome=outcome,
+                detail={"todo_id": todo_id, "error": error},
+            )
+        except FileExistsError:
+            pass
 
     def list_ready_for_review_pending(self) -> list[ReadyForReview]:
         """

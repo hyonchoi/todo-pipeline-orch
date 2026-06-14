@@ -65,9 +65,23 @@ def test_discard_writes_discarded_outcome(state, tmp_path: Path):
     assert side["outcome"] == "discarded"
 
 
-def test_outcome_sidecar_is_write_once(state):
-    """A second terminal transition for the same tick_id raises FileExistsError."""
+def test_outcome_sidecar_is_write_once_best_effort(state, tmp_path):
+    """A second terminal transition for the same tick_id must NOT crash the
+    caller — `set_merge_status` has already persisted the new RFR status to
+    disk by the time it tries to append the sidecar. Crashing here would
+    leave the RFR and outcome divergent (RFR says merged, outcome still
+    in_flight). The original sidecar wins; the second call is a no-op."""
     state.write_ready_for_review(_rfr())
     state.set_merge_status(todo_id=7, status="merged")
-    with pytest.raises(FileExistsError):
-        state.set_merge_status(todo_id=7, status="merged")
+    # Manually mutate the RFR back to pending so set_merge_status will try
+    # to write a different outcome — original sidecar must survive.
+    rec = state.read_ready_for_review(7)
+    rec.merge_status = "pending"
+    state.write_ready_for_review(rec)
+    # No raise — best-effort sidecar.
+    state.set_merge_status(todo_id=7, status="rejected")
+    side = json.loads((tmp_path / ".hermes" / "outcomes" / "01JT.json").read_text())
+    assert side["outcome"] == "merged"
+    # RFR write-once does NOT apply — merge_status is the operator's view of
+    # truth and must reflect the latest transition.
+    assert state.read_ready_for_review(7).merge_status == "rejected"
