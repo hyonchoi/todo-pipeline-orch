@@ -367,3 +367,240 @@ hedge.
 ---
 
 *Approved 2026-06-12 after 2-iteration spec review (converged clean).*
+
+## Eng Review Updates (2026-06-13)
+
+This section locks the design changes from `/plan-eng-review`. Where these
+conflict with sections above, this section wins.
+
+### Scope reductions (Step 0)
+
+- **N3 fallback.py — DROPPED.** The `--no-hermes` deterministic-sort fallback
+  is removed. Rationale: per the original design, the fallback only runs
+  against a strict-schema TODOS.md, and drift-tolerance is the whole reason
+  for the agent path. Hermes-outage debugging uses `hermes_pipeline.decision`
+  imported directly with `ANTHROPIC_API_KEY` in env.
+- **`cost.max_decisions_per_hour` — DROPPED.** The no-progress breaker plus
+  outcome-aware recent_decisions plus Phase 9 cover the failure modes. Re-add
+  if a cost spike is ever observed in practice (~half-day change).
+- **N8 cross-repo doc — COLLAPSED.** `docs/hermes-contract.md` becomes rich
+  docstrings on `HermesSelectionDecision` + `SelectionContext` + a 20-line
+  `hermes_pipeline/decision/README.md` that re-exports the schemas. Single
+  source of truth; no drift.
+- **Single-project assumption — LOCKED.** N1's per-project try/except wrapper
+  (re-homed T4) is dropped. `pipeline-tick` runs against this repo only.
+  `SelectionContext.project_slug` is a constant. Multi-project is a thin
+  wrapper to be added if/when a second project exists.
+
+### Architecture locks
+
+- **A1 — mid-flight in_flight tracking.** `phases.run()` writes
+  `.hermes/phase_started/<todo_id>.json` synchronously at the top of
+  execution, before any Claude Code invocation. Marker is deleted only when
+  the phase reaches a terminal state (success writes ready_for_review then
+  deletes; failure writes merge_status:failed then deletes). Stale markers
+  older than `max_phase_timeout` are swept by `decision/context.py` on read.
+  `in_flight` is the union of `ready_for_review` and `phase_started/*`.
+- **A2 — prompt SHA pinning.** `decision/agent.py` computes SHA-256 of the
+  prompt file body, embeds it as `prompt_sha` on every
+  `HermesSelectionDecision`. `.hermes/config.toml` adds optional
+  `expected_prompt_sha`. Mismatch → `picked=None`, rationale captures both
+  SHAs, fires Slack alert via `hermes chan message` (loud failure, not
+  silent — folds Codex #7), and does NOT count toward the no-progress
+  circuit breaker (the failure is a deployment fault, not a stall).
+- **A3 — outcome-aware recent_decisions.** Decision records gain an
+  `outcome` field surfaced through `recent_decisions` in the next tick's
+  `SelectionContext`. Outcome values: `"in_flight" | "merged" |
+  "failed_at_phase_N" | "discarded" | "killed_by_operator" |
+  "failed_to_spawn"`. See XM2 for the N7 reconciliation and XM3 for the
+  storage shape.
+- **XM1 — tick-level lock.** `pipeline-tick` acquires `.hermes/tick.lock`
+  (flock or atomic mkdir) before `run_selection()` and releases it after
+  spawn confirmation (or after writing `outcome="failed_to_spawn"` on
+  spawn failure, or after persisting the decision in shadow mode). A new
+  tick that finds the lock held exits immediately with rationale="tick
+  already in flight, skipping" — NOT counted as no-progress. Stale-lock
+  sweep when the holder file is older than `max_tick_duration`.
+- **XM2 — N7 dropped.** The re-homed T3 "clear decision history on
+  transition out of ready_for_review" is removed entirely. The original
+  T3 concern (suppressed-regression dedup) lives in `kanban.py`'s
+  outbox-collapse, not in `state.py` touching decision records. Decision
+  records are immutable; the agent's failure memory survives.
+- **XM3 — immutable decisions + sidecar outcomes.** `.hermes/decisions/
+  <tick_id>.json` is write-once. `.hermes/outcomes/<tick_id>.json` is
+  appended by `state.py` transitions. `store.load_recent(n)` joins the
+  two directories by tick_id. Rotation moves both files in lockstep when
+  the hot dir exceeds 50.
+- **XM4 — prompt-injection guard.** `.hermes/prompts/selection.md` wraps
+  TODOS.md content in `<todos_md_content>` tags and recent decisions in
+  `<recent_decisions>` tags. System prompt explicitly states that fenced
+  content is untrusted data, not instructions. Eval suite gains an
+  `injection_attempt.md` fixture.
+- **XM6 — rollback kill switch.** New CLI subcommand
+  `pipeline-watch kill [--all | --todo TODO-N]` reads
+  `phase_started/*` markers, sends `hermes run kill <job-id>` for each,
+  writes `outcome="killed_by_operator"` outcome sidecars, deletes the
+  markers. Migration section's rollback procedure: (1) set
+  `auto_execute=false`, (2) `pipeline-watch kill --all`, (3) inspect
+  `.hermes/decisions/` for orphans, (4) optionally revert
+  `expected_prompt_sha` to a known-good.
+
+### Code quality lock
+
+- **C1 — decision.py becomes a sub-package.** `hermes_pipeline/decision/`
+  layout:
+  - `__init__.py` — re-exports public API (`HermesSelectionDecision`,
+    `SelectionContext`, `run_selection`); orchestrates build-ctx → call-agent
+    → persist → return.
+  - `schema.py` — dataclasses (`HermesSelectionDecision`,
+    `SelectionContext`). Rich docstrings carry the cross-repo contract
+    (replaces N8).
+  - `agent.py` — prompt build, SHA compute, Anthropic API call, response
+    parse.
+  - `store.py` — `persist()`, `append_outcome()`, `load_recent()` (joins
+    decisions + outcomes by tick_id), rotation.
+  - `context.py` — `build_in_flight()` (union of `phase_started/*` and
+    `ready_for_review`, with stale sweep), `build_context(tick_id)`.
+
+### Test plan lock
+
+- **T1 — selection-prompt eval suite.** 8-12 fixtures under
+  `tests/eval/selection/` covering: 3 drift levels, in_flight respect,
+  outcome-aware reasoning (A3), priority-with-deps, SHA-mismatch refusal,
+  prompt-injection attempt, empty TODOS. CI runs the suite on every commit
+  touching `decision/agent.py` or `.hermes/prompts/`; **non-blocking** until
+  the shadow-mode bake week ends, then flip to blocking. See the test plan
+  artifact for the full fixture inventory:
+  `~/.gstack/projects/todo-pipeline-orchestrator/hyonchoi-main-eng-review-test-plan-20260613-000000.md`.
+- **REGRESSION RULE** — Phase 9 typed-confirm merge: a regression test is
+  written and verified green against the current `watcher.py`
+  implementation BEFORE `phases.py` extraction lands. Then extract.
+
+## NOT in scope
+
+Explicitly deferred or excluded from this PR.
+
+- **`--no-hermes` deterministic-sort fallback (N3).** Dropped. Re-add only
+  if a Hermes outage event makes the case empirically. Hermes-outage
+  debugging today: `python -c "from hermes_pipeline.decision import
+  run_selection; ..."` with API key in env.
+- **`max_decisions_per_hour` cost cap.** Dropped per D1 and XM5. Re-evaluate
+  if real-cost data justifies it.
+- **Standalone `docs/hermes-contract.md`.** Replaced by docstrings +
+  `decision/README.md` (T15).
+- **Multi-project tick iteration.** Single-project locked. Multi-project
+  wrapper is a half-day change when a second project exists.
+- **Selection-model fallback ladder.** Captured as TODO-5 in `TODOS.md`.
+  This PR fails loudly on a model 404.
+- **Open Q1 / Open Q3 resolution as separate PR.** Folded into T16 (resolve
+  before N4 implementation kicks off). Q3 lean: stdout-only, Hermes is the
+  log sink.
+
+## What already exists
+
+Existing code/flows this plan reuses rather than rebuilds.
+
+- **`state.py` state machine** — `ready_for_review`, `merge_status`. Reused
+  unchanged in shape; extended via T8 (sidecar outcome writes) and the
+  Phase 9 transition path.
+- **`kanban.py` thin HermesKanbanAdapter + T1 outbox-collapse logic.**
+  Retained. The original T1 (selection.py outbox collapse) is gone because
+  selection.py is gone, but the kanban write-side outbox-collapse stays
+  here and absorbs any "suppressed regression" concern from XM2.
+- **Phase 9 typed-confirm merge (`merge.py`).** Behavior unchanged. T1
+  regression test pins this before phases.py extraction.
+- **`hermes cron`, `hermes run`, `hermes chan message`, `hermes kanban`.**
+  Already shipping in the Hermes substrate; this plan consumes them.
+- **Existing `watcher.py` phase invocation.** Logic is reused as the body
+  of the new `phases.py`; this is an extraction + marker write, not a
+  rewrite.
+- **Hermes config repo.** Hosts `.hermes/prompts/selection.md`,
+  `pipeline-tick`, `pipeline-phase` command defs. Cross-repo contract is
+  the Python schema imports (T15), not a separate markdown.
+
+## Implementation Tasks
+Synthesized from this review's findings. Each task derives from a specific
+finding above. Run with Claude Code or Codex; checkbox as you ship.
+
+- [ ] **T1 (P1, human: ~3h / CC: ~25min)** — phases.py — Pin Phase 9 typed-confirm regression test BEFORE extracting from watcher.py
+  - Surfaced by: Test review — REGRESSION RULE; phases.py extraction must not silently change Phase 9 behavior
+  - Files: `tests/regression/test_phase9_merge.py`, `hermes_pipeline/phases.py`, `hermes_pipeline/watcher.py`
+  - Verify: `uv run pytest tests/regression/test_phase9_merge.py` passes against `watcher.py` BEFORE the extraction PR; same test still passes after `phases.py` lands.
+- [ ] **T2 (P1, human: ~4h / CC: ~30min)** — decision/ — Implement decision/ sub-package
+  - Surfaced by: C1 — split decision.py into schema/agent/store/context with `__init__.py` re-exporting public API
+  - Files: `hermes_pipeline/decision/{__init__,schema,agent,store,context}.py`
+  - Verify: `from hermes_pipeline.decision import HermesSelectionDecision, SelectionContext, run_selection` works; `uv run pytest tests/test_decision_*.py` green.
+- [ ] **T3 (P1, human: ~2h / CC: ~15min)** — phases.py — phase_started marker write + stale sweep
+  - Surfaced by: A1 — mid-flight in_flight tracking; cron-overlap protection at phase level
+  - Files: `hermes_pipeline/phases.py`, `hermes_pipeline/decision/context.py`
+  - Verify: marker present during phase execution, absent after terminal; sweep test removes stale markers older than `max_phase_timeout`.
+- [ ] **T4 (P1, human: ~3h / CC: ~20min)** — pipeline-tick — Tick-level `.hermes/tick.lock`
+  - Surfaced by: XM1 — closes overlapping-cron race and spawn-failure orphan (Codex #2/#3)
+  - Files: `hermes_pipeline/decision/__init__.py`, Hermes command definition for `pipeline-tick`
+  - Verify: two concurrent `pipeline-tick` invocations result in one call to `run_selection` and one `tick already in flight` exit; spawn failure writes `outcome="failed_to_spawn"`.
+- [ ] **T5 (P1, human: ~2h / CC: ~15min)** — decision/agent.py — Prompt SHA pin + loud mismatch alert
+  - Surfaced by: A2 + folded Codex #7 — prompt provenance and loud failure on pin mismatch
+  - Files: `hermes_pipeline/decision/agent.py`, `hermes_pipeline/circuit.py`
+  - Verify: decision records carry `prompt_sha`; mismatch with pinned SHA produces Slack alert and `picked=None` without calling the API; not counted as no-progress.
+- [ ] **T6 (P1, human: ~1h / CC: ~10min)** — decision/agent.py — Prompt-injection fences
+  - Surfaced by: XM4 — Codex #8
+  - Files: `.hermes/prompts/selection.md`, `hermes_pipeline/decision/agent.py`
+  - Verify: eval suite `injection_attempt.md` fixture passes; rendered prompt contains `<todos_md_content>...</todos_md_content>` and anti-injection clause.
+- [ ] **T7 (P1, human: ~3h / CC: ~20min)** — decision/store.py — Immutable decision + sidecar outcome pattern
+  - Surfaced by: XM3 — Codex #5 immutable audit trail
+  - Files: `hermes_pipeline/decision/store.py`, `hermes_pipeline/state.py`
+  - Verify: writing an outcome never modifies the decision file; `load_recent` returns joined records; rotation moves matching pairs.
+- [ ] **T8 (P1, human: ~1h / CC: ~10min)** — state.py — Outcome sidecar writes; remove N7
+  - Surfaced by: A3 + XM2 — outcome feedback retained, N7 dropped to remove the self-contradiction
+  - Files: `hermes_pipeline/state.py`, `tests/test_state_outcomes.py`
+  - Verify: each terminal transition writes a sidecar with the correct outcome value; no decision JSON mutation; legacy clear-on-resolve code paths absent.
+- [ ] **T9 (P1, human: ~2h / CC: ~15min)** — cli.py — `pipeline-watch kill [--all|--todo X]`
+  - Surfaced by: XM6 — rollback kill switch (Codex #9)
+  - Files: `hermes_pipeline/cli.py`, `tests/test_cli_kill.py`
+  - Verify: invoking with `--all` issues `hermes run kill` for each `phase_started/*`; writes `killed_by_operator` outcome sidecars; deletes the markers; releases `tick.lock` if held.
+- [ ] **T10 (P1, human: ~3h / CC: ~20min)** — circuit.py — No-progress counter + 24h Slack dedup + cron backoff
+  - Surfaced by: N5 from approved design (retained shape)
+  - Files: `hermes_pipeline/circuit.py`, `tests/test_circuit.py`
+  - Verify: 3 consecutive `picked=None` ticks trip backoff and fire exactly one Slack message; second alert within 24h is deduped; first successful pick resets state and restores 5-min interval.
+- [ ] **T11 (P1, human: ~1h / CC: ~10min)** — config.py — `.hermes/config.toml` loader, per-tick reload
+  - Surfaced by: N6 + A2 — config schema + SHA pin support
+  - Files: `hermes_pipeline/config.py`, `tests/test_config.py`
+  - Verify: edits to `config.toml` mid-run reflect in the next tick; missing optional fields default cleanly; malformed TOML raises with line.
+- [ ] **T12 (P1, human: ~6h / CC: ~45min)** — tests/ — Unit suite for all 49 code paths + 8 user flows
+  - Surfaced by: Test review — 0/57 coverage today (green-field)
+  - Files: `tests/test_decision_*.py`, `tests/test_phases.py`, `tests/test_state_outcomes.py`, `tests/test_circuit.py`, `tests/test_config.py`
+  - Verify: `uv run pytest` reports >= 49 unit tests green; coverage report shows every diagrammed branch hit at least once.
+- [ ] **T13 (P1, human: ~2h / CC: ~30min)** — tests/eval/ — Selection-prompt eval suite
+  - Surfaced by: T1 — highest-leverage testable surface
+  - Files: `tests/eval/selection/`, `tests/eval/runner.py`, `.github/workflows/eval.yml`
+  - Verify: 8+ fixtures pass against the current prompt SHA; CI workflow runs and posts result as PR comment; flip to blocking after bake week.
+- [ ] **T14 (P2, human: ~2h / CC: ~15min)** — docs/ — Explicit state-machine transition table
+  - Surfaced by: Codex #18
+  - Files: `docs/pipeline-modularization-plan.md`, `docs/hermes-state-machine.md`
+  - Verify: table enumerates every transition (markers → decisions → outcomes → ready_for_review → terminal); links from `decision/README.md`.
+- [ ] **T15 (P2, human: ~1h / CC: ~10min)** — docs/ — N8 contract → docstrings + decision/README.md
+  - Surfaced by: D1 — collapse standalone N8 doc
+  - Files: `hermes_pipeline/decision/__init__.py`, `hermes_pipeline/decision/schema.py`, `hermes_pipeline/decision/README.md`
+  - Verify: external Hermes-config repo imports compile against the docstrings; README is < 30 lines and just points at the schemas.
+- [ ] **T16 (P2, human: ~30min / CC: ~5min)** — ops — Resolve Open Q1 + Open Q3
+  - Surfaced by: Codex #14 / #15
+  - Files: `docs/pipeline-modularization-plan.md`
+  - Verify: Hermes command repo path is documented; log-routing decision (lean: stdout-only) is documented as the final resolution; both removed from "Open Questions".
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR (PLAN) | 11 decisions folded, 16 implementation tasks queued |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+- **CODEX:** Outside voice ran (Codex, read-only, high effort). 18 findings; 6 substantive cross-model tensions surfaced as AskUserQuestion (XM1-XM6). 5 accepted as Codex-recommended, 1 kept current (XM5 cost cap relitigation). Remaining Codex findings (#1 cli wording, #4 stale sweep design-acceptable, #11 eval bake gate documented, #13 architectural alternative declined per office-hours conviction, #16 single-project ≠ single-process — addressed by XM1, #17 model lifecycle — TODO-5, #18 state machine table — T14) were resolved or routed to tasks.
+- **CROSS-MODEL:** Eng review and Codex converged on tick lock (XM1), N7 reconciliation (XM2), immutable decisions (XM3), prompt injection guard (XM4), and kill switch (XM6). One genuine disagreement (XM5 hourly cost cap) resolved in favor of the existing design with explicit rationale.
+- **VERDICT:** ENG CLEARED — ready to implement after Open Q1 and Open Q3 resolution (T16, blocker for N4 only).
+
+**UNRESOLVED DECISIONS:**
+- Open Q1 (Hermes command repo path) — must be resolved before T4/N4 lands; tracked as T16. Does not block T1-T3 or T5-T15 from starting.
+- Open Q3 (log routing) — leaning stdout-only with Hermes as log sink; T16 confirms. Does not block implementation start.
