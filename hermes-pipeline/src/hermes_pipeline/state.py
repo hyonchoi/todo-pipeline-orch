@@ -4,11 +4,19 @@ from __future__ import annotations
 import json
 import os
 import hashlib
+import uuid as _uuid
 from dataclasses import dataclass, asdict, field
 from pathlib import Path
 from typing import Optional, Literal
 
 from hermes_pipeline.decision import store as _decision_store
+
+
+def _atomic_write_text(path: Path, payload: str) -> None:
+    """Crash-safe write: tmp + rename. Same-directory tmp keeps rename atomic."""
+    tmp = path.with_name(f"{path.name}.{_uuid.uuid4().hex}.tmp")
+    tmp.write_text(payload)
+    tmp.replace(path)
 
 MergeStatus = Literal["pending", "merged", "rejected", "abandoned", "failed"]
 
@@ -165,8 +173,10 @@ class State:
         data["completed_phases"] = data.get("completed_phases", {})
         data["completed_phases"][phase_key] = True
 
-        # Atomic write
-        checkpoint_path.write_text(json.dumps(data, indent=2))
+        # Crash-safe write: tmp + rename so a mid-write crash never leaves a
+        # truncated JSON that read_text + json.loads would swallow as "no
+        # checkpoint" and re-drive the phase.
+        _atomic_write_text(checkpoint_path, json.dumps(data, indent=2))
 
     def reset(self, todo_id: int) -> None:
         """
@@ -188,7 +198,7 @@ class State:
         """
         self.ready_dir.mkdir(parents=True, exist_ok=True)
         path = self.ready_dir / f"todo-{rec.todo_id}.json"
-        path.write_text(rec.to_json())
+        _atomic_write_text(path, rec.to_json())
 
     def write_ready_for_review_min(
         self,
