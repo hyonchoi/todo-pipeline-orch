@@ -234,3 +234,104 @@ def test_hermes_call_error_includes_stdout():
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
         with pytest.raises(HermesCallError, match="partial result"):
             hermes_call(prompt="hello")
+
+
+# === GAP-FILLING TESTS ===
+
+
+def test_hermes_call_file_not_found_error_propagates():
+    """subprocess.run raises FileNotFoundError when 'hermes' binary is not found — must propagate up."""
+    with patch(
+        "hermes_pipeline.hermes_adapter.subprocess.run",
+        side_effect=FileNotFoundError("hermes"),
+    ):
+        with pytest.raises(FileNotFoundError):
+            hermes_call(prompt="hello")
+
+
+def test_hermes_call_timeout_expired_propagates():
+    """subprocess.run raises TimeoutExpired when the process exceeds the timeout — must propagate up."""
+    with patch(
+        "hermes_pipeline.hermes_adapter.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="hermes", timeout=10),
+    ):
+        with pytest.raises(subprocess.TimeoutExpired):
+            hermes_call(prompt="hello", timeout=10)
+
+
+def test_hermes_agent_call_nonzero_return_code():
+    """When hermes exits with a non-zero code, the result should carry that code, not raise."""
+    fake_proc = MagicMock()
+    fake_proc.returncode = 1
+    fake_proc.pid = 12345
+    fake_proc.communicate.return_value = ("", "error output")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        result = hermes_agent_call(prompt="do something")
+
+    assert result.returncode == 1
+    assert result.stderr == "error output"
+    assert result.timed_out is False
+
+
+def test_hermes_agent_call_returncode_none_coalesced_to_zero():
+    """When Popen.returncode is None (shouldn't happen after communicate, but defensible), coalesce to 0."""
+    fake_proc = MagicMock()
+    fake_proc.returncode = None
+    fake_proc.pid = 12345
+    fake_proc.communicate.return_value = ("ok", "")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        result = hermes_agent_call(prompt="do something")
+
+    assert result.returncode == 0
+
+
+def test_hermes_agent_call_popen_file_not_found_propagates():
+    """When Popen raises FileNotFoundError (hermes not in PATH), propagate up."""
+    with patch(
+        "hermes_pipeline.hermes_adapter.subprocess.Popen",
+        side_effect=FileNotFoundError("hermes"),
+    ):
+        with pytest.raises(FileNotFoundError):
+            hermes_agent_call(prompt="hello")
+
+
+def test_hermes_agent_call_on_pid_callback_exception_suppressed():
+    """When on_pid callback raises, the exception must be silently suppressed."""
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.pid = 12345
+    fake_proc.communicate.return_value = ("ok", "")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        # on_pid that raises should not bubble up
+        result = hermes_agent_call(
+            prompt="test",
+            on_pid=lambda pid: (_ for _ in ()).throw(ValueError("boom")),
+        )
+
+    assert result.returncode == 0
+
+
+def test_hermes_agent_call_timeout_stderr_augmented():
+    """After timeout kill, stderr must include '[killed on timeout]' marker."""
+    fake_proc = MagicMock()
+    fake_proc.pid = 99999
+
+    call_count = [0]
+
+    def communicate(input=None, timeout=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)
+        # Second call after kill — returns output
+        return ("", "killed")
+
+    fake_proc.communicate = communicate
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        result = hermes_agent_call(prompt="slow", timeout=5)
+
+    assert result.timed_out is True
+    assert "[killed on timeout]" in result.stderr

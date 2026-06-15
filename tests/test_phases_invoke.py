@@ -100,3 +100,39 @@ def test_invoke_propagates_subprocess_failure(state_dir, monkeypatch):
             todo_id="TODO-7", phase_key="phase_2_autoplan",
             tick_id="01JT", state_dir=state_dir, project_slug="demo",
         )
+
+
+def test_run_hermes_subprocess_wraps_hermes_agent_result(monkeypatch):
+    """_run_hermes_subprocess must unwrap HermesAgentResult into a dict."""
+    from hermes_pipeline.hermes_adapter import HermesAgentResult
+    monkeypatch.setattr(
+        "hermes_pipeline.hermes_adapter.hermes_agent_call",
+        lambda **kw: HermesAgentResult(
+            returncode=0, stdout="ok", stderr="", timed_out=False,
+        ),
+    )
+    result = phases_mod._run_hermes_subprocess(
+        prompt="test", tools="Read", turns=5, timeout=30, cwd="/tmp",
+    )
+    assert result == {
+        "returncode": 0,
+        "stdout": "ok",
+        "stderr": "",
+        "timed_out": False,
+    }
+
+
+def test_run_hermes_subprocess_timed_out_flag_propagates(monkeypatch):
+    """_run_hermes_subprocess must preserve the timed_out flag."""
+    from hermes_pipeline.hermes_adapter import HermesAgentResult
+    monkeypatch.setattr(
+        "hermes_pipeline.hermes_adapter.hermes_agent_call",
+        lambda **kw: HermesAgentResult(
+            returncode=-1, stdout="", stderr="[killed on timeout]", timed_out=True,
+        ),
+    )
+    result = phases_mod._run_hermes_subprocess(
+        prompt="test", tools="Read", turns=5, timeout=30, cwd="/tmp",
+    )
+    assert result["timed_out"] is True
+    assert result["returncode"] == -1

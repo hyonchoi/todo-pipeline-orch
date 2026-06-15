@@ -83,3 +83,17 @@ def test_parse_failure_returns_picked_none(tmp_path, monkeypatch):
     r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
     assert r.parsed["picked"] is None
     assert "parse" in r.parsed["rationale"].lower()
+
+
+def test_hermes_call_propagates_hermes_call_error(tmp_path, monkeypatch):
+    """When _hermes_call raises HermesCallError, call_agent should propagate it."""
+    from hermes_pipeline.hermes_adapter import HermesCallError
+    p = _write_prompt(tmp_path)
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._hermes_call",
+        lambda *a, **kw: (_ for _ in ()).throw(
+            HermesCallError("hermes failed", returncode=1, stderr="E100"),
+        ),
+    )
+    with pytest.raises(HermesCallError, match="hermes failed"):
+        call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
