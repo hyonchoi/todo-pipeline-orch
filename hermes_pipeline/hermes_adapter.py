@@ -56,7 +56,7 @@ def hermes_call(
         HermesCallError: If the process exits with non-zero.
     """
     cmd = [
-        "hermes", "chat", "-q",
+        "hermes", "chat", "-q", prompt,
         "-Q",
     ]
     if model != "auto":
@@ -71,7 +71,6 @@ def hermes_call(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                input=prompt,
             )
             last_err = None  # clear any prior transient error on success
             break
@@ -115,23 +114,16 @@ def hermes_agent_call(
 
     Drop-in replacement for _run_hermes_subprocess. The prompt is augmented
     with agent constraints (tools availability, turn limit) encoded in the
-    system prompt portion since `hermes chat -q` does not have --tools/--turns
-    flags — Hermes manages those internally.
-
-    WARNING: Tool and turn constraints are prompt-only. `hermes chat -q` has
-    no per-call --tools or --turns flags, so the worker's actual access is
-    governed by Hermes config, not by the Phase's tools string. A phase
-    configured with ``tools: "Read"`` will get Hermes' full tool access unless
-    the Hermes config restricts it. TODO-6 follow-up: migrate to Hermes
-    per-call tool scoping once the CLI supports it.
+    system prompt portion. CLI-level enforcement is also applied via
+    ``-t/--toolsets`` and ``--max-turns`` flags.
 
     Args:
         prompt: The prompt text to send.
         model: Model identifier. "auto" lets Hermes resolve from config.
         tools: Comma-separated tool list (e.g. "Read,Write,Bash"). Empty string
-            means no tools. Passed in the prompt header — **not enforced** by
-            Hermes at the CLI level.
-        turns: Maximum turns (encoded in prompt, Hermes enforces).
+            means no tools. Enforced via ``-t/--toolsets`` CLI flag and also
+            encoded in the prompt header as an advisory constraint.
+        turns: Maximum turns. Enforced via ``--max-turns`` CLI flag.
         timeout: Seconds before killing the process.
         cwd: Working directory for the subprocess.
         on_pid: Callback fired with subprocess PID immediately after spawn.
@@ -140,7 +132,6 @@ def hermes_agent_call(
         HermesAgentResult with returncode, stdout, stderr, timed_out.
     """
     # Build augmented prompt with agent constraints.
-    # Note: these constraints are advisory — Hermes chat -q lacks --tools/--turns.
     if tools:
         tools_str = tools
         access_line = f"Available tools: {tools}. Do not use tools not listed."
@@ -155,11 +146,14 @@ def hermes_agent_call(
 
     try:
         cmd = [
-            "hermes", "chat", "-q",
+            "hermes", "chat", "-q", augmented_prompt,
             "-Q",
         ]
         if model != "auto":
             cmd.extend(["-m", model])
+        if tools:
+            cmd.extend(["-t", tools])
+        cmd.extend(["--max-turns", str(turns)])
         cmd.extend(["--source", "tool"])
 
         proc = subprocess.Popen(
@@ -178,7 +172,7 @@ def hermes_agent_call(
             except Exception:
                 pass
 
-        stdout, stderr = proc.communicate(input=augmented_prompt, timeout=timeout)
+        stdout, stderr = proc.communicate(timeout=timeout)
         return HermesAgentResult(
             returncode=proc.returncode or 0,
             stdout=stdout or "",

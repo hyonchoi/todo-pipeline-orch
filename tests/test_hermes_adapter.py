@@ -60,14 +60,14 @@ def test_hermes_call_passes_correct_args():
 
     cmd = mock_run.call_args[0][0]
     assert cmd == [
-        "hermes", "chat", "-q",
+        "hermes", "chat", "-q", "test prompt",
         "-Q",
         "-m", "claude-sonnet-4-6",
         "--source", "tool",
     ]
     assert mock_run.call_args[1]["timeout"] == 60
-    # Prompt is passed via stdin, not as a CLI arg
-    assert mock_run.call_args[1]["input"] == "test prompt"
+    # Prompt is passed as -q CLI arg, not via stdin
+    assert "input" not in mock_run.call_args[1]
 
 
 def test_hermes_call_omits_model_flag_when_auto():
@@ -125,21 +125,26 @@ def test_hermes_agent_call_encodes_tools_in_prompt():
     fake_proc.pid = 12345
     fake_proc.communicate.return_value = ("ok", "")
 
-    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc) as mock_popen:
         hermes_agent_call(
             prompt="do something",
             tools="Read,Write",
             turns=15,
         )
 
-    # The augmented prompt is passed via stdin to communicate()
-    comm_args = fake_proc.communicate.call_args
-    prompt_arg = comm_args[1]["input"] if comm_args[1] else comm_args[0][0]
+    # The augmented prompt is passed as -q CLI arg
+    cmd = mock_popen.call_args[0][0]
+    prompt_arg = cmd[3]  # cmd[3] is the -q argument
     assert "AGENT_MODE" in prompt_arg
     assert "tools=Read,Write" in prompt_arg
     assert "Available tools: Read,Write" in prompt_arg
     assert "max_turns=15" in prompt_arg
     assert "do something" in prompt_arg
+    # CLI-level enforcement flags
+    assert "-t" in cmd
+    assert "Read,Write" in cmd
+    assert "--max-turns" in cmd
+    assert "15" in cmd
 
 
 def test_hermes_agent_call_no_tools_prompt_not_contradictory():
@@ -148,19 +153,21 @@ def test_hermes_agent_call_no_tools_prompt_not_contradictory():
     fake_proc.pid = 12345
     fake_proc.communicate.return_value = ("ok", "")
 
-    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc) as mock_popen:
         hermes_agent_call(
             prompt="no tools here",
             tools="",
             turns=10,
         )
 
-    comm_args = fake_proc.communicate.call_args
-    prompt_arg = comm_args[1]["input"] if comm_args[1] else comm_args[0][0]
+    cmd = mock_popen.call_args[0][0]
+    prompt_arg = cmd[3]  # cmd[3] is the -q argument
     assert "tools=none" in prompt_arg
     assert "Do not use tools." in prompt_arg
     # Must NOT contain the contradictory "You have tool access"
     assert "You have tool access" not in prompt_arg
+    # No -t flag when no tools
+    assert "-t" not in cmd
 
 
 def test_hermes_agent_call_handles_timeout():
