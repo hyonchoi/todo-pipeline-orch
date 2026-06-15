@@ -107,33 +107,32 @@ def _run_claude_subprocess(
     cwd,
     on_pid=None,
 ) -> dict:
-    """Run the Claude CLI as a subprocess.
+    """Run a phase via `hermes chat -q`.
 
-    Returns a dict with returncode, stdout, stderr keys. The optional
-    `on_pid(pid)` callback fires immediately after spawn so the caller can
-    record the child PID for kill routing. Tests monkey-patch this function
+    Returns a dict with returncode, stdout, stderr, timed_out keys — same
+    shape as the old Claude subprocess call for drop-in compatibility.
+    The `claude_cmd` parameter is ignored (Hermes resolves model via config).
+    The `tools` parameter is a comma-separated list (e.g., "Read,Write,Bash")
+    encoded in the AGENT_MODE prompt header. Tests monkey-patch this function
     to avoid hitting the real CLI.
     """
-    proc = _sp.Popen(
-        [claude_cmd, "-p", prompt, "--tools", tools, "--turns", str(turns)],
-        stdout=_sp.PIPE,
-        stderr=_sp.PIPE,
-        text=True,
+    from .hermes_adapter import hermes_agent_call
+
+    result = hermes_agent_call(
+        prompt=prompt,
+        tools=len(tools) > 0,
+        turns=turns,
+        timeout=timeout,
         cwd=cwd,
-        start_new_session=True,
+        on_pid=on_pid,
     )
-    if on_pid is not None:
-        try:
-            on_pid(proc.pid)
-        except Exception:
-            pass
-    try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-        return {"returncode": proc.returncode, "stdout": stdout, "stderr": stderr}
-    except _sp.TimeoutExpired:
-        proc.kill()
-        stdout, stderr = proc.communicate()
-        return {"returncode": -1, "stdout": stdout, "stderr": stderr, "timed_out": True}
+
+    return {
+        "returncode": result.returncode,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "timed_out": result.timed_out,
+    }
 
 class UnknownPhaseError(KeyError):
     """phase_key is not defined in phases.yaml."""
