@@ -7,6 +7,8 @@ Two functions:
 """
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import time
 from dataclasses import dataclass
@@ -16,6 +18,8 @@ HERMES_AGENT_DEFAULT_TIMEOUT = 1800  # 30-minute default for agent calls
 HERMES_RETRY_ATTEMPTS = 2  # retries for transient CLI failures
 HERMES_RETRY_DELAY = 1  # seconds between retries
 
+class HermesDependencyError(Exception):
+    """Raised when the hermes CLI is not available at deploy/startup time."""
 
 class HermesCallError(Exception):
     """Raised when `hermes chat -q` returns non-zero exit code."""
@@ -99,6 +103,43 @@ def hermes_call(
 
     return result.stdout.strip()
 
+def check_hermes() -> str:
+    """Verify that the hermes CLI is installed and accessible.
+
+    Call this at deploy/startup time — before any hermes_call or
+    hermes_agent_call — to fail fast with a clear error message.
+
+    Returns:
+        The hermes version string (stdout of `hermes --version`).
+
+    Raises:
+        HermesDependencyError: If the hermes CLI is not found or fails.
+    """
+    try:
+        result = subprocess.run(
+            ["hermes", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except FileNotFoundError as exc:
+        raise HermesDependencyError(
+            "hermes CLI not found in PATH. Install it before running the pipeline. "
+            "See https://github.com/hyonchoi/hermes"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HermesDependencyError(
+            "hermes --version timed out (10s). Is the process hung?"
+        ) from exc
+
+    if result.returncode != 0:
+        raise HermesDependencyError(
+            f"hermes --version failed (rc={result.returncode}): "
+            f"{result.stderr[:MAX_ERROR_OUTPUT]}"
+        )
+
+    return result.stdout.strip()
+
 
 def hermes_agent_call(
     *,
@@ -144,28 +185,44 @@ def hermes_agent_call(
     )
     augmented_prompt = agent_header + prompt
 
+    cmd = [
+        "hermes", "chat", "-q", augmented_prompt,
+        "-Q",
+    ]
+    if model != "auto":
+        cmd.extend(["-m", model])
+    if tools:
+        cmd.extend(["-t", tools])
+    cmd.extend(["--max-turns", str(turns)])
+    cmd.extend(["--source", "tool"])
+
+    # Retry on transient spawn failures (same pattern as hermes_call).
+    last_err = None
+    proc = None
+    for attempt in range(1 + HERMES_RETRY_ATTEMPTS):
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=cwd,
+                start_new_session=True,
+            )
+            last_err = None  # clear prior transient error on success
+            break  # spawned successfully
+        except FileNotFoundError:
+            raise  # hermes binary missing is never transient
+        except OSError as exc:
+            last_err = exc
+            if attempt < HERMES_RETRY_ATTEMPTS:
+                time.sleep(HERMES_RETRY_DELAY)
+
+    if last_err is not None:
+        raise last_err
+
     try:
-        cmd = [
-            "hermes", "chat", "-q", augmented_prompt,
-            "-Q",
-        ]
-        if model != "auto":
-            cmd.extend(["-m", model])
-        if tools:
-            cmd.extend(["-t", tools])
-        cmd.extend(["--max-turns", str(turns)])
-        cmd.extend(["--source", "tool"])
-
-        proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            cwd=cwd,
-            start_new_session=True,
-        )
-
         if on_pid is not None:
             try:
                 on_pid(proc.pid)
@@ -181,9 +238,18 @@ def hermes_agent_call(
         )
 
     except subprocess.TimeoutExpired:
-        proc.kill()
+        # Kill the entire process group (hermes + any child processes) to
+        # prevent orphaned subprocesses. start_new_session=True in Popen
+        # guarantees proc.pid is the group leader.
         try:
-            stdout, stderr = proc.communicate()
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass  # process group already gone
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # Final fallback — shouldn't happen after SIGKILL, but be safe.
+            stdout, stderr = proc.communicate(timeout=2)
         except KeyboardInterrupt:
             raise
         return HermesAgentResult(

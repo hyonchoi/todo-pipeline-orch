@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 import pytest
+import signal
 import subprocess
 
 from hermes_pipeline.hermes_adapter import (
@@ -9,6 +10,8 @@ from hermes_pipeline.hermes_adapter import (
     HermesCallError,
     hermes_agent_call,
     HermesAgentResult,
+    check_hermes,
+    HermesDependencyError,
 )
 
 
@@ -186,15 +189,17 @@ def test_hermes_agent_call_handles_timeout():
     pid_seen = []
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
-        result = hermes_agent_call(
-            prompt="slow task",
-            timeout=10,
-            on_pid=pid_seen.append,
-        )
+        with patch("os.killpg"):
+            result = hermes_agent_call(
+                prompt="slow task",
+                timeout=10,
+                on_pid=pid_seen.append,
+            )
 
     assert result.returncode == -1
     assert result.timed_out is True
-    fake_proc.kill.assert_called_once()
+    # Process group kill (not proc.kill) is used to prevent orphaned children
+    assert pid_seen == [99999], "on_pid callback must fire"
 
 
 def test_hermes_agent_call_respects_cwd():
@@ -438,3 +443,182 @@ def test_hermes_call_timeout_clamping():
         # max_tokens=100000 -> 100000//100=1000s, clamped to MAX (300s)
         _hermes_call(model="m", max_tokens=100000, prompt="test")
         assert captured_timeout[-1] == MAX_TIMEOUT_SECONDS, "100k tokens should clamp to max"
+
+
+# === CHECK_HERMES PREFLIGHT TESTS ===
+
+
+def test_check_hermes_returns_version():
+    """check_hermes returns the version string when hermes is available."""
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "hermes 0.3.0\n"
+    fake_result.stderr = ""
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        result = check_hermes()
+
+    assert result == "hermes 0.3.0"
+
+
+def test_check_hermes_raises_on_file_not_found():
+    """check_hermes raises HermesDependencyError when hermes is not in PATH."""
+    with patch(
+        "hermes_pipeline.hermes_adapter.subprocess.run",
+        side_effect=FileNotFoundError("hermes"),
+    ):
+        with pytest.raises(HermesDependencyError, match="not found in PATH"):
+            check_hermes()
+
+
+def test_check_hermes_raises_on_timeout():
+    """check_hermes raises HermesDependencyError when hermes --version hangs."""
+    with patch(
+        "hermes_pipeline.hermes_adapter.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="hermes", timeout=10),
+    ):
+        with pytest.raises(HermesDependencyError, match="timed out"):
+            check_hermes()
+
+
+def test_check_hermes_raises_on_nonzero_exit():
+    """check_hermes raises HermesDependencyError when hermes --version fails."""
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = ""
+    fake_result.stderr = "hermes: config error"
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        with pytest.raises(HermesDependencyError, match="config error"):
+            check_hermes()
+
+
+# === HERMES_AGENT_CALL: PROCESS GROUP KILL ON TIMEOUT ===
+
+
+def test_hermes_agent_call_timeout_kills_process_group():
+    """On timeout, hermes_agent_call kills the entire process group, not just the process."""
+    import os
+    fake_proc = MagicMock()
+    fake_proc.pid = 99999
+
+    call_count = [0]
+
+    def communicate(input=None, timeout=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)
+        return ("", "killed")
+
+    fake_proc.communicate = communicate
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        with patch("os.killpg") as mock_killpg:
+            hermes_agent_call(prompt="slow task", timeout=10)
+
+    mock_killpg.assert_called_once_with(99999, signal.SIGKILL)
+    # Verify proc.kill() is NOT called
+    fake_proc.kill.assert_not_called()
+
+
+def test_hermes_agent_call_timeout_communicate_has_timeout():
+    """Post-kill communicate must have a timeout to prevent hanging."""
+    import os
+    fake_proc = MagicMock()
+    fake_proc.pid = 99999
+
+    call_count = [0]
+
+    def communicate(input=None, timeout=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)
+        # Verify timeout is passed (should be 5)
+        return ("", "killed")
+
+    fake_proc.communicate = communicate
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        with patch("os.killpg"):
+            result = hermes_agent_call(prompt="slow", timeout=10)
+
+    assert result.timed_out is True
+
+
+def test_hermes_agent_call_timeout_process_group_lookup_error():
+    """ProcessLookupError from killpg on timeout is handled gracefully."""
+    fake_proc = MagicMock()
+    fake_proc.pid = 99999
+
+    call_count = [0]
+
+    def communicate(input=None, timeout=None):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)
+        return ("", "")
+
+    fake_proc.communicate = communicate
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        with patch("os.killpg", side_effect=ProcessLookupError):
+            result = hermes_agent_call(prompt="slow", timeout=10)
+
+    assert result.timed_out is True
+    assert result.returncode == -1
+
+
+# === HERMES_AGENT_CALL: RETRY LOGIC ===
+
+
+def test_hermes_agent_call_retries_on_os_error():
+    """hermes_agent_call should retry on transient OSError up to HERMES_RETRY_ATTEMPTS times."""
+    call_count = [0]
+
+    def fake_popen(*a, **kw):
+        call_count[0] += 1
+        if call_count[0] < 2:
+            raise OSError("Temporary spawn failure")
+        proc = MagicMock()
+        proc.returncode = 0
+        proc.pid = 12345
+        proc.communicate.return_value = ("ok", "")
+        return proc
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", side_effect=fake_popen):
+        with patch("hermes_pipeline.hermes_adapter.time.sleep") as mock_sleep:
+            result = hermes_agent_call(prompt="test")
+
+    assert result.returncode == 0
+    assert call_count[0] == 2, "Should retry once after OSError"
+    mock_sleep.assert_called_once()
+
+
+def test_hermes_agent_call_oserror_exhaust():
+    """When OSError persists across all retries, the last OSError should be raised."""
+    call_count = [0]
+
+    def always_fail(*a, **kw):
+        call_count[0] += 1
+        raise OSError("Persistent spawn failure")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", side_effect=always_fail):
+        with pytest.raises(OSError, match="Persistent spawn failure"):
+            hermes_agent_call(prompt="test")
+
+    assert call_count[0] == 3, "Should attempt 1 + 2 retries = 3 times"
+
+
+def test_hermes_agent_call_popen_file_not_found_not_retried():
+    """FileNotFoundError from Popen should propagate immediately, not be retried."""
+    call_count = [0]
+
+    def fake_popen(*a, **kw):
+        call_count[0] += 1
+        raise FileNotFoundError("hermes")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", side_effect=fake_popen):
+        with pytest.raises(FileNotFoundError):
+            hermes_agent_call(prompt="test")
+
+    assert call_count[0] == 1, "FileNotFoundError should not be retried"

@@ -1,10 +1,13 @@
 from __future__ import annotations
 import datetime as _dt
 import json as _json
+import logging
 import os as _os
 from dataclasses import dataclass
 from pathlib import Path
 import yaml
+
+log = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class Phase:
@@ -110,9 +113,8 @@ def _run_hermes_subprocess(
     Returns a dict with returncode, stdout, stderr, timed_out keys — same
     shape as the old Claude subprocess call for drop-in compatibility.
     The `tools` parameter is a comma-separated list (e.g., "Read,Write,Bash")
-    encoded in the AGENT_MODE prompt header as an advisory constraint.
-    **Tool restrictions are NOT enforced by Hermes CLI** — the constraint
-    is prompt-only. Hermes chat -q lacks --tools/--turns flags.
+    enforced via ``-t/--toolsets`` CLI flag and also encoded in the
+    AGENT_MODE prompt header as an advisory constraint.
     Tests monkey-patch this function to avoid hitting the real CLI.
     """
     from .hermes_adapter import hermes_agent_call
@@ -191,7 +193,9 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
 
     if result["returncode"] != 0:
         raise RuntimeError(
-            f"phase failed: rc={result['returncode']} stdout={result['stdout'][:200]}"
+            f"phase failed: rc={result['returncode']} "
+            f"stdout={result['stdout'][:200]} "
+            f"stderr={result['stderr'][:200]}"
         )
 
     if phase.terminal:
@@ -254,8 +258,13 @@ def run(
             )
         except FileExistsError:
             pass
-        except Exception:
-            pass
+        except Exception as se:
+            # Sidecar write failed (e.g., disk full, permission denied).
+            # Log but don't mask the original phase failure.
+            log.warning(
+                "failed to write outcome sidecar for %s (original error: %s): %s",
+                todo_id, e, se,
+            )
         _delete_marker(sd, todo_id, tick_id=tick_id)
         raise
     _delete_marker(sd, todo_id, tick_id=tick_id)

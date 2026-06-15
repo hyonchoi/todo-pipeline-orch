@@ -93,9 +93,24 @@ def test_invoke_propagates_subprocess_failure(state_dir, monkeypatch):
     ])
     monkeypatch.setattr(
         phases_mod, "_run_hermes_subprocess",
-        lambda **kw: {"returncode": 2, "stdout": "boom"},
+        lambda **kw: {"returncode": 2, "stdout": "boom", "stderr": "E100: hermes error"},
     )
     with pytest.raises(RuntimeError, match="phase failed"):
+        phases_mod._invoke_hermes(
+            todo_id="TODO-7", phase_key="phase_2_autoplan",
+            tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        )
+
+def test_invoke_failure_error_includes_stderr(state_dir, monkeypatch):
+    """Phase failure RuntimeError must include stderr for debugging."""
+    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False),
+    ])
+    monkeypatch.setattr(
+        phases_mod, "_run_hermes_subprocess",
+        lambda **kw: {"returncode": 2, "stdout": "boom", "stderr": "E100: stderr detail"},
+    )
+    with pytest.raises(RuntimeError, match="E100: stderr detail"):
         phases_mod._invoke_hermes(
             todo_id="TODO-7", phase_key="phase_2_autoplan",
             tick_id="01JT", state_dir=state_dir, project_slug="demo",
@@ -148,3 +163,38 @@ def test_run_hermes_subprocess_propagates_exception(monkeypatch):
         phases_mod._run_hermes_subprocess(
             prompt="test", tools="Read", turns=5, timeout=30, cwd="/tmp",
         )
+
+def test_run_logs_sidecar_write_failure(state_dir, monkeypatch, caplog):
+    """When the outcome sidecar write fails (not FileExistsError), it should be logged."""
+    import logging
+    caplog.set_level(logging.WARNING)
+
+    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False),
+    ])
+    monkeypatch.setattr(
+        phases_mod, "_run_hermes_subprocess",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("phase boom")),
+    )
+
+    # Patch append_outcome to raise a non-FileExistsError exception
+    def fake_append_outcome(*a, **kw):
+        raise PermissionError("disk full")
+
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.store.append_outcome",
+        fake_append_outcome,
+        raising=False,
+    )
+
+    with pytest.raises(RuntimeError, match="phase boom"):
+        phases_mod.run(
+            state_dir=state_dir,
+            todo_id="TODO-7",
+            tick_id="01JT",
+            phase_key="phase_2_autoplan",
+            project_slug="demo",
+        )
+
+    # The sidecar failure should be logged
+    assert "failed to write outcome sidecar" in caplog.text
