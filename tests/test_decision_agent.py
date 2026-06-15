@@ -44,7 +44,7 @@ def test_sha_mismatch_raises_without_api_call(tmp_path, monkeypatch):
     p = _write_prompt(tmp_path)
     called = []
     monkeypatch.setattr(
-        "hermes_pipeline.decision.agent._anthropic_call",
+        "hermes_pipeline.decision.agent._hermes_call",
         lambda *a, **kw: called.append(True) or "",
     )
     with pytest.raises(PromptShaMismatch):
@@ -60,7 +60,7 @@ def test_sha_mismatch_raises_without_api_call(tmp_path, monkeypatch):
 def test_well_formed_json_response_parses(tmp_path, monkeypatch):
     p = _write_prompt(tmp_path)
     monkeypatch.setattr(
-        "hermes_pipeline.decision.agent._anthropic_call",
+        "hermes_pipeline.decision.agent._hermes_call",
         lambda *a, **kw: json.dumps({
             "candidates_considered": ["TODO-1"],
             "picked": "TODO-1",
@@ -77,7 +77,7 @@ def test_well_formed_json_response_parses(tmp_path, monkeypatch):
 def test_parse_failure_returns_picked_none(tmp_path, monkeypatch):
     p = _write_prompt(tmp_path)
     monkeypatch.setattr(
-        "hermes_pipeline.decision.agent._anthropic_call",
+        "hermes_pipeline.decision.agent._hermes_call",
         lambda *a, **kw: "this is not json",
     )
     r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)

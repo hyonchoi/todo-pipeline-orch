@@ -1,4 +1,4 @@
-"""Prompt build, SHA pin, Anthropic API call, response parse."""
+"""Prompt build, SHA pin, Hermes API call, response parse."""
 from __future__ import annotations
 import hashlib
 import json
@@ -64,15 +64,15 @@ def build_prompt(prompt_path: Path, ctx: SelectionContext) -> str:
     ]
     return "\n".join(parts)
 
-def _anthropic_call(*, model: str, max_tokens: int, prompt: str) -> str:
-    import anthropic
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    msg = client.messages.create(
+def _hermes_call(*, model: str, max_tokens: int, prompt: str) -> str:
+    from .. import hermes_adapter
+
+    result = hermes_adapter.hermes_call(
         model=model,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
+        prompt=prompt,
+        timeout=min(max(max_tokens // 100, 30), 300),
     )
-    return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
+    return result
 
 def _parse(raw: str) -> dict:
     body = raw.strip()
@@ -111,5 +111,5 @@ def call_agent(
     if expected_sha is not None and expected_sha != actual_sha:
         raise PromptShaMismatch(expected_sha, actual_sha)
     rendered = build_prompt(prompt_path, ctx)
-    raw = _anthropic_call(model=model, max_tokens=max_tokens, prompt=rendered)
+    raw = _hermes_call(model=model, max_tokens=max_tokens, prompt=rendered)
     return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)
