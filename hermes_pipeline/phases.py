@@ -111,8 +111,10 @@ def _run_hermes_subprocess(
     Returns a dict with returncode, stdout, stderr, timed_out keys — same
     shape as the old Claude subprocess call for drop-in compatibility.
     The `tools` parameter is a comma-separated list (e.g., "Read,Write,Bash")
-    encoded in the AGENT_MODE prompt header. Tests monkey-patch this function
-    to avoid hitting the real CLI.
+    encoded in the AGENT_MODE prompt header as an advisory constraint.
+    **Tool restrictions are NOT enforced by Hermes CLI** — the constraint
+    is prompt-only. Hermes chat -q lacks --tools/--turns flags.
+    Tests monkey-patch this function to avoid hitting the real CLI.
     """
     from .hermes_adapter import hermes_agent_call
 

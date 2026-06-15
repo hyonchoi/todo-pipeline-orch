@@ -8,10 +8,13 @@ Two functions:
 from __future__ import annotations
 
 import subprocess
+import time
 from dataclasses import dataclass
 
 MAX_ERROR_OUTPUT = 300  # chars of stdout/stderr to include in error messages
 HERMES_AGENT_DEFAULT_TIMEOUT = 1800  # 30-minute default for agent calls
+HERMES_RETRY_ATTEMPTS = 2  # retries for transient CLI failures
+HERMES_RETRY_DELAY = 1  # seconds between retries
 
 
 class HermesCallError(Exception):
@@ -60,13 +63,28 @@ def hermes_call(
         cmd.extend(["-m", model])
     cmd.extend(["--source", "tool"])
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        input=prompt,
-    )
+    last_err = None
+    for attempt in range(1 + HERMES_RETRY_ATTEMPTS):
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                input=prompt,
+            )
+            break
+        except subprocess.TimeoutExpired:
+            raise  # timeout is never transient
+        except FileNotFoundError:
+            raise  # hermes binary missing is never transient
+        except OSError as exc:
+            last_err = exc
+            if attempt < HERMES_RETRY_ATTEMPTS:
+                time.sleep(HERMES_RETRY_DELAY)
+
+    if last_err is not None:
+        raise last_err
 
     if result.returncode != 0:
         raise HermesCallError(
