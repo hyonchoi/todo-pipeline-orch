@@ -41,6 +41,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
 | [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
 | [Kill a stuck in-flight phase](docs/howto-kill-stuck-phase.md) | How-to | A phase is wedged past `max_phase_timeout_min` |
+| [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` replaces Anthropic SDK calls |
 
 ## Getting Started
 
