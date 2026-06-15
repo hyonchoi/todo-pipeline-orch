@@ -8,7 +8,9 @@ this before changing `decision/agent.py`, the prompt template
 ## Prerequisites
 
 - `ANTHROPIC_API_KEY` exported in your shell (the suite is `pytest.mark.skipif`
-  gated — without it, every fixture is silently skipped).
+  gated — without it, every fixture is silently skipped). Note: as of v0.3, the
+  orchestrator routes through Hermes via `hermes chat -q`, so Hermes must also be
+  installed and authenticated (`hermes login`).
 - `uv sync` has run at the repo root.
 - A prompt file at `.hermes/prompts/selection.md` (or `SELECTION_PROMPT_PATH`
   pointing to one). The runner reads the bytes and hashes them on every call.
@@ -113,15 +115,19 @@ block merge. `ANTHROPIC_API_KEY` must be set as a repo secret.
 **Every test is SKIPPED.**
 `ANTHROPIC_API_KEY` is unset. The `pytest.mark.skipif` at
 `tests/eval/runner.py:23` triggers when the env var is missing. Export it and
-re-run.
+re-run. Note: the orchestrator now routes through Hermes — make sure Hermes is
+also installed and authenticated (`hermes login`).
 
-**`anthropic.AuthenticationError: invalid x-api-key`.**
-The key is malformed or revoked. Generate a new one in the Anthropic console
-and re-export. The eval suite does not retry on auth errors.
+**`HermesCallError: hermes chat failed: rc=...` thrown from `hermes_adapter.py`.**
+Hermes returned a non-zero exit code. Check `hermes login` to verify auth,
+`hermes model` to verify model, and `hermes chat -q "hello"` to confirm the
+CLI is working. As of v0.3, the orchestrator no longer calls Anthropic directly —
+all LLM traffic goes through `hermes chat -q`.
 
-**`KeyError: 'ANTHROPIC_API_KEY'` thrown from `agent.py:69`.**
-Same root cause — env var missing in the subprocess. If you exported it in a
-parent shell, confirm it's visible: `env | grep ANTHROPIC_API_KEY`.
+**`KeyError: 'ANTHROPIC_API_KEY'` thrown from the eval suite.**
+The eval suite still checks for `ANTHROPIC_API_KEY` (for backwards compatibility
+with the skip gate). The orchestrator itself no longer reads this env var directly —
+Hermes resolves auth internally.
 
 **Parse error: `picked=None, rationale='parse error: ...'`.**
 The model returned non-JSON or unfenced text. `agent.py:_parse` strips ` ```json `

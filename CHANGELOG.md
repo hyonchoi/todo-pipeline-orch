@@ -55,6 +55,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Deterministic `selection.py`** — replaced by Hermes LLM-driven decision engine
 - **Redundant `hermes-pipeline/README.md`** — documentation consolidated in root docs
 
+## [0.3.0] - 2026-06-15
+
+### Added
+- **Hermes adapter** — `hermes_pipeline/hermes_adapter.py` with `hermes_call()` (simple one-shot queries) and `hermes_agent_call()` (agent-style subprocess with PID tracking). All LLM traffic now routes through `hermes chat -q` instead of direct Anthropic SDK calls.
+- **HermesCallError and HermesAgentResult** — structured error and result types for Hermes CLI failures and agent outcomes.
+- **.env file support** — `.env` files are now git-ignored (`.env.example` is allowed).
+- **CI action pinning** — GitHub Actions pinned to SHA hashes for supply-chain security.
+
+### Changed
+- **Decision agent** — `_anthropic_call()` replaced with `_hermes_call()`; no longer imports the `anthropic` package. Timeout is computed from `max_tokens` (1s per 100 tokens, min 30s, max 300s).
+- **Phase execution** — `_run_claude_subprocess()` replaced with `hermes_agent_call()`. Tool and turn constraints are now encoded as prompt headers since `hermes chat -q` lacks `--tools`/`--turns` flags.
+- **Requirements** — Anthropic API key is no longer needed. Hermes CLI must be installed and authenticated (`hermes login`) instead.
+
+### Removed
+- **Anthropic SDK dependency** — `anthropic>=0.40` removed from `pyproject.toml`. The orchestrator no longer calls the Anthropic API directly.
+
 ## [Unreleased]
 
 ### Planned

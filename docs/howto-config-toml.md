@@ -10,7 +10,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 - The state dir exists (`~/.hermes` by default, or whatever
   `PIPELINE_STATE_DIR` points to).
 - Python 3.12+ — the loader uses stdlib `tomllib`.
-- `ANTHROPIC_API_KEY` exported if you're enabling `auto_execute = true`.
+- `ANTHROPIC_API_KEY` exported if you're enabling `auto_execute = true`. (Note: as of v0.3, the orchestrator routes through Hermes via `hermes_adapter.py`. Hermes resolves auth and model — but the env var may still be needed for legacy eval paths.)
 
 ## Steps
 
@@ -57,7 +57,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 
 | Key | Default | Effect |
 |---|---|---|
-| `model` | `claude-opus-4-7` | Anthropic model id passed to `messages.create`. Pin a specific snapshot to keep eval results stable; bumping this is a real change — re-run the eval suite. |
+| `model` | `claude-opus-4-7` | Model id passed to `hermes chat -q -m <model>`. Pin a specific snapshot to keep eval results stable; bumping this is a real change — re-run the eval suite. |
 | `max_tokens` | `4000` | Cap on the model's response. The selection JSON is small (<1KB typical); raising this rarely helps and costs more. |
 | `auto_execute` | `false` | When `false`, decisions are persisted but the phase does not run (shadow mode). Set `true` only after the eval suite passes against the current prompt. |
 | `prompt_path` | `.hermes/prompts/selection.md` | File the agent loads and hashes. Path is resolved relative to the working directory of `pipeline-watch`, not the state dir. |
@@ -125,8 +125,11 @@ table above. Common typo: `circuit-breaker` (hyphen) vs `circuit_breaker`
 (underscore — required).
 
 **`KeyError: 'ANTHROPIC_API_KEY'` on the next tick.**
-Not a config issue — env var missing. The TOML overlay does not source
-secrets; selection always reads `os.environ["ANTHROPIC_API_KEY"]`.
+Not a config issue — env var missing. As of v0.3, selection routes through Hermes
+via `hermes_adapter.hermes_call()`, so `ANTHROPIC_API_KEY` is no longer read
+directly by the orchestrator. If you see this error, it likely comes from the
+eval suite (which still checks for it as a skip gate). Set it or run
+`hermes login` for Hermes auth.
 
 ## Related
 

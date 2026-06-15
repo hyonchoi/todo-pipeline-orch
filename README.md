@@ -11,7 +11,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 ## Features
 
 - **Auto-tick discovery**: Scan all projects for TODOS.md changes and automatically select eligible TODOs
-- **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Anthropic API with SHA-pinned prompt, immutable decision records, and outcome sidecars
+- **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes API with SHA-pinned prompt, immutable decision records, and outcome sidecars
 - **CLI subcommands**: `auto`, `merge`, `status`, `kill` for pipeline management
 - **Pending records table**: Display ready-for-review records with status and age
 - **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
@@ -22,7 +22,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/install/) package manager
-- **Anthropic API key** (v0.2+): selection is now LLM-driven and calls the Anthropic API on every tick. Export `ANTHROPIC_API_KEY` before running `pipeline-watch auto`.
+- **Hermes CLI** (v0.3+): selection and phase execution route through `hermes chat -q`. Install Hermes and run `hermes login` before running `pipeline-watch auto`.
 
 Install uv:
 ```bash
@@ -104,7 +104,7 @@ Example:
 ```bash
 export PIPELINE_PROJECTS_DIR=~/my-projects
 export PIPELINE_LOCK_DIR=~/.hermes/locks
-export ANTHROPIC_API_KEY=sk-ant-...
+hermes login  # authenticate with your provider
 uv run pipeline-watch auto
 ```
 
@@ -158,12 +158,13 @@ list.
 
 The package is organized into lanes:
 
-- **Lane A**: Hermes-agent selection (`decision/` — LLM-driven TODO pick via Anthropic API, SHA-pinned prompt, immutable decision records + outcome sidecars). The deterministic `selection.py` was retired in v0.2.
+- **Lane A**: Hermes-agent selection (`decision/` — LLM-driven TODO pick via Hermes API, SHA-pinned prompt, immutable decision records + outcome sidecars). The deterministic `selection.py` was retired in v0.2.
 - **Lane B**: State management (locks, checkpoints, ready-for-review records, atomic tmp+rename writes)
 - **Lane C**: Kanban integration (active tasks, outbox, sync)
 - **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)
 - **Lane E**: Merge orchestration (Phase 9)
 - **Lane F**: CLI, watcher, status, and installation (this lane)
+- **Lane G**: Hermes adapter (`hermes_adapter.py` — wraps `hermes chat -q` for all LLM calls, replaces direct Anthropic SDK usage)
 
 State transitions and the file layout under `.hermes/` (decisions, outcomes, phase_started, tick.lock, ready_for_review) are documented in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). The selection seat contract lives in [hermes_pipeline/decision/README.md](hermes_pipeline/decision/README.md). See `docs/gstack/hermes-pipeline/design-plan.md` for the full design specification.
 
