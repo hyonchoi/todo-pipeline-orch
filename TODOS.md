@@ -2,6 +2,13 @@
 
 gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the required fields: What/Why/Pros/Cons/Context/Depends on/Decisions. Status markers: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold. See `docs/gstack/hyonchoi-main-design-20260610-195349.md` ("TODOS Manager Skill") for the full schema and `TODO-<n>` ID assignment rules.
 
+- [ ] **TODO-9: fix pre-existing eval test failure — missing `.hermes/prompts/selection.md`** — Eval infrastructure repair
+  - **What:** The eval test suite (`tests/eval/runner.py::test_selection_fixture`) fails on both `main` and feature branches because `.hermes/prompts/selection.md` does not exist. Create the prompt file or provision it from Hermes.
+  - **Why:** Eval tests are the regression gate for selection-agent behavior. Without them, changes to `decision/agent.py` and prompt handling can silently regress.
+  - **Context:** Noticed by gstack /ship on 2026-06-15 on branch `worktree-todo-6-hermes-adapter`. Error: `FileNotFoundError: [Errno 2] No such file or directory: '.hermes/prompts/selection.md'` at `hermes_pipeline/decision/agent.py:23` in `compute_prompt_sha()`. Test requires `ANTHROPIC_API_KEY` env var and a working Hermes install with the selection prompt.
+  - **Depends on:** none
+  - **Decisions:** Priority `P0`, Effort `S`, Test Coverage `필요`, Security Review `불필요`
+
 - [ ] **TODO-1: todos-manager counter recovery mode** — Add `todos-manager --recover-counter`
   - **What:** Add `todos-manager --recover-counter` that scans `TODOS.md` for the max existing `TODO-<n>` ID and initializes `.hermes/todo_id_counter` to that value.
   - **Why:** Prevent ID collisions when bootstrapping a project that already has hand-written `TODO-<n>` entries but no counter file yet.

@@ -298,12 +298,13 @@ TODOS.md에 새로운 작업 항목을 추가하는 스킬. gstack 형식을 따
 
 | 필드 | 설명 | 필수 여부 |
 |------|------|-----------|
+| **ID** | `TODO-<n>` — 항목 헤딩에 포함, 발급 후 불변 | ✅ (자동 발급) |
 | **What** | 작업 내용 | ✅ |
 | **Why** | 이유/배경 | ✅ |
 | **Pros** | 장점 | ✅ |
 | **Cons** | 단점 | ✅ |
 | **Context** | 구현 맥락/시작점 | ✅ |
-| **Depends on** | 의존성 | 조건부 |
+| **Depends on** | 의존성 (`TODO-<n>` 참조, 같은 프로젝트 내) | 조건부 |
 
 상태 표시:
 - `[ ]` — 대기 중
@@ -311,23 +312,36 @@ TODOS.md에 새로운 작업 항목을 추가하는 스킬. gstack 형식을 따
 - `[x]` — 완료
 - `[~]` — 유보
 
-### 스킬 설계: `todos-manager`
+**ID 발급 규칙** (오케스트레이터 리팩터링 설계 — `docs/gstack/hyonchoi-main-design-20260610-195349.md`
+Premise 5/Approach A 참조): `TODO-<n>`은 프로젝트별 단조 증가 카운터 파일
+(`.hermes/todo_id_counter`)에서 한 번만 발급되며, 재사용/재번호 부여 금지. 항목이 완료/삭제
+되어도 그 번호는 영구히 비워둔다 — 의존성, 브랜치 attempt 추적, kanban 카드 연결, 락/상태
+파일에서 안전하게 참조 가능해야 하므로.
+
+### 스킬 설계: `todos-manager` (가칭 "add-todo")
 
 **동작 흐름:**
 
 ```
-1. 프로젝트 디렉토리 확인 (TODOS.md 존재)
+1. 프로젝트 디렉토리 확인 (TODOS.md 존재, 없으면 .hermes/todo_id_counter도 0으로 초기화)
 2. 사용자 입력: 작업 설명 (자연어)
-3. gstack 형식으로 TODOS 항목 작성:
+3. .hermes/todo_id_counter를 읽어 다음 TODO-<n> ID를 발급하고 카운터 증가
+4. gstack 형식으로 TODOS 항목 작성:
    - What/Why/Pros/Cons/Context 도출
    - 핵심 결정 사항 사전 정의:
      a. 우선순위 (P1~P4)
      b. 노력 추정 (S/M/L/XL)
      c. Phase 매핑 (어떤 Phase에서 처리될 작업인가)
-     d. 브랜치 전략 (새 브랜치 vs 기존)
-4. TODOS.md에 항목 추가
-5. Slack 채널에 알림
+     d. Slug (브랜치명에 쓰일 짧은 식별자 — 버전 prefix는 오케스트레이터가 부여)
+5. Depends on에 입력된 TODO-<n>이 실제 TODOS.md에 존재하는지, 그리고 추가 시 의존성
+   사이클이 생기지 않는지 검사 — 사이클이면 경고하고 사용자에게 재확인
+6. TODOS.md에 항목 추가 (헤딩: `## TODO-<n>: [작업명]`)
+7. Slack 채널에 알림
 ```
+
+이 스킬은 **kanban에 직접 쓰지 않는다** — kanban은 오케스트레이터가 "현재 진행 중인
+작업"만 1프로젝트당 1카드로 관리하므로(Premise 8), 백로그 추가 시점에는 kanban 동기화가
+필요 없다.
 
 **핵심 결정 사항 사전 정의 템플릿:**
 
@@ -348,23 +362,25 @@ TODOS.md에 새로운 작업 항목을 추가하는 스킬. gstack 형식을 따
 
 **Context:** [구현 시작점/맥락]
 
-**Depends on:** [의존성, 없으면 없음]
+**Depends on:** [TODO-<n>, ... / 없으면 없음]
 
 **Decisions:**
 - Priority: P1 / P2 / P3 / P4
 - Effort: S / M / L / XL
 - Phase: 4 (Development) / 6.1 (CSO) / ...
-- Branch: feature/short-desc (새 브랜치 필요 시)
+- Slug: short-desc (오케스트레이터가 `feat/{base_version}-{slug}` 형식으로 브랜치 생성 시 사용)
 - Test Coverage: 필요 / 불필요
 - Security Review: 필요 / 불필요
 ```
+
+`N`은 위 ID 발급 규칙에 따라 스킬이 자동으로 채운다 — 사용자가 직접 번호를 매기지 않는다.
 
 ### 스킬 프론트매터
 
 ```yaml
 ---
 name: todos-manager
-description: "TODOS.md 항목 추가 및 관리 — gstack 형식 기반, 핵심 결정 사항 사전 정의"
+description: "TODOS.md 항목 추가 및 관리 — gstack 형식 기반, TODO-<n> ID 자동 발급, 핵심 결정 사항 사전 정의"
 version: 1.0.0
 author: hyonchoi
 license: MIT
