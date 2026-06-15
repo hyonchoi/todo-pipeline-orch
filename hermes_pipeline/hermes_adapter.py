@@ -207,7 +207,7 @@ def hermes_agent_call(
         try:
             proc = subprocess.Popen(
                 cmd,
-                stdin=subprocess.PIPE,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,

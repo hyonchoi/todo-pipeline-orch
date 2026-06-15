@@ -192,8 +192,10 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
     )
 
     if result["returncode"] != 0:
+        timed_out = result.get("timed_out", False)
         raise RuntimeError(
             f"phase failed: rc={result['returncode']} "
+            f"(timed_out={timed_out}) "
             f"stdout={result['stdout'][:200]} "
             f"stderr={result['stderr'][:200]}"
         )

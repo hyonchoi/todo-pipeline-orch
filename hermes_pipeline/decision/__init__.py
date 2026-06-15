@@ -77,7 +77,7 @@ def run_selection(
         }
         prompt_sha = e.actual
     except KeyError as e:
-        # ANTHROPIC_API_KEY missing — config fault, not a stall. Persist a
+        # Config fault — missing env var. Persist a
         # decision so the next tick's `recent_decisions` carries the cause,
         # but do not crash the cron entrypoint.
         parsed = {
@@ -89,7 +89,7 @@ def run_selection(
         }
         prompt_sha = ""
     except Exception as e:
-        # Anthropic API surface — 401/429/5xx/network/timeout/SDK errors —
+        # Hermes call surface — 401/429/5xx/network/timeout/CLI errors —
         # plus any other transport error. The plan's edge-case contract:
         # produce picked=None with a distinct rationale; the circuit breaker
         # treats it as no-progress (caller responsibility).
