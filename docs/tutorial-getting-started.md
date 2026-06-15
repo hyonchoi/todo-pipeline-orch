@@ -180,7 +180,7 @@ uv run pipeline-watch merge demo-app 1 --abandon
 So far you've run commands manually. To automate, register a cron job that runs auto-tick every 5 minutes:
 
 ```bash
-bash hermes-pipeline/scripts/install-cron.sh
+bash scripts/install-cron.sh
 ```
 
 This command:

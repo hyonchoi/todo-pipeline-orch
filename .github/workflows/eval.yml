@@ -2,9 +2,9 @@ name: selection-eval
 on:
   pull_request:
     paths:
-      - 'hermes-pipeline/src/hermes_pipeline/decision/agent.py'
+      - 'hermes_pipeline/decision/agent.py'
       - '.hermes/prompts/**'
-      - 'hermes-pipeline/tests/eval/**'
+      - 'tests/eval/**'
 
 jobs:
   eval:
@@ -13,7 +13,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
-      - run: uv sync --directory hermes-pipeline
-      - run: uv run --directory hermes-pipeline pytest tests/eval/ -v
+      - run: uv sync
+      - run: uv run pytest tests/eval/ -v
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}

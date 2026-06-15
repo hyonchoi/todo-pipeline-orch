@@ -74,7 +74,7 @@ is desired. You're updating the pin to match the file.
 3. Run the eval suite against the new prompt before re-arming:
 
    ```bash
-   cd hermes-pipeline && uv run pytest tests/eval/ -v
+   uv run pytest tests/eval/ -v
    ```
 
    See [How to run the selection eval suite](howto-eval-suite.md). Do not
@@ -161,4 +161,4 @@ TODOS.md for actually-pickable items.
 
 - [How to run the selection eval suite](howto-eval-suite.md)
 - [Pipeline state machine](hermes-state-machine.md)
-- [Selection seat contract](../hermes-pipeline/src/hermes_pipeline/decision/README.md)
+- [Selection seat contract](../hermes_pipeline/decision/README.md)

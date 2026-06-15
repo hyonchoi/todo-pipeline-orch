@@ -35,7 +35,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 |---|---|---|
 | [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `pipeline-watch` end-to-end |
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
-| [Selection seat contract](hermes-pipeline/src/hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
+| [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
 | [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
 | [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
@@ -84,7 +84,7 @@ uv run pipeline-watch kill --all
 
 Register a 5-minute cron job:
 ```bash
-bash hermes-pipeline/scripts/install-cron.sh
+bash scripts/install-cron.sh
 ```
 
 This will register a crontab entry to run `pipeline-watch auto` every 5 minutes and log output to `~/.hermes/cron.log`.
@@ -132,7 +132,7 @@ max_tick_duration_min = 10
 
 See [docs/hermes-state-machine.md](docs/hermes-state-machine.md) for the
 state transitions these settings gate, and the docstrings in
-`hermes-pipeline/src/hermes_pipeline/config.py` for the authoritative field
+`hermes_pipeline/config.py` for the authoritative field
 list.
 
 ## Troubleshooting
@@ -165,7 +165,7 @@ The package is organized into lanes:
 - **Lane E**: Merge orchestration (Phase 9)
 - **Lane F**: CLI, watcher, status, and installation (this lane)
 
-State transitions and the file layout under `.hermes/` (decisions, outcomes, phase_started, tick.lock, ready_for_review) are documented in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). The selection seat contract lives in [hermes-pipeline/src/hermes_pipeline/decision/README.md](hermes-pipeline/src/hermes_pipeline/decision/README.md). See `docs/gstack/hermes-pipeline/design-plan.md` for the full design specification.
+State transitions and the file layout under `.hermes/` (decisions, outcomes, phase_started, tick.lock, ready_for_review) are documented in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). The selection seat contract lives in [hermes_pipeline/decision/README.md](hermes_pipeline/decision/README.md). See `docs/gstack/hermes-pipeline/design-plan.md` for the full design specification.
 
 ## Contributing
 

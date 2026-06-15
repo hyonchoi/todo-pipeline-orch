@@ -9,7 +9,7 @@ this before changing `decision/agent.py`, the prompt template
 
 - `ANTHROPIC_API_KEY` exported in your shell (the suite is `pytest.mark.skipif`
   gated — without it, every fixture is silently skipped).
-- `uv sync` has run at the repo root and inside `hermes-pipeline/`.
+- `uv sync` has run at the repo root.
 - A prompt file at `.hermes/prompts/selection.md` (or `SELECTION_PROMPT_PATH`
   pointing to one). The runner reads the bytes and hashes them on every call.
 
@@ -18,7 +18,7 @@ this before changing `decision/agent.py`, the prompt template
 1. Run the full battery:
 
    ```bash
-   cd hermes-pipeline
+     
    uv run pytest tests/eval/ -v
    ```
 
@@ -64,7 +64,7 @@ expected_picked_not: ["TODO-2"]
 - TODO-2 [priority:high] fix the build
 ```
 
-Frontmatter keys the runner honors (`hermes-pipeline/tests/eval/runner.py:14`):
+Frontmatter keys the runner honors (`tests/eval/runner.py:14`):
 - `in_flight` — list of TODO ids passed as `SelectionContext.in_flight`
 - `recent_decisions` — list of `{tick_id, picked, outcome}` for the outcome sidecar context
 - `expected_picked_in` — assertion: model's `picked` must be one of these
@@ -101,9 +101,9 @@ signal about whether the prompt is leading the model astray.
 
 `.github/workflows/eval.yml` runs the same battery on every PR that touches:
 
-- `hermes-pipeline/src/hermes_pipeline/decision/agent.py`
+- `hermes_pipeline/decision/agent.py`
 - `.hermes/prompts/**`
-- `hermes-pipeline/tests/eval/**`
+- `tests/eval/**`
 
 The workflow is `continue-on-error: true` — eval failures inform, they do not
 block merge. `ANTHROPIC_API_KEY` must be set as a repo secret.
@@ -139,4 +139,4 @@ behavior.
 
 - [How to recover from a prompt SHA mismatch](howto-prompt-sha-mismatch.md)
 - [Pipeline state machine](hermes-state-machine.md)
-- [Selection seat contract](../hermes-pipeline/src/hermes_pipeline/decision/README.md)
+- [Selection seat contract](../hermes_pipeline/decision/README.md)

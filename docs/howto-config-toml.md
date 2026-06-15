@@ -132,4 +132,4 @@ secrets; selection always reads `os.environ["ANTHROPIC_API_KEY"]`.
 
 - [How to run the selection eval suite](howto-eval-suite.md)
 - [How to recover from a prompt SHA mismatch](howto-prompt-sha-mismatch.md)
-- Authoritative field definitions: `hermes-pipeline/src/hermes_pipeline/config.py`
+- Authoritative field definitions: `hermes_pipeline/config.py`

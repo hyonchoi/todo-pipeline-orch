@@ -5,7 +5,7 @@
 # Idempotent: re-running doesn't duplicate the cron entry.
 #
 # Usage:
-#   bash hermes-pipeline/scripts/install-cron.sh
+#   bash scripts/install-cron.sh
 
 set -euo pipefail
 
