@@ -4,7 +4,7 @@
 
 **Goal:** Remove all direct Anthropic SDK invocations from the orchestrator and route all LLM queries through `hermes chat -q`.
 
-**Architecture:** Create `hermes_adapter.py` with two functions — `hermes_call()` for simple one-shot queries (replaces `_anthropic_call` in the decision agent) and `hermes_agent_call()` for agent-style subprocess calls with PID tracking (replaces `_run_claude_subprocess` in phases). Both functions call `hermes chat -q` as a subprocess. Existing tests are updated to monkey-patch the new functions. Finally, `anthropic` is removed from `pyproject.toml`.
+**Architecture:** Create `hermes_pipeline/hermes_adapter.py` with two functions — `hermes_call()` for simple one-shot queries (replaces `_anthropic_call` in the decision agent) and `hermes_agent_call()` for agent-style subprocess calls with PID tracking (replaces `_run_claude_subprocess` in phases). Both functions call `hermes chat -q` as a subprocess. Existing tests are updated to monkey-patch the new functions. Finally, `anthropic` is removed from `pyproject.toml`. This is **Phase A** of the migration outlined in [the approved design doc](../gstack/hyonchoi-feat-v0.3-hermes-centric-design-20260614-225657.md) and the [CEO plan](../gstack/ceo-plans/2026-06-15-hermes-native-pipeline.md).
 
 **Tech Stack:** Python 3.12+, `hermes` CLI, `subprocess`, `pyyaml`
 
@@ -18,10 +18,9 @@
 ### Modified Files
 - `hermes_pipeline/decision/agent.py` — Replace `_anthropic_call()` (lines 67-75) with `hermes_call()` from `hermes_adapter`
 - `hermes_pipeline/phases.py` — Replace `_run_claude_subprocess()` (lines 100-136) with `hermes_agent_call()` from `hermes_adapter`
-- `tests/test_decision_agent.py` — Update monkey-patch targets from `_anthropic_call` to `hermes_pipeline.hermes_adapter.hermes_call`
-- `tests/test_phases_invoke.py` — Update monkey-patch targets from `_run_claude_subprocess` to `hermes_pipeline.hermes_adapter.hermes_agent_call`
+- `tests/test_decision_agent.py` — Update monkey-patch targets from `_anthropic_call` to `_hermes_call`
+- `tests/test_phases_invoke.py` — **No changes needed** — tests monkey-patch `_run_claude_subprocess` and we keep that function name/shape
 - `pyproject.toml` — Remove `anthropic>=0.40` from dependencies
-- `docs/gstack/codex-review-corrected-plan.md` — Already written, no changes needed
 
 ### Unchanged (kept as-is)
 - `runner.py` — PipelineRunner, branch naming, phase loop
@@ -30,7 +29,38 @@
 - `circuit.py` — Circuit breaker
 - `tick.py` — Tick lock
 - `merge.py` — Branch merge logic
+- `configs/phases.yaml` — Phase definitions
 - All other tests
+
+---
+
+## Design Decisions (from source docs)
+
+### Why `hermes chat -q` over `hermes proxy start`?
+
+The design doc mentions both approaches. `hermes proxy start` creates an OpenAI-compatible local proxy — just redirect `base_url`. But that keeps the Python package in orchestration mode (same SDK calls, different endpoint). `hermes chat -q` is the correct choice because: model policy, auth, and fallback are managed by Hermes, not Python. The `anthropic` package is removed entirely.
+
+### `--source tool` flag
+
+Added to both `hermes_call()` and `hermes_agent_call()` to signal to Hermes that this call originates from pipeline tooling, not user interaction. Hermes can use this for logging, metrics, and rate-limiting purposes.
+
+### Model resolution
+
+`hermes_call()` takes an optional `model` parameter — when passed, `-m <model>` is added to the command. When `"auto"`, Hermes resolves from its config (via `hermes model`). This aligns with the TODO-6 context: "hermes model sets default model+provider so decision/agent.py no longer hardcodes one."
+
+### Fallback
+
+Model fallback is handled by Hermes via `hermes fallback` — no custom fallback logic needed (TODO-5 collapse).
+
+### Tools encoding
+
+`hermes chat -q` does not have `--tools` or `--turns` flags. The `hermes_agent_call()` function encodes these constraints in the prompt header:
+```
+AGENT_MODE: tools=enabled, available_tools=Read,Write,Bash, max_turns=15.
+You have tool access. Complete the task within 15 turns.
+```
+
+This way Hermes (and its workers) can enforce these constraints internally.
 
 ---
 
@@ -40,62 +70,177 @@
 - Create: `hermes_pipeline/hermes_adapter.py`
 - Test: `tests/test_hermes_adapter.py`
 
-- [ ] **Step 1: Write failing test — hermes_call success case**
+- [ ] **Step 1: Write failing test — hermes_call success, failure, and args**
 
 Create `tests/test_hermes_adapter.py`:
 
 ```python
 from __future__ import annotations
-from pathlib import Path
-from unittest.mock import patch, MagicMock
-import pytest
 
-from hermes_pipeline.hermes_adapter import hermes_call, HermesCallError
-from hermes_pipeline.hermes_adapter import hermes_agent_call, HermesAgentResult
+from unittest.mock import MagicMock, patch
+import pytest
+import subprocess
+
+from hermes_pipeline.hermes_adapter import (
+    hermes_call,
+    HermesCallError,
+    hermes_agent_call,
+    HermesAgentResult,
+)
 
 
 def test_hermes_call_returns_stdout_on_success():
-    fake_proc = MagicMock()
-    fake_proc.returncode = 0
-    fake_proc.stdout = "plan output here"
-    fake_proc.stderr = ""
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "  plan output here  "
+    fake_result.stderr = ""
 
-    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_proc):
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
         result = hermes_call(prompt="hello world", model="claude-sonnet-4-6")
 
     assert result == "plan output here"
 
 
 def test_hermes_call_raises_on_nonzero_exit():
-    fake_proc = MagicMock()
-    fake_proc.returncode = 1
-    fake_proc.stdout = ""
-    fake_proc.stderr = "E100: gateway unreachable"
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = ""
+    fake_result.stderr = "E100: gateway unreachable"
 
-    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_proc):
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
         with pytest.raises(HermesCallError, match="gateway unreachable"):
             hermes_call(prompt="hello", model="claude-sonnet-4-6")
 
 
-def test_hermes_call_passes_correct_args():
-    fake_proc = MagicMock()
-    fake_proc.returncode = 0
-    fake_proc.stdout = "ok"
-    fake_proc.stderr = ""
+def test_hermes_call_includes_error_details():
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = ""
+    fake_result.stderr = "detailed error message"
 
-    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_proc) as mock_run:
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        with pytest.raises(HermesCallError) as exc_info:
+            hermes_call(prompt="hello", model="claude-sonnet-4-6")
+
+    assert exc_info.value.returncode == 1
+    assert exc_info.value.stderr == "detailed error message"
+
+
+def test_hermes_call_passes_correct_args():
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "ok"
+    fake_result.stderr = ""
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result) as mock_run:
         hermes_call(prompt="test prompt", model="claude-sonnet-4-6", timeout=60)
 
-    call_args = mock_run.call_args
-    cmd = call_args[0][0]
-    assert "hermes" in cmd
-    assert "chat" in cmd
-    assert "-q" in cmd
-    assert "test prompt" in cmd
-    assert "-m" in cmd
-    assert "claude-sonnet-4-6" in cmd
+    cmd = mock_run.call_args[0][0]
+    assert cmd == [
+        "hermes", "chat", "-q",
+        "test prompt",
+        "-Q",
+        "-m", "claude-sonnet-4-6",
+        "--source", "tool",
+    ]
+    assert mock_run.call_args[1]["timeout"] == 60
 
-    assert call_args[1]["timeout"] == 60
+
+def test_hermes_call_omits_model_flag_when_auto():
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "ok"
+    fake_result.stderr = ""
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result) as mock_run:
+        hermes_call(prompt="test", model="auto")
+
+    cmd = mock_run.call_args[0][0]
+    assert "-m" not in cmd
+
+
+def test_hermes_agent_call_returns_result_on_success():
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.pid = 12345
+    fake_proc.communicate.return_value = ("agent output", "")
+
+    pid_seen = []
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        result = hermes_agent_call(
+            prompt="do something",
+            model="claude-sonnet-4-6",
+            tools=True,
+            turns=15,
+            on_pid=pid_seen.append,
+        )
+
+    assert isinstance(result, HermesAgentResult)
+    assert result.returncode == 0
+    assert result.stdout == "agent output"
+    assert result.timed_out is False
+    assert pid_seen == [12345], "on_pid callback must fire"
+
+
+def test_hermes_agent_call_encodes_tools_in_prompt():
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.pid = 12345
+    fake_proc.communicate.return_value = ("ok", "")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc) as mock_popen:
+        hermes_agent_call(
+            prompt="do something",
+            tools=True,
+            turns=15,
+        )
+
+    # The spawned command should include an augmented prompt with AGENT_MODE header
+    cmd = mock_popen.call_args[0][0]
+    # Find the prompt argument (comes after -q)
+    q_idx = cmd.index("-q")
+    prompt_arg = cmd[q_idx + 1]
+    assert "AGENT_MODE" in prompt_arg
+    assert "tools=enabled" in prompt_arg
+    assert "max_turns=15" in prompt_arg
+    assert "do something" in prompt_arg
+
+
+def test_hermes_agent_call_handles_timeout():
+    fake_proc = MagicMock()
+    fake_proc.pid = 99999
+
+    def communicate(timeout):
+        raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)
+
+    fake_proc.communicate = communicate
+    pid_seen = []
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        result = hermes_agent_call(
+            prompt="slow task",
+            timeout=10,
+            on_pid=pid_seen.append,
+        )
+
+    assert result.returncode == -1
+    assert result.timed_out is True
+    fake_proc.kill.assert_called_once()
+
+
+def test_hermes_agent_call_respects_cwd():
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.communicate.return_value = ("ok", "")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc) as mock_popen:
+        hermes_agent_call(
+            prompt="test",
+            cwd="/some/path",
+        )
+
+    assert mock_popen.call_args[1]["cwd"] == "/some/path"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -118,9 +263,7 @@ Two functions:
 from __future__ import annotations
 
 import subprocess
-import os
 from dataclasses import dataclass
-from typing import Literal
 
 
 class HermesCallError(Exception):
@@ -165,9 +308,10 @@ def hermes_call(
         "hermes", "chat", "-q",
         prompt,
         "-Q",
-        "-m", model,
         "--source", "tool",
     ]
+    if model != "auto":
+        cmd.extend(["-m", model])
 
     result = subprocess.run(
         cmd,
@@ -227,14 +371,17 @@ def hermes_agent_call(
     augmented_prompt = agent_header + prompt
 
     try:
+        cmd = [
+            "hermes", "chat", "-q",
+            augmented_prompt,
+            "-Q",
+            "--source", "tool",
+        ]
+        if model != "auto":
+            cmd.extend(["-m", model])
+
         proc = subprocess.Popen(
-            [
-                "hermes", "chat", "-q",
-                augmented_prompt,
-                "-Q",
-                "-m", model,
-                "--source", "tool",
-            ],
+            cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -270,74 +417,20 @@ def hermes_agent_call(
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_hermes_adapter.py -v`
-Expected: 3/3 PASS
+Expected: 9/9 PASS
 
-- [ ] **Step 5: Write failing test — hermes_agent_call success and timeout**
-
-Add to `tests/test_hermes_adapter.py`:
-
-```python
-def test_hermes_agent_call_returns_result_on_success():
-    fake_proc = MagicMock()
-    fake_proc.returncode = 0
-    fake_proc.pid = 12345
-    fake_proc.communicate.return_value = ("agent output", "")
-
-    pid_seen = []
-
-    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
-        result = hermes_agent_call(
-            prompt="do something",
-            model="claude-sonnet-4-6",
-            tools=True,
-            turns=15,
-            on_pid=pid_seen.append,
-        )
-
-    assert isinstance(result, HermesAgentResult)
-    assert result.returncode == 0
-    assert result.stdout == "agent output"
-    assert result.timed_out is False
-    assert pid_seen == [12345], "on_pid callback must fire"
-
-
-def test_hermes_agent_call_handles_timeout():
-    fake_proc = MagicMock()
-    fake_proc.pid = 99999
-
-    def communicate(timeout):
-        raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)
-
-    fake_proc.communicate = communicate
-
-    pid_seen = []
-
-    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
-        result = hermes_agent_call(
-            prompt="slow task",
-            timeout=10,
-            on_pid=pid_seen.append,
-        )
-
-    assert result.returncode == -1
-    assert result.timed_out is True
-    fake_proc.kill.assert_called_once()
-```
-
-- [ ] **Step 6: Run test to verify it passes**
-
-Run: `uv run pytest tests/test_hermes_adapter.py -v`
-Expected: 5/5 PASS
-
-- [ ] **Step 7: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add hermes_pipeline/hermes_adapter.py tests/test_hermes_adapter.py
 git commit -m "feat: add hermes_adapter to replace direct Anthropic calls
 
 - hermes_call(): one-shot query via hermes chat -q
-- hermes_agent_call(): agent-style call with PID tracking
-- Both functions wrap subprocess calls, no external SDKs"
+- hermes_agent_call(): agent-style call with PID tracking and
+  AGENT_MODE prompt header for tools/turns constraints
+- HermesCallError with returncode and stderr attributes
+- Model 'auto' omits -m flag — Hermes resolves from config
+- --source tool flag signals pipeline tooling origin"
 ```
 
 ---
@@ -346,9 +439,10 @@ git commit -m "feat: add hermes_adapter to replace direct Anthropic calls
 
 **Files:**
 - Modify: `hermes_pipeline/decision/agent.py:67-75`
+- Modify: `hermes_pipeline/decision/agent.py:114` (call site)
 - Test: `tests/test_decision_agent.py`
 
-- [ ] **Step 1: Replace `_anthropic_call` function with `hermes_call`**
+- [ ] **Step 1: Replace `_anthropic_call` function with `_hermes_call`**
 
 In `hermes_pipeline/decision/agent.py`, replace lines 67-75:
 
@@ -368,63 +462,37 @@ def _anthropic_call(*, model: str, max_tokens: int, prompt: str) -> str:
 **After:**
 ```python
 def _hermes_call(*, model: str, max_tokens: int, prompt: str) -> str:
-    from . import hermes_adapter
+    from .. import hermes_adapter
 
     result = hermes_adapter.hermes_call(
         model=model,
         prompt=prompt,
-        timeout=min(max_tokens * 2, 300),  # Rough estimate: 2s per 1000 tokens, cap at 5min
+        timeout=min(max(max_tokens // 100, 30), 300),
     )
     return result
 ```
 
-- [ ] **Step 2: Update `call_agent` to handle `HermesCallError`**
+Note: `from .. import hermes_adapter` — the parent of `decision` is `hermes_pipeline`. The timeout is derived from `max_tokens` as a rough estimate (30-300s range).
 
-In `call_agent()`, the current code:
+- [ ] **Step 2: Update the call site in `call_agent()`**
 
+In `hermes_pipeline/decision/agent.py`, line 114:
+
+**Before:**
 ```python
-def call_agent(
-    *,
-    ctx: SelectionContext,
-    prompt_path: Path,
-    model: str,
-    max_tokens: int,
-    expected_sha: str | None,
-) -> AgentResult:
-    actual_sha = compute_prompt_sha(prompt_path)
-    if expected_sha is not None and expected_sha != actual_sha:
-        raise PromptShaMismatch(expected_sha, actual_sha)
-    rendered = build_prompt(prompt_path, ctx)
     raw = _anthropic_call(model=model, max_tokens=max_tokens, prompt=rendered)
-    return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)
 ```
 
 **After:**
-
 ```python
-def call_agent(
-    *,
-    ctx: SelectionContext,
-    prompt_path: Path,
-    model: str,
-    max_tokens: int,
-    expected_sha: str | None,
-) -> AgentResult:
-    actual_sha = compute_prompt_sha(prompt_path)
-    if expected_sha is not None and expected_sha != actual_sha:
-        raise PromptShaMismatch(expected_sha, actual_sha)
-    rendered = build_prompt(prompt_path, ctx)
     raw = _hermes_call(model=model, max_tokens=max_tokens, prompt=rendered)
-    return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)
 ```
-
-Note: `HermesCallError` will propagate as-is — existing callers expect exceptions to bubble up from `call_agent`.
 
 - [ ] **Step 3: Update `tests/test_decision_agent.py` monkey-patch targets**
 
-In `tests/test_decision_agent.py`, update all references from `_anthropic_call` to `_hermes_call`:
+In `tests/test_decision_agent.py`, update all three references from `_anthropic_call` to `_hermes_call`:
 
-**Before (line 46-48):**
+**Line 46-48 — Before:**
 ```python
     monkeypatch.setattr(
         "hermes_pipeline.decision.agent._anthropic_call",
@@ -453,8 +521,10 @@ Expected: 5/5 PASS
 git add hermes_pipeline/decision/agent.py tests/test_decision_agent.py
 git commit -m "feat: replace _anthropic_call with hermes_call in decision agent
 
-- _hermes_call() uses hermes_adapter.hermes_call() instead of Anthropic SDK
-- call_agent() unchanged except function name
+- _hermes_call() uses hermes_adapter.hermes_call() instead of
+  Anthropic SDK — model policy shifts from Python to Hermes
+- call_agent() signature unchanged — HermesCallError propagates
+  through as-is (callers expect exceptions to bubble)
 - Tests monkey-patch _hermes_call instead of _anthropic_call"
 ```
 
@@ -464,7 +534,7 @@ git commit -m "feat: replace _anthropic_call with hermes_call in decision agent
 
 **Files:**
 - Modify: `hermes_pipeline/phases.py:100-136`
-- Test: `tests/test_phases_invoke.py`
+- Test: `tests/test_phases_invoke.py` (no changes needed — same function name/shape)
 
 - [ ] **Step 1: Replace `_run_claude_subprocess` function**
 
@@ -528,14 +598,15 @@ def _run_claude_subprocess(
     Returns a dict with returncode, stdout, stderr, timed_out keys — same
     shape as the old Claude subprocess call for drop-in compatibility.
     The `claude_cmd` parameter is ignored (Hermes resolves model via config).
-    The `tools` and `turns` parameters are encoded in the agent prompt header.
-    Tests monkey-patch this function to avoid hitting the real CLI.
+    The `tools` parameter is a comma-separated list (e.g., "Read,Write,Bash")
+    encoded in the AGENT_MODE prompt header. Tests monkey-patch this function
+    to avoid hitting the real CLI.
     """
     from .hermes_adapter import hermes_agent_call
 
     result = hermes_agent_call(
         prompt=prompt,
-        tools=tools != "none",
+        tools=len(tools) > 0,
         turns=turns,
         timeout=timeout,
         cwd=cwd,
@@ -550,9 +621,11 @@ def _run_claude_subprocess(
     }
 ```
 
-- [ ] **Step 2: Update `tests/test_phases_invoke.py` monkey-patch targets**
+Key point: `tools=len(tools) > 0` — the `tools` parameter is a comma-separated string like "Read,Write,Bash". We convert to boolean for `hermes_agent_call`. Non-empty means tools are enabled.
 
-The existing tests in `test_phases_invoke.py` already monkey-patch `_run_claude_subprocess` — since we kept the same function name and return shape, these patches continue to work without changes. Verify by running:
+- [ ] **Step 2: Verify existing tests still work**
+
+The existing tests in `test_phases_invoke.py` monkey-patch `_run_claude_subprocess` with lambdas returning dicts — since we kept the same function name and return dict shape, these patches work without changes.
 
 - [ ] **Step 3: Run phases invoke tests**
 
@@ -570,9 +643,11 @@ Expected: 7/7 PASS (these patch `_invoke_claude`, which still exists and calls `
 git add hermes_pipeline/phases.py
 git commit -m "feat: replace _run_claude_subprocess with hermes_agent_call
 
-- _run_claude_subprocess now calls hermes_adapter.hermes_agent_call()
-- Same return dict shape for drop-in compatibility
-- tests/test_phases_invoke.py patches still work unchanged"
+- _run_claude_subprocess now delegates to hermes_adapter.hermes_agent_call()
+- Same function name and return dict shape for drop-in compatibility
+- claude_cmd parameter ignored (Hermes resolves model from config)
+- tools string converted to boolean (non-empty = enabled)
+- test_phases_invoke.py patches continue to work unchanged"
 ```
 
 ---
@@ -584,7 +659,7 @@ git commit -m "feat: replace _run_claude_subprocess with hermes_agent_call
 
 - [ ] **Step 1: Remove `anthropic>=0.40` from dependencies**
 
-In `pyproject.toml`, replace:
+In `pyproject.toml`:
 
 **Before:**
 ```toml
@@ -620,7 +695,8 @@ git add pyproject.toml uv.lock
 git commit -m "feat: remove anthropic dependency — all LLM traffic via hermes
 
 - anthropic>=0.40 removed from pyproject.toml
-- All tests pass with hermes_adapter as the only LLM backend"
+- All tests pass with hermes_adapter as the only LLM backend
+- Model policy (fallback, auth, pinning) now managed by Hermes"
 ```
 
 ---
@@ -634,31 +710,47 @@ git commit -m "feat: remove anthropic dependency — all LLM traffic via hermes
 Run: `rg "import anthropic|from anthropic" hermes_pipeline/`
 Expected: 0 matches — no Anthropic imports anywhere in the codebase.
 
-- [ ] **Step 2: Verify all tests pass**
+- [ ] **Step 2: Verify no Anthropic SDK usage**
+
+Run: `rg "Anthropic(" hermes_pipeline/`
+Expected: 0 matches.
+
+- [ ] **Step 3: Verify all tests pass**
 
 Run: `uv run pytest -v --tb=short`
 Expected: ALL PASS
 
-- [ ] **Step 3: Verify TODO-6 success criteria from codex-review-corrected-plan.md**
+- [ ] **Step 4: Verify TODO-6 success criteria**
 
-Checklist:
+From the corrected plan and design doc:
 1. `uv run pytest` passes — all existing tests green
 2. `anthropic` removed from `pyproject.toml` — no direct SDK calls
 3. Two call sites replaced: `_hermes_call` in `decision/agent.py`, `hermes_agent_call` in `phases.py`
 4. Error handling works — `HermesCallError` raised on non-zero exit
+5. Model fallback handled by Hermes via `hermes fallback` — no custom logic
 
-- [ ] **Step 4: Update TODOS.md**
+- [ ] **Step 5: Update TODOS.md**
 
-Mark TODO-6 as done in `TODOS.md`:
+Mark TODO-6 as done in `TODOS.md`. Find the TODO-6 line and change:
 
-**Before:** `TODO-6: route LLM queries through \`hermes\` instead of direct Claude calls`
-**After:** `TODO-6 [x]: route LLM queries through \`hermes\` instead of direct Claude calls`
+**Before:**
+```
+TODO-6: route LLM queries through `hermes` instead of direct Claude calls
+```
 
-- [ ] **Step 5: Commit**
+**After:**
+```
+TODO-6 [x]: route LLM queries through `hermes` instead of direct Claude calls
+```
+
+- [ ] **Step 6: Commit**
 
 ```bash
 git add TODOS.md
-git commit -m "docs: mark TODO-6 done — LLM queries routed through hermes"
+git commit -m "docs: mark TODO-6 done — LLM queries routed through hermes
+
+Phase A complete: replaced two Anthropic call sites with hermes chat -q.
+Phase B (Kanban-Native) is a future migration per CEO plan."
 ```
 
 ---
@@ -670,24 +762,36 @@ git commit -m "docs: mark TODO-6 done — LLM queries routed through hermes"
 - [x] Replace _anthropic_call with hermes_call → Task 2
 - [x] Replace _run_claude_subprocess with hermes_agent_call → Task 3
 - [x] Remove anthropic from pyproject.toml → Task 4
-- [x] Run all tests → Task 4 Step 3, Task 5 Step 2
-- [x] Error handling (HermesCallError) → Task 1 tests
-- [x] PID tracking (on_pid callback) → Task 1 hermes_agent_call tests
-- [x] Timeout handling → Task 1 timeout test
+- [x] Run all tests → Task 4 Step 3, Task 5 Step 3
+- [x] Error handling (HermesCallError with returncode/stderr) → Task 1 tests
+- [x] PID tracking (on_pid callback) → Task 1 test
+- [x] Timeout handling → Task 1 test
+- [x] Model resolution ("auto" omits -m flag) → Task 1 test
+- [x] Tools encoding in AGENT_MODE header → Task 1 test
+- [x] --source tool flag → Task 1 tests
+- [x] Verify no Anthropic imports remain → Task 5 Step 1-2
 
 **2. Placeholder scan:** No "TBD", "TODO", "implement later" found. Every step has code blocks or exact commands.
 
 **3. Type consistency:**
 - `HermesAgentResult` defined in Task 1, used in Task 3 — field names match (`returncode`, `stdout`, `stderr`, `timed_out`)
-- `HermesCallError` defined in Task 1, tested in Task 1
+- `HermesCallError` defined in Task 1, tested in Task 1 — includes `returncode` and `stderr` attributes
 - `_run_claude_subprocess` return dict shape preserved — `{"returncode": ..., "stdout": ..., "stderr": ..., "timed_out": ...}` — same as before
-- Monkey-patch targets in Task 2 (`_hermes_call`) and Task 3 (no change needed — `_run_claude_subprocess` name preserved)
+- Import path in Task 2: `from .. import hermes_adapter` — correct for `hermes_pipeline/decision/agent.py` (parent of `decision` is `hermes_pipeline`)
+- Import path in Task 3: `from .hermes_adapter import hermes_agent_call` — correct for `hermes_pipeline/phases.py` (same package level)
+- Monkey-patch targets: Task 2 patches `_hermes_call`, Task 3 patches stay on `_run_claude_subprocess` (unchanged name)
+
+**4. Source doc alignment:**
+- [x] Design doc Phase 1: "Replace _anthropic_call() with hermes chat -q, add hermes fallback config, remove anthropic" — covered (fallback is Hermes-native, no Python config needed)
+- [x] CEO plan Phase A: "Replace two call sites, keep state machine, keep tests" — covered
+- [x] CEO plan: "hermes model sets default model+provider" — covered via "auto" model parameter
+- [x] Codex corrected plan: all Phase A steps covered
 
 ---
 
-Plan complete. Two execution options:
+Plan complete and saved to `docs/superpowers/plans/2026-06-15-todo-6-hermes-adapter.md`. Two execution options:
 
-**1. Subagent-Driven (recommended)** — Dispatch a fresh subagent per task, review between tasks, fast iteration.
+**1. Subagent-Driven (recommended)** — I dispatch a fresh subagent per task, review between tasks, fast iteration.
 
 **2. Inline Execution** — Execute tasks in this session using executing-plans, batch execution with checkpoints.
 
