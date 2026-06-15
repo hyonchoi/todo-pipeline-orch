@@ -3,12 +3,15 @@
 Two functions:
 - hermes_call(): simple one-shot query (replaces _anthropic_call in decision/agent.py)
 - hermes_agent_call(): agent-style subprocess with PID tracking (replaces
-  _run_hermes_subprocess in phases.py)
+  _run_claude_subprocess in phases.py)
 """
 from __future__ import annotations
 
 import subprocess
 from dataclasses import dataclass
+
+MAX_ERROR_OUTPUT = 300  # chars of stdout/stderr to include in error messages
+HERMES_AGENT_DEFAULT_TIMEOUT = 1800  # 30-minute default for agent calls
 
 
 class HermesCallError(Exception):
@@ -69,8 +72,8 @@ def hermes_call(
         raise HermesCallError(
             message=(
                 f"hermes chat failed: rc={result.returncode} "
-                f"stdout={result.stdout[:300]} "
-                f"stderr={result.stderr[:300]}"
+                f"stdout={result.stdout[:MAX_ERROR_OUTPUT]} "
+                f"stderr={result.stderr[:MAX_ERROR_OUTPUT]}"
             ),
             returncode=result.returncode,
             stderr=result.stderr,
@@ -85,7 +88,7 @@ def hermes_agent_call(
     model: str = "auto",
     tools: str = "",
     turns: int = 25,
-    timeout: int = 1800,
+    timeout: int = HERMES_AGENT_DEFAULT_TIMEOUT,
     cwd: str | None = None,
     on_pid: callable | None = None,
 ) -> HermesAgentResult:

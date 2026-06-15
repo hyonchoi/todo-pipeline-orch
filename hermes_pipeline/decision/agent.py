@@ -2,7 +2,6 @@
 from __future__ import annotations
 import hashlib
 import json
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from .schema import SelectionContext
@@ -64,6 +63,10 @@ def build_prompt(prompt_path: Path, ctx: SelectionContext) -> str:
     ]
     return "\n".join(parts)
 
+TOKENS_PER_SECOND = 100  # estimated throughput for timeout estimation
+MIN_TIMEOUT_SECONDS = 30  # minimum hermes call timeout
+MAX_TIMEOUT_SECONDS = 300  # maximum hermes call timeout (5 minutes)
+
 def _hermes_call(*, model: str, max_tokens: int, prompt: str) -> str:
     from .. import hermes_adapter
 
@@ -71,7 +74,7 @@ def _hermes_call(*, model: str, max_tokens: int, prompt: str) -> str:
     result = hermes_adapter.hermes_call(
         model=model,
         prompt=prompt,
-        timeout=min(max(max_tokens // 100, 30), 300),
+        timeout=min(max(max_tokens // TOKENS_PER_SECOND, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS),
     )
     return result
 
