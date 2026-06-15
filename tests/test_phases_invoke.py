@@ -136,3 +136,15 @@ def test_run_hermes_subprocess_timed_out_flag_propagates(monkeypatch):
     )
     assert result["timed_out"] is True
     assert result["returncode"] == -1
+
+
+def test_run_hermes_subprocess_propagates_exception(monkeypatch):
+    """_run_hermes_subprocess should propagate exceptions from hermes_agent_call."""
+    monkeypatch.setattr(
+        "hermes_pipeline.hermes_adapter.hermes_agent_call",
+        lambda **kw: (_ for _ in ()).throw(FileNotFoundError("hermes not found")),
+    )
+    with pytest.raises(FileNotFoundError, match="hermes not found"):
+        phases_mod._run_hermes_subprocess(
+            prompt="test", tools="Read", turns=5, timeout=30, cwd="/tmp",
+        )

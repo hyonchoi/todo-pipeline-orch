@@ -73,6 +73,7 @@ def hermes_call(
                 timeout=timeout,
                 input=prompt,
             )
+            last_err = None  # clear any prior transient error on success
             break
         except subprocess.TimeoutExpired:
             raise  # timeout is never transient

@@ -4,7 +4,6 @@ import json as _json
 import os as _os
 from dataclasses import dataclass
 from pathlib import Path
-import subprocess as _sp
 import yaml
 
 @dataclass(frozen=True)
@@ -140,8 +139,8 @@ class UnknownPhaseError(KeyError):
 def _render_phase_prompt(template: str, *, todo_id: str, tick_id: str, project_slug: str) -> str:
     """Inject the pipeline context the phase prompt needs.
 
-    A picked TODO must be visible to Claude — otherwise a TODO-7 pick can
-    silently produce work for whatever TODO Claude latches onto next. We
+    A picked TODO must be visible to the LLM — otherwise a TODO-7 pick can
+    silently produce work for whatever TODO the LLM latches onto next. We
     prepend a non-templated context header and ALSO support `{todo_id}` /
     `{tick_id}` / `{project_slug}` substitution for phases that want to
     weave the values into prose. `.format()` with named-only fields is safe

@@ -335,3 +335,99 @@ def test_hermes_agent_call_timeout_stderr_augmented():
 
     assert result.timed_out is True
     assert "[killed on timeout]" in result.stderr
+
+
+# === RETRY AND TIMEOUT EDGE-CASE TESTS (CRITICAL — pre-landing review) ===
+
+
+def test_hermes_call_retries_on_os_error():
+    """hermes_call should retry on transient OSError up to HERMES_RETRY_ATTEMPTS times
+    and call time.sleep between retries."""
+    call_count = [0]
+
+    def fake_run(*a, **kw):
+        call_count[0] += 1
+        if call_count[0] < 2:
+            raise OSError("Temporary network issue")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "ok"
+        result.stderr = ""
+        return result
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=fake_run):
+        with patch("hermes_pipeline.hermes_adapter.time.sleep") as mock_sleep:
+            result = hermes_call(prompt="test")
+
+    assert result == "ok"
+    assert call_count[0] == 2, "Should retry once after OSError"
+    mock_sleep.assert_called_once()
+
+
+def test_hermes_call_oserror_exhaust():
+    """When OSError persists across all retries, the last OSError should be raised."""
+    call_count = [0]
+
+    def always_fail(*a, **kw):
+        call_count[0] += 1
+        raise OSError("Persistent network failure")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=always_fail):
+        with pytest.raises(OSError, match="Persistent network failure"):
+            hermes_call(prompt="test")
+
+    assert call_count[0] == 3, "Should attempt 1 + 2 retries = 3 times"
+
+
+def test_hermes_call_retry_succeeds_on_second():
+    """When OSError occurs on first attempt but second succeeds, no further retries."""
+    call_count = [0]
+
+    def fail_once_then_succeed(*a, **kw):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise OSError("Transient failure")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "recovered"
+        result.stderr = ""
+        return result
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=fail_once_then_succeed):
+        result = hermes_call(prompt="test")
+
+    assert result == "recovered"
+    assert call_count[0] == 2
+
+
+def test_hermes_call_timeout_clamping():
+    """_hermes_call should clamp timeout to [MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS]."""
+    from hermes_pipeline.decision.agent import (
+        TOKENS_PER_SECOND,
+        MIN_TIMEOUT_SECONDS,
+        MAX_TIMEOUT_SECONDS,
+    )
+
+    captured_timeout = []
+
+    def fake_hermes_call(*, prompt, model, timeout):
+        captured_timeout.append(timeout)
+        return "ok"
+
+    with patch("hermes_pipeline.hermes_adapter.hermes_call", fake_hermes_call):
+        from hermes_pipeline.decision.agent import _hermes_call
+        # max_tokens=0 -> clamped to MIN (30s)
+        _hermes_call(model="m", max_tokens=0, prompt="test")
+        assert captured_timeout[-1] == MIN_TIMEOUT_SECONDS, "0 tokens should clamp to min"
+
+        # max_tokens=50 -> 50//100=0, clamped to MIN (30s)
+        _hermes_call(model="m", max_tokens=50, prompt="test")
+        assert captured_timeout[-1] == MIN_TIMEOUT_SECONDS, "50 tokens should clamp to min"
+
+        # max_tokens=5000 -> 5000//100=50s, no clamp
+        _hermes_call(model="m", max_tokens=5000, prompt="test")
+        assert captured_timeout[-1] == 50, "5000 tokens should be 50s"
+
+        # max_tokens=100000 -> 100000//100=1000s, clamped to MAX (300s)
+        _hermes_call(model="m", max_tokens=100000, prompt="test")
+        assert captured_timeout[-1] == MAX_TIMEOUT_SECONDS, "100k tokens should clamp to max"
