@@ -47,7 +47,7 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** `TODO-2`, `TODO-3`
   - **Decisions:** Priority `P3`, Effort `S`, Phase `2 (Design)`, Branch `feature/selection-model-fallback`, Test Coverage `필요`, Security Review `불필요`
 
-- [ ] **TODO-6: route LLM queries through `hermes` instead of direct Claude calls** — Hermes as the only LLM surface
+- [x] **TODO-6: route LLM queries through `hermes` instead of direct Claude calls** — Hermes as the only LLM surface
   - **What:** Remove any direct `claude`/Anthropic SDK invocations from the orchestrator and route all LLM queries through the `hermes` command.
   - **Why:** Direct Claude usage bypasses Hermes' control surface, breaking the Hermes-centered execution model and producing drift in prompt/model policy.
   - **Pros:** Centralizes LLM policy (model pinning, prompt SHA, fallback ladder) under Hermes; consistent with TODO-3's process-routing rule.
