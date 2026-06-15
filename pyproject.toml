@@ -5,7 +5,6 @@ description = "Autonomous TODOS.md pipeline orchestrator (Hermes-agent selection
 requires-python = ">=3.12"
 dependencies = [
     "pyyaml>=6.0",
-    "anthropic>=0.40",
     "python-ulid>=2.2",
 ]
 
