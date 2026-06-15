@@ -11,7 +11,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 ## Features
 
 - **Auto-tick discovery**: Scan all projects for TODOS.md changes and automatically select eligible TODOs
-- **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes API with SHA-pinned prompt, immutable decision records, and outcome sidecars
+- **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
 - **CLI subcommands**: `auto`, `merge`, `status`, `kill` for pipeline management
 - **Pending records table**: Display ready-for-review records with status and age
 - **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
@@ -97,7 +97,7 @@ Set these environment variables to customize behavior:
 |----------|---------|-------------|
 | `PIPELINE_LOCK_DIR` | `~/.hermes/locks` | Directory for merge operation locks |
 | `PIPELINE_PROJECTS_DIR` | (required) | Path to scan for `TODOS.md` files |
-| `PIPELINE_CLAUDE_CMD` | `claude` | Command to invoke Claude Code |
+| `PIPELINE_CLAUDE_CMD` | `claude` | Command to invoke Claude Code (deprecated in v0.3 — phases now use `hermes chat -q` instead) |
 | `PIPELINE_KANBAN_ADAPTER` | `null` | Kanban adapter: `hermes` or `null` |
 
 Example:
@@ -158,7 +158,7 @@ list.
 
 The package is organized into lanes:
 
-- **Lane A**: Hermes-agent selection (`decision/` — LLM-driven TODO pick via Hermes API, SHA-pinned prompt, immutable decision records + outcome sidecars). The deterministic `selection.py` was retired in v0.2.
+- **Lane A**: Hermes-agent selection (`decision/` — LLM-driven TODO pick via `hermes chat -q`, SHA-pinned prompt, immutable decision records + outcome sidecars). The deterministic `selection.py` was retired in v0.2.
 - **Lane B**: State management (locks, checkpoints, ready-for-review records, atomic tmp+rename writes)
 - **Lane C**: Kanban integration (active tasks, outbox, sync)
 - **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)

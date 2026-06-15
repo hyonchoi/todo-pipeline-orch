@@ -10,7 +10,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 - The state dir exists (`~/.hermes` by default, or whatever
   `PIPELINE_STATE_DIR` points to).
 - Python 3.12+ — the loader uses stdlib `tomllib`.
-- `ANTHROPIC_API_KEY` exported if you're enabling `auto_execute = true`. (Note: as of v0.3, the orchestrator routes through Hermes via `hermes_adapter.py`. Hermes resolves auth and model — but the env var may still be needed for legacy eval paths.)
+- Hermes installed and authenticated (`hermes login`) if you're enabling `auto_execute = true`.
 
 ## Steps
 

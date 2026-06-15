@@ -111,7 +111,7 @@ pointing at the wrong state dir. Check `PIPELINE_STATE_DIR`.
 
 **`no in-flight phase for TODO-7`.**
 The marker doesn't exist. If you expected one, the phase already terminated
-(check `.hermes/ready_for_review/7.json` and `.hermes/outcomes/<tick>.json`).
+(check `.hermes/ready_for_review/todo-7.json` and `.hermes/outcomes/<tick>.json`).
 
 **`warning: no child_pid or job_id on marker; cannot confirm kill`.**
 An older marker shape, or a phase that crashed mid-write. The command

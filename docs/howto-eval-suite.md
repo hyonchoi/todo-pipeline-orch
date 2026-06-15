@@ -1,6 +1,6 @@
 # How to run the selection eval suite
 
-Exercise the live Anthropic selection agent against a fixture battery and
+Exercise the live Hermes selection agent (routed through `hermes chat -q` as of v0.3) against a fixture battery and
 verify the model picks (or correctly refuses to pick) the expected TODO. Use
 this before changing `decision/agent.py`, the prompt template
 (`.hermes/prompts/selection.md`), or the pinned model id.
@@ -108,7 +108,9 @@ signal about whether the prompt is leading the model astray.
 - `tests/eval/**`
 
 The workflow is `continue-on-error: true` — eval failures inform, they do not
-block merge. `ANTHROPIC_API_KEY` must be set as a repo secret.
+block merge. `ANTHROPIC_API_KEY` must be set as a repo secret (the eval suite
+still checks for it as a skip gate). Hermes must be installed and authenticated
+on the runner for the agent calls to succeed.
 
 ## Troubleshooting
 
