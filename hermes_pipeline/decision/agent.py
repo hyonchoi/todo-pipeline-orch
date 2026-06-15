@@ -67,6 +67,7 @@ def build_prompt(prompt_path: Path, ctx: SelectionContext) -> str:
 def _hermes_call(*, model: str, max_tokens: int, prompt: str) -> str:
     from .. import hermes_adapter
 
+    # 1s per 100 tokens, min 30s, max 300s
     result = hermes_adapter.hermes_call(
         model=model,
         prompt=prompt,

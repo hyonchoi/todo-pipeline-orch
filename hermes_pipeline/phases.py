@@ -118,7 +118,7 @@ def _run_hermes_subprocess(
 
     result = hermes_agent_call(
         prompt=prompt,
-        tools=len(tools) > 0,
+        tools=tools,
         turns=turns,
         timeout=timeout,
         cwd=cwd,

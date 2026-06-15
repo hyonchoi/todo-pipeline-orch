@@ -69,6 +69,7 @@ def hermes_call(
         raise HermesCallError(
             message=(
                 f"hermes chat failed: rc={result.returncode} "
+                f"stdout={result.stdout[:300]} "
                 f"stderr={result.stderr[:300]}"
             ),
             returncode=result.returncode,
@@ -82,7 +83,7 @@ def hermes_agent_call(
     *,
     prompt: str,
     model: str = "auto",
-    tools: bool = True,
+    tools: str = "",
     turns: int = 25,
     timeout: int = 1800,
     cwd: str | None = None,
@@ -95,10 +96,19 @@ def hermes_agent_call(
     system prompt portion since `hermes chat -q` does not have --tools/--turns
     flags — Hermes manages those internally.
 
+    WARNING: Tool and turn constraints are prompt-only. `hermes chat -q` has
+    no per-call --tools or --turns flags, so the worker's actual access is
+    governed by Hermes config, not by the Phase's tools string. A phase
+    configured with ``tools: "Read"`` will get Hermes' full tool access unless
+    the Hermes config restricts it. TODO-6 follow-up: migrate to Hermes
+    per-call tool scoping once the CLI supports it.
+
     Args:
         prompt: The prompt text to send.
         model: Model identifier. "auto" lets Hermes resolve from config.
-        tools: Whether tools should be available (encoded in prompt, Hermes enforces).
+        tools: Comma-separated tool list (e.g. "Read,Write,Bash"). Empty string
+            means no tools. Passed in the prompt header — **not enforced** by
+            Hermes at the CLI level.
         turns: Maximum turns (encoded in prompt, Hermes enforces).
         timeout: Seconds before killing the process.
         cwd: Working directory for the subprocess.
@@ -107,11 +117,17 @@ def hermes_agent_call(
     Returns:
         HermesAgentResult with returncode, stdout, stderr, timed_out.
     """
-    # Build augmented prompt with agent constraints
-    tools_str = "enabled" if tools else "disabled"
+    # Build augmented prompt with agent constraints.
+    # Note: these constraints are advisory — Hermes chat -q lacks --tools/--turns.
+    if tools:
+        tools_str = tools
+        access_line = f"Available tools: {tools}. Do not use tools not listed."
+    else:
+        tools_str = "none"
+        access_line = "Do not use tools."
     agent_header = (
         f"AGENT_MODE: tools={tools_str}, max_turns={turns}. "
-        f"You have tool access. Complete the task within {turns} turns.\n\n"
+        f"{access_line} Complete the task within {turns} turns.\n\n"
     )
     augmented_prompt = agent_header + prompt
 
@@ -150,10 +166,13 @@ def hermes_agent_call(
 
     except subprocess.TimeoutExpired:
         proc.kill()
-        stdout, stderr = proc.communicate()
+        try:
+            stdout, stderr = proc.communicate()
+        except KeyboardInterrupt:
+            raise
         return HermesAgentResult(
             returncode=-1,
             stdout=stdout or "",
-            stderr=stderr or "",
+            stderr=stderr + " [killed on timeout]",
             timed_out=True,
         )

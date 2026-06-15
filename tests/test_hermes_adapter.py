@@ -107,7 +107,7 @@ def test_hermes_agent_call_returns_result_on_success():
         result = hermes_agent_call(
             prompt="do something",
             model="claude-sonnet-4-6",
-            tools=True,
+            tools="Read,Write,Bash",
             turns=15,
             on_pid=pid_seen.append,
         )
@@ -128,7 +128,7 @@ def test_hermes_agent_call_encodes_tools_in_prompt():
     with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
         hermes_agent_call(
             prompt="do something",
-            tools=True,
+            tools="Read,Write",
             turns=15,
         )
 
@@ -136,9 +136,31 @@ def test_hermes_agent_call_encodes_tools_in_prompt():
     comm_args = fake_proc.communicate.call_args
     prompt_arg = comm_args[1]["input"] if comm_args[1] else comm_args[0][0]
     assert "AGENT_MODE" in prompt_arg
-    assert "tools=enabled" in prompt_arg
+    assert "tools=Read,Write" in prompt_arg
+    assert "Available tools: Read,Write" in prompt_arg
     assert "max_turns=15" in prompt_arg
     assert "do something" in prompt_arg
+
+
+def test_hermes_agent_call_no_tools_prompt_not_contradictory():
+    fake_proc = MagicMock()
+    fake_proc.returncode = 0
+    fake_proc.pid = 12345
+    fake_proc.communicate.return_value = ("ok", "")
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        hermes_agent_call(
+            prompt="no tools here",
+            tools="",
+            turns=10,
+        )
+
+    comm_args = fake_proc.communicate.call_args
+    prompt_arg = comm_args[1]["input"] if comm_args[1] else comm_args[0][0]
+    assert "tools=none" in prompt_arg
+    assert "Do not use tools." in prompt_arg
+    # Must NOT contain the contradictory "You have tool access"
+    assert "You have tool access" not in prompt_arg
 
 
 def test_hermes_agent_call_handles_timeout():
@@ -176,7 +198,39 @@ def test_hermes_agent_call_respects_cwd():
     with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc) as mock_popen:
         hermes_agent_call(
             prompt="test",
+            tools="Read",
             cwd="/some/path",
         )
 
     assert mock_popen.call_args[1]["cwd"] == "/some/path"
+
+
+def test_hermes_agent_call_keyboard_interrupt_not_masked():
+    """KeyboardInterrupt during post-timeout communicate must propagate."""
+    fake_proc = MagicMock()
+    fake_proc.pid = 77777
+
+    def communicate(input=None, timeout=None):
+        raise KeyboardInterrupt()
+
+    fake_proc.communicate = communicate
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        with pytest.raises(KeyboardInterrupt):
+            hermes_agent_call(
+                prompt="slow task",
+                tools="Read",
+                timeout=10,
+            )
+
+
+def test_hermes_call_error_includes_stdout():
+    """HermesCallError message should include stdout for debugging."""
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = "partial result"
+    fake_result.stderr = "E100: error"
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        with pytest.raises(HermesCallError, match="partial result"):
+            hermes_call(prompt="hello")
