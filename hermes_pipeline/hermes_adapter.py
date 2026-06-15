@@ -3,7 +3,7 @@
 Two functions:
 - hermes_call(): simple one-shot query (replaces _anthropic_call in decision/agent.py)
 - hermes_agent_call(): agent-style subprocess with PID tracking (replaces
-  _run_claude_subprocess in phases.py)
+  _run_hermes_subprocess in phases.py)
 """
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ class HermesCallError(Exception):
 @dataclass(frozen=True)
 class HermesAgentResult:
     """Result from an agent-style hermes call — matches the shape of
-    _run_claude_subprocess return value for drop-in compatibility."""
+    _run_hermes_subprocess return value for drop-in compatibility."""
     returncode: int
     stdout: str
     stderr: str
@@ -51,7 +51,6 @@ def hermes_call(
     """
     cmd = [
         "hermes", "chat", "-q",
-        prompt,
         "-Q",
     ]
     if model != "auto":
@@ -63,6 +62,7 @@ def hermes_call(
         capture_output=True,
         text=True,
         timeout=timeout,
+        input=prompt,
     )
 
     if result.returncode != 0:
@@ -90,7 +90,7 @@ def hermes_agent_call(
 ) -> HermesAgentResult:
     """Call `hermes chat -q` in agent mode and return structured result.
 
-    Drop-in replacement for _run_claude_subprocess. The prompt is augmented
+    Drop-in replacement for _run_hermes_subprocess. The prompt is augmented
     with agent constraints (tools availability, turn limit) encoded in the
     system prompt portion since `hermes chat -q` does not have --tools/--turns
     flags — Hermes manages those internally.
@@ -118,7 +118,6 @@ def hermes_agent_call(
     try:
         cmd = [
             "hermes", "chat", "-q",
-            augmented_prompt,
             "-Q",
         ]
         if model != "auto":
@@ -127,6 +126,7 @@ def hermes_agent_call(
 
         proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -140,7 +140,7 @@ def hermes_agent_call(
             except Exception:
                 pass
 
-        stdout, stderr = proc.communicate(timeout=timeout)
+        stdout, stderr = proc.communicate(input=augmented_prompt, timeout=timeout)
         return HermesAgentResult(
             returncode=proc.returncode or 0,
             stdout=stdout or "",

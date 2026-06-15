@@ -1,4 +1,4 @@
-"""The phases._invoke_claude body must produce a ready_for_review record
+"""The phases._invoke_hermes body must produce a ready_for_review record
 identical to what watcher.run_phase produced before extraction."""
 from __future__ import annotations
 import json
@@ -25,10 +25,10 @@ def test_invoke_writes_ready_for_review_on_terminal_phase(state_dir, monkeypatch
         _fake_phase(phase_key="phase_8_finish_branch", terminal=True),
     ])
     monkeypatch.setattr(
-        phases_mod, "_run_claude_subprocess",
+        phases_mod, "_run_hermes_subprocess",
         lambda **kw: {"returncode": 0, "stdout": "phase ok"},
     )
-    out = phases_mod._invoke_claude(
+    out = phases_mod._invoke_hermes(
         todo_id="TODO-7",
         phase_key="phase_8_finish_branch",
         tick_id="01JT",
@@ -48,10 +48,10 @@ def test_invoke_does_not_write_rfr_for_non_terminal_phase(state_dir, monkeypatch
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     monkeypatch.setattr(
-        phases_mod, "_run_claude_subprocess",
+        phases_mod, "_run_hermes_subprocess",
         lambda **kw: {"returncode": 0, "stdout": "phase ok"},
     )
-    phases_mod._invoke_claude(
+    phases_mod._invoke_hermes(
         todo_id="TODO-7", phase_key="phase_2_autoplan",
         tick_id="01JT", state_dir=state_dir, project_slug="demo",
     )
@@ -67,8 +67,8 @@ def test_invoke_passes_todo_context_into_prompt(state_dir, monkeypatch):
     def _capture(**kw):
         seen["prompt"] = kw["prompt"]
         return {"returncode": 0, "stdout": ""}
-    monkeypatch.setattr(phases_mod, "_run_claude_subprocess", _capture)
-    phases_mod._invoke_claude(
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    phases_mod._invoke_hermes(
         todo_id="TODO-7", phase_key="phase_2_autoplan",
         tick_id="01JT", state_dir=state_dir, project_slug="demo",
     )
@@ -82,7 +82,7 @@ def test_invoke_raises_on_unknown_phase_key(state_dir, monkeypatch):
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     with pytest.raises(phases_mod.UnknownPhaseError):
-        phases_mod._invoke_claude(
+        phases_mod._invoke_hermes(
             todo_id="TODO-7", phase_key="bogus",
             tick_id="01JT", state_dir=state_dir, project_slug="demo",
         )
@@ -92,11 +92,11 @@ def test_invoke_propagates_subprocess_failure(state_dir, monkeypatch):
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     monkeypatch.setattr(
-        phases_mod, "_run_claude_subprocess",
+        phases_mod, "_run_hermes_subprocess",
         lambda **kw: {"returncode": 2, "stdout": "boom"},
     )
     with pytest.raises(RuntimeError, match="phase failed"):
-        phases_mod._invoke_claude(
+        phases_mod._invoke_hermes(
             todo_id="TODO-7", phase_key="phase_2_autoplan",
             tick_id="01JT", state_dir=state_dir, project_slug="demo",
         )

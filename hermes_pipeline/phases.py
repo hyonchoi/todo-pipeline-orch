@@ -97,9 +97,8 @@ def _delete_marker(state_dir: Path, todo_id: str, *, tick_id: str | None = None)
     except FileNotFoundError:
         pass
 
-def _run_claude_subprocess(
+def _run_hermes_subprocess(
     *,
-    claude_cmd: str,
     prompt: str,
     tools: str,
     turns: int,
@@ -111,7 +110,6 @@ def _run_claude_subprocess(
 
     Returns a dict with returncode, stdout, stderr, timed_out keys — same
     shape as the old Claude subprocess call for drop-in compatibility.
-    The `claude_cmd` parameter is ignored (Hermes resolves model via config).
     The `tools` parameter is a comma-separated list (e.g., "Read,Write,Bash")
     encoded in the AGENT_MODE prompt header. Tests monkey-patch this function
     to avoid hitting the real CLI.
@@ -162,8 +160,8 @@ def _render_phase_prompt(template: str, *, todo_id: str, tick_id: str, project_s
         body = template
     return header + body
 
-def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
-    """Execute a single phase via Claude subprocess and write ready_for_review on terminal success."""
+def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
+    """Execute a single phase via hermes subprocess and write ready_for_review on terminal success."""
     phases_cfg = {p.phase_key: p for p in load_phases()}
     phase = phases_cfg.get(phase_key)
     if phase is None:
@@ -181,8 +179,7 @@ def _invoke_claude(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
         phase.prompt, todo_id=todo_id, tick_id=tick_id, project_slug=project_slug,
     )
 
-    result = _run_claude_subprocess(
-        claude_cmd=kw.get("claude_cmd", "claude"),
+    result = _run_hermes_subprocess(
         prompt=prompt,
         tools=phase.tools,
         turns=phase.turns,
@@ -233,7 +230,7 @@ def run(
 ) -> dict:
     """Library entrypoint for phase execution. Owns the phase_started marker.
 
-    Marker write must happen BEFORE any Claude invocation so that the next
+    Marker write must happen BEFORE any Hermes invocation so that the next
     pipeline-tick sees this TODO as in-flight even if we crash mid-phase.
 
     On failure, writes a `failed_at_phase_<phase_key>` outcome sidecar so the
@@ -242,7 +239,7 @@ def run(
     sd = Path(state_dir)
     _write_marker(sd, todo_id=todo_id, tick_id=tick_id, phase_key=phase_key)
     try:
-        result = _invoke_claude(todo_id=todo_id, phase_key=phase_key, tick_id=tick_id, state_dir=sd, **kw)
+        result = _invoke_hermes(todo_id=todo_id, phase_key=phase_key, tick_id=tick_id, state_dir=sd, **kw)
     except Exception as e:
         # Record the failure outcome before the marker disappears. The
         # decision/store path is write-once; swallow FileExistsError so we

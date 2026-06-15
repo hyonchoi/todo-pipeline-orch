@@ -61,12 +61,13 @@ def test_hermes_call_passes_correct_args():
     cmd = mock_run.call_args[0][0]
     assert cmd == [
         "hermes", "chat", "-q",
-        "test prompt",
         "-Q",
         "-m", "claude-sonnet-4-6",
         "--source", "tool",
     ]
     assert mock_run.call_args[1]["timeout"] == 60
+    # Prompt is passed via stdin, not as a CLI arg
+    assert mock_run.call_args[1]["input"] == "test prompt"
 
 
 def test_hermes_call_omits_model_flag_when_auto():
@@ -80,6 +81,18 @@ def test_hermes_call_omits_model_flag_when_auto():
 
     cmd = mock_run.call_args[0][0]
     assert "-m" not in cmd
+
+
+def test_hermes_call_returns_empty_string_on_no_output():
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = ""
+    fake_result.stderr = ""
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        result = hermes_call(prompt="test", model="auto")
+
+    assert result == ""
 
 
 def test_hermes_agent_call_returns_result_on_success():
@@ -112,18 +125,16 @@ def test_hermes_agent_call_encodes_tools_in_prompt():
     fake_proc.pid = 12345
     fake_proc.communicate.return_value = ("ok", "")
 
-    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc) as mock_popen:
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
         hermes_agent_call(
             prompt="do something",
             tools=True,
             turns=15,
         )
 
-    # The spawned command should include an augmented prompt with AGENT_MODE header
-    cmd = mock_popen.call_args[0][0]
-    # Find the prompt argument (comes after -q)
-    q_idx = cmd.index("-q")
-    prompt_arg = cmd[q_idx + 1]
+    # The augmented prompt is passed via stdin to communicate()
+    comm_args = fake_proc.communicate.call_args
+    prompt_arg = comm_args[1]["input"] if comm_args[1] else comm_args[0][0]
     assert "AGENT_MODE" in prompt_arg
     assert "tools=enabled" in prompt_arg
     assert "max_turns=15" in prompt_arg
@@ -136,7 +147,7 @@ def test_hermes_agent_call_handles_timeout():
 
     call_count = [0]
 
-    def communicate(timeout=None):
+    def communicate(input=None, timeout=None):
         call_count[0] += 1
         if call_count[0] == 1:
             raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)

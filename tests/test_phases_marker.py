@@ -22,7 +22,7 @@ def test_marker_written_before_invocation(state_dir):
         seen.append(_phase_marker(state_dir, "TODO-7").exists())
         return {"status": "success"}
 
-    with patch.object(phases_mod, "_invoke_claude", _fake_invoke):
+    with patch.object(phases_mod, "_invoke_hermes", _fake_invoke):
         phases_mod.run(
             state_dir=state_dir,
             todo_id="TODO-7",
@@ -32,7 +32,7 @@ def test_marker_written_before_invocation(state_dir):
     assert seen == [True], "marker must exist when claude invocation begins"
 
 def test_marker_deleted_on_success(state_dir):
-    with patch.object(phases_mod, "_invoke_claude", lambda *a, **kw: {"status": "success"}):
+    with patch.object(phases_mod, "_invoke_hermes", lambda *a, **kw: {"status": "success"}):
         phases_mod.run(state_dir=state_dir, todo_id="TODO-7", tick_id="01JT", phase_key="autoplan")
     assert not _phase_marker(state_dir, "TODO-7").exists()
 
@@ -40,7 +40,7 @@ def test_marker_deleted_on_failure(state_dir):
     def _boom(*a, **kw):
         raise RuntimeError("phase blew up")
 
-    with patch.object(phases_mod, "_invoke_claude", _boom):
+    with patch.object(phases_mod, "_invoke_hermes", _boom):
         with pytest.raises(RuntimeError):
             phases_mod.run(state_dir=state_dir, todo_id="TODO-7", tick_id="01JT", phase_key="autoplan")
     assert not _phase_marker(state_dir, "TODO-7").exists()
@@ -67,7 +67,7 @@ def test_run_writes_failed_outcome_on_phase_failure(state_dir, tmp_path):
     from hermes_pipeline import phases as phases_mod
     def _boom(*a, **kw):
         raise RuntimeError("phase blew up")
-    with _patch.object(phases_mod, "_invoke_claude", _boom):
+    with _patch.object(phases_mod, "_invoke_hermes", _boom):
         with pytest.raises(RuntimeError):
             phases_mod.run(state_dir=state_dir, todo_id="TODO-7", tick_id="01JFAIL", phase_key="autoplan")
     out = state_dir / "outcomes" / "01JFAIL.json"
@@ -84,7 +84,7 @@ def test_marker_contains_tick_id_and_started_at(state_dir):
         captured.update(json.loads(marker.read_text()))
         return {"status": "success"}
 
-    with patch.object(phases_mod, "_invoke_claude", _fake_invoke):
+    with patch.object(phases_mod, "_invoke_hermes", _fake_invoke):
         phases_mod.run(state_dir=state_dir, todo_id="TODO-7", tick_id="01JT", phase_key="autoplan")
     assert captured["tick_id"] == "01JT"
     assert "started_at" in captured
