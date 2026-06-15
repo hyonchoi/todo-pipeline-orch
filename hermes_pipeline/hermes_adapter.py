@@ -2,8 +2,8 @@
 
 Two functions:
 - hermes_call(): simple one-shot query (replaces _anthropic_call in decision/agent.py)
-- hermes_agent_call(): agent-style subprocess with PID tracking (replaces
-  _run_claude_subprocess in phases.py)
+- hermes_agent_call(): agent-style subprocess with PID tracking (wraps
+  _run_hermes_subprocess in phases.py)
 """
 from __future__ import annotations
 
@@ -15,6 +15,10 @@ from dataclasses import dataclass
 
 MAX_ERROR_OUTPUT = 300  # chars of stdout/stderr to include in error messages
 HERMES_AGENT_DEFAULT_TIMEOUT = 1800  # 30-minute default for agent calls
+HERMES_CALL_DEFAULT_TIMEOUT = 120  # default timeout for simple hermes_call
+HERMES_VERSION_TIMEOUT = 10  # timeout for hermes --version check
+HERMES_POST_KILL_COMMUNICATE_TIMEOUT = 5  # timeout after SIGKILL to drain output
+HERMES_POST_KILL_FALLBACK_TIMEOUT = 2  # fallback timeout if post-kill communicate hangs
 HERMES_RETRY_ATTEMPTS = 2  # retries for transient CLI failures
 HERMES_RETRY_DELAY = 1  # seconds between retries
 
@@ -44,7 +48,7 @@ def hermes_call(
     *,
     prompt: str,
     model: str = "auto",
-    timeout: int = 120,
+    timeout: int = HERMES_CALL_DEFAULT_TIMEOUT,
 ) -> str:
     """Call `hermes chat -q` and return stripped stdout.
 
@@ -120,7 +124,7 @@ def check_hermes() -> str:
             ["hermes", "--version"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=HERMES_VERSION_TIMEOUT,
         )
     except FileNotFoundError as exc:
         raise HermesDependencyError(
@@ -129,7 +133,7 @@ def check_hermes() -> str:
         ) from exc
     except subprocess.TimeoutExpired as exc:
         raise HermesDependencyError(
-            "hermes --version timed out (10s). Is the process hung?"
+            f"hermes --version timed out ({HERMES_VERSION_TIMEOUT}s). Is the process hung?"
         ) from exc
 
     if result.returncode != 0:
@@ -246,10 +250,15 @@ def hermes_agent_call(
         except ProcessLookupError:
             pass  # process group already gone
         try:
-            stdout, stderr = proc.communicate(timeout=5)
+            stdout, stderr = proc.communicate(timeout=HERMES_POST_KILL_COMMUNICATE_TIMEOUT)
         except subprocess.TimeoutExpired:
             # Final fallback — shouldn't happen after SIGKILL, but be safe.
-            stdout, stderr = proc.communicate(timeout=2)
+            try:
+                stdout, stderr = proc.communicate(timeout=HERMES_POST_KILL_FALLBACK_TIMEOUT)
+            except subprocess.TimeoutExpired:
+                # Even the 2s fallback timed out — return whatever we have.
+                stdout = ""
+                stderr = "[killed on timeout; communicate failed even after fallback]"
         except KeyboardInterrupt:
             raise
         return HermesAgentResult(

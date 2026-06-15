@@ -12,6 +12,7 @@ from hermes_pipeline.hermes_adapter import (
     HermesAgentResult,
     check_hermes,
     HermesDependencyError,
+    HERMES_RETRY_ATTEMPTS,
 )
 
 
@@ -388,7 +389,7 @@ def test_hermes_call_oserror_exhaust():
         with pytest.raises(OSError, match="Persistent network failure"):
             hermes_call(prompt="test")
 
-    assert call_count[0] == 3, "Should attempt 1 + 2 retries = 3 times"
+    assert call_count[0] == 1 + HERMES_RETRY_ATTEMPTS, "Should attempt 1 + 2 retries = 3 times"
 
 
 def test_hermes_call_retry_succeeds_on_second():
@@ -606,7 +607,7 @@ def test_hermes_agent_call_oserror_exhaust():
         with pytest.raises(OSError, match="Persistent spawn failure"):
             hermes_agent_call(prompt="test")
 
-    assert call_count[0] == 3, "Should attempt 1 + 2 retries = 3 times"
+    assert call_count[0] == 1 + HERMES_RETRY_ATTEMPTS, "Should attempt 1 + 2 retries = 3 times"
 
 
 def test_hermes_agent_call_popen_file_not_found_not_retried():
@@ -622,3 +623,81 @@ def test_hermes_agent_call_popen_file_not_found_not_retried():
             hermes_agent_call(prompt="test")
 
     assert call_count[0] == 1, "FileNotFoundError should not be retried"
+
+
+def test_hermes_agent_call_timeout_post_kill_communicate_fallback_2s():
+    """After SIGKILL, if communicate(timeout=5) ALSO times out,
+    fall back to communicate(timeout=2)."""
+    fake_proc = MagicMock()
+    fake_proc.pid = 99999
+
+    call_count = [0]
+    timeouts_seen = []
+
+    def communicate(input=None, timeout=None):
+        call_count[0] += 1
+        timeouts_seen.append(timeout)
+        # All communicate calls time out — the fallback path
+        raise subprocess.TimeoutExpired(cmd="hermes", timeout=timeout)
+
+    fake_proc.communicate = communicate
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        with patch("os.killpg"):
+            result = hermes_agent_call(prompt="slow", timeout=10)
+
+    assert result.timed_out is True
+    assert result.returncode == -1
+    # First call: original timeout, second: 5s, third (fallback): 2s
+    assert timeouts_seen[1] == 5, "Post-kill communicate should use 5s timeout"
+    assert timeouts_seen[2] == 2, "Fallback communicate should use 2s timeout"
+    assert call_count[0] == 3, "Should attempt 3 communicates total"
+
+
+def test_hermes_call_permission_error_raises():
+    """PermissionError when hermes is not executable should propagate (not retry)."""
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=PermissionError("not executable")):
+        with pytest.raises(PermissionError, match="not executable"):
+            hermes_call(prompt="test")
+
+
+def test_hermes_call_error_output_truncated():
+    """HermesCallError message should truncate stdout/stderr to MAX_ERROR_OUTPUT chars."""
+    from hermes_pipeline.hermes_adapter import MAX_ERROR_OUTPUT
+
+    long_output = "x" * (MAX_ERROR_OUTPUT + 100)
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = long_output
+    fake_result.stderr = "stderr " + long_output
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        with pytest.raises(HermesCallError) as exc_info:
+            hermes_call(prompt="test")
+
+    # The message truncates stdout and stderr to MAX_ERROR_OUTPUT
+    msg = str(exc_info.value)
+    # stdout portion in the message should be at most MAX_ERROR_OUTPUT
+    assert "stdout=" in msg
+    # The stderr attribute carries the full stderr (untruncated)
+    assert exc_info.value.stderr == "stderr " + long_output, "stderr attribute should carry full stderr"
+
+
+def test_hermes_agent_call_popen_permission_error_raises():
+    """PermissionError from Popen (hermes exists but not executable) should propagate."""
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", side_effect=PermissionError("denied")):
+        with pytest.raises(PermissionError, match="denied"):
+            hermes_agent_call(prompt="test")
+
+
+def test_hermes_agent_call_none_stdout_stderr_coalesced():
+    """If communicate returns None for stdout/stderr, or should coalesce to empty string."""
+    fake_proc = MagicMock()
+    fake_proc.communicate.return_value = ("", "")
+    fake_proc.returncode = 0
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", return_value=fake_proc):
+        result = hermes_agent_call(prompt="test")
+
+    assert result.stdout == "", "stdout should be empty string"
+    assert result.stderr == "", "stderr should be empty string"

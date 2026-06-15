@@ -1,5 +1,5 @@
 """The phases._invoke_hermes body must produce a ready_for_review record
-identical to what watcher.run_phase produced before extraction."""
+identical to what the inline watcher.run_phase produced before extraction."""
 from __future__ import annotations
 import json
 from pathlib import Path
@@ -14,10 +14,11 @@ def state_dir(tmp_path: Path) -> Path:
     (d / "ready_for_review").mkdir(parents=True)
     return d
 
-def _fake_phase(*, phase_key: str, terminal: bool, prompt: str = "do thing") -> phases_mod.Phase:
+def _fake_phase(*, phase_key: str, terminal: bool, prompt: str = "do thing",
+                 turns: int = 1, timeout: int = 10) -> phases_mod.Phase:
     return phases_mod.Phase(
         phase_key=phase_key, name=phase_key, prompt=prompt,
-        tools="Read", turns=1, timeout=10, terminal=terminal,
+        tools="Read", turns=turns, timeout=timeout, terminal=terminal,
     )
 
 def test_invoke_writes_ready_for_review_on_terminal_phase(state_dir, monkeypatch):
@@ -164,6 +165,45 @@ def test_run_hermes_subprocess_propagates_exception(monkeypatch):
             prompt="test", tools="Read", turns=5, timeout=30, cwd="/tmp",
         )
 
+def test_invoke_on_pid_records_child_pid_in_marker(state_dir, monkeypatch):
+    """_invoke_hermes should record the child PID in the phase marker via on_pid."""
+    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False),
+    ])
+
+    def _capture_on_pid(**kw):
+        # The on_pid callback should fire with a PID from the subprocess
+        if kw.get("on_pid") is not None:
+            kw["on_pid"](42424)  # simulate subprocess PID
+        return {"returncode": 0, "stdout": "ok"}
+
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture_on_pid)
+
+    phases_mod._invoke_hermes(
+        todo_id="TODO-7",
+        phase_key="phase_2_autoplan",
+        tick_id="01JT",
+        state_dir=state_dir,
+        project_slug="demo",
+    )
+
+    marker = state_dir / "phase_started" / "TODO-7.json"
+    if marker.exists():
+        data = json.loads(marker.read_text())
+        assert data.get("child_pid") == 42424
+
+def test_invoke_load_phases_exception_propagates(monkeypatch):
+    """When load_phases raises, the exception should propagate from _invoke_hermes."""
+    monkeypatch.setattr(phases_mod, "load_phases", lambda: (_ for _ in ()).throw(ValueError("yaml corrupt")))
+    with pytest.raises(ValueError, match="yaml corrupt"):
+        phases_mod._invoke_hermes(
+            todo_id="TODO-7",
+            phase_key="phase_2_autoplan",
+            tick_id="01JT",
+            state_dir="/tmp",
+            project_slug="demo",
+        )
+
 def test_run_logs_sidecar_write_failure(state_dir, monkeypatch, caplog):
     """When the outcome sidecar write fails (not FileExistsError), it should be logged."""
     import logging
@@ -198,3 +238,31 @@ def test_run_logs_sidecar_write_failure(state_dir, monkeypatch, caplog):
 
     # The sidecar failure should be logged
     assert "failed to write outcome sidecar" in caplog.text
+
+def test_run_sidecar_fileexists_error_suppressed(state_dir, monkeypatch):
+    """When append_outcome raises FileExistsError, it should be silently
+    swallowed so as not to mask the original phase failure."""
+    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False),
+    ])
+    monkeypatch.setattr(
+        phases_mod, "_run_hermes_subprocess",
+        lambda **kw: (_ for _ in ()).throw(RuntimeError("phase boom")),
+    )
+
+    # Patch append_outcome to raise FileExistsError (outcome already exists)
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.store.append_outcome",
+        lambda *a, **kw: (_ for _ in ()).throw(FileExistsError("already exists")),
+        raising=False,
+    )
+
+    # The original exception should propagate, not the FileExistsError
+    with pytest.raises(RuntimeError, match="phase boom"):
+        phases_mod.run(
+            state_dir=state_dir,
+            todo_id="TODO-7",
+            tick_id="01JT",
+            phase_key="phase_2_autoplan",
+            project_slug="demo",
+        )

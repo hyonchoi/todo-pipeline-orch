@@ -97,3 +97,22 @@ def test_hermes_call_propagates_hermes_call_error(tmp_path, monkeypatch):
     )
     with pytest.raises(HermesCallError, match="hermes failed"):
         call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
+
+
+def test_hermes_call_negative_max_tokens_clamps(tmp_path, monkeypatch):
+    """Negative max_tokens should produce timeout=MIN_TIMEOUT_SECONDS, not error."""
+    p = _write_prompt(tmp_path)
+    called = []
+
+    def capture_hermes_call(*, prompt, model, timeout):
+        called.append(timeout)
+        return '{"picked":"TODO-1","rationale":"ok"}'
+
+    monkeypatch.setattr(
+        "hermes_pipeline.hermes_adapter.hermes_call",
+        capture_hermes_call,
+    )
+    call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=-1, expected_sha=None)
+    assert len(called) == 1
+    # -1 // 100 = -1, clamped to MIN_TIMEOUT_SECONDS (30)
+    assert called[0] == 30, f"Negative max_tokens should clamp to MIN_TIMEOUT_SECONDS, got {called[0]}"
