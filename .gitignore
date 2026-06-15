@@ -8,6 +8,11 @@ docs/gstack/**/.gbrain-*
 # Only allow tracking of human-readable documentation and plans
 !docs/gstack/**/*.md
 
+# ---- Environment files ----
+.env
+.env.*
+!.env.example
+
 # ---- Python ----
 __pycache__/
 *.py[cod]
