@@ -217,28 +217,6 @@ Add kanban-specific metadata to phase entries:
 
 ## GSTACK REVIEW REPORT
 
-| Review | Trigger | Why | Runs | Status | Findings |
-|--------|---------|-----|------|--------|----------|
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
-| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 5 issues, 0 critical gaps |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
-| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
-
-CROSS-MODEL: Outside voice (Claude subagent — Codex failed) found 15 findings. Key tension on kanban-as-scheduler execution model resolved: user confirmed kanban workers run phases as Hermes-native goals.
-VERDICT: ENG OPEN — 5 issues folded into design doc (Step 1.5 observe_outcomes, gateway as dispatch, manual intervention on phase failure, append_phase_outcome, temp file for kanban body). Additional outside-voice findings require design doc update (build_in_flight kanban query, circuit breaker JSONL integration, phase timeout enforcement, operator resume mechanism, pipeline-tick command registration).
-
-NO UNRESOLVED DECISIONS
-
-## GSTACK REVIEW REPORT — ENG FOLLOW-UP
-
-| Status | Date | Trigger | Notes |
-|--------|------|---------|-------|
-| issues_open | 2026-06-16 | `/plan-eng-review` | 5 outside-voice findings |
-| resolved | 2026-06-16 | Outside-voice resolution | OV-1 through OV-5 folded into design doc |
-
-VERDICT: ENG CLEARED — all outside-voice findings addressed (OV-1: `build_in_flight` kanban query, OV-2: circuit breaker JSONL integration, OV-3: phase timeout enforcement, OV-4: operator resume mechanism, OV-5: `pipeline-tick` command registration). Ready for implementation.
-
 ### OV-1: `build_in_flight` must query kanban status, not file markers
 
 **Problem:** The current `build_in_flight()` in `decision/context.py` reads file markers (`ready_for_review/` and `phase_started/` directories) to determine which TODOs are in-flight. With kanban-as-scheduler, the source of truth for "what's running" is the kanban board, not file markers. Relying on file markers creates a split-brain where the selection engine sees stale state.
@@ -408,3 +386,18 @@ hermes cron set pipeline-tick '*/5 * * * *' --command "uv run pipeline-watch tic
 ```
 
 Verify the exact cron registration mechanism against the Hermes CLI docs before implementation.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | clean | 14 findings, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+CROSS-MODEL: Codex (OpenAI) outside voice found 14 findings. Key tensions resolved: metadata format (title encoding), observe_from_outcomes replay bug (high-watermark), outcome storage (extend load_recent), python-ulid (reuse new_tick_id), idempotency keys (persist tick_id before registration), and strategic architecture (Kanban-as-scheduler confirmed).
+VERDICT: ENG CLEARED — all findings folded into design doc. Ready for implementation.
+
+NO UNRESOLVED DECISIONS

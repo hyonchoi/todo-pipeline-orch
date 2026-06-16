@@ -13,14 +13,21 @@ Repo: todo-pipeline-orchestrator
 - Prior tick complete → observe_outcomes writes phase outcomes to decision store before selection
 - Phase fails → downstream phases stay pending → manual intervention required → pipeline does NOT auto-resume
 - Selection picks None → circuit breaker counts no-progress
+- observe_from_outcomes replays correctly with high-watermark (no replay bug)
+- load_recent discovers *-phases.json JSONL outcomes
+- Idempotency key reuse on mid-registration retry (tick_id persisted before registration)
 
 ## Edge Cases
 - Cold start: no `.hermes/current_tick_id.txt` exists — first tick should proceed normally
 - Mid-registration failure: some kanban tasks created, rest fail → already-created tasks are archived, tick aborts
-- Idempotency retry: same tick_id + phase_key → hermes kanban deduplicates
+- Idempotency retry: same tick_id + phase_key → hermes kanban deduplicates (persisted before registration)
 - Kanban board unavailable during `observe_outcomes` → outcomes delayed one tick (5 min), not lost
 - Stale tick lock: prior tick died → TickLock sweeps stale lock, new tick proceeds
+- Kanban daemon not running → staleness check in tick counts as no-progress → Slack alert
+- observe_from_outcomes called multiple times → high-watermark prevents replay bug
+- new_tick_id() reuse instead of python-ulid — no new dependency
 
 ## Critical Paths
 - Cron fires → tick completes within 30 seconds → kanban tasks registered → gateway dispatches → phases run sequentially via --parent chain → all phases complete → next tick selects new TODO
 - Circuit breaker: N consecutive no-progress → cron backs off → Slack alert → operator intervenes
+- observe_from_outcomes reads JSONL → writes phase outcomes → load_recent discovers them → selection context updated
