@@ -18,7 +18,7 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** `TODO-10` (needs pipeline-tick to exist before there's something to trigger manually)
   - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `불필요`, Security Review `불필요`
 
-- [ ] **TODO-9: fix pre-existing eval test failure — missing `.hermes/prompts/selection.md`** — Eval infrastructure repair
+- [x] **TODO-9: fix pre-existing eval test failure — missing `.hermes/prompts/selection.md`** — Eval infrastructure repair
   - **What:** The eval test suite (`tests/eval/runner.py::test_selection_fixture`) fails on both `main` and feature branches because `.hermes/prompts/selection.md` does not exist. Create the prompt file or provision it from Hermes.
   - **Why:** Eval tests are the regression gate for selection-agent behavior. Without them, changes to `decision/agent.py` and prompt handling can silently regress.
   - **Context:** Noticed by gstack /ship on 2026-06-15 on branch `worktree-todo-6-hermes-adapter`. Error: `FileNotFoundError: [Errno 2] No such file or directory: '.hermes/prompts/selection.md'` at `hermes_pipeline/decision/agent.py:23` in `compute_prompt_sha()`. Test requires `ANTHROPIC_API_KEY` env var and a working Hermes install with the selection prompt.
