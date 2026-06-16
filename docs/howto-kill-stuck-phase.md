@@ -83,7 +83,7 @@ left orphans).
      .hermes/outcomes/<tick_id>.json
    ```
 
-3. If the killed tick owned the lock, the next `pipeline-watch auto` should
+3. If the killed tick owned the lock, the next Hermes cron tick should
    acquire the tick lock without complaining about a stale holder:
 
    ```bash

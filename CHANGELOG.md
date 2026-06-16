@@ -32,7 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Circuit breaker** — no-progress counter, cron backoff, Slack alert deduplication
 - **Atomic tick lock** — atomic-mkdir `tick.lock` with stale sweep; prevents duplicate ticks
 - **Phase markers** — `phase_started` marker write/delete around invocation; exclusive markers prevent double-run
-- **Kill subcommand** — `hermes-pipeline kill <phase>` for in-flight phases; confirms process exit, releases tick lock when owned
+- **Kill subcommand** — `pipeline-watch kill --todo TODO-N` or `--all` for in-flight phases; confirms process exit, releases tick lock when owned
 - **Outcome sidecar** — terminal `merge_status` transitions write outcome metadata (failed, killed_by_operator)
 - **Eval suite** — 8 selection-prompt fixtures with runner (`tests/eval/`); non-blocking eval workflow
 - **Operator how-to guides** — Diataxis-formatted guides for config, eval, kill, and prompt-sha-mismatch troubleshooting
@@ -41,7 +41,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 - **Directory structure flattened** — `hermes-pipeline/src/hermes_pipeline/` → `hermes_pipeline/`; `hermes-pipeline/tests/` → `tests/`; `hermes-pipeline/configs/` → `configs/`
 - **Raised minimum Python version** from >=3.9 to >=3.12
-- **Decision-driven pipeline** — watcher and CLI pruned to delegate selection to the Hermes decision engine
+- **Decision-driven pipeline** — watcher and CLI pruned to delegate selection and scheduling to Hermes
 
 ### Fixed
 - **Hallucinated picks rejected** — LLM must pick a TODO that exists in TODOS.md; rejects hallucinated IDs
@@ -53,6 +53,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 - **Deterministic `selection.py`** — replaced by Hermes LLM-driven decision engine
+- **`pipeline-watch auto` subcommand** — scheduling moved to Hermes cron (`hermes cron set pipeline-tick */5 * * * *`)
+- **System crontab registration** — `install-cron.sh` removed; tick schedule managed via `hermes cron set`
 - **Redundant `hermes-pipeline/README.md`** — documentation consolidated in root docs
 
 ## [0.3.0] - 2026-06-15

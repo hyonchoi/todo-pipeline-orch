@@ -106,10 +106,10 @@ ls -t .hermes/decisions/ | head -1
 ls -t .hermes/outcomes/ 2>/dev/null | head -1
 ```
 
-Or trigger one manually:
+Or inspect the newest decision file to confirm the config took effect:
 
 ```bash
-uv run pipeline-watch auto
+jq '.model, .max_tokens' .hermes/decisions/$(ls -t .hermes/decisions/ | head -1)
 ```
 
 ## Troubleshooting
@@ -125,11 +125,10 @@ table above. Common typo: `circuit-breaker` (hyphen) vs `circuit_breaker`
 (underscore — required).
 
 **`KeyError: 'ANTHROPIC_API_KEY'` on the next tick.**
-Not a config issue — env var missing. As of v0.3, selection routes through Hermes
-via `hermes_adapter.hermes_call()`, so `ANTHROPIC_API_KEY` is no longer read
-directly by the orchestrator. If you see this error, it likely comes from the
-eval suite (which still checks for it as a skip gate). Set it or run
-`hermes login` for Hermes auth.
+As of v0.3, selection routes through Hermes via `hermes_adapter.hermes_call()`,
+so `ANTHROPIC_API_KEY` is no longer needed for pipeline operations. If you see
+this error, it likely comes from the eval suite (which still checks for it as a
+skip gate). Run `hermes login` for Hermes auth.
 
 ## Related
 

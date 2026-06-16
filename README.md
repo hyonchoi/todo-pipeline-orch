@@ -10,19 +10,18 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 
 ## Features
 
-- **Auto-tick discovery**: Scan all projects for TODOS.md changes and automatically select eligible TODOs
 - **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
-- **CLI subcommands**: `auto`, `merge`, `status`, `kill` for pipeline management
+- **CLI subcommands**: `merge`, `status`, `kill` for pipeline management
 - **Pending records table**: Display ready-for-review records with status and age
 - **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
 - **Circuit breaker**: no-progress counter, cron backoff, and Slack alert dedup to stop runaway ticks
-- **Cron registration**: 5-minute automated tick via `install-cron.sh`
+- **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
 
 ## Requirements
 
 - Python 3.12+
 - [uv](https://docs.astral.sh/uv/install/) package manager
-- **Hermes CLI** (v0.3+): selection and phase execution route through `hermes chat -q`. Install Hermes and run `hermes login` before running `pipeline-watch auto`.
+- **Hermes CLI** (v0.3+): selection and phase execution route through `hermes chat -q`. Install Hermes and run `hermes login` before running the pipeline.
 
 Install uv:
 ```bash
@@ -62,11 +61,6 @@ Display pipeline status:
 uv run pipeline-watch status
 ```
 
-Run one auto-tick (discover projects, detect changes, select eligible TODOs):
-```bash
-uv run pipeline-watch auto
-```
-
 Merge a ready TODO to main:
 ```bash
 uv run pipeline-watch merge <project> <todo_id>
@@ -83,12 +77,17 @@ uv run pipeline-watch kill --all
 
 ### Automated Ticks
 
-Register a 5-minute cron job:
+The pipeline is driven by Hermes cron, not system crontab. The Hermes CLI
+manages the tick schedule; the circuit breaker adjusts the interval
+automatically (normal 5-minute ticks, backoff to 30 minutes after repeated
+no-progress ticks):
+
 ```bash
-bash scripts/install-cron.sh
+hermes cron set pipeline-tick '*/5 * * * *'
 ```
 
-This will register a crontab entry to run `pipeline-watch auto` every 5 minutes and log output to `~/.hermes/cron.log`.
+See [docs/hermes-state-machine.md](docs/hermes-state-machine.md) for the
+tick lifecycle.
 
 ## Configuration
 
@@ -106,7 +105,7 @@ Example:
 export PIPELINE_PROJECTS_DIR=~/my-projects
 export PIPELINE_LOCK_DIR=~/.hermes/locks
 hermes login  # authenticate with your provider
-uv run pipeline-watch auto
+hermes cron set pipeline-tick '*/5 * * * *'  # start the tick loop
 ```
 
 ### TOML overlay (`.hermes/config.toml`)
@@ -145,7 +144,7 @@ list.
 **"No pending records"**
 - No TODOs are ready for review yet
 - Check `PIPELINE_PROJECTS_DIR` is set and contains `TODOS.md` files
-- Run `uv run pipeline-watch auto` to trigger discovery
+- Ensure the Hermes cron tick is running: `hermes cron list`
 
 **"error: argument todo_id: invalid int value"**
 - `todo_id` must be a number, e.g., `123` (not `ABC` or `some-id`)

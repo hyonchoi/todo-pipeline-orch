@@ -83,14 +83,9 @@ is desired. You're updating the pin to match the file.
    skip this — pin updates without eval coverage are how silent regressions
    ship.
 
-4. Verify by triggering one manual tick:
-
-   ```bash
-   uv run pipeline-watch auto
-   ```
-
-   Inspect the newest file in `.hermes/decisions/`. The rationale must not
-   start with `prompt_sha_mismatch:`.
+4. Verify by waiting for the next Hermes cron tick and inspecting
+   `.hermes/decisions/`. The rationale must not start with
+   `prompt_sha_mismatch:`.
 
 ## Path B — revert the prompt (file change was unintentional)
 
