@@ -20,12 +20,18 @@ from typing import Optional
 
 import subprocess as _cli_sp
 
-from .config import Config
-from .decision import store as _cli_dec_store
+from .circuit import CircuitBreaker
+from .config import Config, CircuitBreakerConfig
+from .decision import run_selection, store as _cli_dec_store
+from .decision.context import build_context
 from .kanban import NullKanbanAdapter, HermesKanbanAdapter
+from .kanban_tasks import all_phases_complete, observe_outcomes, register_todo_phases
 from .logging_setup import configure as configure_logging
+from .logging_setup import new_tick_id as _new_tick_id
 from .merge import run_phase9, make_default_bump_fn
+from .phases import load_phases
 from .status import collect_pending, format_table
+from .tick import TickLock, TickLockHeld
 
 log = logging.getLogger(__name__)
 
@@ -273,6 +279,14 @@ def build_parser() -> argparse.ArgumentParser:
     kill_group.add_argument("--todo", help="Kill a specific TODO (e.g., TODO-1)")
     kill_parser.set_defaults(func=_cmd_kill)
 
+    # tick: Pipeline tick — select TODO, register kanban phases
+    tick_parser = subparsers.add_parser(
+        "tick",
+        help="Run one pipeline tick: select a TODO and register kanban phases",
+    )
+    tick_parser.add_argument("project", help="Project name/slug")
+    tick_parser.set_defaults(func=_cmd_tick)
+
     return parser
 
 
@@ -352,6 +366,180 @@ def _cmd_kill(args, config: Config) -> int:
         todo=args.todo,
     )
 
+
+def _read_prior_tick_id(state_dir: Path) -> str | None:
+    """Read the prior tick_id from current_tick_id.txt.
+
+    Returns None if the file doesn't exist (cold start).
+    """
+    path = state_dir / "current_tick_id.txt"
+    if not path.exists():
+        return None
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+def _generate_tick_id() -> str:
+    """Generate a new tick ID."""
+    try:
+        return _new_tick_id()
+    except Exception:
+        import datetime as _dt
+        import random as _random
+        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d%H%M%S")
+        rand = _random.randint(100000, 999999)
+        return f"{ts}{rand}"
+
+def _load_cb_config(state_dir: Path):
+    """Load circuit breaker config from TOML overlay, falling back to defaults."""
+    from .config import Config as AppConfig, FullConfig, load_toml_overlay
+
+    toml_path = state_dir / "pipeline.toml"
+    try:
+        base_cfg = AppConfig.from_env()
+        full_cfg: FullConfig = load_toml_overlay(base_cfg, toml_path)
+        if hasattr(full_cfg, "circuit_breaker"):
+            return full_cfg.circuit_breaker
+    except Exception:
+        pass
+    return CircuitBreakerConfig()
+
+def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
+    """Create a CircuitBreaker instance from config."""
+    return CircuitBreaker(
+        state_path=state_dir / "circuit.json",
+        no_progress_threshold=cb_cfg.no_progress_threshold,
+        backoff_interval_min=cb_cfg.backoff_interval_min,
+        alert_dedup_hours=cb_cfg.alert_dedup_hours,
+        slack_channel=slack_channel,
+    )
+
+def _cmd_tick(args, config: Config) -> int:
+    """Handle 'tick' subcommand — kanban-as-scheduler pipeline tick.
+
+    Flow:
+    1. Read prior_tick_id, check if in-flight (skip if so)
+    2. Acquire TickLock, mint ULID tick_id, persist current_tick_id.txt
+    3. Build context, run selection
+    4. If picked=None: observe circuit breaker, exit
+    5. If picked=TODO-N: register kanban tasks, observe circuit breaker, exit
+    """
+    state_dir = config.state_dir
+    project = args.project
+
+    # --- Step 1: Check prior tick ---
+    prior_tick_id = _read_prior_tick_id(state_dir)
+
+    if prior_tick_id is not None:
+        # Prior tick exists — is it complete?
+        if not all_phases_complete(project, prior_tick_id):
+            log.info("prior tick %s still in-flight, skipping", prior_tick_id)
+            return 0
+
+        # Prior tick complete — observe outcomes before new selection
+        try:
+            from .kanban_tasks import get_todo_kanban_status
+            status_map = get_todo_kanban_status(project, prior_tick_id)
+            observe_outcomes(
+                state_dir=state_dir,
+                tick_id=prior_tick_id,
+                status_map=status_map,
+            )
+        except Exception as e:
+            log.warning("observe_outcomes for prior tick %s failed: %s", prior_tick_id, e)
+
+    # --- Step 2: Acquire lock ---
+    cb_cfg = _load_cb_config(state_dir)
+    tick_lock = TickLock(state_dir, max_age_min=cb_cfg.max_tick_duration_min)
+
+    tick_id = _generate_tick_id()
+
+    # Persist current tick_id for next tick's prior check
+    try:
+        (state_dir / "current_tick_id.txt").write_text(tick_id)
+    except OSError as e:
+        log.warning("failed to persist current_tick_id: %s", e)
+
+    try:
+        with tick_lock.acquire(tick_id):
+
+            # --- Step 3: Build context ---
+            project_dir = config.projects_dir / project
+            if not project_dir.exists():
+                log.error("project not found: %s", project)
+                return 2
+
+            todos_path = project_dir / "TODOS.md"
+            if not todos_path.exists():
+                log.error("TODOS.md not found in %s", project_dir)
+                return 2
+
+            ctx = build_context(
+                tick_id=tick_id,
+                state_dir=state_dir,
+                todos_path=todos_path,
+                project_slug=project,
+                max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
+            )
+
+            # --- Step 4: Run selection ---
+            from .config import SelectionConfig
+
+            sel_cfg = SelectionConfig()  # Use defaults
+            decision = run_selection(
+                tick_id=tick_id,
+                ctx=ctx,
+                cfg=sel_cfg,
+            )
+
+            picked = decision.picked
+
+            if picked is None:
+                log.info("selection picked None, observing circuit breaker")
+                cb = _make_circuit_breaker(state_dir, cb_cfg, config.slack_channel)
+                cb.observe(picked=None, counts_as_no_progress=True)
+                return 0
+
+            # --- Step 5: Register kanban tasks ---
+            log.info("selected %s, registering kanban phases", picked)
+            try:
+                task_ids = register_todo_phases(
+                    todo_id=picked,
+                    tick_id=tick_id,
+                    board_slug=project,
+                    project_dir=project_dir,
+                )
+                log.info(
+                    "registered %d kanban tasks for %s: %s",
+                    len(task_ids),
+                    picked,
+                    task_ids,
+                )
+            except RuntimeError as e:
+                log.error("kanban registration failed for %s: %s", picked, e)
+                # Write a failure outcome so the circuit breaker knows
+                try:
+                    from .decision.store import append_outcome
+                    append_outcome(
+                        state_dir,
+                        tick_id,
+                        outcome="failed_to_spawn",
+                        detail={"todo_id": picked, "error": str(e)[:500]},
+                    )
+                except Exception as se:
+                    log.warning("failed to write outcome sidecar: %s", se)
+                return 1
+
+            # --- Step 6: Observe circuit breaker ---
+            cb = _make_circuit_breaker(state_dir, cb_cfg, config.slack_channel)
+            cb.observe(picked=picked, counts_as_no_progress=False)
+
+            return 0
+
+    except TickLockHeld:
+        log.error("tick lock held, exiting")
+        return 1
 
 def main(argv: Optional[list[str]] = None) -> int:
     """
