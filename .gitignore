@@ -1,4 +1,10 @@
 
+# ---- Hermes ----
+# Track prompt templates; ignore runtime state (decisions, outcomes, locks)
+.hermes/*
+!.hermes/prompts/
+
+# ---- Gstack / Gbrain ----
 # Ignore operational and machine-specific gstack/gbrain operational noise
 docs/gstack/**/brain-cache/
 docs/gstack/**/*.json
