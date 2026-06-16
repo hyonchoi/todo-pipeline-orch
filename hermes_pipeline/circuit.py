@@ -70,3 +70,47 @@ class CircuitBreaker:
             _set_cron_interval(minutes=self.backoff_interval_min)
             st["backed_off"] = True
         self._save(st)
+
+    def observe_from_outcomes(
+        self,
+        *,
+        state_dir: Path,
+        prior_tick_id: str,
+        current_picked: str | None,
+    ) -> None:
+        """Observe circuit breaker state from JSONL outcome file.
+
+        Reads .hermes/outcomes/<prior_tick_id>-phases.json and derives
+        the no-progress judgment from the outcomes:
+        - all_phases_complete / phase_complete -> progress (counter reset)
+        - failed_at_phase_* -> no progress (counter increment)
+        - No file or empty file -> fall back to picked=None logic
+        """
+        phases_file = state_dir / "outcomes" / f"{prior_tick_id}-phases.json"
+        if not phases_file.exists():
+            return self.observe(picked=current_picked, counts_as_no_progress=True)
+
+        content = phases_file.read_text().strip()
+        if not content:
+            return self.observe(picked=current_picked, counts_as_no_progress=False)
+
+        outcomes = []
+        for line in content.split("\n"):
+            line = line.strip()
+            if line:
+                outcomes.append(json.loads(line))
+
+        has_phase_complete = any(o.get("outcome") == "phase_complete" for o in outcomes)
+        has_all_complete = any(o.get("outcome") == "all_phases_complete" for o in outcomes)
+        has_failure = any(
+            o.get("outcome", "").startswith("failed_at_phase_") for o in outcomes
+        )
+
+        if has_all_complete:
+            return self.observe(picked=current_picked, counts_as_no_progress=False)
+        if has_phase_complete:
+            return self.observe(picked=current_picked, counts_as_no_progress=False)
+        if has_failure:
+            return self.observe(picked=current_picked, counts_as_no_progress=True)
+
+        return self.observe(picked=current_picked, counts_as_no_progress=False)
