@@ -9,7 +9,8 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** `TODO-2`, `TODO-3`, `TODO-6` (needs hermes decision agent, hermes process routing, hermes LLM routing)
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Test Coverage `필요`, Security Review `불필요`
 
-- [ ] **TODO-11: rewrite getting-started tutorial to use manual trigger, not cron** — Testing/debugging without waiting
+- [x] **TODO-11: rewrite getting-started tutorial to use manual trigger, not cron** — Testing/debugging without waiting
+  - **Completed:** v0.3.1 (2026-06-16)
   - **What:** Add a `pipeline-watch tick` CLI subcommand that fires a single tick immediately (mint tick_id, acquire lock, run selection, spawn phase — same logic as the cron path). Rewrite the getting-started tutorial so that the primary workflow uses `pipeline-watch tick` for manual triggering. Move `hermes cron set pipeline-tick` to an "Autopilot" or "Production" section at the end of the tutorial — cron is for production, manual triggering is for development and debugging.
   - **Why:** The current tutorial makes users set up a cron job and wait up to 5 minutes just to see if the pipeline works. For testing and debugging, the primary workflow should be: make a change, run `pipeline-watch tick`, see the result immediately. Cron is how you run the pipeline in production — it shouldn't be the getting-started path.
   - **Pros:** Onboarding is instant — users verify their setup in seconds. Debugging is iterative: fire a tick, check `.hermes/` state, fix, fire again. The tutorial itself becomes testable and fast.
