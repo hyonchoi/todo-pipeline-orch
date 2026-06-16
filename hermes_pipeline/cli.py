@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+from hermes_pipeline import __version__
 import time
 from pathlib import Path
 from typing import Optional
@@ -236,7 +237,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="Hermes pipeline orchestrator: merge, status, and kill commands.",
     )
     parser.add_argument(
-        "--version", action="version", version="%(prog)s 0.1.0"
+        "--version", action="version", version=f"%(prog)s {__version__}"
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")

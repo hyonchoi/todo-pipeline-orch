@@ -25,7 +25,7 @@ uv run pipeline-watch --version
 
 Expected output:
 ```
-pipeline-watch 0.1.0
+pipeline-watch 0.3.0
 ```
 
 If you see "command not found," run:
