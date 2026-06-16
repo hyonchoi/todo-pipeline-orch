@@ -11,7 +11,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 ## Features
 
 - **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
-- **CLI subcommands**: `merge`, `status`, `kill` for pipeline management
+- **CLI subcommands**: `tick`, `merge`, `status`, `kill` for pipeline management
 - **Pending records table**: Display ready-for-review records with status and age
 - **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
 - **Circuit breaker**: no-progress counter, cron backoff, and Slack alert dedup to stop runaway ticks
@@ -36,6 +36,8 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
+| [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `pipeline-watch tick` uses kanban for phase state and ordering |
+| [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `pipeline-watch tick` for iterative development |
 | [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
 | [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
 | [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
@@ -55,6 +57,11 @@ uv sync
 ## Run
 
 ### CLI Commands
+
+Run a single pipeline tick (select a TODO, register kanban phases, observe the circuit breaker):
+```bash
+uv run pipeline-watch tick <project>
+```
 
 Display pipeline status:
 ```bash
@@ -160,7 +167,7 @@ The package is organized into lanes:
 
 - **Lane A**: Hermes-agent selection (`decision/` — LLM-driven TODO pick via `hermes chat -q`, SHA-pinned prompt, immutable decision records + outcome sidecars). The deterministic `selection.py` was retired in v0.2.
 - **Lane B**: State management (locks, checkpoints, ready-for-review records, atomic tmp+rename writes)
-- **Lane C**: Kanban integration (active tasks, outbox, sync)
+- **Lane C**: Kanban integration (kanban-as-scheduler — phases as kanban tasks with `--parent` dependency chains; see [reference-kanban-as-scheduler.md](docs/reference-kanban-as-scheduler.md))
 - **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)
 - **Lane E**: Merge orchestration (Phase 9)
 - **Lane F**: CLI, watcher, status, and installation (this lane)
