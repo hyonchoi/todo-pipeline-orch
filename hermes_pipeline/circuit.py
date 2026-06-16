@@ -76,23 +76,26 @@ class CircuitBreaker:
         *,
         state_dir: Path,
         prior_tick_id: str,
-        current_picked: str | None,
     ) -> None:
         """Observe circuit breaker state from JSONL outcome file.
 
         Reads .hermes/outcomes/<prior_tick_id>-phases.json and derives
-        the no-progress judgment from the outcomes:
+        the no-progress judgment from the outcomes. Called before the
+        new selection in _cmd_tick, so picked is always None — the
+        outcome file is the sole source of truth.
+
         - all_phases_complete / phase_complete -> progress (counter reset)
         - failed_at_phase_* -> no progress (counter increment)
-        - No file or empty file -> fall back to picked=None logic
+        - No file -> prior tick picked=None, no progress
+        - Empty file -> tick still in-flight, don't count
         """
         phases_file = state_dir / "outcomes" / f"{prior_tick_id}-phases.json"
         if not phases_file.exists():
-            return self.observe(picked=current_picked, counts_as_no_progress=True)
+            return self.observe(picked=None, counts_as_no_progress=True)
 
         content = phases_file.read_text().strip()
         if not content:
-            return self.observe(picked=current_picked, counts_as_no_progress=False)
+            return self.observe(picked=None, counts_as_no_progress=False)
 
         outcomes = []
         for line in content.split("\n"):
@@ -106,11 +109,15 @@ class CircuitBreaker:
             o.get("outcome", "").startswith("failed_at_phase_") for o in outcomes
         )
 
-        if has_all_complete:
-            return self.observe(picked=current_picked, counts_as_no_progress=False)
-        if has_phase_complete:
-            return self.observe(picked=current_picked, counts_as_no_progress=False)
-        if has_failure:
-            return self.observe(picked=current_picked, counts_as_no_progress=True)
+        if has_all_complete or has_phase_complete:
+            # Progress detected — reset counter directly
+            st = self._load()
+            st["consecutive_no_progress"] = 0
+            self._save(st)
+            return
 
-        return self.observe(picked=current_picked, counts_as_no_progress=False)
+        if has_failure:
+            return self.observe(picked=None, counts_as_no_progress=True)
+
+        # No terminal outcomes yet — in-flight, don't count as no-progress
+        pass

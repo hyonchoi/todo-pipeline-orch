@@ -80,7 +80,6 @@ class TestObserveFromOutcomes:
         cb.observe_from_outcomes(
             state_dir=state_dir,
             prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-            current_picked="TODO-5",
         )
 
         st = cb._load()
@@ -109,7 +108,6 @@ class TestObserveFromOutcomes:
         cb.observe_from_outcomes(
             state_dir=state_dir,
             prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-            current_picked="TODO-5",
         )
 
         st = cb._load()
@@ -134,7 +132,6 @@ class TestObserveFromOutcomes:
         cb.observe_from_outcomes(
             state_dir=state_dir,
             prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-            current_picked=None,
         )
 
         st = cb._load()
@@ -153,7 +150,6 @@ class TestObserveFromOutcomes:
         cb.observe_from_outcomes(
             state_dir=state_dir,
             prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-            current_picked=None,
         )
 
         st = cb._load()
@@ -176,7 +172,6 @@ class TestObserveFromOutcomes:
         cb.observe_from_outcomes(
             state_dir=state_dir,
             prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-            current_picked="TODO-5",
         )
 
         st = cb._load()
@@ -201,7 +196,6 @@ class TestObserveFromOutcomes:
         cb.observe_from_outcomes(
             state_dir=state_dir,
             prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-            current_picked="TODO-5",
         )
         st1 = cb._load()
         assert st1["consecutive_no_progress"] == 0
@@ -209,7 +203,6 @@ class TestObserveFromOutcomes:
         cb.observe_from_outcomes(
             state_dir=state_dir,
             prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-            current_picked="TODO-5",
         )
         st2 = cb._load()
         assert st2["consecutive_no_progress"] == 0
