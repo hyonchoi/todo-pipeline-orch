@@ -219,3 +219,97 @@ def all_phases_complete(board_slug: str, tick_id: str) -> bool:
             return False
 
     return True
+
+
+def observe_outcomes(
+    *,
+    state_dir: Path | str,
+    tick_id: str,
+    status_map: dict[str, str],
+) -> None:
+    """Write phase outcomes to JSONL sidecar based on kanban task status.
+
+    Direction 2 — Kanban -> Decision Store: reads the kanban status map
+    and appends outcome entries to .hermes/outcomes/<tick_id>-phases.json.
+
+    High-watermark: reads existing outcomes to avoid re-writing phases that
+    were already observed.
+
+    Args:
+        state_dir: State directory (e.g., Path(".hermes")).
+        tick_id: ULID tick ID for the outcome file.
+        status_map: Dict mapping phase_key to kanban status.
+    """
+    state_dir = Path(state_dir)
+    outcomes_dir = state_dir / "outcomes"
+    outcomes_dir.mkdir(parents=True, exist_ok=True)
+
+    phases_file = outcomes_dir / f"{tick_id}-phases.json"
+
+    # Read existing outcomes (high-watermark to avoid duplicates)
+    existing = set()
+    if phases_file.exists():
+        content = phases_file.read_text().strip()
+        if content:
+            for line in content.split("\n"):
+                line = line.strip()
+                if line:
+                    entry = json.loads(line)
+                    key = entry.get("phase_key", "")
+                    if key:
+                        existing.add(key)
+                    # Track outcome-level sentinels (e.g. all_phases_complete)
+                    outcome = entry.get("outcome", "")
+                    if outcome:
+                        existing.add(outcome)
+
+    new_outcomes: list[str] = []
+
+    for phase_key, status in status_map.items():
+        if status == "done":
+            if phase_key not in existing:
+                new_outcomes.append(
+                    json.dumps(
+                        {
+                            "outcome": "phase_complete",
+                            "phase_key": phase_key,
+                        },
+                        sort_keys=True,
+                    )
+                )
+        elif status == "failed":
+            if phase_key not in existing:
+                new_outcomes.append(
+                    json.dumps(
+                        {
+                            "outcome": f"failed_at_phase_{phase_key}",
+                            "detail": {"kanban_status": "failed"},
+                        },
+                        sort_keys=True,
+                    )
+                )
+        # running, ready, created, archived — no outcome line
+
+    # Check if all tasks are terminal
+    all_terminal = (
+        len(status_map) > 0
+        and all(s in TERMINAL_STATUSES for s in status_map.values())
+    )
+    if all_terminal and "all_phases_complete" not in existing:
+        new_outcomes.append(
+            json.dumps(
+                {
+                    "outcome": "all_phases_complete",
+                },
+                sort_keys=True,
+            )
+        )
+
+    if new_outcomes:
+        with open(phases_file, "a") as f:
+            for line in new_outcomes:
+                f.write(line + "\n")
+
+        log.info(
+            "observed %d outcomes for tick %s", len(new_outcomes), tick_id
+        )

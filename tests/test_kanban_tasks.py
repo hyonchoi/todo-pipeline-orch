@@ -336,3 +336,136 @@ class TestGetTodoKanbanStatus:
 
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {}
+
+
+class TestObserveOutcomes:
+    """Tests for observe_outcomes() — kanban -> decision store sync."""
+
+    def test_writes_phase_complete_outcomes(self, state_dir):
+        """Done phases get phase_complete written to JSONL."""
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {
+            "phase_2_autoplan": "done",
+            "phase_4_development": "done",
+            "phase_6_1_cso": "done",
+        }
+
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        lines = [l for l in phases_file.read_text().strip().split("\n") if l.strip()]
+        outcomes = [json.loads(l) for l in lines]
+
+        # Should have 3 phase_complete + 1 all_phases_complete
+        assert len(outcomes) == 4
+
+        phase_completes = [o for o in outcomes if o["outcome"] == "phase_complete"]
+        assert len(phase_completes) == 3
+
+        all_complete = [o for o in outcomes if o["outcome"] == "all_phases_complete"]
+        assert len(all_complete) == 1
+
+    def test_writes_failed_outcome(self, state_dir):
+        """Failed phase gets failed_at_phase_* written."""
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {
+            "phase_2_autoplan": "done",
+            "phase_4_development": "failed",
+            "phase_6_1_cso": "ready",  # Blocked by parent
+        }
+
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        lines = [l for l in phases_file.read_text().strip().split("\n") if l.strip()]
+        outcomes = [json.loads(l) for l in lines]
+
+        phase_completes = [o for o in outcomes if o["outcome"] == "phase_complete"]
+        assert len(phase_completes) == 1  # Only phase_2_autoplan
+
+        failed = [o for o in outcomes if o["outcome"] == "failed_at_phase_phase_4_development"]
+        assert len(failed) == 1
+
+        # No all_phases_complete because phase_6_1_cso is still ready (non-terminal)
+
+    def test_creates_outcomes_dir(self, state_dir):
+        """Outcomes directory is created if it doesn't exist."""
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {"phase_2_autoplan": "done"}
+
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        assert phases_file.exists()
+
+    def test_high_watermark_no_duplicate(self, state_dir):
+        """Phase outcomes already in file are not duplicated on re-observe."""
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {
+            "phase_2_autoplan": "done",
+            "phase_4_development": "done",
+        }
+
+        # First observe
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        # Second observe with same status_map
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        lines = [l for l in phases_file.read_text().strip().split("\n") if l.strip()]
+
+        # Should still be 3 (2 phase_complete + 1 all_phases_complete), not 6
+        assert len(lines) == 3
+
+    def test_skips_in_flight_phases(self, state_dir):
+        """Phases that are running/ready are skipped (not written as outcomes)."""
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {
+            "phase_2_autoplan": "done",
+            "phase_4_development": "running",
+            "phase_6_1_cso": "ready",
+        }
+
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        lines = [l for l in phases_file.read_text().strip().split("\n") if l.strip()]
+        outcomes = [json.loads(l) for l in lines]
+
+        # Only 1 phase_complete (phase_2_autoplan), no all_phases_complete
+        phase_completes = [o for o in outcomes if o["outcome"] == "phase_complete"]
+        assert len(phase_completes) == 1
+        assert phase_completes[0]["phase_key"] == "phase_2_autoplan"
+
+        all_complete = [o for o in outcomes if o["outcome"] == "all_phases_complete"]
+        assert len(all_complete) == 0
