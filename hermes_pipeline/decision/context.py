@@ -87,30 +87,15 @@ def _phase_started_ids(state_dir: Path, *, max_phase_timeout_min: int) -> list[s
             pass
     return out
 
-def _kanban_in_flight_ids(board_slug: str) -> set[str] | None:
-    """Extract TODO IDs with in-flight kanban tasks.
+def _extract_in_flight_ids(snapshot: dict) -> set[str]:
+    """Extract TODO IDs with in-flight tasks from a kanban snapshot.
 
-    Queries `hermes kanban list --board <slug> --json` and parses the
-    JSON header in each task's body. Returns None on CLI failure so the
-    caller can fall back to file markers.
+    Args:
+        snapshot: Parsed JSON from `hermes kanban list --json`.
 
     Returns:
-        Set of TODO IDs with tasks in created/ready/running status,
-        or None if the kanban CLI is unavailable.
+        Set of TODO IDs with tasks in created/ready/running status.
     """
-    try:
-        result = subprocess.run(
-            ["hermes", "kanban", "list", "--board", board_slug, "--json"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            return None
-        snapshot = json.loads(result.stdout)
-    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-        return None
-
     result_set = set()
     for task in snapshot.get("tasks", []):
         if task.get("status") not in ("created", "ready", "running"):
@@ -126,11 +111,28 @@ def _kanban_in_flight_ids(board_slug: str) -> set[str] | None:
             pass  # Task without JSON header — skip
     return result_set
 
+def _kanban_in_flight_ids(board_slug: str) -> set[str] | None:
+    """Extract TODO IDs with in-flight kanban tasks.
+
+    Queries `hermes kanban list --board <slug> --json` and parses the
+    JSON header in each task's body. Returns None on CLI failure so the
+    caller can fall back to file markers.
+
+    Returns:
+        Set of TODO IDs with tasks in created/ready/running status,
+        or None if the kanban CLI is unavailable.
+    """
+    snapshot = _fetch_kanban_snapshot(board_slug)
+    if snapshot is None:
+        return None
+    return _extract_in_flight_ids(snapshot)
+
 def build_in_flight(
     state_dir: Path,
     *,
     max_phase_timeout_min: int,
     board_slug: str | None = None,
+    snapshot: dict | None = None,
 ) -> list[str]:
     """Compute in-flight set from kanban state, falling back to file markers.
 
@@ -139,11 +141,16 @@ def build_in_flight(
         max_phase_timeout_min: Max age in minutes before a lock is stale.
         board_slug: Kanban board slug for kanban-aware lookup.
             If None or kanban CLI fails, falls back to file markers.
+        snapshot: Pre-fetched kanban snapshot (from _fetch_kanban_snapshot).
+            If provided, used instead of fetching from the CLI.
 
     Returns:
         Sorted list of TODO IDs currently in flight.
     """
     if board_slug is not None:
+        if snapshot is not None:
+            kanban_in_flight = _extract_in_flight_ids(snapshot)
+            return sorted(kanban_in_flight)
         kanban_in_flight = _kanban_in_flight_ids(board_slug)
         if kanban_in_flight is not None:
             return sorted(kanban_in_flight)
@@ -154,11 +161,15 @@ def build_in_flight(
         | set(_phase_started_ids(state_dir, max_phase_timeout_min=max_phase_timeout_min))
     )
 
-def _kanban_snapshot(project_slug: str) -> dict:
-    """Capture current Kanban state via `hermes kanban list`."""
+def _fetch_kanban_snapshot(project_slug: str) -> dict | None:
+    """Fetch kanban board state via `hermes kanban list --json`.
+
+    Returns:
+        Parsed JSON dict, or None on CLI failure.
+    """
     try:
         r = subprocess.run(
-            ["hermes", "kanban", "list", "--project", project_slug, "--json"],
+            ["hermes", "kanban", "list", "--board", project_slug, "--json"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -168,6 +179,17 @@ def _kanban_snapshot(project_slug: str) -> dict:
             return json.loads(r.stdout)
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
         pass
+    return None
+
+def _kanban_snapshot(project_slug: str) -> dict:
+    """Capture current Kanban state via `hermes kanban list`.
+
+    Returns a dict suitable for the selection prompt. On CLI failure,
+    returns an error marker dict.
+    """
+    snapshot = _fetch_kanban_snapshot(project_slug)
+    if snapshot is not None:
+        return snapshot
     return {"columns": [], "_error": "kanban snapshot unavailable"}
 
 def _recent_decisions(state_dir: Path, n: int) -> list[dict]:
@@ -183,15 +205,21 @@ def build_context(
     max_phase_timeout_min: int,
     recent_n: int = 5,
 ) -> SelectionContext:
-    """Assemble the full SelectionContext for a tick."""
+    """Assemble the full SelectionContext for a tick.
+
+    Fetches the kanban snapshot once and reuses it for both in-flight
+    detection and the kanban_snapshot field (avoids duplicate CLI calls).
+    """
+    snapshot = _fetch_kanban_snapshot(project_slug)
     return SelectionContext(
         todos_md=todos_path.read_text(),
         in_flight=build_in_flight(
             state_dir,
             max_phase_timeout_min=max_phase_timeout_min,
             board_slug=project_slug,
+            snapshot=snapshot,
         ),
         recent_decisions=_recent_decisions(state_dir, recent_n),
-        kanban_snapshot=_kanban_snapshot(project_slug),
+        kanban_snapshot=snapshot if snapshot is not None else {"columns": [], "_error": "kanban snapshot unavailable"},
         project_slug=project_slug,
     )

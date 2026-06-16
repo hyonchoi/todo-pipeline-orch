@@ -293,6 +293,24 @@ class TestAllPhasesComplete:
 
         assert all_phases_complete("demo", "01HA") is False
 
+    def test_archived_task_not_complete(self, mocker):
+        """Archived tasks (mid-registration cleanup) are not completion status."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = {
+            "tasks": [
+                {"status": "archived", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "archived", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is False
+
 
 class TestGetTodoKanbanStatus:
     """Tests for get_todo_kanban_status()."""
@@ -441,6 +459,32 @@ class TestObserveOutcomes:
 
         # Should still be 3 (2 phase_complete + 1 all_phases_complete), not 6
         assert len(lines) == 3
+
+    def test_archived_phases_write_failed_outcome(self, state_dir):
+        """Archived phases (mid-registration cleanup) write failed_at_phase_*."""
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {
+            "phase_2_autoplan": "archived",
+            "phase_4_development": "archived",
+        }
+
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        lines = [l for l in phases_file.read_text().strip().split("\n") if l.strip()]
+        outcomes = [json.loads(l) for l in lines]
+
+        failed = [o for o in outcomes if o["outcome"].startswith("failed_at_phase_")]
+        assert len(failed) == 2
+
+        # No all_phases_complete because archived is not a completion status
+        all_complete = [o for o in outcomes if o["outcome"] == "all_phases_complete"]
+        assert len(all_complete) == 0
 
     def test_skips_in_flight_phases(self, state_dir):
         """Phases that are running/ready are skipped (not written as outcomes)."""

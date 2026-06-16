@@ -386,9 +386,9 @@ def _generate_tick_id() -> str:
         return _new_tick_id()
     except Exception:
         import datetime as _dt
-        import random as _random
+        import secrets as _secrets
         ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d%H%M%S")
-        rand = _random.randint(100000, 999999)
+        rand = format(_secrets.randbelow(900000) + 100000, "06d")
         return f"{ts}{rand}"
 
 def _load_cb_config(state_dir: Path):
@@ -415,21 +415,48 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
         slack_channel=slack_channel,
     )
 
+def _validate_project_slug(slug: str) -> bool:
+    """Reject project slugs that could inject CLI flags into subprocess calls."""
+    import re as _re
+    return bool(_re.match(r'^[a-zA-Z0-9._-]+$', slug))
+
+def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
+    """Persist tick_id for the next tick's prior check."""
+    try:
+        (state_dir / "current_tick_id.txt").write_text(tick_id)
+    except OSError as e:
+        log.warning("failed to persist current_tick_id: %s", e)
+
 def _cmd_tick(args, config: Config) -> int:
     """Handle 'tick' subcommand — kanban-as-scheduler pipeline tick.
 
     Flow:
     1. Read prior_tick_id, check if in-flight (skip if so)
-    2. Acquire TickLock, mint ULID tick_id, persist current_tick_id.txt
+    2. Acquire TickLock, mint ULID tick_id
     3. Build context, run selection
     4. If picked=None: observe circuit breaker, exit
-    5. If picked=TODO-N: register kanban tasks, observe circuit breaker, exit
+    5. If picked=TODO-N: register kanban tasks, persist tick_id, exit
+
+    tick_id is persisted AFTER kanban registration (inside the lock) so that
+    a concurrent tick cannot see an unregistered tick_id and skip selection.
+    If picked=None the tick_id is also persisted inside the lock so the next
+    tick knows this tick was the last one to run (even though no phases were
+    registered).
     """
     state_dir = config.state_dir
     project = args.project
 
+    # Validate project slug to prevent CLI flag injection
+    if not _validate_project_slug(project):
+        log.error("invalid project slug: %r (must be alphanumeric, dot, dash, underscore)", project)
+        return 2
+
     # --- Step 1: Check prior tick ---
     prior_tick_id = _read_prior_tick_id(state_dir)
+
+    # --- Load circuit breaker config early (needed for prior-tick observation) ---
+    cb_cfg = _load_cb_config(state_dir)
+    cb = _make_circuit_breaker(state_dir, cb_cfg, config.slack_channel)
 
     if prior_tick_id is not None:
         # Prior tick exists — is it complete?
@@ -446,20 +473,18 @@ def _cmd_tick(args, config: Config) -> int:
                 tick_id=prior_tick_id,
                 status_map=status_map,
             )
+            # Feed outcomes back to the circuit breaker
+            cb.observe_from_outcomes(
+                state_dir=state_dir,
+                prior_tick_id=prior_tick_id,
+            )
         except Exception as e:
             log.warning("observe_outcomes for prior tick %s failed: %s", prior_tick_id, e)
 
     # --- Step 2: Acquire lock ---
-    cb_cfg = _load_cb_config(state_dir)
     tick_lock = TickLock(state_dir, max_age_min=cb_cfg.max_tick_duration_min)
 
     tick_id = _generate_tick_id()
-
-    # Persist current tick_id for next tick's prior check
-    try:
-        (state_dir / "current_tick_id.txt").write_text(tick_id)
-    except OSError as e:
-        log.warning("failed to persist current_tick_id: %s", e)
 
     try:
         with tick_lock.acquire(tick_id):
@@ -497,8 +522,20 @@ def _cmd_tick(args, config: Config) -> int:
 
             if picked is None:
                 log.info("selection picked None, observing circuit breaker")
-                cb = _make_circuit_breaker(state_dir, cb_cfg, config.slack_channel)
+                # Write sentinel so next tick's observe_from_outcomes doesn't
+                # count this as no-progress.
+                try:
+                    import json as _json
+                    outcomes_dir = state_dir / "outcomes"
+                    outcomes_dir.mkdir(parents=True, exist_ok=True)
+                    phases_file = outcomes_dir / f"{tick_id}-phases.json"
+                    with open(phases_file, "w") as f:
+                        f.write(_json.dumps({"outcome": "picked_none"}) + "\n")
+                except OSError as e:
+                    log.warning("failed to write picked_none sentinel: %s", e)
                 cb.observe(picked=None, counts_as_no_progress=True)
+                # Persist inside lock so next tick knows this one ran
+                _persist_tick_id(state_dir, tick_id)
                 return 0
 
             # --- Step 5: Register kanban tasks ---
@@ -531,8 +568,11 @@ def _cmd_tick(args, config: Config) -> int:
                     log.warning("failed to write outcome sidecar: %s", se)
                 return 1
 
+            # Persist AFTER registration — inside the lock — so a concurrent
+            # tick cannot see an unregistered tick_id and skip selection.
+            _persist_tick_id(state_dir, tick_id)
+
             # --- Step 6: Observe circuit breaker ---
-            cb = _make_circuit_breaker(state_dir, cb_cfg, config.slack_channel)
             cb.observe(picked=picked, counts_as_no_progress=False)
 
             return 0

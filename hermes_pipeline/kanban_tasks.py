@@ -4,8 +4,10 @@ Uses raw `hermes kanban` CLI directly — not through HermesKanbanAdapter.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -14,6 +16,11 @@ from .phases import load_phases, _render_phase_prompt
 log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
+
+# Statuses that count as "complete" for the purpose of determining whether
+# a prior tick's work is done. Archived phases (from mid-registration
+# cleanup) are excluded — they indicate the tick didn't finish cleanly.
+COMPLETION_STATUSES = frozenset({"done", "failed"})
 
 
 def _build_json_header(
@@ -108,7 +115,7 @@ def register_todo_phases(
             tick_id,
         )
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
             # Mid-registration failure: archive already-created tasks
             log.error(
@@ -191,13 +198,16 @@ def get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]:
 
 
 def all_phases_complete(board_slug: str, tick_id: str) -> bool:
-    """Check if all kanban tasks for a tick are in terminal statuses.
+    """Check if all kanban tasks for a tick are in completion statuses.
 
-    Terminal statuses: done, failed, archived.
+    Completion statuses: done, failed. Archived phases (from mid-registration
+    cleanup) are excluded — they indicate the tick didn't finish cleanly,
+    so we hold the lock until the operator intervenes or the stale lock
+    is reclaimed.
 
     Returns:
-        True if every task for the tick is terminal.
-        False if any task is still in-flight or if the CLI fails
+        True if every task for the tick is in a completion status.
+        False if any task is still in-flight, archived, or if the CLI fails
         (conservative: don't release lock on failure).
     """
     status_map = get_todo_kanban_status(board_slug, tick_id)
@@ -211,10 +221,10 @@ def all_phases_complete(board_slug: str, tick_id: str) -> bool:
         return False
 
     for phase_key, status in status_map.items():
-        if status not in TERMINAL_STATUSES:
+        if status not in COMPLETION_STATUSES:
             log.debug(
-                "phase %s for tick %s is still %s (not terminal)",
-                phase_key, tick_id, status,
+                "phase %s for tick %s is still %s (not in completion status %s)",
+                phase_key, tick_id, status, sorted(COMPLETION_STATUSES),
             )
             return False
 
@@ -288,14 +298,25 @@ def observe_outcomes(
                         sort_keys=True,
                     )
                 )
-        # running, ready, created, archived — no outcome line
+        elif status == "archived":
+            if phase_key not in existing:
+                new_outcomes.append(
+                    json.dumps(
+                        {
+                            "outcome": "failed_at_phase_" + phase_key,
+                            "detail": {"kanban_status": "archived"},
+                        },
+                        sort_keys=True,
+                    )
+                )
+        # running, ready, created — no outcome line
 
-    # Check if all tasks are terminal
-    all_terminal = (
+    # Check if all tasks are in completion statuses (done/failed, not archived)
+    all_complete = (
         len(status_map) > 0
-        and all(s in TERMINAL_STATUSES for s in status_map.values())
+        and all(s in COMPLETION_STATUSES for s in status_map.values())
     )
-    if all_terminal and "all_phases_complete" not in existing:
+    if all_complete and "all_phases_complete" not in existing:
         new_outcomes.append(
             json.dumps(
                 {
@@ -306,9 +327,14 @@ def observe_outcomes(
         )
 
     if new_outcomes:
-        with open(phases_file, "a") as f:
+        fd = os.open(str(phases_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
             for line in new_outcomes:
-                f.write(line + "\n")
+                os.write(fd, (line + "\n").encode())
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
 
         log.info(
             "observed %d outcomes for tick %s", len(new_outcomes), tick_id

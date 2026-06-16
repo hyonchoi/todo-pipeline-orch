@@ -108,16 +108,27 @@ class CircuitBreaker:
         has_failure = any(
             o.get("outcome", "").startswith("failed_at_phase_") for o in outcomes
         )
+        has_picked_none = any(o.get("outcome") == "picked_none" for o in outcomes)
 
         if has_all_complete or has_phase_complete:
-            # Progress detected — reset counter directly
+            # Progress detected — reset counter and backoff state
             st = self._load()
             st["consecutive_no_progress"] = 0
+            if st.get("backed_off"):
+                _set_cron_interval(minutes=5)
+                st["backed_off"] = False
             self._save(st)
             return
 
         if has_failure:
             return self.observe(picked=None, counts_as_no_progress=True)
 
-        # No terminal outcomes yet — in-flight, don't count as no-progress
-        pass
+        if has_picked_none:
+            # Selection picked nothing — all TODOs are complete or blocked.
+            # Not a failure; the pipeline is idle. Don't count as no-progress.
+            return self.observe(picked=None, counts_as_no_progress=False)
+
+        # No terminal outcomes yet — in-flight, update observation without
+        # counting as no-progress so the circuit breaker stays aware of the
+        # current tick cadence.
+        return self.observe(picked=None, counts_as_no_progress=False)

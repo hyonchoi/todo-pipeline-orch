@@ -165,7 +165,7 @@ def test_build_context_assembles_all_fields(tmp_path, monkeypatch):
     todos = tmp_path / "TODOS.md"
     todos.write_text("- TODO-1: do thing\n")
     monkeypatch.setattr(
-        "hermes_pipeline.decision.context._kanban_snapshot",
+        "hermes_pipeline.decision.context._fetch_kanban_snapshot",
         lambda slug: {"columns": ["doing"]},
     )
     monkeypatch.setattr(

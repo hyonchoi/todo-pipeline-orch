@@ -177,6 +177,30 @@ class TestObserveFromOutcomes:
         st = cb._load()
         assert st["consecutive_no_progress"] == 0
 
+    def test_picked_none_not_no_progress(self, state_dir):
+        """picked_none outcome -> not counted as no-progress."""
+        cb = CircuitBreaker(
+            state_path=state_dir / "circuit.json",
+            no_progress_threshold=3,
+            backoff_interval_min=30,
+            alert_dedup_hours=24,
+            slack_channel="#alerts",
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        phases_file.parent.mkdir(parents=True, exist_ok=True)
+        phases_file.write_text(
+            '{"outcome": "picked_none"}\n'
+        )
+
+        cb.observe_from_outcomes(
+            state_dir=state_dir,
+            prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+        )
+
+        st = cb._load()
+        assert st["consecutive_no_progress"] == 0
+
     def test_high_watermark_no_replay(self, state_dir):
         """Calling observe_from_outcomes twice -> same outcome, no double count."""
         cb = CircuitBreaker(
