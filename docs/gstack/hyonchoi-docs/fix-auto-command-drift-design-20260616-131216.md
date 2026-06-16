@@ -214,3 +214,197 @@ Add kanban-specific metadata to phase entries:
 - `python-ulid` — ULID tick ID generation
 - `TODO-2`, `TODO-3`, `TODO-6` — already done (hermes decision agent, hermes process routing, hermes LLM routing)
 - Hermes installed and configured (assumption from TODO-6)
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 5 issues, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+CROSS-MODEL: Outside voice (Claude subagent — Codex failed) found 15 findings. Key tension on kanban-as-scheduler execution model resolved: user confirmed kanban workers run phases as Hermes-native goals.
+VERDICT: ENG OPEN — 5 issues folded into design doc (Step 1.5 observe_outcomes, gateway as dispatch, manual intervention on phase failure, append_phase_outcome, temp file for kanban body). Additional outside-voice findings require design doc update (build_in_flight kanban query, circuit breaker JSONL integration, phase timeout enforcement, operator resume mechanism, pipeline-tick command registration).
+
+NO UNRESOLVED DECISIONS
+
+## GSTACK REVIEW REPORT — ENG FOLLOW-UP
+
+| Status | Date | Trigger | Notes |
+|--------|------|---------|-------|
+| issues_open | 2026-06-16 | `/plan-eng-review` | 5 outside-voice findings |
+| resolved | 2026-06-16 | Outside-voice resolution | OV-1 through OV-5 folded into design doc |
+
+VERDICT: ENG CLEARED — all outside-voice findings addressed (OV-1: `build_in_flight` kanban query, OV-2: circuit breaker JSONL integration, OV-3: phase timeout enforcement, OV-4: operator resume mechanism, OV-5: `pipeline-tick` command registration). Ready for implementation.
+
+### OV-1: `build_in_flight` must query kanban status, not file markers
+
+**Problem:** The current `build_in_flight()` in `decision/context.py` reads file markers (`ready_for_review/` and `phase_started/` directories) to determine which TODOs are in-flight. With kanban-as-scheduler, the source of truth for "what's running" is the kanban board, not file markers. Relying on file markers creates a split-brain where the selection engine sees stale state.
+
+**Resolution:** Add a `build_in_flight_from_kanban(board_slug)` function that queries `hermes kanban list --board <slug> --json` and extracts the set of TODO IDs with non-terminal kanban tasks (tasks in `created`, `ready`, `running` status). The function parses the JSON header in each task's body to find `todo_id`.
+
+The existing `_kanban_snapshot()` in `context.py` already does this — it's just not wired into `build_in_flight`. The updated flow:
+
+```python
+def build_in_flight(state_dir: Path, board_slug: str, *, max_phase_timeout_min: int) -> list[str]:
+    """Compute in-flight set from kanban state, falling back to file markers."""
+    kanban_in_flight = _kanban_in_flight_ids(board_slug)
+    if kanban_in_flight is not None:
+        return sorted(kanban_in_flight)
+    # Fallback: file markers (for pre-kanban state or if kanban CLI fails)
+    return build_in_flight_from_files(state_dir, max_phase_timeout_min=max_phase_timeout_min)
+
+def _kanban_in_flight_ids(board_slug: str) -> set[str] | None:
+    """Extract TODO IDs with in-flight kanban tasks. Returns None on CLI failure."""
+    snapshot = _kanban_snapshot(board_slug)
+    if snapshot is None:
+        return None
+    result = set()
+    for task in snapshot.get("tasks", []):
+        if task.get("status") in ("created", "ready", "running"):
+            # Extract todo_id from JSON header in task body
+            body = task.get("body", "")
+            first_line = body.split("\n")[0]
+            try:
+                header = json.loads(first_line)
+                todo_id = header.get("todo_id")
+                if todo_id:
+                    result.add(todo_id)
+            except (json.JSONDecodeError, IndexError):
+                pass  # Task without JSON header — skip
+    return result
+```
+
+**Backward compatibility:** Falls back to file markers if kanban CLI is unavailable (migration period).
+
+### OV-2: Circuit breaker needs JSONL outcome integration
+
+**Problem:** The current `CircuitBreaker.observe(picked, counts_as_no_progress)` requires the caller to determine whether a tick made progress. With the JSONL outcome file (`.hermes/outcomes/<tick_id>-phases.json`), the circuit breaker should be able to read outcomes directly and derive its own judgment.
+
+**Resolution:** Add an `observe_from_outcomes()` method that reads the JSONL file and determines no-progress status:
+
+```python
+def observe_from_outcomes(self, state_dir: Path, prior_tick_id: str, current_picked: str | None) -> None:
+    """Observe circuit breaker state from JSONL outcome file."""
+    phases_file = state_dir / ".hermes" / "outcomes" / f"{prior_tick_id}-phases.json"
+    if not phases_file.exists():
+        # No outcome file — prior tick didn't register phases (Approach A or picked=None)
+        # Fall back to explicit observe
+        return self.observe(picked=current_picked, counts_as_no_progress=True)
+
+    lines = phases_file.read_text().strip().split("\n")
+    outcomes = [json.loads(line) for line in lines if line.strip()]
+
+    has_phase_complete = any(o.get("outcome") == "phase_complete" for o in outcomes)
+    has_all_complete = any(o.get("outcome") == "all_phases_complete" for o in outcomes)
+    has_failure = any(o.get("outcome", "").startswith("failed_at_phase_") for o in outcomes)
+
+    if has_all_complete:
+        # Pipeline fully completed a TODO — definite progress, reset counter
+        return self.observe(picked=current_picked, counts_as_no_progress=False)
+    if has_phase_complete:
+        # At least one phase completed — progress, reset counter
+        return self.observe(picked=current_picked, counts_as_no_progress=False)
+    if has_failure:
+        # Phase failed — no progress, increment counter
+        return self.observe(picked=current_picked, counts_as_no_progress=True)
+
+    # No outcomes yet — tick is still in-flight, don't count as no-progress
+    return self.observe(picked=current_picked, counts_as_no_progress=False)
+```
+
+The tick flow calls `observe_from_outcomes()` at step 7, passing the prior tick's ID and current selection result. This eliminates the need for the caller to manually determine `counts_as_no_progress`.
+
+### OV-3: Phase timeout enforcement mechanism
+
+**Problem:** If a phase worker gets stuck (e.g., infinite loop, hung on user input), the kanban daemon's stale-claim reclaim handles it — but the interval and timeout need explicit configuration. The current `max_phase_timeout_min` in the circuit breaker config is used for file marker staleness, not kanban task timeouts.
+
+**Resolution:** The phase timeout is enforced by the kanban daemon's `--stale-claim-timeout` flag. Add a `phase_timeout_min` configuration to `phases.yaml`:
+
+```yaml
+pipeline:
+  phase_timeout_min: 30  # Default: 30 minutes per phase
+  goal_max_turns: 20     # Default max turns per phase goal
+```
+
+The `register_todo_phases()` function passes `--stale-claim-timeout` to `hermes kanban create`:
+
+```python
+cmd = [
+    "hermes", "kanban", "create",
+    "--board", board_slug,
+    "--workspace", f"dir:{project_dir}",
+    "--goal", f"--goal-max-turns", str(phase.get("goal_max_turns", 20)),
+    "--idempotency-key", f"{tick_id}:{phase_key}",
+    "--stale-claim-timeout", f"{phase_timeout_min}m",
+    # ...
+]
+```
+
+If `--stale-claim-timeout` is not supported by the hermes kanban CLI, the timeout is enforced by the `hermes kanban daemon --interval 60` which checks for stale claims (task in `running` for > `--interval * stale_threshold`). The existing `_phase_started_ids()` stale-sweep logic is the fallback.
+
+**On timeout:** The kanban daemon reclaims the task (sets status to `ready`), and the next dispatch cycle picks it up again. If a phase fails N times (tracked via retry count in the kanban task metadata), it transitions to `failed` status — the tick's `observe_outcomes()` writes `failed_at_phase_<key>` to the JSONL file, and the circuit breaker counts it as no-progress.
+
+**Retry limit:** Default 2 retries per phase. After 2 retries, the phase is marked `failed` and the circuit breaker is notified. Prevents infinite reclaim-retry loops.
+
+### OV-4: Operator resume mechanism for failed phases
+
+**Problem:** When a phase fails (after retries or due to a hard error like a merge conflict), the pipeline needs a mechanism for the operator to intervene and resume from the point of failure — not restart from phase 1.
+
+**Resolution:** The kanban model naturally supports this. When a phase task fails, the operator can:
+
+1. **Fix and retry:** `hermes kanban retry <task_id>` — resets the task to `ready` status, dispatch picks it up on the next cycle.
+
+2. **Skip and promote:** `hermes kanban promote --skip <task_id>` — marks the task as `done` (skipped) so the next phase in the `--parent` chain becomes unblocked.
+
+3. **Re-register from phase N:** A new `pipeline-watch resume <project> --from-phase <phase_key>` subcommand that re-registers only the failed and subsequent phases:
+   ```
+   pipeline-watch resume todo-pipeline-orchestrator --from-phase phase_4_review
+   ```
+   This reads the prior tick's kanban task status, archives any tasks still in a failed state, and re-creates them with new `--idempotency-key` values (appending `:retry-1`).
+
+**Implementation note:** `pipeline-watch resume` is a follow-up command, not required for TODO-10. The `hermes kanban retry` and `hermes kanban promote --skip` CLIs are sufficient for V1 operator intervention.
+
+**Circuit breaker impact:** When the operator resumes a failed phase, the circuit breaker counter should reset — the operator's intervention counts as progress. The `pipeline-watch resume` command writes a `{"outcome": "operator_resumed", "phase_key": "..."}` entry to the JSONL file, which the circuit breaker interprets as `counts_as_no_progress=False`.
+
+### OV-5: `pipeline-tick` Hermes command registration
+
+**Problem:** The design doc describes the tick flow and the cron entry (`hermes cron set pipeline-tick '*/5 * * * *'`), but doesn't specify how the Hermes command `pipeline-tick` is registered. Hermes cron invokes commands by name — the command must be defined in the Hermes config or skill system for the cron to resolve it.
+
+**Resolution:** Register `pipeline-tick` as a Hermes command via the Hermes config in the project's `.hermes/` directory:
+
+```yaml
+# .hermes/commands/pipeline-tick.yaml
+name: pipeline-tick
+description: "Tick the pipeline — select a TODO and register kanban phases"
+executor: shell
+command: "uv run pipeline-watch tick {{project}}"
+triggers:
+  - cron: "*/5 * * * *"
+args:
+  - name: project
+    required: true
+    default: "{{.ProjectSlug}}"
+```
+
+The `{{project}}` variable is resolved from the project slug. Alternatively, if Hermes commands are defined in the Hermes config repo (not project-local), the command definition lives there:
+
+```yaml
+# hermes-config/commands/pipeline-tick.yaml
+name: pipeline-tick
+executor: shell
+command: "uv run pipeline-watch tick {{.ProjectSlug}}"
+cron: "*/5 * * * *"
+```
+
+**Verification:** Run `hermes commands list` after registration to confirm `pipeline-tick` is available.
+
+**Fallback for Step 6:** If Hermes doesn't support YAML command registration (it may use a skill-based system), the cron entry maps directly to a shell command via `hermes cron set`:
+
+```bash
+hermes cron set pipeline-tick '*/5 * * * *' --command "uv run pipeline-watch tick todo-pipeline-orchestrator"
+```
+
+Verify the exact cron registration mechanism against the Hermes CLI docs before implementation.
