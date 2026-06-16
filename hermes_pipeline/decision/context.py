@@ -87,8 +87,68 @@ def _phase_started_ids(state_dir: Path, *, max_phase_timeout_min: int) -> list[s
             pass
     return out
 
-def build_in_flight(state_dir: Path, *, max_phase_timeout_min: int) -> list[str]:
-    """Compute in-flight set: ready_for_review union phase_started, minus stale."""
+def _kanban_in_flight_ids(board_slug: str) -> set[str] | None:
+    """Extract TODO IDs with in-flight kanban tasks.
+
+    Queries `hermes kanban list --board <slug> --json` and parses the
+    JSON header in each task's body. Returns None on CLI failure so the
+    caller can fall back to file markers.
+
+    Returns:
+        Set of TODO IDs with tasks in created/ready/running status,
+        or None if the kanban CLI is unavailable.
+    """
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "list", "--board", board_slug, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        snapshot = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        return None
+
+    result_set = set()
+    for task in snapshot.get("tasks", []):
+        if task.get("status") not in ("created", "ready", "running"):
+            continue
+        body = task.get("body", "")
+        first_line = body.split("\n")[0]
+        try:
+            header = json.loads(first_line)
+            todo_id = header.get("todo_id")
+            if todo_id:
+                result_set.add(todo_id)
+        except (json.JSONDecodeError, IndexError):
+            pass  # Task without JSON header — skip
+    return result_set
+
+def build_in_flight(
+    state_dir: Path,
+    *,
+    max_phase_timeout_min: int,
+    board_slug: str | None = None,
+) -> list[str]:
+    """Compute in-flight set from kanban state, falling back to file markers.
+
+    Args:
+        state_dir: State directory path.
+        max_phase_timeout_min: Max age in minutes before a lock is stale.
+        board_slug: Kanban board slug for kanban-aware lookup.
+            If None or kanban CLI fails, falls back to file markers.
+
+    Returns:
+        Sorted list of TODO IDs currently in flight.
+    """
+    if board_slug is not None:
+        kanban_in_flight = _kanban_in_flight_ids(board_slug)
+        if kanban_in_flight is not None:
+            return sorted(kanban_in_flight)
+
+    # Fallback: existing file markers
     return sorted(
         set(_rfr_ids(state_dir))
         | set(_phase_started_ids(state_dir, max_phase_timeout_min=max_phase_timeout_min))
@@ -126,7 +186,11 @@ def build_context(
     """Assemble the full SelectionContext for a tick."""
     return SelectionContext(
         todos_md=todos_path.read_text(),
-        in_flight=build_in_flight(state_dir, max_phase_timeout_min=max_phase_timeout_min),
+        in_flight=build_in_flight(
+            state_dir,
+            max_phase_timeout_min=max_phase_timeout_min,
+            board_slug=project_slug,
+        ),
         recent_decisions=_recent_decisions(state_dir, recent_n),
         kanban_snapshot=_kanban_snapshot(project_slug),
         project_slug=project_slug,

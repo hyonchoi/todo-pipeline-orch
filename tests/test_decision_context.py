@@ -57,6 +57,110 @@ def test_stale_marker_with_dead_pid_is_swept(tmp_path, monkeypatch):
     assert "TODO-5" not in ids
     assert not p.exists()
 
+class TestKanbanInFlight:
+    """Tests for _kanban_in_flight_ids() and kanban-aware build_in_flight()."""
+
+    def test_kanban_in_flight_ids_parsing(self, tmp_path, mocker):
+        """_kanban_in_flight_ids extracts TODO IDs from kanban JSON with in-flight tasks."""
+        from hermes_pipeline.decision.context import _kanban_in_flight_ids
+
+        mock_data = {
+            "tasks": [
+                {
+                    "status": "running",
+                    "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\nDo the work',
+                },
+                {
+                    "status": "ready",
+                    "body": '{"tick_id":"01HA","phase_key":"phase_3_writing","todo_id":"TODO-10","project_slug":"demo"}\nWrite plan',
+                },
+                {
+                    "status": "done",
+                    "body": '{"tick_id":"01H9","phase_key":"phase_2_autoplan","todo_id":"TODO-9","project_slug":"demo"}\nDone',
+                },
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = _kanban_in_flight_ids("demo")
+        assert result == {"TODO-10"}
+
+    def test_kanban_in_flight_returns_none_on_failure(self, tmp_path, mocker):
+        """CLI failure -> None (fallback to file markers)."""
+        from hermes_pipeline.decision.context import _kanban_in_flight_ids
+
+        mocker.patch("subprocess.run", side_effect=FileNotFoundError)
+
+        result = _kanban_in_flight_ids("demo")
+        assert result is None
+
+    def test_kanban_in_flight_skips_no_header(self, tmp_path, mocker):
+        """Tasks without JSON header are skipped, not crashed."""
+        from hermes_pipeline.decision.context import _kanban_in_flight_ids
+
+        mock_data = {
+            "tasks": [
+                {
+                    "status": "running",
+                    "body": "No JSON header — just raw text",
+                },
+                {
+                    "status": "running",
+                    "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\nValid header',
+                },
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = _kanban_in_flight_ids("demo")
+        assert result == {"TODO-10"}
+
+    def test_build_in_flight_uses_kanban(self, state_dir, mocker):
+        """build_in_flight uses kanban when available."""
+        from hermes_pipeline.decision.context import build_in_flight
+
+        mocker.patch(
+            "hermes_pipeline.decision.context._kanban_in_flight_ids",
+            return_value={"TODO-7"},
+        )
+
+        result = build_in_flight(
+            state_dir=state_dir,
+            max_phase_timeout_min=120,
+            board_slug="demo",
+        )
+        assert result == ["TODO-7"]
+
+    def test_build_in_flight_fallback_to_files(self, state_dir, mocker):
+        """build_in_flight falls back to file markers when kanban fails."""
+        from hermes_pipeline.decision.context import build_in_flight
+
+        mocker.patch(
+            "hermes_pipeline.decision.context._kanban_in_flight_ids",
+            return_value=None,
+        )
+
+        # Create a file marker in phase_started (the fallback reads there)
+        marker_dir = state_dir / "phase_started"
+        marker_dir.mkdir(exist_ok=True)
+        marker = marker_dir / "TODO-3.json"
+        marker.write_text(json.dumps({"tick_id": "old", "phase_key": "phase_2_autoplan"}))
+
+        result = build_in_flight(
+            state_dir=state_dir,
+            max_phase_timeout_min=120,
+            board_slug="demo",
+        )
+        assert "TODO-3" in result
+
 def test_build_context_assembles_all_fields(tmp_path, monkeypatch):
     todos = tmp_path / "TODOS.md"
     todos.write_text("- TODO-1: do thing\n")
