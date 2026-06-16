@@ -213,3 +213,126 @@ class TestRegisterTodoPhases:
         )
 
         assert task_ids == ["task-001", "task-002"]
+
+
+class TestAllPhasesComplete:
+    """Tests for all_phases_complete() and get_todo_kanban_status()."""
+
+    def test_all_done_is_complete(self, mocker):
+        """All tasks done -> all_phases_complete returns True."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = {
+            "tasks": [
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is True
+
+    def test_running_task_not_complete(self, mocker):
+        """At least one running task -> not complete."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = {
+            "tasks": [
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is False
+
+    def test_no_tasks_for_tick(self, mocker):
+        """No tasks for the tick -> False (nothing to complete)."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = {"tasks": []}
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is False
+
+    def test_failed_task_is_terminal(self, mocker):
+        """A failed task is terminal — all tasks terminal -> True."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = {
+            "tasks": [
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "failed", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is True
+
+    def test_cli_failure_returns_false(self, mocker):
+        """Kanban CLI failure -> False (conservative: don't release lock)."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mocker.patch("subprocess.run", side_effect=FileNotFoundError)
+
+        assert all_phases_complete("demo", "01HA") is False
+
+
+class TestGetTodoKanbanStatus:
+    """Tests for get_todo_kanban_status()."""
+
+    def test_returns_status_map(self, mocker):
+        """Returns {phase_key: status} for the tick."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mock_data = {
+            "tasks": [
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "ready", "body": '{"tick_id":"01HA","phase_key":"phase_6_1_cso","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                # Different tick — should be filtered out
+                {"status": "done", "body": '{"tick_id":"01H9","phase_key":"phase_2_autoplan","todo_id":"TODO-9","project_slug":"demo"}\n...'},
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {
+            "phase_2_autoplan": "done",
+            "phase_4_development": "running",
+            "phase_6_1_cso": "ready",
+        }
+
+    def test_returns_empty_for_no_matching_tick(self, mocker):
+        """No tasks for the tick -> empty map."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mock_data = {"tasks": []}
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {}

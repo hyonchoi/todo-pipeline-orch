@@ -146,3 +146,76 @@ def _archive_tasks(task_ids: list[str]) -> None:
             log.info("archived kanban task %s", task_id)
         except Exception as e:
             log.warning("failed to archive task %s: %s", task_id, e)
+
+
+def get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]:
+    """Query kanban for all tasks of a tick, return {phase_key: status}.
+
+    Args:
+        board_slug: Kanban board slug.
+        tick_id: ULID tick ID to filter tasks by.
+
+    Returns:
+        Dict mapping phase_key to status for tasks matching the tick_id.
+        Empty dict if no tasks found or CLI fails.
+    """
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "list", "--board", board_slug, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            return {}
+        snapshot = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        log.warning("kanban list failed for board=%s", board_slug)
+        return {}
+
+    status_map: dict[str, str] = {}
+    for task in snapshot.get("tasks", []):
+        body = task.get("body", "")
+        first_line = body.split("\n")[0]
+        try:
+            header = json.loads(first_line)
+            if header.get("tick_id") != tick_id:
+                continue
+            phase_key = header.get("phase_key")
+            if phase_key:
+                status_map[phase_key] = task.get("status", "unknown")
+        except (json.JSONDecodeError, IndexError):
+            pass
+
+    return status_map
+
+
+def all_phases_complete(board_slug: str, tick_id: str) -> bool:
+    """Check if all kanban tasks for a tick are in terminal statuses.
+
+    Terminal statuses: done, failed, archived.
+
+    Returns:
+        True if every task for the tick is terminal.
+        False if any task is still in-flight or if the CLI fails
+        (conservative: don't release lock on failure).
+    """
+    status_map = get_todo_kanban_status(board_slug, tick_id)
+
+    if not status_map:
+        # No tasks found — could be: (a) first tick hasn't registered yet,
+        # or (b) picked=None so no phases were registered.
+        # Conservative: return False so we don't accidentally release.
+        # In the tick flow, the check is only done when a prior tick
+        # had a picked TODO, so empty here means still in-flight.
+        return False
+
+    for phase_key, status in status_map.items():
+        if status not in TERMINAL_STATUSES:
+            log.debug(
+                "phase %s for tick %s is still %s (not terminal)",
+                phase_key, tick_id, status,
+            )
+            return False
+
+    return True
