@@ -16,8 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`.hermes/prompts/` tracking** — prompt templates are tracked in git; runtime state (decisions, outcomes, locks) is ignored
 
 ### Changed
-- **`tick` subcommand** — manual one-shot trigger (`pipeline-watch tick`) complements the cron-driven `pipeline-tick`; runs a single tick immediately for testing and debugging
-- **Tutorial updated** — manual `pipeline-watch auto` replaced by `hermes cron set pipeline-tick`; cron setup is the primary workflow
+- **Tutorial updated** — `pipeline-watch tick` is the primary workflow for development and debugging; Hermes cron is optional for production
 
 ### Fixed
 - **Circuit breaker config loaded once per tick** — eliminated duplicate TOML overlay reads and `CircuitBreaker` instantiations

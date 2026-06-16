@@ -1,15 +1,15 @@
 # Getting Started with pipeline-watch
 
-In this tutorial, you'll set up your first pipeline-watched project and run the core workflows: configuring the pipeline, reviewing TODOs, and merging one to main. By the end, you'll have a working automation loop driven by Hermes cron.
+In this tutorial, you'll set up your first pipeline-watched project and run the core workflows: triggering a tick, reviewing TODOs, and merging one to main. By the end, you'll have a working pipeline — with an optional cron schedule for production.
 
-**Time: ~15 minutes**
+**Time: ~10 minutes**
 
 ## What you'll need
 
 - `todo-pipeline-orchestrator` installed (see [README prerequisites](../README.md#requirements))
-- A git repository with at least one project containing a `TODOS.md` file
 - Python 3.12+ and uv package manager
 - Hermes CLI installed and authenticated (`hermes login`)
+- Hermes kanban configured for your project
 - Write permissions on your git repositories
 
 If you don't have a test project yet, the setup section below will guide you through creating one.
@@ -26,7 +26,7 @@ uv run pipeline-watch --version
 
 Expected output:
 ```
-pipeline-watch 0.3.0
+pipeline-watch 0.3.1
 ```
 
 If you see "command not found," run:
@@ -103,32 +103,54 @@ This is correct — no TODOs are ready for review yet. The status command shows 
 
 ---
 
-## Step 4: Configure the Hermes cron tick
+## Step 4: Run a manual tick
 
-The pipeline is driven by Hermes cron. Hermes discovers projects, detects
-TODOS.md changes, selects eligible TODOs via the Hermes agent, and runs the
-phase loop. Set up the tick schedule:
+The `tick` command runs one pipeline tick immediately: it checks for in-flight work from a previous tick, observes outcomes, acquires a tick lock, runs selection via the Hermes agent, and registers phases as kanban tasks. This is the fastest way to see the pipeline in action.
 
 ```bash
-hermes cron set pipeline-tick '*/5 * * * *'
+uv run pipeline-watch tick demo-app
 ```
 
-Verify the schedule is active:
+You'll see log output as the tick runs. The Hermes agent evaluates your TODOS.md and picks a TODO (or returns `picked=None` if nothing is ready yet).
+
+Check the decision record:
 
 ```bash
-hermes cron list
+jq '{picked: .picked, rationale: .rationale}' \
+  .hermes/decisions/$(ls -t .hermes/decisions/ | head -1)
 ```
 
-You should see an entry for `pipeline-tick` with the `*/5` schedule.
+If you see `picked=None`, mark TODO-1 as in progress and run the tick again:
 
-The first tick may take up to 5 minutes to fire. While you wait, move on to
-the next steps.
+```bash
+# Edit TODOS.md: change the status from `[ ]` to `[→]`
+cd ~/my-projects/demo-app
+# ... edit TODOS.md to set Status: `[→]` ...
+git add TODOS.md
+git commit -m "TODO-1: mark in progress"
+
+uv run pipeline-watch tick demo-app
+```
+
+Run the tick a second time. This tick observes outcomes from the prior tick (if any) and then runs selection again.
+
+### Inspect the kanban board
+
+If a TODO was picked, phases are now registered as kanban tasks with `--parent` dependency chains. Check the board:
+
+```bash
+hermes kanban list --board demo-app
+```
+
+You should see phases like `phase_2_autoplan` (running) and `phase_4_development` (ready — blocked on its parent).
+
+See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
 
 ---
 
 ## Step 5: Check pipeline status
 
-Once the Hermes cron tick has run, check what TODOs are pending:
+Once a TODO has been selected and is progressing through phases, check the pending records:
 
 ```bash
 uv run pipeline-watch status
@@ -139,7 +161,7 @@ When TODOs are ready for review, you'll see a table like:
 ```
 Project | TODO ID | Status           | Age
 --------|---------|------------------|------
-demo-app| 1       | ready-for-review | 2m
+demo-app| 1       | ready-for-review | 5m
 ```
 
 ---
@@ -174,15 +196,33 @@ uv run pipeline-watch merge demo-app 1 --abandon
 
 ---
 
+## Step 7: Automate with Hermes cron (optional)
+
+So far you've been running `pipeline-watch tick` manually. For production, set up the Hermes cron schedule:
+
+```bash
+hermes cron set pipeline-tick '*/5 * * * *'
+```
+
+Verify the schedule is active:
+
+```bash
+hermes cron list
+```
+
+You should see an entry for `pipeline-tick` with the `*/5` schedule. The circuit breaker adjusts the interval automatically — 5-minute ticks normally, backing off to 30 minutes after repeated no-progress ticks.
+
+---
+
 ## What you built
 
 You now have a working pipeline-watch setup that:
 
-✅ Discovers projects with TODOS.md files via Hermes cron  
-✅ Detects status changes and selects eligible TODOs via Hermes agent  
+✅ Discovers projects with TODOS.md files via Hermes agent  
+✅ Selects TODOs and registers phases as kanban tasks with dependency chains  
 ✅ Displays pending records in a table  
 ✅ Merges TODOs to main with version bumping  
-✅ Runs automatically every 5 minutes via Hermes cron  
+✅ Runs automatically every 5 minutes via Hermes cron (optional)  
 
 ### Next steps
 
@@ -190,12 +230,11 @@ You now have a working pipeline-watch setup that:
 - Read [Configuration](../README.md#configuration) to customize `PIPELINE_LOCK_DIR`, `PIPELINE_STATE_DIR`, etc.
 - See [Troubleshooting](../README.md#troubleshooting) for common issues and fixes
 
-**Integrate into your workflow:**
-- Set environment variables in your shell profile (`.bashrc`, `.zshrc`, etc.)
-- Add `PIPELINE_PROJECTS_DIR` to point to your real projects directory
-- Monitor pipeline state in `~/.hermes/` (decisions, outcomes, phase_started)
+**Run ticks iteratively during development:**
+- See [How to run a manual tick](howto-pipeline-tick.md) for the full tick flow with verification and troubleshooting
 
 **Understand the architecture:**
+- Read [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) to understand how phases map to kanban tasks
 - Read [Architecture](../README.md#architecture) to see how pipeline-watch orchestrates the phases and merges
 - Check [docs/pipeline-modularization-plan.md](pipeline-modularization-plan.md) for the full design
 
