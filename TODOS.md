@@ -2,6 +2,22 @@
 
 gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the required fields: What/Why/Pros/Cons/Context/Depends on/Decisions. Status markers: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold. See `docs/gstack/hyonchoi-main-design-20260610-195349.md` ("TODOS Manager Skill") for the full schema and `TODO-<n>` ID assignment rules.
 
+- [ ] **TODO-10: implement `pipeline-tick` Hermes command** — The cron-driven selection loop
+  - **What:** Implement the `pipeline-tick` command that `hermes cron set pipeline-tick '*/5 * * * *'` fires every 5 minutes. The command mints a ULID tick_id, acquires `.hermes/tick.lock` (atomic mkdir), calls `hermes_pipeline.decision.run_selection(tick_id, ctx)`, persists the decision, and spawns `pipeline-phase` for selected TODOs. Concurrent ticks exit early ("tick already in flight, skipping"). Stale-lock sweep for holders older than `max_tick_duration_min`.
+  - **Why:** The tutorial (`docs/tutorial-getting-started.md`), README, CHANGELOG, and superpowers plan all assume `pipeline-tick` exists as a Hermes command — but the Python code has no handler for it. The tutorial is ahead of the code; the cron fires a command that isn't registered, so the pipeline never actually drives itself.
+  - **Context:** Design lives in [docs/superpowers/plans/2026-06-13-hermes-centric-selection.md](docs/superpowers/plans/2026-06-13-hermes-centric-selection.md) (lines 7, 468, 2119, 2577). State machine in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). Circuit breaker backoff in [hermes_pipeline/circuit.py:21](hermes_pipeline/circuit.py:21) already passes `["hermes", "cron", "set", "pipeline-tick", ...]` but the command itself doesn't exist.
+  - **Depends on:** `TODO-2`, `TODO-3`, `TODO-6` (needs hermes decision agent, hermes process routing, hermes LLM routing)
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Test Coverage `필요`, Security Review `불필요`
+
+- [ ] **TODO-11: rewrite getting-started tutorial to use manual trigger, not cron** — Testing/debugging without waiting
+  - **What:** Add a `pipeline-watch tick` CLI subcommand that fires a single tick immediately (mint tick_id, acquire lock, run selection, spawn phase — same logic as the cron path). Rewrite the getting-started tutorial so that the primary workflow uses `pipeline-watch tick` for manual triggering. Move `hermes cron set pipeline-tick` to an "Autopilot" or "Production" section at the end of the tutorial — cron is for production, manual triggering is for development and debugging.
+  - **Why:** The current tutorial makes users set up a cron job and wait up to 5 minutes just to see if the pipeline works. For testing and debugging, the primary workflow should be: make a change, run `pipeline-watch tick`, see the result immediately. Cron is how you run the pipeline in production — it shouldn't be the getting-started path.
+  - **Pros:** Onboarding is instant — users verify their setup in seconds. Debugging is iterative: fire a tick, check `.hermes/` state, fix, fire again. The tutorial itself becomes testable and fast.
+  - **Cons:** Need to ensure `pipeline-watch tick` shares the same lock semantics and decision pipeline as the cron `pipeline-tick` path — two entry points must behave identically.
+  - **Context:** The getting-started tutorial (Step 4) says "The first tick may take up to 5 minutes to fire. While you wait, move on to the next steps." — that's the UX gap. After TODO-10 lands, `pipeline-watch tick` replaces that wait. Check if Hermes cron supports `hermes cron run pipeline-tick` (one-shot fire) — if so, the tutorial could use that instead of adding a new CLI subcommand.
+  - **Depends on:** `TODO-10` (needs pipeline-tick to exist before there's something to trigger manually)
+  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `불필요`, Security Review `불필요`
+
 - [ ] **TODO-9: fix pre-existing eval test failure — missing `.hermes/prompts/selection.md`** — Eval infrastructure repair
   - **What:** The eval test suite (`tests/eval/runner.py::test_selection_fixture`) fails on both `main` and feature branches because `.hermes/prompts/selection.md` does not exist. Create the prompt file or provision it from Hermes.
   - **Why:** Eval tests are the regression gate for selection-agent behavior. Without them, changes to `decision/agent.py` and prompt handling can silently regress.
