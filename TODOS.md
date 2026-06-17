@@ -106,3 +106,22 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** `TODO-3`
   - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-llm-routing`, Test Coverage `필요`, Security Review `불필요`
 
+- [ ] **TODO-12: enable multi-project tick scanning with project-level config** — Scan-and-per-project-selection tick
+  - **What:** Refactor `pipeline-watch tick` (no `project` argument) to scan `projects_dir` for active projects and run one selection per project. Introduce `<project>/.hermes/project.toml` as a per-project marker file for filtering and config.
+  - **Why:** The current `tick <project>` requires one Hermes cron entry per project. With many projects this is unmanageable and defeats the kanban-as-scheduler model — one cron, one tick, one global lock should drive the whole pipeline.
+  - **How — filtering:** `projects_dir.iterdir()` → `TODOS.md` exists? → `.hermes/project.toml` says `enabled = false`? → skip. Default (no file) is active — opt-out for archived projects.
+  - **How — config shape:**
+    ```toml
+    # <project>/.hermes/project.toml
+    [active]
+    enabled = true  # default if file missing; set false to archive
+    slack_channel = "project__my-slug"  # per-project alert/notification channel
+    ```
+  - **How — Slack notification:** Use `project.toml`'s `slack_channel` if set, otherwise fall back to `PIPELINE_SLACK_CHANNEL` env var, otherwise fall back to `#alert`. Notifications go on: new selection, circuit breaker trip, phase completion.
+  - **How — tick flow:** Single global lock, single global `current_tick_id.txt`. For each active project: build `SelectionContext`, run `run_selection`, register kanban phases. Prior-tick check (`all_phases_complete`) is per-project — if a project has an in-flight tick, skip it and move to the next project.
+  - **Pros:** One cron entry drives the whole pipeline. Project-level config is filesystem-based (no network calls before selection). Slack channel is configurable per-project without global env coupling.
+  - **Cons:** Need to coordinate multiple `register_todo_phases` calls under one lock. The `current_tick_id.txt` becomes shared across projects — need per-project `picked_none` sentinel in outcomes. `build_context` and `run_selection` are project-scoped — the tick loop becomes the orchestrator of multiple contexts.
+  - **Context:** The `tick` subcommand currently requires a `project` argument (`cli.py:287`). `collect_pending` in `status.py:67` already demonstrates the scan pattern. `Config.projects_dir` is wired up via `PIPELINE_PROJECTS_DIR`. Slack channel is currently global via `PIPELINE_SLACK_CHANNEL` in `config.py:40`.
+  - **Depends on:** none (builds on existing tick infrastructure from TODO-11)
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/multi-project-tick`, Test Coverage `필요`, Security Review `불필요`
+
