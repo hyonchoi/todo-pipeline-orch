@@ -506,8 +506,8 @@ class TestObserveOutcomes:
         all_complete = [o for o in outcomes if o["outcome"] == "all_phases_complete"]
         assert len(all_complete) == 0
 
-    def test_skips_in_flight_phases(self, state_dir):
-        """Phases that are running/ready are skipped (not written as outcomes)."""
+    def test_phase_complete_written_in_flight_skipped(self, state_dir):
+        """Done phases written; running/ready phases skipped (not written as outcomes)."""
         from hermes_pipeline.kanban_tasks import observe_outcomes
 
         status_map = {
@@ -533,3 +533,179 @@ class TestObserveOutcomes:
 
         all_complete = [o for o in outcomes if o["outcome"] == "all_phases_complete"]
         assert len(all_complete) == 0
+
+    def test_skips_in_flight_phases(self, state_dir):
+        """In-flight phases (running, ready) are skipped."""
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {
+            "phase_2_autoplan": "running",
+            "phase_4_development": "ready",
+        }
+
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        # No outcomes should be written for in-flight phases
+        content = phases_file.read_text().strip() if phases_file.exists() else ""
+        assert content == ""
+
+    def test_json_parse_error_in_kanban_create(self, tmp_path, mocker):
+        """If kanban create returns non-JSON, RuntimeError is raised."""
+        from hermes_pipeline.kanban_tasks import register_todo_phases
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0, stdout="not json", stderr=""
+        )
+
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        with pytest.raises(RuntimeError, match="failed to parse"):
+            register_todo_phases(
+                todo_id="TODO-10",
+                tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+                board_slug="demo",
+                project_dir=str(tmp_path),
+                phases_path=str(phases_cfg),
+            )
+
+    def test_load_phases_file_not_found(self, tmp_path, mocker):
+        """If phases.yaml doesn't exist, the error propagates."""
+        from hermes_pipeline.kanban_tasks import register_todo_phases
+
+        with pytest.raises(FileNotFoundError):
+            register_todo_phases(
+                todo_id="TODO-10",
+                tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+                board_slug="demo",
+                project_dir=str(tmp_path),
+                phases_path=str(tmp_path / "nonexistent.yaml"),
+            )
+
+    def test_archive_tasks_multiple(self, tmp_path, mocker):
+        """_archive_tasks archives multiple tasks."""
+        from hermes_pipeline.kanban_tasks import _archive_tasks
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(returncode=0, stdout="", stderr="")
+
+        _archive_tasks(["task-001", "task-002", "task-003"])
+
+        assert mock_run.call_count == 3
+        for i, call in enumerate(mock_run.call_args_list):
+            args = call[0][0]
+            assert "kanban" in args
+            assert "archive" in args
+
+    def test_archive_task_failure_is_best_effort(self, tmp_path, mocker):
+        """_archive_tasks continues if one archive fails."""
+        from hermes_pipeline.kanban_tasks import _archive_tasks
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.side_effect = [
+            mocker.MagicMock(returncode=0, stdout="", stderr=""),
+            mocker.MagicMock(returncode=1, stdout="", stderr="error"),
+            mocker.MagicMock(returncode=0, stdout="", stderr=""),
+        ]
+
+        # Should not raise — best-effort
+        _archive_tasks(["task-001", "task-002", "task-003"])
+        assert mock_run.call_count == 3
+
+    def test_all_phases_complete_dict_format(self, mocker):
+        """all_phases_complete handles dict format {'tasks': [...]}."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = {
+            "tasks": [
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is True
+
+    def test_all_phases_complete_mixed_done_ready(self, mocker):
+        """Some done, some ready -> not all complete."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = [
+            {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "ready", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+        ]
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is False
+
+    def test_get_todo_kanban_status_dict_format(self, mocker):
+        """get_todo_kanban_status handles dict format {'tasks': [...]}."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mock_data = {
+            "tasks": [
+                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+                {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {
+            "phase_2_autoplan": "done",
+            "phase_4_development": "running",
+        }
+
+    def test_get_todo_kanban_status_timeout(self, mocker):
+        """get_todo_kanban_status handles subprocess timeout."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        import subprocess
+
+        mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("hermes", 10))
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {}
+
+    def test_get_todo_kanban_status_malformed_header(self, mocker):
+        """get_todo_kanban_status skips tasks with malformed JSON header."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mock_data = [
+            {"status": "done", "body": "No JSON header — just text"},
+            {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_dev"}\n...'},
+        ]
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {"phase_4_dev": "running"}

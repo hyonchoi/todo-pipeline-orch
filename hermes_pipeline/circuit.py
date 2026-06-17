@@ -6,6 +6,13 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from hermes_pipeline.outcomes import (
+    OUTCOME_ALL_COMPLETE,
+    OUTCOME_FAILED_PREFIX,
+    OUTCOME_PHASE_COMPLETE,
+    OUTCOME_PICKED_NONE,
+)
+
 def _now() -> _dt.datetime:
     return _dt.datetime.now(_dt.timezone.utc)
 
@@ -86,6 +93,7 @@ class CircuitBreaker:
 
         - all_phases_complete / phase_complete -> progress (counter reset)
         - failed_at_phase_* -> no progress (counter increment)
+        See hermes_pipeline.outcomes for the canonical string constants.
         - No file -> prior tick picked=None, no progress
         - Empty file -> tick still in-flight, don't count
         """
@@ -103,12 +111,21 @@ class CircuitBreaker:
             if line:
                 outcomes.append(json.loads(line))
 
-        has_phase_complete = any(o.get("outcome") == "phase_complete" for o in outcomes)
-        has_all_complete = any(o.get("outcome") == "all_phases_complete" for o in outcomes)
-        has_failure = any(
-            o.get("outcome", "").startswith("failed_at_phase_") for o in outcomes
-        )
-        has_picked_none = any(o.get("outcome") == "picked_none" for o in outcomes)
+        # Single pass: classify all outcomes in one iteration
+        has_phase_complete = False
+        has_all_complete = False
+        has_failure = False
+        has_picked_none = False
+        for o in outcomes:
+            outcome = o.get("outcome", "")
+            if outcome == OUTCOME_PHASE_COMPLETE:
+                has_phase_complete = True
+            elif outcome == OUTCOME_ALL_COMPLETE:
+                has_all_complete = True
+            elif outcome.startswith(OUTCOME_FAILED_PREFIX):
+                has_failure = True
+            elif outcome == OUTCOME_PICKED_NONE:
+                has_picked_none = True
 
         if has_all_complete or has_phase_complete:
             # Progress detected — reset counter and backoff state

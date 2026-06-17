@@ -8,6 +8,7 @@ import fcntl
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -70,6 +71,9 @@ def register_todo_phases(
             archived before raising.
     """
     project_dir = Path(project_dir)
+    # Validate todo_id format before use in subprocess calls
+    if not re.match(r'^TODO-\d+$', todo_id):
+        raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
     phases = load_phases(phases_path)
 
     task_ids: list[str] = []
@@ -369,7 +373,7 @@ def observe_outcomes(
         )
 
     if new_outcomes:
-        fd = os.open(str(phases_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
+        fd = os.open(str(phases_file), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o640)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             for line in new_outcomes:
