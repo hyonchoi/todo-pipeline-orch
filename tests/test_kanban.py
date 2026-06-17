@@ -427,26 +427,20 @@ class TestHermesKanbanAdapter:
 
     @patch("hermes_pipeline.kanban.subprocess.run")
     def test_set_active_task_success(self, mock_run, tmp_path):
-        """set_active_task should create board and task."""
+        """set_active_task should create task with --tenant and --json."""
         outbox_path = tmp_path / "outbox.jsonl"
         store_path = tmp_path / "active_tasks.json"
         outbox = KanbanOutbox(outbox_path)
         store = ActiveTasksStore(store_path)
         adapter = HermesKanbanAdapter(outbox, store)
 
-        # Mock successful board creation
-        board_result = MagicMock()
-        board_result.returncode = 0
-        board_result.stdout = "board-123"
-        board_result.stderr = ""
-
-        # Mock successful task creation
+        # Mock successful task creation (JSON output from --json)
         task_result = MagicMock()
         task_result.returncode = 0
-        task_result.stdout = "task-456"
+        task_result.stdout = '{"id": "task-456"}'
         task_result.stderr = ""
 
-        mock_run.side_effect = [board_result, task_result]
+        mock_run.side_effect = [task_result]
 
         result = adapter.set_active_task(
             "project_a",

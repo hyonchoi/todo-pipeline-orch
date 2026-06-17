@@ -460,7 +460,7 @@ def _cmd_tick(args, config: Config) -> int:
 
     if prior_tick_id is not None:
         # Prior tick exists — is it complete?
-        if not all_phases_complete(project, prior_tick_id):
+        if not all_phases_complete(project, prior_tick_id, state_dir=state_dir):
             log.info("prior tick %s still in-flight, skipping", prior_tick_id)
             return 0
 
@@ -509,13 +509,17 @@ def _cmd_tick(args, config: Config) -> int:
             )
 
             # --- Step 4: Run selection ---
-            from .config import SelectionConfig
+            from .config import FullConfig, SelectionConfig
 
-            sel_cfg = SelectionConfig()  # Use defaults
+            full_cfg = FullConfig(
+                base=config,
+                selection=SelectionConfig(),
+                circuit_breaker=cb_cfg,
+            )
             decision = run_selection(
                 tick_id=tick_id,
                 ctx=ctx,
-                cfg=sel_cfg,
+                cfg=full_cfg,
             )
 
             picked = decision.picked

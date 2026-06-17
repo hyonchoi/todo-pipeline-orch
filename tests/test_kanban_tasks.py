@@ -17,7 +17,9 @@ class TestRegisterTodoPhases:
         from hermes_pipeline.kanban_tasks import register_todo_phases
 
         mock_run = mocker.patch("subprocess.run")
-        mock_run.return_value = mocker.MagicMock(returncode=0, stdout="task-001")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0, stdout=json.dumps({"id": "task-001"})
+        )
 
         phases_cfg = tmp_path / "phases.yaml"
         phases_cfg.write_text(
@@ -52,7 +54,7 @@ class TestRegisterTodoPhases:
         assert "hermes" in first_call_args
         assert "kanban" in first_call_args
         assert "create" in first_call_args
-        assert "--board" in first_call_args
+        assert "--tenant" in first_call_args
         assert "demo" in first_call_args
         assert "--parent" not in first_call_args
 
@@ -65,7 +67,9 @@ class TestRegisterTodoPhases:
         from hermes_pipeline.kanban_tasks import register_todo_phases
 
         mock_run = mocker.patch("subprocess.run")
-        mock_run.return_value = mocker.MagicMock(returncode=0, stdout="task-001")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0, stdout=json.dumps({"id": "task-001"})
+        )
 
         phases_cfg = tmp_path / "phases.yaml"
         phases_cfg.write_text(
@@ -104,7 +108,9 @@ class TestRegisterTodoPhases:
         from hermes_pipeline.kanban_tasks import register_todo_phases
 
         mock_run = mocker.patch("subprocess.run")
-        mock_run.return_value = mocker.MagicMock(returncode=0, stdout="task-001")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0, stdout=json.dumps({"id": "task-001"})
+        )
 
         phases_cfg = tmp_path / "phases.yaml"
         phases_cfg.write_text(
@@ -138,7 +144,9 @@ class TestRegisterTodoPhases:
         # First call succeeds, second call fails
         mock_run = mocker.patch("subprocess.run")
         mock_run.side_effect = [
-            mocker.MagicMock(returncode=0, stdout="task-001"),
+            mocker.MagicMock(
+                returncode=0, stdout=json.dumps({"id": "task-001"})
+            ),
             mocker.MagicMock(returncode=1, stdout="", stderr="error"),
             # Archive call
             mocker.MagicMock(returncode=0, stdout=""),
@@ -183,8 +191,12 @@ class TestRegisterTodoPhases:
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.side_effect = [
-            mocker.MagicMock(returncode=0, stdout="task-001"),
-            mocker.MagicMock(returncode=0, stdout="task-002"),
+            mocker.MagicMock(
+                returncode=0, stdout=json.dumps({"id": "task-001"})
+            ),
+            mocker.MagicMock(
+                returncode=0, stdout=json.dumps({"id": "task-002"})
+            ),
         ]
 
         phases_cfg = tmp_path / "phases.yaml"
@@ -222,12 +234,10 @@ class TestAllPhasesComplete:
         """All tasks done -> all_phases_complete returns True."""
         from hermes_pipeline.kanban_tasks import all_phases_complete
 
-        mock_data = {
-            "tasks": [
-                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-            ]
-        }
+        mock_data = [
+            {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+        ]
 
         mock_result = mocker.MagicMock()
         mock_result.returncode = 0
@@ -240,12 +250,10 @@ class TestAllPhasesComplete:
         """At least one running task -> not complete."""
         from hermes_pipeline.kanban_tasks import all_phases_complete
 
-        mock_data = {
-            "tasks": [
-                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-                {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-            ]
-        }
+        mock_data = [
+            {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+        ]
 
         mock_result = mocker.MagicMock()
         mock_result.returncode = 0
@@ -258,7 +266,7 @@ class TestAllPhasesComplete:
         """No tasks for the tick -> False (nothing to complete)."""
         from hermes_pipeline.kanban_tasks import all_phases_complete
 
-        mock_data = {"tasks": []}
+        mock_data = []
 
         mock_result = mocker.MagicMock()
         mock_result.returncode = 0
@@ -267,16 +275,32 @@ class TestAllPhasesComplete:
 
         assert all_phases_complete("demo", "01HA") is False
 
+    def test_no_tasks_with_picked_none_sentinel(self, mocker, tmp_path):
+        """No tasks + picked=None sentinel + state_dir -> True (tick done)."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = []
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        # Create the picked=None sentinel
+        outcomes_dir = tmp_path / "outcomes"
+        outcomes_dir.mkdir()
+        sentinel = outcomes_dir / "01HA-phases.json"
+        sentinel.write_text('{"outcome": "picked_none"}\n')
+
+        assert all_phases_complete("demo", "01HA", state_dir=str(tmp_path)) is True
+
     def test_failed_task_is_terminal(self, mocker):
         """A failed task is terminal — all tasks terminal -> True."""
         from hermes_pipeline.kanban_tasks import all_phases_complete
 
-        mock_data = {
-            "tasks": [
-                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-                {"status": "failed", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-            ]
-        }
+        mock_data = [
+            {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "failed", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+        ]
 
         mock_result = mocker.MagicMock()
         mock_result.returncode = 0
@@ -297,12 +321,10 @@ class TestAllPhasesComplete:
         """Archived tasks (mid-registration cleanup) are not completion status."""
         from hermes_pipeline.kanban_tasks import all_phases_complete
 
-        mock_data = {
-            "tasks": [
-                {"status": "archived", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-                {"status": "archived", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-            ]
-        }
+        mock_data = [
+            {"status": "archived", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "archived", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+        ]
 
         mock_result = mocker.MagicMock()
         mock_result.returncode = 0
@@ -319,15 +341,13 @@ class TestGetTodoKanbanStatus:
         """Returns {phase_key: status} for the tick."""
         from hermes_pipeline.kanban_tasks import get_todo_kanban_status
 
-        mock_data = {
-            "tasks": [
-                {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-                {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-                {"status": "ready", "body": '{"tick_id":"01HA","phase_key":"phase_6_1_cso","todo_id":"TODO-10","project_slug":"demo"}\n...'},
-                # Different tick — should be filtered out
-                {"status": "done", "body": '{"tick_id":"01H9","phase_key":"phase_2_autoplan","todo_id":"TODO-9","project_slug":"demo"}\n...'},
-            ]
-        }
+        mock_data = [
+            {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "running", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "ready", "body": '{"tick_id":"01HA","phase_key":"phase_6_1_cso","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            # Different tick — should be filtered out
+            {"status": "done", "body": '{"tick_id":"01H9","phase_key":"phase_2_autoplan","todo_id":"TODO-9","project_slug":"demo"}\n...'},
+        ]
 
         mock_result = mocker.MagicMock()
         mock_result.returncode = 0
@@ -345,7 +365,7 @@ class TestGetTodoKanbanStatus:
         """No tasks for the tick -> empty map."""
         from hermes_pipeline.kanban_tasks import get_todo_kanban_status
 
-        mock_data = {"tasks": []}
+        mock_data = []
 
         mock_result = mocker.MagicMock()
         mock_result.returncode = 0

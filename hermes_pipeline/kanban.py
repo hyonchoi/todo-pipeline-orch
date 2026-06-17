@@ -288,8 +288,7 @@ class HermesKanbanAdapter:
     """Kanban adapter using `hermes kanban` CLI commands.
 
     Uses the following commands:
-    - hermes kanban boards create --title <title> → returns board_id
-    - hermes kanban create --board <board_id> --title <title> --body <body> → returns task_id
+    - hermes kanban create --tenant <tenant> <title> --body <body> --json → returns task json
     - hermes kanban comment <task_id> "<message>"
     - hermes kanban complete <task_id>
     - hermes kanban archive <task_id>
@@ -323,17 +322,6 @@ class HermesKanbanAdapter:
         except Exception as e:
             return False, str(e)
 
-    def _ensure_board(self, project: str, board_title: str) -> tuple[bool, str | None]:
-        """Ensure a board exists for the project. Return (ok, board_id)."""
-        ok, output = self._run_cmd(
-            ["hermes", "kanban", "boards", "create", "--title", board_title]
-        )
-        if ok:
-            # Assume output is the board_id
-            return True, output
-        # If board creation fails, we'll still try to use the project as board_id
-        return False, project
-
     def set_active_task(
         self,
         project: str,
@@ -342,38 +330,16 @@ class HermesKanbanAdapter:
         title: str,
         phase: str,
     ) -> SyncResult:
-        """Set active task. Bootstraps board if needed, then creates a task card."""
-        # Ensure board exists
-        ok, board_id = self._ensure_board(project, f"{project} pipeline")
-        if not ok:
-            # Board creation failed, queue for retry
-            entry = OutboxEntry(
-                project=project,
-                operation="set_active_task",
-                has_task_id=False,
-                params={
-                    "todo_id": todo_id,
-                    "title": title,
-                    "phase": phase,
-                },
-            )
-            self.outbox.enqueue(entry, has_task_id=False)
-            return SyncResult(
-                ok=False,
-                error=f"Failed to bootstrap board: {board_id}",
-            )
-
-        if not board_id:
-            board_id = project
-
-        # Create the task
+        """Set active task. Creates a task card in the project tenant."""
+        # Create the task using --tenant for namespacing
         body = f"Phase: {phase}\nTODO ID: {todo_id}"
         ok, output = self._run_cmd(
             [
                 "hermes", "kanban", "create",
-                "--board", board_id,
-                "--title", title,
+                "--tenant", project,
+                title,
                 "--body", body,
+                "--json",
             ]
         )
 
@@ -392,8 +358,13 @@ class HermesKanbanAdapter:
             self.outbox.enqueue(entry, has_task_id=False)
             return SyncResult(ok=False, error=output)
 
-        # Store task_id for future operations
-        task_id = output  # Assume output is the task_id
+        # Parse task_id from JSON output
+        try:
+            task_data = json.loads(output)
+            task_id = task_data["id"]
+        except (json.JSONDecodeError, KeyError) as e:
+            return SyncResult(ok=False, error=f"Failed to parse task ID: {e}")
+
         self.active_tasks.set(project, task_id)
         return SyncResult(ok=True, task_id=task_id)
 

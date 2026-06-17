@@ -89,16 +89,18 @@ def register_todo_phases(
             project_slug=board_slug,
         )
 
-        # Build command
+        # Build command — title is positional, use --tenant for namespacing,
+        # --json for structured task ID output.
         cmd = [
             "hermes",
             "kanban",
             "create",
-            "--board", board_slug,
-            "--title", phase.name,
+            "--tenant", board_slug,
+            phase.name,
             "--body", body,
             "--workspace", f"dir:{project_dir}",
             "--idempotency-key", f"{tick_id}:{phase.phase_key}",
+            "--json",
         ]
 
         # Add --parent for phases after the first
@@ -131,8 +133,9 @@ def register_todo_phases(
                 f"for {todo_id}: rc={result.returncode} stderr={result.stderr[:200]}"
             )
 
-        # Parse task ID from output (stdout contains the task ID)
-        task_id = result.stdout.strip()
+        # Parse task ID from JSON output (--json returns {"id": "t_xxx"})
+        task_data = json.loads(result.stdout)
+        task_id = task_data["id"]
         task_ids.append(task_id)
         log.info("registered kanban task: task_id=%s phase=%s", task_id, phase.phase_key)
 
@@ -155,11 +158,11 @@ def _archive_tasks(task_ids: list[str]) -> None:
             log.warning("failed to archive task %s: %s", task_id, e)
 
 
-def get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]:
+def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:
     """Query kanban for all tasks of a tick, return {phase_key: status}.
 
     Args:
-        board_slug: Kanban board slug.
+        tenant: Tenant (project slug) to filter by.
         tick_id: ULID tick ID to filter tasks by.
 
     Returns:
@@ -168,7 +171,7 @@ def get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]:
     """
     try:
         result = subprocess.run(
-            ["hermes", "kanban", "list", "--board", board_slug, "--json"],
+            ["hermes", "kanban", "list", "--tenant", tenant, "--json"],
             capture_output=True,
             text=True,
             timeout=10,
@@ -177,11 +180,18 @@ def get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]:
             return {}
         snapshot = json.loads(result.stdout)
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
-        log.warning("kanban list failed for board=%s", board_slug)
+        log.warning("kanban list failed for tenant=%s", tenant)
         return {}
 
+    # hermes kanban list --json returns a list; older versions returned
+    # {"tasks": [...]} — handle both.
+    if isinstance(snapshot, list):
+        tasks = snapshot
+    else:
+        tasks = snapshot.get("tasks", [])
+
     status_map: dict[str, str] = {}
-    for task in snapshot.get("tasks", []):
+    for task in tasks:
         body = task.get("body", "")
         first_line = body.split("\n")[0]
         try:
@@ -197,7 +207,12 @@ def get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]:
     return status_map
 
 
-def all_phases_complete(board_slug: str, tick_id: str) -> bool:
+def all_phases_complete(
+    tenant: str,
+    tick_id: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> bool:
     """Check if all kanban tasks for a tick are in completion statuses.
 
     Completion statuses: done, failed. Archived phases (from mid-registration
@@ -205,16 +220,35 @@ def all_phases_complete(board_slug: str, tick_id: str) -> bool:
     so we hold the lock until the operator intervenes or the stale lock
     is reclaimed.
 
+    Args:
+        tenant: Tenant (project slug) to filter by.
+        tick_id: ULID tick ID.
+        state_dir: State directory — used to check for the picked=None
+            sentinel when no kanban tasks exist.
+
     Returns:
         True if every task for the tick is in a completion status.
         False if any task is still in-flight, archived, or if the CLI fails
         (conservative: don't release lock on failure).
     """
-    status_map = get_todo_kanban_status(board_slug, tick_id)
+    status_map = get_todo_kanban_status(tenant, tick_id)
 
     if not status_map:
         # No tasks found — could be: (a) first tick hasn't registered yet,
         # or (b) picked=None so no phases were registered.
+        # Check for the picked=None sentinel to distinguish (b).
+        if state_dir is not None:
+            outcomes_dir = Path(state_dir) / "outcomes"
+            sentinel = outcomes_dir / f"{tick_id}-phases.json"
+            if sentinel.exists():
+                try:
+                    lines = sentinel.read_text().strip().split("\n")
+                    for line in lines:
+                        data = json.loads(line)
+                        if data.get("outcome") == "picked_none":
+                            return True  # Prior tick completed, no work
+                except (json.JSONDecodeError, OSError):
+                    pass
         # Conservative: return False so we don't accidentally release.
         # In the tick flow, the check is only done when a prior tick
         # had a picked TODO, so empty here means still in-flight.
