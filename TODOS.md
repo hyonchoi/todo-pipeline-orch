@@ -2,6 +2,12 @@
 
 gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the required fields: What/Why/Pros/Cons/Context/Depends on/Decisions. Status markers: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold. See `docs/gstack/hyonchoi-main-design-20260610-195349.md` ("TODOS Manager Skill") for the full schema and `TODO-<n>` ID assignment rules.
 
+- [ ] **TODO-13: add `--verbose` / `--debug` logging flags** — Improve debugging experience
+  - **What:** Add `--verbose` and `--debug` CLI flags to `pipeline-watch` commands. `--verbose` increases log output to include informational details (tick_id, lock state, selection results). `--debug` enables full debug logging (raw agent payloads, circuit breaker internals, lock file contents). Flags should route through Python's logging module with appropriate levels (INFO vs DEBUG).
+  - **Why:** Debugging pipeline issues currently requires digging through `.hermes/` state files manually. A `--debug` flag would surface internal state inline — what the selection agent received, what it returned, why a TODO was or wasn't selected, lock acquisition details, etc.
+  - **Depends on:** none
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Test Coverage `불필요`, Security Review `불필요`
+
 - [ ] **TODO-10: implement `pipeline-tick` Hermes command** — The cron-driven selection loop
   - **What:** Implement the `pipeline-tick` command that `hermes cron set pipeline-tick '*/5 * * * *'` fires every 5 minutes. The command mints a ULID tick_id, acquires `.hermes/tick.lock` (atomic mkdir), calls `hermes_pipeline.decision.run_selection(tick_id, ctx)`, persists the decision, and spawns `pipeline-phase` for selected TODOs. Concurrent ticks exit early ("tick already in flight, skipping"). Stale-lock sweep for holders older than `max_tick_duration_min`.
   - **Why:** The tutorial (`docs/tutorial-getting-started.md`), README, CHANGELOG, and superpowers plan all assume `pipeline-tick` exists as a Hermes command — but the Python code has no handler for it. The tutorial is ahead of the code; the cron fires a command that isn't registered, so the pipeline never actually drives itself.
