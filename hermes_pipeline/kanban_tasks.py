@@ -246,9 +246,11 @@ def all_phases_complete(
     status_map = get_todo_kanban_status(tenant, tick_id)
 
     if not status_map:
-        # No tasks found — could be: (a) first tick hasn't registered yet,
-        # or (b) picked=None so no phases were registered.
-        # Check for the picked=None sentinel to distinguish (b).
+        # No tasks found — could be:
+        # (a) picked=None, so no phases were registered.
+        # (b) tick_id persisted but crash before/during registration —
+        #     tick_started sentinel present, no kanban tasks.
+        # (c) first tick, hasn't registered yet (shouldn't reach here).
         if state_dir is not None:
             outcomes_dir = Path(state_dir) / "outcomes"
             sentinel = outcomes_dir / f"{tick_id}-phases.json"
@@ -257,8 +259,12 @@ def all_phases_complete(
                     lines = sentinel.read_text().strip().split("\n")
                     for line in lines:
                         data = json.loads(line)
-                        if data.get("outcome") == "picked_none":
+                        outcome = data.get("outcome")
+                        if outcome == "picked_none":
                             return True  # Prior tick completed, no work
+                        if outcome == "tick_started":
+                            return True  # Crash before/during registration;
+                                        # no tasks to wait for.
                 except (json.JSONDecodeError, OSError):
                     pass
         # Conservative: return False so we don't accidentally release.

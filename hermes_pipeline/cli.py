@@ -391,19 +391,26 @@ def _generate_tick_id() -> str:
         rand = format(_secrets.randbelow(900000) + 100000, "06d")
         return f"{ts}{rand}"
 
-def _load_cb_config(state_dir: Path):
-    """Load circuit breaker config from TOML overlay, falling back to defaults."""
-    from .config import Config as AppConfig, FullConfig, load_toml_overlay
+def _load_toml_overlay(state_dir: Path, config: Config):
+    """Load circuit breaker + selection config from .hermes/config.toml.
 
-    toml_path = state_dir / "pipeline.toml"
+    Returns a tuple of (FullConfig or None, CircuitBreakerConfig).
+    FullConfig is the complete overlay (selection, circuit_breaker).
+    CircuitBreakerConfig is extracted for early use (before lock acquisition).
+    On TOML error the overlay falls back to defaults with a warning.
+    """
+    from .config import FullConfig, load_toml_overlay as _load_toml
+
+    toml_path = state_dir / "config.toml"
     try:
-        base_cfg = AppConfig.from_env()
-        full_cfg: FullConfig = load_toml_overlay(base_cfg, toml_path)
-        if hasattr(full_cfg, "circuit_breaker"):
-            return full_cfg.circuit_breaker
-    except Exception:
-        pass
-    return CircuitBreakerConfig()
+        full_cfg: FullConfig = _load_toml(config, toml_path)
+        return (full_cfg, full_cfg.circuit_breaker)
+    except FileNotFoundError:
+        # No config.toml — use defaults silently
+        return (None, CircuitBreakerConfig())
+    except Exception as e:
+        log.warning("failed to load %s: %s — using defaults", toml_path, e)
+        return (None, CircuitBreakerConfig())
 
 def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
     """Create a CircuitBreaker instance from config."""
@@ -421,11 +428,32 @@ def _validate_project_slug(slug: str) -> bool:
     return bool(_re.match(r'^[a-zA-Z0-9._-]+$', slug))
 
 def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
-    """Persist tick_id for the next tick's prior check."""
+    """Persist tick_id atomically for the next tick's prior check.
+
+    Uses tmp+rename so a crash mid-write doesn't leave a partial file.
+    Also writes a sentinel file so all_phases_complete can distinguish
+    "persisted but never registered" from "persisted and registered".
+    """
+    from .state import _atomic_write_text
+
     try:
-        (state_dir / "current_tick_id.txt").write_text(tick_id)
+        _atomic_write_text(state_dir / "current_tick_id.txt", tick_id)
     except OSError as e:
         log.warning("failed to persist current_tick_id: %s", e)
+        return
+
+    # Write sentinel so the next tick's all_phases_complete knows this
+    # tick was legitimate even if registration crashed before creating
+    # any kanban tasks.  picked=None writes its own outcome later.
+    try:
+        outcomes_dir = state_dir / "outcomes"
+        outcomes_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(
+            outcomes_dir / f"{tick_id}-phases.json",
+            '{"outcome": "tick_started"}\n',
+        )
+    except OSError as e:
+        log.warning("failed to write tick_started sentinel: %s", e)
 
 def _cmd_tick(args, config: Config) -> int:
     """Handle 'tick' subcommand — kanban-as-scheduler pipeline tick.
@@ -434,14 +462,14 @@ def _cmd_tick(args, config: Config) -> int:
     1. Read prior_tick_id, check if in-flight (skip if so)
     2. Acquire TickLock, mint ULID tick_id
     3. Build context, run selection
-    4. If picked=None: observe circuit breaker, exit
-    5. If picked=TODO-N: register kanban tasks, persist tick_id, exit
+    4. If picked=None: observe circuit breaker, persist, exit
+    5. If picked=TODO-N: persist tick_id, register kanban tasks, exit
 
-    tick_id is persisted AFTER kanban registration (inside the lock) so that
-    a concurrent tick cannot see an unregistered tick_id and skip selection.
-    If picked=None the tick_id is also persisted inside the lock so the next
-    tick knows this tick was the last one to run (even though no phases were
-    registered).
+    tick_id is persisted BEFORE kanban registration (inside the lock) using
+    atomic tmp+rename. A sentinel file is written alongside it so the next
+    tick's all_phases_complete can distinguish "crashed before registration"
+    from "in-flight". This prevents split-brain where two TODOs are
+    selected simultaneously after a crash between registration and persist.
     """
     state_dir = config.state_dir
     project = args.project
@@ -454,8 +482,8 @@ def _cmd_tick(args, config: Config) -> int:
     # --- Step 1: Check prior tick ---
     prior_tick_id = _read_prior_tick_id(state_dir)
 
-    # --- Load circuit breaker config early (needed for prior-tick observation) ---
-    cb_cfg = _load_cb_config(state_dir)
+    # --- Load TOML overlay early (needed for prior-tick observation) ---
+    toml_cfg, cb_cfg = _load_toml_overlay(state_dir, config)
     cb = _make_circuit_breaker(state_dir, cb_cfg, config.slack_channel)
 
     if prior_tick_id is not None:
@@ -509,13 +537,19 @@ def _cmd_tick(args, config: Config) -> int:
             )
 
             # --- Step 4: Run selection ---
+            # Use the full TOML overlay (config.toml) for both selection and
+            # circuit_breaker config. Fall back to in-memory defaults if no
+            # config.toml is present — same values, just constructed here.
             from .config import FullConfig, SelectionConfig
 
-            full_cfg = FullConfig(
-                base=config,
-                selection=SelectionConfig(),
-                circuit_breaker=cb_cfg,
-            )
+            if toml_cfg is not None:
+                full_cfg = toml_cfg
+            else:
+                full_cfg = FullConfig(
+                    base=config,
+                    selection=SelectionConfig(),
+                    circuit_breaker=cb_cfg,
+                )
             decision = run_selection(
                 tick_id=tick_id,
                 ctx=ctx,
@@ -526,8 +560,12 @@ def _cmd_tick(args, config: Config) -> int:
 
             if picked is None:
                 log.info("selection picked None, observing circuit breaker")
-                # Write sentinel so next tick's observe_from_outcomes doesn't
-                # count this as no-progress.
+                cb.observe(picked=None, counts_as_no_progress=True)
+                # Persist inside lock so next tick knows this one ran.
+                # _persist_tick_id writes a tick_started sentinel; overwrite
+                # with picked_none so next tick doesn't treat this as a
+                # crashed registration.
+                _persist_tick_id(state_dir, tick_id)
                 try:
                     import json as _json
                     outcomes_dir = state_dir / "outcomes"
@@ -537,12 +575,18 @@ def _cmd_tick(args, config: Config) -> int:
                         f.write(_json.dumps({"outcome": "picked_none"}) + "\n")
                 except OSError as e:
                     log.warning("failed to write picked_none sentinel: %s", e)
-                cb.observe(picked=None, counts_as_no_progress=True)
-                # Persist inside lock so next tick knows this one ran
-                _persist_tick_id(state_dir, tick_id)
                 return 0
 
-            # --- Step 5: Register kanban tasks ---
+            # --- Step 5: Persist tick_id BEFORE registration ---
+            # Atomic persist + sentinel so a crash between here and
+            # register_todo_phases doesn't cause split-brain (two TODOs
+            # selected simultaneously).  If we crash after this point,
+            # the next tick sees the tick_id, finds no/empty kanban
+            # tasks, reads the sentinel, and treats the prior tick as
+            # complete — then selects a new TODO.
+            _persist_tick_id(state_dir, tick_id)
+
+            # --- Step 6: Register kanban tasks ---
             log.info("selected %s, registering kanban phases", picked)
             try:
                 task_ids = register_todo_phases(
@@ -571,10 +615,6 @@ def _cmd_tick(args, config: Config) -> int:
                 except Exception as se:
                     log.warning("failed to write outcome sidecar: %s", se)
                 return 1
-
-            # Persist AFTER registration — inside the lock — so a concurrent
-            # tick cannot see an unregistered tick_id and skip selection.
-            _persist_tick_id(state_dir, tick_id)
 
             # --- Step 6: Observe circuit breaker ---
             cb.observe(picked=picked, counts_as_no_progress=False)

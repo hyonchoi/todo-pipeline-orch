@@ -161,6 +161,49 @@ class TestKanbanInFlight:
         )
         assert "TODO-3" in result
 
+    def test_kanban_in_flight_json_decode_error(self, tmp_path, mocker):
+        """_kanban_in_flight_ids handles JSONDecodeError from subprocess."""
+        from hermes_pipeline.decision.context import _kanban_in_flight_ids
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "not json"
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = _kanban_in_flight_ids("demo")
+        assert result is None
+
+    def test_kanban_in_flight_timeout(self, tmp_path, mocker):
+        """_kanban_in_flight_ids handles subprocess timeout."""
+        from hermes_pipeline.decision.context import _kanban_in_flight_ids
+
+        import subprocess
+        mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("hermes", 10))
+
+        result = _kanban_in_flight_ids("demo")
+        assert result is None
+
+    def test_kanban_in_flight_dict_format(self, tmp_path, mocker):
+        """_kanban_in_flight_ids handles dict format {'tasks': [...]}."""
+        from hermes_pipeline.decision.context import _kanban_in_flight_ids
+
+        mock_data = {
+            "tasks": [
+                {
+                    "status": "running",
+                    "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\nDo the work',
+                },
+            ]
+        }
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = _kanban_in_flight_ids("demo")
+        assert result == {"TODO-10"}
+
 def test_build_context_assembles_all_fields(tmp_path, monkeypatch):
     todos = tmp_path / "TODOS.md"
     todos.write_text("- TODO-1: do thing\n")

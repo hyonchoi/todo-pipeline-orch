@@ -1,6 +1,8 @@
 from __future__ import annotations
 import json
 from pathlib import Path
+
+import pytest
 from unittest.mock import patch
 from hermes_pipeline.circuit import CircuitBreaker
 
@@ -230,6 +232,84 @@ class TestObserveFromOutcomes:
         )
         st2 = cb._load()
         assert st2["consecutive_no_progress"] == 0
+
+    def test_backoff_reset_on_progress(self, state_dir):
+        """When backed off and we get progress, backoff is cleared."""
+        cb = CircuitBreaker(
+            state_path=state_dir / "circuit.json",
+            no_progress_threshold=3,
+            backoff_interval_min=30,
+            alert_dedup_hours=24,
+            slack_channel="#alerts",
+        )
+
+        # Trip the circuit breaker first
+        with patch("hermes_pipeline.circuit._send_slack"), \
+             patch("hermes_pipeline.circuit._set_cron_interval"):
+            for _ in range(3):
+                cb.observe(picked=None, counts_as_no_progress=True)
+
+        st = cb._load()
+        assert st["backed_off"] is True
+
+        # Now simulate progress via observe_from_outcomes
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        phases_file.parent.mkdir(parents=True, exist_ok=True)
+        phases_file.write_text(
+            '{"outcome": "phase_complete", "phase_key": "phase_2_autoplan"}\n'
+        )
+
+        cb.observe_from_outcomes(
+            state_dir=state_dir,
+            prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+        )
+
+        st = cb._load()
+        assert st["backed_off"] is False
+        assert st["consecutive_no_progress"] == 0
+
+    def test_jsonl_parse_error(self, state_dir):
+        """If outcome file has invalid JSON, raises JSONDecodeError."""
+        cb = CircuitBreaker(
+            state_path=state_dir / "circuit.json",
+            no_progress_threshold=3,
+            backoff_interval_min=30,
+            alert_dedup_hours=24,
+            slack_channel="#alerts",
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        phases_file.parent.mkdir(parents=True, exist_ok=True)
+        phases_file.write_text("this is not json\n")
+
+        with pytest.raises(json.JSONDecodeError):
+            cb.observe_from_outcomes(
+                state_dir=state_dir,
+                prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            )
+
+    def test_in_flight_no_terminal_outcomes(self, state_dir):
+        """No terminal outcomes (tick still running) -> no_progress=False."""
+        cb = CircuitBreaker(
+            state_path=state_dir / "circuit.json",
+            no_progress_threshold=3,
+            backoff_interval_min=30,
+            alert_dedup_hours=24,
+            slack_channel="#alerts",
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        phases_file.parent.mkdir(parents=True, exist_ok=True)
+        # Non-empty file with no recognized terminal outcomes
+        phases_file.write_text('{"outcome": "some_unknown_outcome"}\n')
+
+        cb.observe_from_outcomes(
+            state_dir=state_dir,
+            prior_tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+        )
+
+        st = cb._load()
+        assert st["consecutive_no_progress"] == 0
 
 
 def test_sha_mismatch_does_not_count(tmp_path):
