@@ -134,8 +134,16 @@ def register_todo_phases(
             )
 
         # Parse task ID from JSON output (--json returns {"id": "t_xxx"})
-        task_data = json.loads(result.stdout)
-        task_id = task_data["id"]
+        try:
+            task_data = json.loads(result.stdout)
+            task_id = task_data["id"]
+        except (json.JSONDecodeError, KeyError):
+            # Fallback: old CLI returns "Created t_xxx  (ready, assignee=-)"
+            line = result.stdout.strip()
+            if line.startswith("Created"):
+                task_id = line.split()[1]
+            else:
+                raise RuntimeError(f"failed to parse task ID from: {result.stdout[:200]}")
         task_ids.append(task_id)
         log.info("registered kanban task: task_id=%s phase=%s", task_id, phase.phase_key)
 

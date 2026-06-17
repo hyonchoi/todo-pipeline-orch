@@ -97,7 +97,8 @@ def _extract_in_flight_ids(snapshot: dict) -> set[str]:
         Set of TODO IDs with tasks in created/ready/running status.
     """
     result_set = set()
-    for task in snapshot.get("tasks", []):
+    tasks = snapshot if isinstance(snapshot, list) else snapshot.get("tasks", [])
+    for task in tasks:
         if task.get("status") not in ("created", "ready", "running"):
             continue
         body = task.get("body", "")
@@ -114,7 +115,7 @@ def _extract_in_flight_ids(snapshot: dict) -> set[str]:
 def _kanban_in_flight_ids(board_slug: str) -> set[str] | None:
     """Extract TODO IDs with in-flight kanban tasks.
 
-    Queries `hermes kanban list --board <slug> --json` and parses the
+    Queries `hermes kanban list --tenant <slug> --json` and parses the
     JSON header in each task's body. Returns None on CLI failure so the
     caller can fall back to file markers.
 
@@ -169,7 +170,7 @@ def _fetch_kanban_snapshot(project_slug: str) -> dict | None:
     """
     try:
         r = subprocess.run(
-            ["hermes", "kanban", "list", "--board", project_slug, "--json"],
+            ["hermes", "kanban", "list", "--tenant", project_slug, "--json"],
             capture_output=True,
             text=True,
             timeout=10,
