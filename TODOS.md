@@ -8,7 +8,8 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** none
   - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Test Coverage `불필요`, Security Review `불필요`
 
-- [ ] **TODO-10: implement `pipeline-tick` Hermes command** — The cron-driven selection loop
+- [x] **TODO-10: implement `pipeline-tick` Hermes command** — The cron-driven selection loop
+  - **Completed:** v0.3.1 (2026-06-16)
   - **What:** Implement the `pipeline-tick` command that `hermes cron set pipeline-tick '*/5 * * * *'` fires every 5 minutes. The command mints a ULID tick_id, acquires `.hermes/tick.lock` (atomic mkdir), calls `hermes_pipeline.decision.run_selection(tick_id, ctx)`, persists the decision, and spawns `pipeline-phase` for selected TODOs. Concurrent ticks exit early ("tick already in flight, skipping"). Stale-lock sweep for holders older than `max_tick_duration_min`.
   - **Why:** The tutorial (`docs/tutorial-getting-started.md`), README, CHANGELOG, and superpowers plan all assume `pipeline-tick` exists as a Hermes command — but the Python code has no handler for it. The tutorial is ahead of the code; the cron fires a command that isn't registered, so the pipeline never actually drives itself.
   - **Context:** Design lives in [docs/superpowers/plans/2026-06-13-hermes-centric-selection.md](docs/superpowers/plans/2026-06-13-hermes-centric-selection.md) (lines 7, 468, 2119, 2577). State machine in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). Circuit breaker backoff in [hermes_pipeline/circuit.py:21](hermes_pipeline/circuit.py:21) already passes `["hermes", "cron", "set", "pipeline-tick", ...]` but the command itself doesn't exist.
