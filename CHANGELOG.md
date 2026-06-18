@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - **Circuit breaker config loaded once per tick** — eliminated duplicate TOML overlay reads and `CircuitBreaker` instantiations
+- **Project slug validation** — rejects path traversal (`..`, `.`) and CLI flag injection (`--help`, `-v`) in project slugs
+- **Partial registration detection** — expected phase keys are now persisted after kanban task registration; `all_phases_complete` verifies all expected phases are present before returning true
+- **Tick stall detection** — `tick_started` sentinel without terminal outcomes is now treated as a stall (not completion) so the circuit breaker can detect no-progress conditions
+- **Hermes kanban CLI adaptation** — adapted to CLI drift: `--board` → `--tenant`, positional title
+- **Atomic tick_id persistence** — tick_id is persisted atomically and before kanban registration, preventing split-brain on crash
 
 ## [0.1.0] - 2026-06-11
 
