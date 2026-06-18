@@ -12,6 +12,13 @@ import re
 import subprocess
 from pathlib import Path
 
+from .outcomes import (
+    OUTCOME_ALL_COMPLETE,
+    OUTCOME_FAILED_TO_SPAWN,
+    OUTCOME_PHASE_COMPLETE,
+    OUTCOME_PICKED_NONE,
+    OUTCOME_TICK_STARTED,
+)
 from .phases import load_phases, _render_phase_prompt
 
 log = logging.getLogger(__name__)
@@ -22,6 +29,11 @@ TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
 # a prior tick's work is done. Archived phases (from mid-registration
 # cleanup) are excluded — they indicate the tick didn't finish cleanly.
 COMPLETION_STATUSES = frozenset({"done", "failed"})
+
+# Timeouts for subprocess calls
+KANBAN_QUERY_TIMEOUT = 60       # kanban create (task registration)
+HERMES_COMMAND_TIMEOUT = 10     # kanban list, archive (utility commands)
+ERROR_MSG_MAX_LENGTH = 200      # max chars of stderr in error messages
 
 
 def _build_json_header(
@@ -121,7 +133,7 @@ def register_todo_phases(
             tick_id,
         )
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=KANBAN_QUERY_TIMEOUT)
         if result.returncode != 0:
             # Mid-registration failure: archive already-created tasks
             log.error(
@@ -129,12 +141,12 @@ def register_todo_phases(
                 phase.phase_key,
                 todo_id,
                 result.returncode,
-                result.stderr[:200],
+                result.stderr[:ERROR_MSG_MAX_LENGTH],
             )
             _archive_tasks(task_ids)
             raise RuntimeError(
                 f"failed to register kanban task {phase.phase_key} "
-                f"for {todo_id}: rc={result.returncode} stderr={result.stderr[:200]}"
+                f"for {todo_id}: rc={result.returncode} stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
             )
 
         # Parse task ID from JSON output (--json returns {"id": "t_xxx"})
@@ -147,7 +159,7 @@ def register_todo_phases(
             if line.startswith("Created"):
                 task_id = line.split()[1]
             else:
-                raise RuntimeError(f"failed to parse task ID from: {result.stdout[:200]}")
+                raise RuntimeError(f"failed to parse task ID from: {result.stdout[:ERROR_MSG_MAX_LENGTH]}")
         task_ids.append(task_id)
         log.info("registered kanban task: task_id=%s phase=%s", task_id, phase.phase_key)
 
@@ -162,7 +174,7 @@ def _archive_tasks(task_ids: list[str]) -> None:
                 ["hermes", "kanban", "archive", task_id],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=HERMES_COMMAND_TIMEOUT,
                 check=False,
             )
             log.info("archived kanban task %s", task_id)
@@ -186,7 +198,7 @@ def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:
             ["hermes", "kanban", "list", "--tenant", tenant, "--json"],
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=HERMES_COMMAND_TIMEOUT,
         )
         if result.returncode != 0:
             return {}
@@ -260,9 +272,9 @@ def all_phases_complete(
                     for line in lines:
                         data = json.loads(line)
                         outcome = data.get("outcome")
-                        if outcome == "picked_none":
+                        if outcome == OUTCOME_PICKED_NONE:
                             return True  # Prior tick completed, no work
-                        if outcome == "tick_started":
+                        if outcome == OUTCOME_TICK_STARTED:
                             return True  # Crash before/during registration;
                                         # no tasks to wait for.
                 except (json.JSONDecodeError, OSError):
@@ -333,7 +345,7 @@ def observe_outcomes(
                 new_outcomes.append(
                     json.dumps(
                         {
-                            "outcome": "phase_complete",
+                            "outcome": OUTCOME_PHASE_COMPLETE,
                             "phase_key": phase_key,
                         },
                         sort_keys=True,
@@ -368,11 +380,11 @@ def observe_outcomes(
         len(status_map) > 0
         and all(s in COMPLETION_STATUSES for s in status_map.values())
     )
-    if all_complete and "all_phases_complete" not in existing:
+    if all_complete and OUTCOME_ALL_COMPLETE not in existing:
         new_outcomes.append(
             json.dumps(
                 {
-                    "outcome": "all_phases_complete",
+                    "outcome": OUTCOME_ALL_COMPLETE,
                 },
                 sort_keys=True,
             )

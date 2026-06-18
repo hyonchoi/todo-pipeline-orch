@@ -27,6 +27,7 @@ from .decision.context import build_context
 from .kanban import NullKanbanAdapter, HermesKanbanAdapter
 from .kanban_tasks import all_phases_complete, observe_outcomes, register_todo_phases
 from .logging_setup import configure as configure_logging
+from .outcomes import CURRENT_TICK_ID_FILE, OUTCOME_PICKED_NONE
 from .logging_setup import new_tick_id as _new_tick_id
 from .merge import run_phase9, make_default_bump_fn
 from .phases import load_phases
@@ -372,7 +373,7 @@ def _read_prior_tick_id(state_dir: Path) -> str | None:
 
     Returns None if the file doesn't exist (cold start).
     """
-    path = state_dir / "current_tick_id.txt"
+    path = state_dir / CURRENT_TICK_ID_FILE
     if not path.exists():
         return None
     try:
@@ -437,7 +438,7 @@ def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
     from .state import _atomic_write_text
 
     try:
-        _atomic_write_text(state_dir / "current_tick_id.txt", tick_id)
+        _atomic_write_text(state_dir / CURRENT_TICK_ID_FILE, tick_id)
     except OSError as e:
         log.warning("failed to persist current_tick_id: %s", e)
         return
@@ -572,7 +573,7 @@ def _cmd_tick(args, config: Config) -> int:
                     outcomes_dir.mkdir(parents=True, exist_ok=True)
                     phases_file = outcomes_dir / f"{tick_id}-phases.json"
                     with open(phases_file, "w") as f:
-                        f.write(_json.dumps({"outcome": "picked_none"}) + "\n")
+                        f.write(_json.dumps({"outcome": OUTCOME_PICKED_NONE}) + "\n")
                 except OSError as e:
                     log.warning("failed to write picked_none sentinel: %s", e)
                 return 0

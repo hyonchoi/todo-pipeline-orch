@@ -5,6 +5,8 @@ OUTCOME_PHASE_COMPLETE = "phase_complete"
 OUTCOME_ALL_COMPLETE = "all_phases_complete"
 OUTCOME_FAILED_PREFIX = "failed_at_phase_"
 OUTCOME_PICKED_NONE = "picked_none"
+OUTCOME_TICK_STARTED = "tick_started"
+OUTCOME_FAILED_TO_SPAWN = "failed_to_spawn"
 
 OUTCOMES_DIR = "outcomes"
 CURRENT_TICK_ID_FILE = "current_tick_id.txt"

@@ -1,6 +1,7 @@
 """Circuit breaker — N consecutive no-progress ticks -> backoff + Slack alert."""
 from __future__ import annotations
 import datetime as _dt
+import fcntl
 import json
 import subprocess
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from hermes_pipeline.outcomes import (
     OUTCOME_FAILED_PREFIX,
     OUTCOME_PHASE_COMPLETE,
     OUTCOME_PICKED_NONE,
+    OUTCOME_TICK_STARTED,
 )
 
 def _now() -> _dt.datetime:
@@ -101,7 +103,14 @@ class CircuitBreaker:
         if not phases_file.exists():
             return self.observe(picked=None, counts_as_no_progress=True)
 
-        content = phases_file.read_text().strip()
+        # Read with shared lock to prevent partial reads from concurrent writes
+        with open(phases_file, "r") as f:
+            fcntl.flock(f, fcntl.LOCK_SH)
+            try:
+                content = f.read().strip()
+            finally:
+                fcntl.flock(f, fcntl.LOCK_UN)
+
         if not content:
             return self.observe(picked=None, counts_as_no_progress=False)
 
@@ -116,6 +125,7 @@ class CircuitBreaker:
         has_all_complete = False
         has_failure = False
         has_picked_none = False
+        has_tick_started = False
         for o in outcomes:
             outcome = o.get("outcome", "")
             if outcome == OUTCOME_PHASE_COMPLETE:
@@ -126,6 +136,19 @@ class CircuitBreaker:
                 has_failure = True
             elif outcome == OUTCOME_PICKED_NONE:
                 has_picked_none = True
+            elif outcome == OUTCOME_TICK_STARTED:
+                has_tick_started = True
+
+        # If only tick_started was written (no terminal outcome), the prior tick
+        # crashed after persisting but before kanban registration. Count as
+        # no-progress so the circuit breaker can detect the stall.
+        if has_tick_started and not (
+            has_phase_complete
+            or has_all_complete
+            or has_failure
+            or has_picked_none
+        ):
+            return self.observe(picked=None, counts_as_no_progress=True)
 
         if has_all_complete or has_phase_complete:
             # Progress detected — reset counter and backoff state
