@@ -155,8 +155,23 @@ class TestTickSubcommand:
         assert _validate_project_slug("my.project") is True
         assert _validate_project_slug("my_project") is True
         assert _validate_project_slug("a1b2") is True
-        # Note: --help is technically valid per the regex (only alphanumeric, dot, dash)
-        assert _validate_project_slug("--help") is True
+
+    def test_validate_project_slug_rejects_flag_injection(self):
+        """Slugs that look like CLI flags are rejected."""
+        from hermes_pipeline.cli import _validate_project_slug
+
+        assert _validate_project_slug("--help") is False
+        assert _validate_project_slug("-v") is False
+        assert _validate_project_slug("--debug") is False
+
+    def test_validate_project_slug_rejects_path_traversal(self):
+        """Slugs with path traversal are rejected."""
+        from hermes_pipeline.cli import _validate_project_slug
+
+        assert _validate_project_slug("..") is False
+        assert _validate_project_slug(".") is False
+        assert _validate_project_slug("my..project") is False
+        assert _validate_project_slug("./demo") is False
 
     def test_validate_project_slug_invalid_spaces(self):
         """Slugs with spaces are rejected."""

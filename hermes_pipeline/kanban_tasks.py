@@ -21,6 +21,9 @@ from .outcomes import (
 )
 from .phases import load_phases, _render_phase_prompt
 
+# Sentinel written after successful registration to record expected phases.
+_EXPECTED_PHASES_FILE_SUFFIX = ".expected-phases.json"
+
 log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
@@ -163,7 +166,29 @@ def register_todo_phases(
         task_ids.append(task_id)
         log.info("registered kanban task: task_id=%s phase=%s", task_id, phase.phase_key)
 
+    # Persist expected phase keys so all_phases_complete can verify
+    # completeness (guards against partial registration on crash).
+    _persist_expected_phases(phases)
+
     return task_ids
+
+
+def _persist_expected_phases(phases: list) -> None:
+    """Write expected phase keys to a sentinel file for crash recovery.
+
+    Called after successful registration so all_phases_complete can verify
+    all expected phases are present (guards against partial registration).
+    """
+    try:
+        phase_keys = [p.phase_key for p in phases]
+        outcomes_dir = Path(".hermes") / "outcomes"
+        outcomes_dir.mkdir(parents=True, exist_ok=True)
+        # Overwrite previous — only the latest registration matters.
+        sentinel = outcomes_dir / "expected-phases.json"
+        sentinel.write_text(json.dumps(phase_keys, sort_keys=False))
+    except OSError:
+        # Best-effort — don't fail registration if we can't write the sentinel.
+        log.warning("failed to persist expected phases sentinel")
 
 
 def _archive_tasks(task_ids: list[str]) -> None:
@@ -274,9 +299,9 @@ def all_phases_complete(
                         outcome = data.get("outcome")
                         if outcome == OUTCOME_PICKED_NONE:
                             return True  # Prior tick completed, no work
-                        if outcome == OUTCOME_TICK_STARTED:
-                            return True  # Crash before/during registration;
-                                        # no tasks to wait for.
+                        # tick_started sentinel alone means crash before/during
+                        # registration — NOT complete. Treat as stall so the
+                        # circuit breaker can detect it. Do NOT return True.
                 except (json.JSONDecodeError, OSError):
                     pass
         # Conservative: return False so we don't accidentally release.
@@ -291,6 +316,25 @@ def all_phases_complete(
                 phase_key, tick_id, status, sorted(COMPLETION_STATUSES),
             )
             return False
+
+    # Guard against partial registration: if we have an expected-phases
+    # sentinel, verify all expected phases are in the status map.
+    try:
+        outcomes_dir = Path(".hermes") / "outcomes"
+        expected_file = outcomes_dir / "expected-phases.json"
+        if expected_file.exists():
+            expected_keys = json.loads(expected_file.read_text())
+            for key in expected_keys:
+                if key not in status_map:
+                    log.warning(
+                        "expected phase %s not found in status map for tick %s "
+                        "(partial registration suspected)",
+                        key, tick_id,
+                    )
+                    return False
+    except (json.JSONDecodeError, OSError):
+        # If we can't read the sentinel, proceed without the check.
+        pass
 
     return True
 
