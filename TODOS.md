@@ -4,7 +4,7 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
 
 - [x] **TODO-13: add `--verbose` / `--debug` logging flags** — Improve debugging experience
   - **Completed:** v0.3.2 (2026-06-19)
-  - **What:** Add `--verbose` and `--debug` CLI flags to `pipeline-watch` commands. `--verbose` increases log output to include informational details (tick_id, lock state, selection results). `--debug` enables full debug logging (raw agent payloads, circuit breaker internals, lock file contents). Flags should route through Python's logging module with appropriate levels (INFO vs DEBUG).
+  - **What:** Add `--verbose` and `--debug` CLI flags to `pipeline-watch` commands. `--verbose` increases log output to include informational details (tick_id, lock state, selection results). `--debug` enables full debug logging (agent call summaries, circuit breaker transitions, kanban registration). Flags should route through Python's logging module with appropriate levels (INFO vs DEBUG).
   - **Why:** Debugging pipeline issues currently requires digging through `.hermes/` state files manually. A `--debug` flag would surface internal state inline — what the selection agent received, what it returned, why a TODO was or wasn't selected, lock acquisition details, etc.
   - **Depends on:** none
   - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Test Coverage `불필요`, Security Review `불필요`
