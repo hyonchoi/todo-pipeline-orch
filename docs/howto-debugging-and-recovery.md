@@ -3,7 +3,7 @@
 This guide covers the three tools you use when a tick doesn't behave the way you expect or when the TODO ID counter is missing.
 
 - **`--verbose`** — add informational details (selection results, lock state) without noise
-- **`--debug`** — surface internal state (agent call summaries, circuit breaker transitions, kanban payloads, lock details)
+- **`--debug`** — surface internal state (agent call summaries, circuit breaker transitions, kanban payloads)
 - **`recover-counter`** — initialize the TODO ID counter by scanning TODOS.md
 
 ## Prerequisites
@@ -23,7 +23,7 @@ uv run pipeline-watch --verbose tick my-project
 
 | Source | Message |
 |--------|---------|
-| Lock acquisition | `acquiring tick lock: lock_dir=<path> tick_id=<id>` |
+| Lock acquisition | `acquiring tick lock: lock_file=<path> tick_id=<id>` |
 | Selection result | `selection result: picked=TODO-N rationale=...` |
 | Lock release | `tick lock released: tick_id=<id>` |
 
@@ -33,7 +33,7 @@ These messages come from the `pipeline.verbose` logger, which is off by default 
 
 ## Using `--debug` for full diagnostics
 
-The `--debug` flag lowers the root log level from INFO to DEBUG, surfacing internal state at 12 strategic points across the pipeline.
+The `--debug` flag lowers the root log level from INFO to DEBUG, surfacing internal state at multiple strategic points across the pipeline.
 
 ```bash
 uv run pipeline-watch --debug tick my-project
@@ -45,7 +45,7 @@ uv run pipeline-watch --debug tick my-project
 |--------|---------|
 | Agent call | `agent prompt (truncated to 2000 chars): ...` |
 | Agent call | `agent raw response (truncated to 2000 chars): ...` |
-| Lock acquisition | `tick lock acquired: lock_dir=<path> holder_pid=<pid>` |
+| Lock acquisition | `tick lock acquired: lock_file=<path> holder_pid=<pid>` |
 | Selection | `selection decision: picked=TODO-N candidates=... rationale=...` |
 | Circuit breaker | `circuit breaker observe: picked=... counts_as_no_progress=... state=...` |
 | Circuit breaker | `circuit breaker: sending slack alert after N consecutive no-progress ticks` |
@@ -80,7 +80,7 @@ Counter set to 5 for project my-project
 
 - **Never decreases the counter.** If the counter file says 8 and TODOS.md has TODO-4, the counter stays at 8. This prevents ID resurrection when completed TODOs were removed.
 - **Creates `.hermes/` if needed.** If the directory doesn't exist, it's created automatically.
-- **Atomic write.** Uses a temp file + rename so a crash mid-write leaves a partial file (which the reader treats as 0) rather than a corrupted counter.
+- **Atomic write.** Uses a temp file + rename so a crash mid-write leaves a partial file (which the reader treats as 0) rather than a corrupted counter. The committed HEAD uses `counter_path.write_text()` — the temp+rename approach is in the working tree.
 - **Corrupt counter recovery.** If the counter file contains non-integer text, it's treated as 0 and replaced with the scanned maximum.
 
 ### Error cases
@@ -125,7 +125,7 @@ After using any of these tools, verify the result:
 **"verbose output not showing up"**
 
 - Make sure you pass `--verbose` before the subcommand: `uv run pipeline-watch --verbose tick my-project`
-- The flags are stripped from argv before argparse runs, so they work anywhere in the command (before or after the subcommand). The conventional position is before the subcommand.
+- The flags are global root-level arguments, positioned before the subcommand.
 
 **"debug output not showing up"**
 

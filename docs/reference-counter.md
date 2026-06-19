@@ -55,9 +55,9 @@ The counter is set to `max(existing_value, scanned_max)`, not `scanned_max`. If 
 
 The regex `\bTODO-(\d+)\b` matches TODO-N patterns anywhere in TODOS.md, not just as list entries. If TODO-6 appears in a "Depends on" note within a TODO-1 entry, the counter is set to 6. This is intentional — it ensures the counter never collides with referenced IDs, even if they aren't active entries.
 
-### Atomic file writes
+### Direct file writes
 
-The counter is written via `tempfile.mkstemp()` + `os.replace()`, not direct file writes. If the process crashes mid-write, the counter file is either the old value or a partial temp file. The reader treats a corrupt file as 0 (see `ValueError`/`OSError` handling at counter.py:51), so a crash doesn't corrupt the pipeline.
+The counter is written via `counter_path.write_text()`, not an atomic temp+rename. If the process crashes mid-write, the counter file may be corrupt. The reader treats a corrupt file as 0 (see `ValueError`/`OSError` handling at counter.py:51), so a crash doesn't corrupt the pipeline.
 
 ### Creates `.hermes/` directory if needed
 
