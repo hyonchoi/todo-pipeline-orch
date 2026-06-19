@@ -11,7 +11,8 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 ## Features
 
 - **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
-- **CLI subcommands**: `tick`, `merge`, `status`, `kill` for pipeline management
+- **CLI subcommands**: `tick`, `merge`, `status`, `kill`, `recover-counter` for pipeline management
+- **Logging flags**: `--verbose` and `--debug` global flags for detailed diagnostics (selection results, lock state, agent payloads, circuit breaker internals)
 - **Pending records table**: Display ready-for-review records with status and age
 - **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
 - **Circuit breaker**: no-progress counter, cron backoff, and Slack alert dedup to stop runaway ticks
@@ -80,6 +81,17 @@ Kill an in-flight phase (writes a `killed_by_operator` outcome sidecar and relea
 uv run pipeline-watch kill --todo TODO-N
 # Or kill every in-flight phase
 uv run pipeline-watch kill --all
+```
+
+Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful when bootstrapping a project with hand-written TODOs but no counter file):
+```bash
+uv run pipeline-watch recover-counter <project>
+```
+
+Global flags available on all subcommands:
+```bash
+uv run pipeline-watch tick --verbose <project>   # increased log detail (selection results, lock state)
+uv run pipeline-watch tick --debug <project>     # full debug logging (agent payloads, circuit breaker internals)
 ```
 
 ### Automated Ticks
