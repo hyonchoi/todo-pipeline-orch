@@ -301,6 +301,14 @@ def build_parser() -> argparse.ArgumentParser:
     tick_parser.add_argument("project", help="Project name/slug")
     tick_parser.set_defaults(func=_cmd_tick)
 
+    # recover-counter: Scan TODOS.md and initialize counter file
+    rc_parser = subparsers.add_parser(
+        "recover-counter",
+        help="Scan TODOS.md and initialize .hermes/todo_id_counter",
+    )
+    rc_parser.add_argument("project", help="Project name/slug")
+    rc_parser.set_defaults(func=_cmd_recover_counter)
+
     return parser
 
 
@@ -662,6 +670,36 @@ def _cmd_tick(args, config: Config) -> int:
     except TickLockHeld:
         log.error("tick lock held, exiting")
         return 1
+
+def _cmd_recover_counter(args, config: Config) -> int:
+    """Handle 'recover-counter' subcommand."""
+    project = args.project
+
+    # Validate project slug
+    if not _validate_project_slug(project):
+        log.error("invalid project slug: %r (must be alphanumeric, dot, dash, underscore)", project)
+        return 2
+
+    project_dir = config.projects_dir / project
+    if not project_dir.exists():
+        log.error("project not found: %s", project)
+        return 2
+
+    from .counter import recover_counter
+
+    try:
+        result = recover_counter(project_dir)
+    except FileNotFoundError as e:
+        log.error("%s", e)
+        return 2
+    except Exception as e:
+        log.error("recover-counter failed: %s", e)
+        return 2
+
+    log.info("recover-counter: set counter to %d for project %s", result, project)
+    print(f"Counter set to {result} for project {project}")
+    return 0
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     """
