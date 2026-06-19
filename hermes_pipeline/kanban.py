@@ -359,6 +359,7 @@ class HermesKanbanAdapter:
             return SyncResult(ok=False, error=output)
 
         # Parse task_id from JSON output
+        log.debug("kanban registration payload (raw JSON, truncated): %s", output[:500])
         try:
             task_data = json.loads(output)
             task_id = task_data["id"]

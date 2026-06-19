@@ -7,6 +7,10 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+import logging
+
+log = logging.getLogger(__name__)
+
 from hermes_pipeline.outcomes import (
     OUTCOME_ALL_COMPLETE,
     OUTCOME_FAILED_PREFIX,
@@ -52,9 +56,12 @@ class CircuitBreaker:
 
     def observe(self, *, picked: str | None, counts_as_no_progress: bool) -> None:
         st = self._load()
+        log.debug("circuit breaker observe: picked=%s counts_as_no_progress=%s state=%s",
+                  picked, counts_as_no_progress, st)
         if picked is not None:
             st["consecutive_no_progress"] = 0
             if st.get("backed_off"):
+                log.debug("circuit breaker: resuming from backoff (was backed_off=True)")
                 _set_cron_interval(minutes=5)
                 st["backed_off"] = False
             self._save(st)
@@ -71,6 +78,8 @@ class CircuitBreaker:
                 if (_now() - last_dt).total_seconds() < self.alert_dedup_hours * 3600:
                     dedup_ok = False
             if dedup_ok:
+                log.debug("circuit breaker: sending slack alert after %d consecutive no-progress ticks",
+                          st["consecutive_no_progress"])
                 _send_slack(
                     channel=self.slack_channel,
                     msg=f"pipeline-tick: {st['consecutive_no_progress']} consecutive no-progress ticks; backing off to {self.backoff_interval_min}m",
@@ -78,6 +87,7 @@ class CircuitBreaker:
                 st["last_alert_at"] = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
             _set_cron_interval(minutes=self.backoff_interval_min)
             st["backed_off"] = True
+            log.debug("circuit breaker: backed off to %d min interval", self.backoff_interval_min)
         self._save(st)
 
     def observe_from_outcomes(
@@ -101,6 +111,7 @@ class CircuitBreaker:
         """
         phases_file = state_dir / "outcomes" / f"{prior_tick_id}-phases.json"
         if not phases_file.exists():
+            log.debug("circuit breaker: no outcomes file for tick %s — counting as no-progress", prior_tick_id)
             return self.observe(picked=None, counts_as_no_progress=True)
 
         # Read with shared lock to prevent partial reads from concurrent writes

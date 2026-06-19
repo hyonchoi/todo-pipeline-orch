@@ -35,6 +35,7 @@ from .status import collect_pending, format_table
 from .tick import TickLock, TickLockHeld
 
 log = logging.getLogger(__name__)
+vlog = logging.getLogger("pipeline.verbose")
 
 
 def _hermes_run_kill(job_id: str) -> int:
@@ -245,6 +246,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=False,
+        help="Increase log detail (selection results, lock state)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        default=False,
+        help="Maximum log detail (raw agent payloads, circuit breaker internals)",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
@@ -531,7 +544,10 @@ def _cmd_tick(args, config: Config) -> int:
     tick_id = _generate_tick_id()
 
     try:
+        vlog.info("acquiring tick lock: lock_dir=%s tick_id=%s", tick_lock.lock_dir, tick_id)
         with tick_lock.acquire(tick_id):
+            log.debug("tick lock acquired: lock_file=%s holder_pid=%d",
+                      tick_lock._holder_path(), os.getpid())
 
             # --- Step 3: Build context ---
             project_dir = config.projects_dir / project
@@ -572,7 +588,12 @@ def _cmd_tick(args, config: Config) -> int:
                 cfg=full_cfg,
             )
 
+            log.debug("selection decision: picked=%s candidates=%s rationale=%s",
+                      decision.picked, decision.candidates_considered, decision.rationale[:500])
+
             picked = decision.picked
+
+            vlog.info("selection result: picked=%s rationale=%s", picked, decision.rationale[:200])
 
             if picked is None:
                 log.info("selection picked None, observing circuit breaker")
@@ -635,6 +656,7 @@ def _cmd_tick(args, config: Config) -> int:
             # --- Step 6: Observe circuit breaker ---
             cb.observe(picked=picked, counts_as_no_progress=False)
 
+            vlog.info("tick lock released: tick_id=%s", tick_id)
             return 0
 
     except TickLockHeld:
@@ -651,15 +673,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     Returns:
         Exit code (0 on success, 2 on error).
     """
+    # Two-pass parse: extract global flags first so logging can be configured
+    # before the subcommand runs.
     parser = build_parser()
-    args = parser.parse_args(argv)
+    first_pass, _ = parser.parse_known_args(argv)
+    verbose = getattr(first_pass, "verbose", False)
+    debug = getattr(first_pass, "debug", False)
 
     # Load config
     config = Config.from_env()
 
-    # Configure logging
+    # Configure logging based on flags
     log_path = config.state_dir / config.log_file_subpath
-    configure_logging(log_path, config.log_retention_days)
+    if debug:
+        configure_logging(log_path, config.log_retention_days, level=logging.DEBUG)
+    elif verbose:
+        configure_logging(log_path, config.log_retention_days, level=logging.INFO)
+        logging.getLogger("pipeline.verbose").setLevel(logging.INFO)
+    else:
+        configure_logging(log_path, config.log_retention_days)
+
+    # Full parse
+    args = parser.parse_args(argv)
 
     # Dispatch to subcommand
     if hasattr(args, "func"):

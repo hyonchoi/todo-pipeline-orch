@@ -2,9 +2,12 @@
 from __future__ import annotations
 import hashlib
 import json
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from .schema import SelectionContext
+
+log = logging.getLogger(__name__)
 
 class PromptShaMismatch(Exception):
     """Raised when expected_prompt_sha != actual prompt SHA. NOT a no-progress event."""
@@ -115,5 +118,7 @@ def call_agent(
     if expected_sha is not None and expected_sha != actual_sha:
         raise PromptShaMismatch(expected_sha, actual_sha)
     rendered = build_prompt(prompt_path, ctx)
+    log.debug("agent prompt (truncated to 2000 chars): %s", rendered[:2000])
     raw = _hermes_call(model=model, max_tokens=max_tokens, prompt=rendered)
+    log.debug("agent raw response (truncated to 2000 chars): %s", raw[:2000])
     return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)
