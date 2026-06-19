@@ -3,7 +3,7 @@
 This guide covers the three tools you use when a tick doesn't behave the way you expect or when the TODO ID counter is missing.
 
 - **`--verbose`** — add informational details (selection results, lock state) without noise
-- **`--debug`** — surface internal state (agent call summaries, circuit breaker transitions, kanban payloads)
+- **`--debug`** — surface internal state (agent call summaries, circuit breaker transitions, kanban payloads, lock details)
 - **`recover-counter`** — initialize the TODO ID counter by scanning TODOS.md
 
 ## Prerequisites
@@ -33,7 +33,7 @@ These messages come from the `pipeline.verbose` logger, which is off by default 
 
 ## Using `--debug` for full diagnostics
 
-The `--debug` flag lowers the root log level from INFO to DEBUG, surfacing internal state at ~14 strategic points across the pipeline.
+The `--debug` flag lowers the root log level from INFO to DEBUG, surfacing internal state at 12 strategic points across the pipeline.
 
 ```bash
 uv run pipeline-watch --debug tick my-project
@@ -125,7 +125,7 @@ After using any of these tools, verify the result:
 **"verbose output not showing up"**
 
 - Make sure you pass `--verbose` before the subcommand: `uv run pipeline-watch --verbose tick my-project`
-- The flags are global root-level arguments — position matters for readability, though they work anywhere before the subcommand
+- The flags are stripped from argv before argparse runs, so they work anywhere in the command (before or after the subcommand). The conventional position is before the subcommand.
 
 **"debug output not showing up"**
 
