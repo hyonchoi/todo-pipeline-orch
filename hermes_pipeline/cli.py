@@ -725,6 +725,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     log_path = config.state_dir / config.log_file_subpath
     if debug:
         configure_logging(log_path, config.log_retention_days, level=logging.DEBUG)
+        logging.getLogger("pipeline.verbose").setLevel(logging.INFO)
     elif verbose:
         configure_logging(log_path, config.log_retention_days, level=logging.INFO)
         logging.getLogger("pipeline.verbose").setLevel(logging.INFO)
