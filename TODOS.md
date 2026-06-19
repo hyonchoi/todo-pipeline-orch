@@ -34,9 +34,9 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** none
   - **Decisions:** Priority `P0`, Effort `S`, Test Coverage `필요`, Security Review `불필요`
 
-- [x] **TODO-1: todos-manager counter recovery mode** — Add `todos-manager --recover-counter`
+- [x] **TODO-1: todos-manager counter recovery mode** — Add `pipeline-watch recover-counter`
   - **Completed:** v0.3.2 (2026-06-19)
-  - **What:** Add `todos-manager --recover-counter` that scans `TODOS.md` for the max existing `TODO-<n>` ID and initializes `.hermes/todo_id_counter` to that value.
+  - **What:** Add `pipeline-watch recover-counter` that scans `TODOS.md` for the max existing `TODO-<n>` ID and initializes `.hermes/todo_id_counter` to that value.
   - **Why:** Prevent ID collisions when bootstrapping a project that already has hand-written `TODO-<n>` entries but no counter file yet.
   - **Pros:** Closes the only remaining gap in the todos-manager spec. Small and isolated implementation.
   - **Cons:** Not needed until a project has pre-existing `TODO-<n>` entries without a counter file, so it does not block current work.
