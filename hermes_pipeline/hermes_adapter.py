@@ -25,6 +25,17 @@ HERMES_RETRY_DELAY = 1  # seconds between retries
 class HermesDependencyError(Exception):
     """Raised when the hermes CLI is not available at deploy/startup time."""
 
+class ClaudeDependencyError(Exception):
+    """Raised when the Claude Code CLI is not available or not authenticated."""
+
+class ClaudeCallError(Exception):
+    """Raised when `claude -p` returns non-zero exit code."""
+
+    def __init__(self, message: str, returncode: int, stderr: str):
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+
 class HermesCallError(Exception):
     """Raised when `hermes chat -q` returns non-zero exit code."""
 
@@ -267,3 +278,91 @@ def hermes_agent_call(
             stderr=stderr + " [killed on timeout]",
             timed_out=True,
         )
+
+CLAUDE_DEFAULT_TIMEOUT = 300  # default timeout for claude_call (5 minutes)
+CLAUDE_VERSION_TIMEOUT = 10  # timeout for claude --version check
+
+
+def claude_call(
+    *,
+    prompt: str,
+    model: str = "auto",
+    timeout: int = CLAUDE_DEFAULT_TIMEOUT,
+) -> str:
+    """Call `claude -p` and return stripped stdout.
+
+    Uses the Claude Code CLI for one-shot prompts. Authentication is handled
+    by the CLI itself (keychain, OAuth, or ANTHROPIC_API_KEY).
+
+    Args:
+        prompt: The prompt text to send.
+        model: Model identifier. "auto" lets Claude resolve from config.
+        timeout: Seconds before killing the process.
+
+    Returns:
+        Stripped stdout from claude -p.
+
+    Raises:
+        ClaudeCallError: If the process exits with non-zero.
+    """
+    cmd = ["claude", "-p", prompt]
+    if model != "auto":
+        cmd.extend(["--model", model])
+
+    result = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+    )
+
+    if result.returncode != 0:
+        raise ClaudeCallError(
+            message=(
+                f"claude -p failed: rc={result.returncode} "
+                f"stdout={result.stdout[:MAX_ERROR_OUTPUT]} "
+                f"stderr={result.stderr[:MAX_ERROR_OUTPUT]}"
+            ),
+            returncode=result.returncode,
+            stderr=result.stderr,
+        )
+
+    return result.stdout.strip()
+
+
+def check_claude() -> str:
+    """Verify that the Claude Code CLI is installed and returns its version.
+
+    Note: This checks binary availability only, not authentication.
+    Auth is verified lazily on the first `claude_call`.
+
+    Returns:
+        The claude version string (stdout of `claude --version`).
+
+    Raises:
+        ClaudeDependencyError: If the CLI is not found or fails.
+    """
+    try:
+        result = subprocess.run(
+            ["claude", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=CLAUDE_VERSION_TIMEOUT,
+        )
+    except FileNotFoundError as exc:
+        raise ClaudeDependencyError(
+            "Claude Code CLI not found in PATH. "
+            "Install it from https://claude.ai/code"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        raise ClaudeDependencyError(
+            f"claude --version timed out ({CLAUDE_VERSION_TIMEOUT}s). Is the process hung?"
+        ) from exc
+
+    if result.returncode != 0:
+        raise ClaudeDependencyError(
+            f"claude --version failed (rc={result.returncode}): "
+            f"{result.stderr[:MAX_ERROR_OUTPUT]}"
+        )
+
+    return result.stdout.strip()

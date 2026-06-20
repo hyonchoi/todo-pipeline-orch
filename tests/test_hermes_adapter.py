@@ -701,3 +701,129 @@ def test_hermes_agent_call_none_stdout_stderr_coalesced():
 
     assert result.stdout == "", "stdout should be empty string"
     assert result.stderr == "", "stderr should be empty string"
+
+
+# === CLAUDE CALL TESTS ===
+
+
+def test_claude_call_returns_stdout_on_success():
+    """claude_call returns stripped stdout on success."""
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "  hello world  \n"
+    fake_result.stderr = ""
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        from hermes_pipeline.hermes_adapter import claude_call
+        result = claude_call(prompt="test")
+
+    assert result == "hello world"
+
+
+def test_claude_call_raises_on_nonzero_exit():
+    """claude_call raises ClaudeCallError on non-zero exit code."""
+    from hermes_pipeline.hermes_adapter import ClaudeCallError
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = ""
+    fake_result.stderr = "auth failed"
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        from hermes_pipeline.hermes_adapter import claude_call
+        with pytest.raises(ClaudeCallError):
+            claude_call(prompt="test")
+
+
+def test_claude_call_passes_model_flag():
+    """claude_call should include --model flag when model is not auto."""
+    captured_cmd = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.append(cmd)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "ok"
+        r.stderr = ""
+        return r
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=fake_run):
+        from hermes_pipeline.hermes_adapter import claude_call
+        claude_call(prompt="test", model="claude-sonnet-4-6")
+
+    assert captured_cmd[0] == ["claude", "-p", "test", "--model", "claude-sonnet-4-6"]
+
+
+def test_claude_call_omits_model_flag_when_auto():
+    """claude_call should omit --model flag when model is auto."""
+    captured_cmd = []
+
+    def fake_run(cmd, **kwargs):
+        captured_cmd.append(cmd)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "ok"
+        r.stderr = ""
+        return r
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=fake_run):
+        from hermes_pipeline.hermes_adapter import claude_call
+        claude_call(prompt="test", model="auto")
+
+    assert captured_cmd[0] == ["claude", "-p", "test"]
+
+
+def test_claude_call_passes_timeout():
+    """claude_call should pass timeout to subprocess.run."""
+    captured_kwargs = {}
+
+    def fake_run(cmd, **kwargs):
+        captured_kwargs.update(kwargs)
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = "ok"
+        r.stderr = ""
+        return r
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=fake_run):
+        from hermes_pipeline.hermes_adapter import claude_call
+        claude_call(prompt="test", timeout=60)
+
+    assert captured_kwargs["timeout"] == 60
+
+
+def test_check_claude_returns_version():
+    """check_claude returns the version string when claude is available."""
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = "2.1.183 (Claude Code)\n"
+    fake_result.stderr = ""
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        from hermes_pipeline.hermes_adapter import check_claude, ClaudeDependencyError
+        version = check_claude()
+
+    assert "2.1.183" in version
+
+
+def test_check_claude_raises_when_not_found():
+    """check_claude raises ClaudeDependencyError when claude binary is not found."""
+    from hermes_pipeline.hermes_adapter import ClaudeDependencyError
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=FileNotFoundError()):
+        from hermes_pipeline.hermes_adapter import check_claude
+        with pytest.raises(ClaudeDependencyError, match="not found"):
+            check_claude()
+
+
+def test_check_claude_raises_on_version_failure():
+    """check_claude raises ClaudeDependencyError when claude --version fails."""
+    from hermes_pipeline.hermes_adapter import ClaudeDependencyError
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stdout = ""
+    fake_result.stderr = "some error"
+
+    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
+        from hermes_pipeline.hermes_adapter import check_claude
+        with pytest.raises(ClaudeDependencyError, match="failed"):
+            check_claude()
