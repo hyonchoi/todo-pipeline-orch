@@ -8,6 +8,7 @@ from pathlib import Path
 from .schema import SelectionContext
 
 log = logging.getLogger(__name__)
+MAX_TRACE_CHARS = 2000  # Truncate agent payloads to this length in logs
 
 class PromptShaMismatch(Exception):
     """Raised when expected_prompt_sha != actual prompt SHA. NOT a no-progress event."""
@@ -118,7 +119,9 @@ def call_agent(
     if expected_sha is not None and expected_sha != actual_sha:
         raise PromptShaMismatch(expected_sha, actual_sha)
     rendered = build_prompt(prompt_path, ctx)
-    log.debug("agent prompt (truncated to 2000 chars): %s", rendered[:2000])
+    # DEBUG-level so --debug surfaces raw agent prompts/responses to stderr
+    # and the file handler. Truncated to MAX_TRACE_CHARS to avoid bloating logs.
+    log.debug("agent prompt (truncated to %d chars): %s", MAX_TRACE_CHARS, rendered[:MAX_TRACE_CHARS])
     raw = _hermes_call(model=model, max_tokens=max_tokens, prompt=rendered)
-    log.debug("agent raw response (truncated to 2000 chars): %s", raw[:2000])
+    log.debug("agent raw response (truncated to %d chars): %s", MAX_TRACE_CHARS, raw[:MAX_TRACE_CHARS])
     return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)

@@ -45,6 +45,9 @@ def configure(log_path: Path, retention_days: int = 7, level: int = logging.INFO
     err_h.setFormatter(fmt)
     err_h.addFilter(_TickFilter())
     root = logging.getLogger()
+    # Close old handlers to prevent file-descriptor leaks on reconfigure.
+    for h in list(root.handlers):
+        h.close()
     root.handlers = [file_h, err_h]
     root.setLevel(level)
 

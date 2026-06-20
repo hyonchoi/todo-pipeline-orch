@@ -77,3 +77,19 @@ def test_tick_id_absent_when_unset(tmp_path):
     text = log_path.read_text()
     assert "standalone" in text
     assert "tick_id=" not in text or "tick_id=-" in text
+
+def test_debug_mode_enables_verbose(tmp_path):
+    """When --debug is used, both DEBUG and verbose messages should appear."""
+    log_path = tmp_path / "pipeline.log"
+    configure(log_path, retention_days=7, level=logging.DEBUG)
+    set_tick_id("01TESTTICKULID0000000000FF")
+    # Simulate --debug also enabling verbose logger (as main() does)
+    logging.getLogger("pipeline.verbose").setLevel(logging.INFO)
+    vlog = logging.getLogger("pipeline.verbose")
+    vlog.info("verbose message")
+    logging.getLogger("hermes_pipeline.debug_test").debug("debug message")
+    for h in logging.getLogger().handlers:
+        h.flush()
+    text = log_path.read_text()
+    assert "verbose message" in text
+    assert "debug message" in text
