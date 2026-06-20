@@ -71,16 +71,16 @@ TOKENS_PER_SECOND = 100  # estimated throughput for timeout estimation
 MIN_TIMEOUT_SECONDS = 30  # minimum hermes call timeout
 MAX_TIMEOUT_SECONDS = 300  # maximum hermes call timeout (5 minutes)
 
-def _hermes_call(*, model: str, max_tokens: int, prompt: str) -> str:
+def _api_call(*, model: str, max_tokens: int, prompt: str, backend: str = "hermes") -> str:
     from .. import hermes_adapter
 
-    # 1s per 100 tokens, min 30s, max 300s
-    result = hermes_adapter.hermes_call(
-        model=model,
-        prompt=prompt,
-        timeout=min(max(max_tokens // TOKENS_PER_SECOND, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS),
-    )
-    return result
+    timeout = min(max(max_tokens // TOKENS_PER_SECOND, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS)
+
+    if backend == "claude":
+        return hermes_adapter.claude_call(model=model, prompt=prompt, timeout=timeout)
+
+    # Default: hermes
+    return hermes_adapter.hermes_call(model=model, prompt=prompt, timeout=timeout)
 
 def _parse(raw: str) -> dict:
     body = raw.strip()
@@ -114,7 +114,21 @@ def call_agent(
     model: str,
     max_tokens: int,
     expected_sha: str | None,
+    backend: str = "hermes",
 ) -> AgentResult:
+    """Call the selection agent via the specified backend.
+
+    Args:
+        ctx: Selection context (todos, in-flight, etc.).
+        prompt_path: Path to the prompt markdown template.
+        model: Model identifier.
+        max_tokens: Maximum tokens for the response.
+        expected_sha: Expected SHA of the prompt (for pin verification).
+        backend: API backend to use — "hermes" or "claude".
+
+    Returns:
+        AgentResult with parsed response, prompt SHA, and raw output.
+    """
     actual_sha = compute_prompt_sha(prompt_path)
     if expected_sha is not None and expected_sha != actual_sha:
         raise PromptShaMismatch(expected_sha, actual_sha)
@@ -122,6 +136,6 @@ def call_agent(
     # DEBUG-level so --debug surfaces raw agent prompts/responses to stderr
     # and the file handler. Truncated to MAX_TRACE_CHARS to avoid bloating logs.
     log.debug("agent prompt (truncated to %d chars): %s", MAX_TRACE_CHARS, rendered[:MAX_TRACE_CHARS])
-    raw = _hermes_call(model=model, max_tokens=max_tokens, prompt=rendered)
+    raw = _api_call(model=model, max_tokens=max_tokens, prompt=rendered, backend=backend)
     log.debug("agent raw response (truncated to %d chars): %s", MAX_TRACE_CHARS, raw[:MAX_TRACE_CHARS])
     return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)

@@ -414,7 +414,7 @@ def test_hermes_call_retry_succeeds_on_second():
 
 
 def test_hermes_call_timeout_clamping():
-    """_hermes_call should clamp timeout to [MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS]."""
+    """_api_call should clamp timeout to [MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS]."""
     from hermes_pipeline.decision.agent import (
         TOKENS_PER_SECOND,
         MIN_TIMEOUT_SECONDS,
@@ -428,21 +428,21 @@ def test_hermes_call_timeout_clamping():
         return "ok"
 
     with patch("hermes_pipeline.hermes_adapter.hermes_call", fake_hermes_call):
-        from hermes_pipeline.decision.agent import _hermes_call
+        from hermes_pipeline.decision.agent import _api_call
         # max_tokens=0 -> clamped to MIN (30s)
-        _hermes_call(model="m", max_tokens=0, prompt="test")
+        _api_call(model="m", max_tokens=0, prompt="test", backend="hermes")
         assert captured_timeout[-1] == MIN_TIMEOUT_SECONDS, "0 tokens should clamp to min"
 
         # max_tokens=50 -> 50//100=0, clamped to MIN (30s)
-        _hermes_call(model="m", max_tokens=50, prompt="test")
+        _api_call(model="m", max_tokens=50, prompt="test", backend="hermes")
         assert captured_timeout[-1] == MIN_TIMEOUT_SECONDS, "50 tokens should clamp to min"
 
         # max_tokens=5000 -> 5000//100=50s, no clamp
-        _hermes_call(model="m", max_tokens=5000, prompt="test")
+        _api_call(model="m", max_tokens=5000, prompt="test", backend="hermes")
         assert captured_timeout[-1] == 50, "5000 tokens should be 50s"
 
         # max_tokens=100000 -> 100000//100=1000s, clamped to MAX (300s)
-        _hermes_call(model="m", max_tokens=100000, prompt="test")
+        _api_call(model="m", max_tokens=100000, prompt="test", backend="hermes")
         assert captured_timeout[-1] == MAX_TIMEOUT_SECONDS, "100k tokens should clamp to max"
 
 

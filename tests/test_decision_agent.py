@@ -44,7 +44,7 @@ def test_sha_mismatch_raises_without_api_call(tmp_path, monkeypatch):
     p = _write_prompt(tmp_path)
     called = []
     monkeypatch.setattr(
-        "hermes_pipeline.decision.agent._hermes_call",
+        "hermes_pipeline.decision.agent._api_call",
         lambda *a, **kw: called.append(True) or "",
     )
     with pytest.raises(PromptShaMismatch):
@@ -60,7 +60,7 @@ def test_sha_mismatch_raises_without_api_call(tmp_path, monkeypatch):
 def test_well_formed_json_response_parses(tmp_path, monkeypatch):
     p = _write_prompt(tmp_path)
     monkeypatch.setattr(
-        "hermes_pipeline.decision.agent._hermes_call",
+        "hermes_pipeline.decision.agent._api_call",
         lambda *a, **kw: json.dumps({
             "candidates_considered": ["TODO-1"],
             "picked": "TODO-1",
@@ -77,7 +77,7 @@ def test_well_formed_json_response_parses(tmp_path, monkeypatch):
 def test_parse_failure_returns_picked_none(tmp_path, monkeypatch):
     p = _write_prompt(tmp_path)
     monkeypatch.setattr(
-        "hermes_pipeline.decision.agent._hermes_call",
+        "hermes_pipeline.decision.agent._api_call",
         lambda *a, **kw: "this is not json",
     )
     r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
@@ -85,12 +85,12 @@ def test_parse_failure_returns_picked_none(tmp_path, monkeypatch):
     assert "parse" in r.parsed["rationale"].lower()
 
 
-def test_hermes_call_propagates_hermes_call_error(tmp_path, monkeypatch):
-    """When _hermes_call raises HermesCallError, call_agent should propagate it."""
+def test_api_call_propagates_hermes_call_error(tmp_path, monkeypatch):
+    """When _api_call raises HermesCallError, call_agent should propagate it."""
     from hermes_pipeline.hermes_adapter import HermesCallError
     p = _write_prompt(tmp_path)
     monkeypatch.setattr(
-        "hermes_pipeline.decision.agent._hermes_call",
+        "hermes_pipeline.decision.agent._api_call",
         lambda *a, **kw: (_ for _ in ()).throw(
             HermesCallError("hermes failed", returncode=1, stderr="E100"),
         ),
