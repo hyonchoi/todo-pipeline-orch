@@ -31,7 +31,7 @@ class _TickFilter(logging.Filter):
         record.tick_id = _current_tick_id()
         return True
 
-def configure(log_path: Path, retention_days: int = 7) -> None:
+def configure(log_path: Path, retention_days: int = 7, level: int = logging.INFO) -> None:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     fmt = logging.Formatter(
         "%(asctime)s %(levelname)s tick_id=%(tick_id)s %(name)s %(message)s"
@@ -45,5 +45,12 @@ def configure(log_path: Path, retention_days: int = 7) -> None:
     err_h.setFormatter(fmt)
     err_h.addFilter(_TickFilter())
     root = logging.getLogger()
+    # Close old handlers to prevent file-descriptor leaks on reconfigure.
+    for h in list(root.handlers):
+        h.close()
     root.handlers = [file_h, err_h]
-    root.setLevel(logging.INFO)
+    root.setLevel(level)
+
+    # pipeline.verbose logger — INFO when --verbose, WARNING (off) by default.
+    verbose_logger = logging.getLogger("pipeline.verbose")
+    verbose_logger.setLevel(logging.WARNING)

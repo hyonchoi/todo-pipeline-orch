@@ -35,6 +35,7 @@ from .status import collect_pending, format_table
 from .tick import TickLock, TickLockHeld
 
 log = logging.getLogger(__name__)
+vlog = logging.getLogger("pipeline.verbose")
 
 
 def _hermes_run_kill(job_id: str) -> int:
@@ -237,6 +238,26 @@ def _parse_todo_id(value: str) -> int:
         )
 
 
+def _strip_global_flags(argv: list[str]) -> tuple[bool, bool, list[str]]:
+    """Strip --verbose/--debug from argv, returning (verbose, debug, remaining).
+
+    This avoids the argparse subparser namespace overwrite: if --verbose lives
+    on both the root parser and a subparser, the subparser's default (False)
+    overwrites the root's True. By stripping the flags upfront we configure
+    logging before argparse ever runs.
+    """
+    verbose = False
+    debug = False
+    remaining = []
+    for arg in argv:
+        if arg in ("--verbose",):
+            verbose = True
+        elif arg in ("--debug",):
+            debug = True
+        else:
+            remaining.append(arg)
+    return verbose, debug, remaining
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -287,6 +308,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tick_parser.add_argument("project", help="Project name/slug")
     tick_parser.set_defaults(func=_cmd_tick)
+
+    # recover-counter: Scan TODOS.md and initialize counter file
+    rc_parser = subparsers.add_parser(
+        "recover-counter",
+        help="Scan TODOS.md and initialize .hermes/todo_id_counter",
+    )
+    rc_parser.add_argument("project", help="Project name/slug")
+    rc_parser.set_defaults(func=_cmd_recover_counter)
 
     return parser
 
@@ -531,7 +560,10 @@ def _cmd_tick(args, config: Config) -> int:
     tick_id = _generate_tick_id()
 
     try:
+        vlog.info("acquiring tick lock: lock_dir=%s tick_id=%s", tick_lock.lock_dir, tick_id)
         with tick_lock.acquire(tick_id):
+            log.debug("tick lock acquired: lock_dir=%s holder_pid=%d",
+                      tick_lock.lock_dir, os.getpid())
 
             # --- Step 3: Build context ---
             project_dir = config.projects_dir / project
@@ -572,7 +604,12 @@ def _cmd_tick(args, config: Config) -> int:
                 cfg=full_cfg,
             )
 
+            log.debug("selection decision: picked=%s candidates=%s rationale=%s",
+                      decision.picked, decision.candidates_considered, decision.rationale[:500])
+
             picked = decision.picked
+
+            vlog.info("selection result: picked=%s rationale=%s", picked, decision.rationale[:200])
 
             if picked is None:
                 log.info("selection picked None, observing circuit breaker")
@@ -635,11 +672,42 @@ def _cmd_tick(args, config: Config) -> int:
             # --- Step 6: Observe circuit breaker ---
             cb.observe(picked=picked, counts_as_no_progress=False)
 
+            vlog.info("tick lock released: tick_id=%s", tick_id)
             return 0
 
     except TickLockHeld:
         log.error("tick lock held, exiting")
         return 1
+
+def _cmd_recover_counter(args, config: Config) -> int:
+    """Handle 'recover-counter' subcommand."""
+    project = args.project
+
+    # Validate project slug
+    if not _validate_project_slug(project):
+        log.error("invalid project slug: %r (must be alphanumeric, dot, dash, underscore)", project)
+        return 2
+
+    project_dir = config.projects_dir / project
+    if not project_dir.exists():
+        log.error("project not found: %s", project)
+        return 2
+
+    from .counter import recover_counter
+
+    try:
+        result = recover_counter(project_dir)
+    except FileNotFoundError as e:
+        log.error("%s", e)
+        return 2
+    except (ValueError, OSError) as e:
+        log.error("recover-counter failed: %s", e)
+        return 2
+
+    log.info("recover-counter: set counter to %d for project %s", result, project)
+    print(f"Counter set to {result} for project {project}")
+    return 0
+
 
 def main(argv: Optional[list[str]] = None) -> int:
     """
@@ -651,15 +719,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     Returns:
         Exit code (0 on success, 2 on error).
     """
-    parser = build_parser()
-    args = parser.parse_args(argv)
+    # Strip --verbose/--debug before argparse to avoid the subparser namespace
+    # overwrite issue (subparser defaults overwrite root-level True values).
+    verbose, debug, remaining = _strip_global_flags(argv or [])
 
     # Load config
     config = Config.from_env()
 
-    # Configure logging
+    # Configure logging based on flags
     log_path = config.state_dir / config.log_file_subpath
-    configure_logging(log_path, config.log_retention_days)
+    if debug:
+        configure_logging(log_path, config.log_retention_days, level=logging.DEBUG)
+        vlog.setLevel(logging.INFO)
+    elif verbose:
+        configure_logging(log_path, config.log_retention_days, level=logging.INFO)
+        vlog.setLevel(logging.INFO)
+    else:
+        configure_logging(log_path, config.log_retention_days)
+
+    parser = build_parser()
+    args = parser.parse_args(remaining)
 
     # Dispatch to subcommand
     if hasattr(args, "func"):

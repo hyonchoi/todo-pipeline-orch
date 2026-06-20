@@ -1,6 +1,6 @@
 [project]
 name = "hermes-pipeline"
-version = "0.3.1"
+version = "0.3.2"
 description = "Autonomous TODOS.md pipeline orchestrator (Hermes-agent selection, kanban, merge-gating)"
 requires-python = ">=3.12"
 dependencies = [
@@ -20,6 +20,7 @@ dev = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=7.1.0",
     "pytest-mock>=3.12",
 ]
 
