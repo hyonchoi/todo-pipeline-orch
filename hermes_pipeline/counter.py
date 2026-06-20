@@ -1,9 +1,14 @@
 """Counter recovery — scan TODOS.md for max TODO-N and initialize .hermes/todo_id_counter."""
 
 from __future__ import annotations
+import os
 import re
+import tempfile
 from pathlib import Path
 
+from .config import Config
+
+COUNTER_FILE = Config().counter_file_subpath
 TODO_ID_RE = re.compile(r"\bTODO-(\d+)\b")
 
 
@@ -36,8 +41,9 @@ def recover_counter(project_dir: Path) -> int:
     scanned_ids = [int(m) for m in TODO_ID_RE.findall(todos_content)]
     scanned_max = max(scanned_ids) if scanned_ids else 0
 
-    # Read existing counter (if any)
-    counter_path = project_dir / ".hermes" / "todo_id_counter"
+    # Read existing counter (if any) — use config for the subpath so there's
+    # a single source of truth.
+    counter_path = project_dir / COUNTER_FILE
     existing_value = 0
     if counter_path.exists():
         try:
@@ -49,8 +55,24 @@ def recover_counter(project_dir: Path) -> int:
     # Use the maximum of existing and scanned (never decrease)
     result = max(existing_value, scanned_max)
 
-    # Write the counter file (create .hermes/ if needed)
+    # Write the counter file atomically (create .hermes/ if needed)
     counter_path.parent.mkdir(parents=True, exist_ok=True)
-    counter_path.write_text(str(result))
+    # Atomic write: temp file + rename, so a crash mid-write leaves a partial
+    # file that the reader treats as 0 rather than a corrupted counter.
+    fd, tmp_path = tempfile.mkstemp(dir=counter_path.parent, prefix=".todo_id_counter.")
+    try:
+        os.write(fd, str(result).encode())
+        os.close(fd)
+        os.replace(tmp_path, str(counter_path))
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
 
     return result

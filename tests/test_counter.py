@@ -1,9 +1,8 @@
 """Tests for counter.py — recover_counter and auto-initialize logic."""
 
+import pytest
 from pathlib import Path
-from hermes_pipeline.counter import recover_counter
-
-COUNTER_SUBPATH = ".hermes/todo_id_counter"
+from hermes_pipeline.counter import recover_counter, COUNTER_FILE
 
 class TestRecoverCounter:
     """Test recover_counter() function."""
@@ -17,7 +16,7 @@ class TestRecoverCounter:
         )
         result = recover_counter(project_dir)
         assert result == 5
-        counter_file = project_dir / COUNTER_SUBPATH
+        counter_file = project_dir / COUNTER_FILE
         assert counter_file.exists()
         assert counter_file.read_text() == "5"
 
@@ -29,10 +28,10 @@ class TestRecoverCounter:
             "# TODOS\n\n- TODO-1: Do something\n- TODO-4: Do fourth\n"
         )
         (project_dir / ".hermes").mkdir()
-        (project_dir / COUNTER_SUBPATH).write_text("8")
+        (project_dir / COUNTER_FILE).write_text("8")
         result = recover_counter(project_dir)
         assert result == 8
-        assert (project_dir / COUNTER_SUBPATH).read_text() == "8"
+        assert (project_dir / COUNTER_FILE).read_text() == "8"
 
     def test_scanned_higher_than_existing(self, tmp_path):
         """Counter at 3, max in TODOS.md is 7 -> writes 7."""
@@ -42,16 +41,15 @@ class TestRecoverCounter:
             "# TODOS\n\n- TODO-1: Do something\n- TODO-7: Do seventh\n"
         )
         (project_dir / ".hermes").mkdir()
-        (project_dir / COUNTER_SUBPATH).write_text("3")
+        (project_dir / COUNTER_FILE).write_text("3")
         result = recover_counter(project_dir)
         assert result == 7
-        assert (project_dir / COUNTER_SUBPATH).read_text() == "7"
+        assert (project_dir / COUNTER_FILE).read_text() == "7"
 
     def test_no_todos_file(self, tmp_path):
         """TODOS.md missing -> raises FileNotFoundError."""
         project_dir = tmp_path / "demo"
         project_dir.mkdir()
-        import pytest
         with pytest.raises(FileNotFoundError):
             recover_counter(project_dir)
 
@@ -64,7 +62,7 @@ class TestRecoverCounter:
         )
         result = recover_counter(project_dir)
         assert result == 0
-        counter_file = project_dir / COUNTER_SUBPATH
+        counter_file = project_dir / COUNTER_FILE
         assert counter_file.exists()
         assert counter_file.read_text() == "0"
 
@@ -80,7 +78,7 @@ class TestRecoverCounter:
         result = recover_counter(project_dir)
         assert result == 3
         assert (project_dir / ".hermes").is_dir()
-        assert (project_dir / COUNTER_SUBPATH).read_text() == "3"
+        assert (project_dir / COUNTER_FILE).read_text() == "3"
 
     def test_corrupt_counter_file(self, tmp_path):
         """Counter file contains non-integer -> treats as 0, uses scanned max."""
@@ -90,10 +88,10 @@ class TestRecoverCounter:
             "# TODOS\n\n- TODO-4: Do fourth\n"
         )
         (project_dir / ".hermes").mkdir()
-        (project_dir / COUNTER_SUBPATH).write_text("not-a-number")
+        (project_dir / COUNTER_FILE).write_text("not-a-number")
         result = recover_counter(project_dir)
         assert result == 4
-        assert (project_dir / COUNTER_SUBPATH).read_text() == "4"
+        assert (project_dir / COUNTER_FILE).read_text() == "4"
 
     def test_empty_counter_file(self, tmp_path):
         """Counter file is empty -> treats as 0, uses scanned max."""
@@ -103,12 +101,12 @@ class TestRecoverCounter:
             "# TODOS\n\n- TODO-2: Do second\n"
         )
         (project_dir / ".hermes").mkdir()
-        (project_dir / COUNTER_SUBPATH).write_text("")
+        (project_dir / COUNTER_FILE).write_text("")
         result = recover_counter(project_dir)
         assert result == 2
-        assert (project_dir / COUNTER_SUBPATH).read_text() == "2"
+        assert (project_dir / COUNTER_FILE).read_text() == "2"
 
-    def test_ignores_todo_references_in_body(self, tmp_path):
+    def test_matches_todo_references_in_body(self, tmp_path):
         """TODO-N in body text (not as entry) is still matched — this is correct behavior per design."""
         project_dir = tmp_path / "demo"
         project_dir.mkdir()
@@ -129,4 +127,29 @@ class TestRecoverCounter:
         (project_dir / "TODOS.md").write_text("# TODOS\n\n")
         result = recover_counter(project_dir)
         assert result == 0
-        assert (project_dir / COUNTER_SUBPATH).read_text() == "0"
+        assert (project_dir / COUNTER_FILE).read_text() == "0"
+
+    def test_atomic_write_failure_cleanup(self, tmp_path):
+        """When os.replace fails during atomic write, temp file is cleaned up."""
+        import os
+        from unittest.mock import patch
+        project_dir = tmp_path / "demo"
+        project_dir.mkdir()
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n- TODO-4: Do fourth\n"
+        )
+        (project_dir / ".hermes").mkdir()
+
+        # Mock os.replace to raise OSError, simulating a disk-full scenario
+        original_replace = os.replace
+        def fake_replace(src, dst):
+            raise OSError("disk full")
+        with patch("os.replace", fake_replace):
+            with pytest.raises(OSError):
+                recover_counter(project_dir)
+
+        # Verify: the original counter file should be untouched (was not overwritten)
+        # and no orphan temp files should exist in .hermes/
+        entries = list((project_dir / ".hermes").iterdir())
+        orphan_files = [f for f in entries if f.name.startswith(".todo_id_counter.") and f.is_file()]
+        assert orphan_files == [], f"Orphan temp files found: {orphan_files}"

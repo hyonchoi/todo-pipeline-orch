@@ -238,6 +238,26 @@ def _parse_todo_id(value: str) -> int:
         )
 
 
+def _strip_global_flags(argv: list[str]) -> tuple[bool, bool, list[str]]:
+    """Strip --verbose/--debug from argv, returning (verbose, debug, remaining).
+
+    This avoids the argparse subparser namespace overwrite: if --verbose lives
+    on both the root parser and a subparser, the subparser's default (False)
+    overwrites the root's True. By stripping the flags upfront we configure
+    logging before argparse ever runs.
+    """
+    verbose = False
+    debug = False
+    remaining = []
+    for arg in argv:
+        if arg in ("--verbose",):
+            verbose = True
+        elif arg in ("--debug",):
+            debug = True
+        else:
+            remaining.append(arg)
+    return verbose, debug, remaining
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
@@ -246,18 +266,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
-    )
-    parser.add_argument(
-        "--verbose",
-        action="store_true",
-        default=False,
-        help="Increase log detail (selection results, lock state)",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        default=False,
-        help="Maximum log detail (raw agent payloads, circuit breaker internals)",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
@@ -554,8 +562,8 @@ def _cmd_tick(args, config: Config) -> int:
     try:
         vlog.info("acquiring tick lock: lock_dir=%s tick_id=%s", tick_lock.lock_dir, tick_id)
         with tick_lock.acquire(tick_id):
-            log.debug("tick lock acquired: lock_file=%s holder_pid=%d",
-                      tick_lock._holder_path(), os.getpid())
+            log.debug("tick lock acquired: lock_dir=%s holder_pid=%d",
+                      tick_lock.lock_dir, os.getpid())
 
             # --- Step 3: Build context ---
             project_dir = config.projects_dir / project
@@ -692,7 +700,7 @@ def _cmd_recover_counter(args, config: Config) -> int:
     except FileNotFoundError as e:
         log.error("%s", e)
         return 2
-    except Exception as e:
+    except (ValueError, OSError) as e:
         log.error("recover-counter failed: %s", e)
         return 2
 
@@ -711,12 +719,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     Returns:
         Exit code (0 on success, 2 on error).
     """
-    # Two-pass parse: extract global flags first so logging can be configured
-    # before the subcommand runs.
-    parser = build_parser()
-    first_pass, _ = parser.parse_known_args(argv)
-    verbose = getattr(first_pass, "verbose", False)
-    debug = getattr(first_pass, "debug", False)
+    # Strip --verbose/--debug before argparse to avoid the subparser namespace
+    # overwrite issue (subparser defaults overwrite root-level True values).
+    verbose, debug, remaining = _strip_global_flags(argv or [])
 
     # Load config
     config = Config.from_env()
@@ -725,15 +730,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     log_path = config.state_dir / config.log_file_subpath
     if debug:
         configure_logging(log_path, config.log_retention_days, level=logging.DEBUG)
-        logging.getLogger("pipeline.verbose").setLevel(logging.INFO)
+        vlog.setLevel(logging.INFO)
     elif verbose:
         configure_logging(log_path, config.log_retention_days, level=logging.INFO)
-        logging.getLogger("pipeline.verbose").setLevel(logging.INFO)
+        vlog.setLevel(logging.INFO)
     else:
         configure_logging(log_path, config.log_retention_days)
 
-    # Full parse
-    args = parser.parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(remaining)
 
     # Dispatch to subcommand
     if hasattr(args, "func"):
