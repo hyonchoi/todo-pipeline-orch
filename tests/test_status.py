@@ -1,7 +1,7 @@
 """Tests for Lane F.2: status.py"""
 
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import pytest
 
 from hermes_pipeline.status import StatusRow, _age, collect_pending, format_table
@@ -30,27 +30,26 @@ class TestAge:
     def test_age_minutes(self):
         """Timestamp 5 minutes ago shows 'Xm'."""
         now = datetime.now(timezone.utc)
-        five_min_ago = now.replace(minute=now.minute - 5) if now.minute >= 5 else now
+        five_min_ago = now - timedelta(minutes=5)
         iso_str = five_min_ago.isoformat()
         age = _age(iso_str)
-        # May show as minutes or hours depending on exact time
-        assert any(c in age for c in ["m", "h"])
+        assert "m" in age
 
     def test_age_hours(self):
         """Timestamp 2 hours ago shows 'Xh'."""
         now = datetime.now(timezone.utc)
-        two_hours_ago = now.replace(hour=now.hour - 2) if now.hour >= 2 else now
+        two_hours_ago = now - timedelta(hours=2)
         iso_str = two_hours_ago.isoformat()
         age = _age(iso_str)
-        assert "h" in age or "d" in age
+        assert "h" in age
 
     def test_age_days(self):
         """Timestamp 3 days ago shows 'Xd'."""
         now = datetime.now(timezone.utc)
-        three_days_ago = now.replace(day=now.day - 3) if now.day > 3 else now
+        three_days_ago = now - timedelta(days=3)
         iso_str = three_days_ago.isoformat()
         age = _age(iso_str)
-        assert "d" in age or any(c in age for c in ["h", "m"])
+        assert "d" in age
 
     def test_age_iso8601_with_z(self):
         """Handle ISO 8601 with Z suffix."""
