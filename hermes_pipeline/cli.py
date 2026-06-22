@@ -718,6 +718,17 @@ def _tick_project(
                  project_slug, len(task_ids), picked, task_ids)
     except RuntimeError as e:
         log.error("project %s: kanban registration failed: %s", project_slug, e)
+        # Write failure outcome so the circuit breaker knows
+        try:
+            from .decision.store import append_outcome
+            append_outcome(
+                project_state,
+                tick_id,
+                outcome="failed_to_spawn",
+                detail={"todo_id": picked, "error": str(e)[:500]},
+            )
+        except Exception as se:
+            log.warning("failed to write outcome sidecar: %s", se)
         raise
 
     # Observe circuit breaker
