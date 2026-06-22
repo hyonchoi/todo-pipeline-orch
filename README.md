@@ -61,9 +61,9 @@ uv sync
 
 ### CLI Commands
 
-Run a single pipeline tick (select a TODO, register kanban phases, observe the circuit breaker):
+Run a single pipeline tick (scans all active projects, select a TODO, register kanban phases, observe the circuit breaker):
 ```bash
-uv run pipeline-watch tick <project>
+uv run pipeline-watch tick
 ```
 
 Display pipeline status:
@@ -92,8 +92,8 @@ uv run pipeline-watch recover-counter <project>
 
 Global flags available on all subcommands:
 ```bash
-uv run pipeline-watch --verbose tick <project>   # increased log detail (selection results, lock state)
-uv run pipeline-watch --debug tick <project>     # full debug logging (agent call summaries, circuit breaker transitions)
+uv run pipeline-watch --verbose tick   # increased log detail (selection results, lock state)
+uv run pipeline-watch --debug tick     # full debug logging (agent call summaries, circuit breaker transitions)
 ```
 
 ### Automated Ticks
