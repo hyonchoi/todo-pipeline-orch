@@ -304,9 +304,8 @@ def build_parser() -> argparse.ArgumentParser:
     # tick: Pipeline tick — select TODO, register kanban phases
     tick_parser = subparsers.add_parser(
         "tick",
-        help="Run one pipeline tick: select a TODO and register kanban phases",
+        help="Run one pipeline tick: scan all projects and select TODOs",
     )
-    tick_parser.add_argument("project", help="Project name/slug")
     tick_parser.set_defaults(func=_cmd_tick)
 
     # recover-counter: Scan TODOS.md and initialize counter file
@@ -501,62 +500,34 @@ def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
         log.warning("failed to write tick_started sentinel: %s", e)
 
 def _cmd_tick(args, config: Config) -> int:
-    """Handle 'tick' subcommand — kanban-as-scheduler pipeline tick.
+    """Handle 'tick' subcommand — kanban-as-scheduler pipeline scan tick.
 
     Flow:
-    1. Read prior_tick_id, check if in-flight (skip if so)
-    2. Acquire TickLock, mint ULID tick_id
-    3. Build context, run selection
-    4. If picked=None: observe circuit breaker, persist, exit
-    5. If picked=TODO-N: persist tick_id, register kanban tasks, exit
+    1. Acquire global TickLock
+    2. Discover active projects
+    3. For each project: migrate state, check prior tick, run selection
+    4. Release lock
 
-    tick_id is persisted BEFORE kanban registration (inside the lock) using
-    atomic tmp+rename. A sentinel file is written alongside it so the next
-    tick's all_phases_complete can distinguish "crashed before registration"
-    from "in-flight". This prevents split-brain where two TODOs are
-    selected simultaneously after a crash between registration and persist.
+    Each project's errors are isolated — one project's failure doesn't
+    block the others.
     """
+    from .circuit import CircuitBreaker
+    from .project_config import _discover_projects, _resolve_slack_channel
+    from .state_migration import _get_project_state_dir, _migrate_global_state
+    from .tick import TickLock, TickLockHeld
+
     state_dir = config.state_dir
-    project = args.project
 
-    # Validate project slug to prevent CLI flag injection
-    if not _validate_project_slug(project):
-        log.error("invalid project slug: %r (must be alphanumeric, dot, dash, underscore)", project)
-        return 2
+    # --- Step 1: Load global config overlay ---
+    try:
+        toml_cfg, cb_cfg = _load_toml_overlay(state_dir, config)
+    except Exception as e:
+        log.warning("failed to load config overlay: %s — using defaults", e)
+        from .config import CircuitBreakerConfig
+        toml_cfg, cb_cfg = None, CircuitBreakerConfig()
 
-    # --- Step 1: Check prior tick ---
-    prior_tick_id = _read_prior_tick_id(state_dir)
-
-    # --- Load TOML overlay early (needed for prior-tick observation) ---
-    toml_cfg, cb_cfg = _load_toml_overlay(state_dir, config)
-    cb = _make_circuit_breaker(state_dir, cb_cfg, config.slack_channel)
-
-    if prior_tick_id is not None:
-        # Prior tick exists — is it complete?
-        if not all_phases_complete(project, prior_tick_id, state_dir=state_dir):
-            log.info("prior tick %s still in-flight, skipping", prior_tick_id)
-            return 0
-
-        # Prior tick complete — observe outcomes before new selection
-        try:
-            from .kanban_tasks import get_todo_kanban_status
-            status_map = get_todo_kanban_status(project, prior_tick_id)
-            observe_outcomes(
-                state_dir=state_dir,
-                tick_id=prior_tick_id,
-                status_map=status_map,
-            )
-            # Feed outcomes back to the circuit breaker
-            cb.observe_from_outcomes(
-                state_dir=state_dir,
-                prior_tick_id=prior_tick_id,
-            )
-        except Exception as e:
-            log.warning("observe_outcomes for prior tick %s failed: %s", prior_tick_id, e)
-
-    # --- Step 2: Acquire lock ---
+    # --- Step 2: Acquire global lock ---
     tick_lock = TickLock(state_dir, max_age_min=cb_cfg.max_tick_duration_min)
-
     tick_id = _generate_tick_id()
 
     try:
@@ -565,119 +536,195 @@ def _cmd_tick(args, config: Config) -> int:
             log.debug("tick lock acquired: lock_dir=%s holder_pid=%d",
                       tick_lock.lock_dir, os.getpid())
 
-            # --- Step 3: Build context ---
-            project_dir = config.projects_dir / project
-            if not project_dir.exists():
-                log.error("project not found: %s", project)
-                return 2
-
-            todos_path = project_dir / "TODOS.md"
-            if not todos_path.exists():
-                log.error("TODOS.md not found in %s", project_dir)
-                return 2
-
-            ctx = build_context(
-                tick_id=tick_id,
-                state_dir=state_dir,
-                todos_path=todos_path,
-                project_slug=project,
-                max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
-            )
-
-            # --- Step 4: Run selection ---
-            # Use the full TOML overlay (config.toml) for both selection and
-            # circuit_breaker config. Fall back to in-memory defaults if no
-            # config.toml is present — same values, just constructed here.
-            from .config import FullConfig, SelectionConfig
-
-            if toml_cfg is not None:
-                full_cfg = toml_cfg
-            else:
-                full_cfg = FullConfig(
-                    base=config,
-                    selection=SelectionConfig(),
-                    circuit_breaker=cb_cfg,
-                )
-            decision = run_selection(
-                tick_id=tick_id,
-                ctx=ctx,
-                cfg=full_cfg,
-            )
-
-            log.debug("selection decision: picked=%s candidates=%s rationale=%s",
-                      decision.picked, decision.candidates_considered, decision.rationale[:500])
-
-            picked = decision.picked
-
-            vlog.info("selection result: picked=%s rationale=%s", picked, decision.rationale[:200])
-
-            if picked is None:
-                log.info("selection picked None, observing circuit breaker")
-                cb.observe(picked=None, counts_as_no_progress=True)
-                # Persist inside lock so next tick knows this one ran.
-                # _persist_tick_id writes a tick_started sentinel; overwrite
-                # with picked_none so next tick doesn't treat this as a
-                # crashed registration.
-                _persist_tick_id(state_dir, tick_id)
-                try:
-                    import json as _json
-                    outcomes_dir = state_dir / "outcomes"
-                    outcomes_dir.mkdir(parents=True, exist_ok=True)
-                    phases_file = outcomes_dir / f"{tick_id}-phases.json"
-                    with open(phases_file, "w") as f:
-                        f.write(_json.dumps({"outcome": OUTCOME_PICKED_NONE}) + "\n")
-                except OSError as e:
-                    log.warning("failed to write picked_none sentinel: %s", e)
+            # --- Step 3: Discover projects ---
+            projects = _discover_projects(config)
+            if not projects:
+                log.info("no active projects found in %s", config.projects_dir)
                 return 0
 
-            # --- Step 5: Persist tick_id BEFORE registration ---
-            # Atomic persist + sentinel so a crash between here and
-            # register_todo_phases doesn't cause split-brain (two TODOs
-            # selected simultaneously).  If we crash after this point,
-            # the next tick sees the tick_id, finds no/empty kanban
-            # tasks, reads the sentinel, and treats the prior tick as
-            # complete — then selects a new TODO.
-            _persist_tick_id(state_dir, tick_id)
+            log.info("discovered %d active projects", len(projects))
 
-            # --- Step 6: Register kanban tasks ---
-            log.info("selected %s, registering kanban phases", picked)
-            try:
-                task_ids = register_todo_phases(
-                    todo_id=picked,
-                    tick_id=tick_id,
-                    board_slug=project,
-                    project_dir=project_dir,
-                )
-                log.info(
-                    "registered %d kanban tasks for %s: %s",
-                    len(task_ids),
-                    picked,
-                    task_ids,
-                )
-            except RuntimeError as e:
-                log.error("kanban registration failed for %s: %s", picked, e)
-                # Write a failure outcome so the circuit breaker knows
+            # --- Step 4: Per-project tick ---
+            for project_dir in projects:
+                project_slug = project_dir.name
+                project_state = _get_project_state_dir(project_dir)
+
                 try:
-                    from .decision.store import append_outcome
-                    append_outcome(
-                        state_dir,
-                        tick_id,
-                        outcome="failed_to_spawn",
-                        detail={"todo_id": picked, "error": str(e)[:500]},
+                    _tick_project(
+                        project_dir=project_dir,
+                        project_slug=project_slug,
+                        project_state=project_state,
+                        config=config,
+                        cb_cfg=cb_cfg,
                     )
-                except Exception as se:
-                    log.warning("failed to write outcome sidecar: %s", se)
-                return 1
-
-            # --- Step 6: Observe circuit breaker ---
-            cb.observe(picked=picked, counts_as_no_progress=False)
-
-            vlog.info("tick lock released: tick_id=%s", tick_id)
-            return 0
+                except Exception as e:
+                    log.error("project %s: %s", project_slug, e)
+                    # Continue to next project
 
     except TickLockHeld:
         log.error("tick lock held, exiting")
         return 1
+
+    vlog.info("tick lock released: tick_id=%s", tick_id)
+    return 0
+
+def _tick_project(
+    *,
+    project_dir: Path,
+    project_slug: str,
+    project_state: Path,
+    config: Config,
+    cb_cfg,
+) -> None:
+    """Run the tick flow for a single project.
+
+    1. Migrate global state (if needed)
+    2. Check prior tick
+    3. Run selection
+    4. Register kanban phases or observe circuit breaker
+
+    Args:
+        project_dir: Project root directory.
+        project_slug: Project name (derived from directory name).
+        project_state: Per-project state directory (<project>/.hermes/).
+        config: Global config.
+        cb_cfg: Circuit breaker configuration.
+
+    Raises:
+        Exception: On any error (caller logs and continues to next project).
+    """
+    from .project_config import _resolve_slack_channel
+    from .state_migration import _migrate_global_state
+
+    vlog = logging.getLogger("pipeline.verbose")
+
+    # Step 1: Migrate global state (one-time, idempotent)
+    try:
+        _migrate_global_state(project_dir, config)
+    except Exception as e:
+        log.warning("state migration for %s: %s", project_slug, e)
+
+    # Ensure per-project state directory exists
+    project_state.mkdir(parents=True, exist_ok=True)
+
+    # Resolve per-project Slack channel
+    slack_channel = _resolve_slack_channel(project_dir, env_channel=config.slack_channel)
+
+    # Step 2: Check prior tick
+    prior_tick_id = _read_prior_tick_id(project_state)
+
+    cb = _make_circuit_breaker(project_state, cb_cfg, slack_channel)
+
+    if prior_tick_id is not None:
+        if not all_phases_complete(project_slug, prior_tick_id, state_dir=project_state):
+            log.info("project %s: prior tick %s still in-flight, skipping",
+                     project_slug, prior_tick_id)
+            return
+
+        # Prior tick complete — observe outcomes before new selection
+        try:
+            from .kanban_tasks import get_todo_kanban_status
+            status_map = get_todo_kanban_status(project_slug, prior_tick_id)
+            observe_outcomes(
+                state_dir=project_state,
+                tick_id=prior_tick_id,
+                status_map=status_map,
+            )
+            cb.observe_from_outcomes(
+                state_dir=project_state,
+                prior_tick_id=prior_tick_id,
+            )
+        except Exception as e:
+            log.warning("project %s: observe_outcomes for prior tick %s failed: %s",
+                        project_slug, prior_tick_id, e)
+
+    # Step 3: Build context & run selection
+    tick_id = _generate_tick_id()
+    todos_path = project_dir / "TODOS.md"
+    if not todos_path.exists():
+        raise FileNotFoundError(f"TODOS.md not found in {project_dir}")
+
+    ctx = build_context(
+        tick_id=tick_id,
+        state_dir=project_state,
+        todos_path=todos_path,
+        project_slug=project_slug,
+        max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
+    )
+
+    # Build full config for selection
+    from .config import FullConfig, SelectionConfig
+    from .config import load_toml_overlay as _load_toml_inline
+
+    try:
+        toml_cfg = _load_toml_inline(config, project_state / "config.toml")
+    except (FileNotFoundError, ValueError):
+        toml_cfg = None
+
+    if toml_cfg is not None:
+        full_cfg = toml_cfg
+    else:
+        full_cfg = FullConfig(
+            base=config,
+            selection=SelectionConfig(),
+            circuit_breaker=cb_cfg,
+        )
+
+    decision = run_selection(
+        tick_id=tick_id,
+        ctx=ctx,
+        cfg=full_cfg,
+    )
+    picked = decision.picked
+
+    vlog.info("project %s: selection result: picked=%s rationale=%s",
+              project_slug, picked, decision.rationale[:200])
+
+    if picked is None:
+        log.info("project %s: selection picked None, observing circuit breaker",
+                 project_slug)
+        cb.observe(picked=None, counts_as_no_progress=True)
+        _persist_tick_id(project_state, tick_id)
+        try:
+            observe_outcomes(
+                state_dir=project_state,
+                tick_id=tick_id,
+                status_map={},
+            )
+            # Write picked_none sentinel
+            outcomes_dir = project_state / "outcomes"
+            outcomes_dir.mkdir(exist_ok=True)
+            sentinel = outcomes_dir / f"{tick_id}-phases.json"
+            from .state import _atomic_write_text
+            _atomic_write_text(
+                sentinel,
+                json.dumps({"outcome": OUTCOME_PICKED_NONE}) + "\n",
+            )
+        except Exception as se:
+            log.warning("project %s: failed to write picked_none sentinel: %s",
+                        project_slug, se)
+        return
+
+    # Step 4: Register kanban phases
+    log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
+    try:
+        task_ids = register_todo_phases(
+            todo_id=picked,
+            tick_id=tick_id,
+            board_slug=project_slug,
+            project_dir=project_dir,
+        )
+        log.info("project %s: registered %d kanban tasks for %s: %s",
+                 project_slug, len(task_ids), picked, task_ids)
+    except RuntimeError as e:
+        log.error("project %s: kanban registration failed: %s", project_slug, e)
+        raise
+
+    # Observe circuit breaker
+    cb.observe(picked=picked, counts_as_no_progress=False)
+
+    # Persist tick_id inside lock
+    _persist_tick_id(project_state, tick_id)
 
 def _cmd_recover_counter(args, config: Config) -> int:
     """Handle 'recover-counter' subcommand."""

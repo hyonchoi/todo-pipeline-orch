@@ -3,129 +3,115 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hermes_pipeline.config import Config
+from hermes_pipeline.cli import _cmd_tick, build_parser
+
+
+def _make_decision(picked=None, **kwargs):
+    """Create a mock HermesSelectionDecision with the right shape."""
+    decision = MagicMock()
+    decision.picked = picked or kwargs.get("picked")
+    decision.rationale = "test"
+    decision.candidates_considered = kwargs.get("candidates_considered", [])
+    return decision
+
+
+def _create_project(projects_dir, name, todos=True):
+    """Helper to create a project directory with optional TODOS.md."""
+    project_dir = projects_dir / name
+    project_dir.mkdir(parents=True, exist_ok=True)
+    if todos:
+        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+    return project_dir
+
+
+class FakeArgs:
+    """Minimal argparse.Namespace for testing."""
+    def __init__(self, **kwargs):
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
 
 class TestTickSubcommand:
-    """Tests for pipeline-watch tick <project>."""
+    """Tests for pipeline-watch tick (scan loop)."""
 
     def test_tick_help(self):
         """tick subcommand shows in help."""
-        from hermes_pipeline.cli import build_parser
-
         parser = build_parser()
-        # Parse --help for tick — argparse --help prints and exits
         with pytest.raises(SystemExit):
             parser.parse_args(["tick", "--help"])
 
-    def test_tick_prior_in_flight_skips(self, state_dir, mocker):
+    def test_tick_prior_in_flight_skips(self, tmp_path, mocker):
         """Prior tick still has in-flight kanban tasks -> skip."""
-        from hermes_pipeline.cli import _cmd_tick
-
         mocker.patch(
             "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=False
         )
 
-        # Write prior_tick_id
-        (state_dir / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
 
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-        result = _cmd_tick(args, config)
+        project_state = projects_dir / "demo" / ".hermes"
+        project_state.mkdir(parents=True)
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
-    def test_tick_prior_complete_proceeds(self, state_dir, mocker):
+    def test_tick_prior_complete_proceeds(self, tmp_path, mocker):
         """Prior tick complete -> proceed with new selection."""
-        from hermes_pipeline.cli import _cmd_tick
-
         mocker.patch(
             "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
         )
-        mock_selection = mocker.patch(
-            "hermes_pipeline.cli.run_selection"
-        )
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
 
-        # Mock the selection decision
-        from hermes_pipeline.decision.schema import HermesSelectionDecision
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
 
-        mock_selection.return_value = HermesSelectionDecision(
-            tick_id="01HB",
-            timestamp="2026-01-01T00:00:00Z",
-            model="claude-opus-4-7",
-            prompt_sha="abc123",
-            candidates_considered=["TODO-10"],
-            picked=None,
-            rationale="All done",
-            blocked_reasons={},
-            in_flight=[],
-        )
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-        # Write prior_tick_id
-        (state_dir / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        project_state = projects_dir / "demo" / ".hermes"
+        project_state.mkdir(parents=True)
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
 
-        # Create TODOS.md
-        project_dir = state_dir.parent / "demo"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
-
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
-
-        result = _cmd_tick(args, config)
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
-    def test_tick_no_prior_proceeds(self, state_dir, mocker):
+    def test_tick_no_prior_proceeds(self, tmp_path, mocker):
         """No prior tick -> proceed normally."""
-        from hermes_pipeline.cli import _cmd_tick
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
 
-        mock_selection = mocker.patch(
-            "hermes_pipeline.cli.run_selection"
-        )
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
 
-        from hermes_pipeline.decision.schema import HermesSelectionDecision
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-        mock_selection.return_value = HermesSelectionDecision(
-            tick_id="01HB",
-            timestamp="2026-01-01T00:00:00Z",
-            model="claude-opus-4-7",
-            prompt_sha="abc123",
-            candidates_considered=["TODO-10"],
-            picked=None,
-            rationale="All done",
-            blocked_reasons={},
-            in_flight=[],
-        )
-
-        # No prior_tick_id file
-        assert not (state_dir / "current_tick_id.txt").exists()
-
-        project_dir = state_dir.parent / "demo"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
-
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
-
-        result = _cmd_tick(args, config)
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
-    def test_tick_lock_held_exits_early(self, state_dir, mocker):
+    def test_tick_lock_held_exits_early(self, tmp_path):
         """Tick lock already held -> exit early with error."""
-        from hermes_pipeline.cli import _cmd_tick
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
         # Hold the lock
         lock_dir = state_dir / "tick.lock"
@@ -138,137 +124,65 @@ class TestTickSubcommand:
             })
         )
 
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-
-        result = _cmd_tick(args, config)
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
         assert result == 1  # Exit code for lock held
 
-    def test_validate_project_slug_valid(self):
-        """Valid slugs return True."""
-        from hermes_pipeline.cli import _validate_project_slug
+    def test_tick_no_projects(self, tmp_path):
+        """No projects found -> return 0."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
 
-        assert _validate_project_slug("demo") is True
-        assert _validate_project_slug("my-project") is True
-        assert _validate_project_slug("my.project") is True
-        assert _validate_project_slug("my_project") is True
-        assert _validate_project_slug("a1b2") is True
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-    def test_validate_project_slug_rejects_flag_injection(self):
-        """Slugs that look like CLI flags are rejected."""
-        from hermes_pipeline.cli import _validate_project_slug
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
 
-        assert _validate_project_slug("--help") is False
-        assert _validate_project_slug("-v") is False
-        assert _validate_project_slug("--debug") is False
-
-    def test_validate_project_slug_rejects_path_traversal(self):
-        """Slugs with path traversal are rejected."""
-        from hermes_pipeline.cli import _validate_project_slug
-
-        assert _validate_project_slug("..") is False
-        assert _validate_project_slug(".") is False
-        assert _validate_project_slug("my..project") is False
-        assert _validate_project_slug("./demo") is False
-
-    def test_validate_project_slug_invalid_spaces(self):
-        """Slugs with spaces are rejected."""
-        from hermes_pipeline.cli import _validate_project_slug
-
-        assert _validate_project_slug("my project") is False
-
-    def test_validate_project_slug_invalid_shell(self):
-        """Slugs with shell metacharacters are rejected."""
-        from hermes_pipeline.cli import _validate_project_slug
-
-        assert _validate_project_slug("a;b") is False
-        assert _validate_project_slug("a|b") is False
-        assert _validate_project_slug("a$b") is False
-        assert _validate_project_slug("a&b") is False
-
-    def test_validate_project_slug_invalid_empty(self):
-        """Empty slug is rejected."""
-        from hermes_pipeline.cli import _validate_project_slug
-
-        assert _validate_project_slug("") is False
-
-    def test_tick_invalid_project_slug_rejected(self, state_dir, mocker):
-        """Invalid project slug in _cmd_tick -> return 2."""
-        from hermes_pipeline.cli import _cmd_tick
-
-        # Mock selection so we get past it into slug validation
+    def test_tick_invalid_slug_skipped(self, tmp_path, mocker):
+        """Invalid project slug is skipped by discover, tick proceeds."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        from hermes_pipeline.decision.schema import HermesSelectionDecision
-        mock_selection.return_value = HermesSelectionDecision(
-            tick_id="01HB",
-            timestamp="2026-01-01T00:00:00Z",
-            model="claude-opus-4-7",
-            prompt_sha="abc123",
-            candidates_considered=["TODO-10"],
-            picked="TODO-10",
-            rationale="Selected",
-            blocked_reasons={},
-            in_flight=[],
-        )
+        mock_selection.return_value = _make_decision()
 
-        project_dir = state_dir.parent / "a;b"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        # Invalid slug directory
+        invalid_dir = projects_dir / "a;b"
+        invalid_dir.mkdir()
+        (invalid_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10\n")
+        # Valid project
+        _create_project(projects_dir, "demo")
 
-        args = mocker.MagicMock()
-        args.project = "a;b"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-        result = _cmd_tick(args, config)
-        assert result == 2
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
 
-    def test_tick_project_not_found(self, state_dir, mocker):
-        """Project directory does not exist -> return 2."""
-        from hermes_pipeline.cli import _cmd_tick
+    def test_tick_project_without_todos_skipped(self, tmp_path, mocker):
+        """Project without TODOS.md is skipped by discover."""
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
 
-        # Create TODOS.md in a different dir
-        project_dir = state_dir.parent / "demo"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "TODOS.md").write_text("# TODOS\n")
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        # Project without TODOS.md
+        project_dir = projects_dir / "no-todos"
+        project_dir.mkdir()
+        # Valid project
+        _create_project(projects_dir, "demo")
 
-        # But tick a different project
-        args = mocker.MagicMock()
-        args.project = "nonexistent"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-        result = _cmd_tick(args, config)
-        assert result == 2
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
 
-    def test_tick_todos_md_not_found(self, state_dir, mocker):
-        """TODOS.md missing in project -> return 2."""
-        from hermes_pipeline.cli import _cmd_tick
-
-        project_dir = state_dir.parent / "demo"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        # No TODOS.md
-
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
-
-        result = _cmd_tick(args, config)
-        assert result == 2
-
-    def test_tick_kanban_registration_failure(self, state_dir, mocker):
-        """Kanban registration raises RuntimeError -> return 1, writes failed_to_spawn."""
-        from hermes_pipeline.cli import _cmd_tick
-
+    def test_tick_kanban_registration_failure_project_error(self, tmp_path, mocker):
+        """Kanban registration raises RuntimeError -> project error logged, tick returns 0."""
         mocker.patch(
             "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
         )
@@ -287,77 +201,52 @@ class TestTickSubcommand:
             in_flight=[],
         )
 
-        # Create TODOS.md
-        project_dir = state_dir.parent / "demo"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
 
-        # Mock registration to fail
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
         mocker.patch(
             "hermes_pipeline.cli.register_todo_phases",
             side_effect=RuntimeError("kanban error"),
         )
 
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        # Per-project error is caught, tick returns 0 (error isolated)
+        assert result == 0
 
-        result = _cmd_tick(args, config)
-        assert result == 1
-
-    def test_tick_observe_outcomes_exception(self, state_dir, mocker):
+    def test_tick_observe_outcomes_exception(self, tmp_path, mocker):
         """observe_outcomes for prior tick raises -> warning, tick proceeds."""
-        from hermes_pipeline.cli import _cmd_tick
-
         mocker.patch(
             "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
         )
-        # Mock get_todo_kanban_status to raise only when called from the
-        # observe_outcomes path (after all_phases_complete check).
-        # We need to let the first call (inside all_phases_complete) succeed,
-        # so we mock it to return a valid map, then mock observe_outcomes to raise.
         mocker.patch(
             "hermes_pipeline.kanban_tasks.observe_outcomes",
             side_effect=RuntimeError("kanban error"),
         )
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
 
-        from hermes_pipeline.decision.schema import HermesSelectionDecision
-        mock_selection.return_value = HermesSelectionDecision(
-            tick_id="01HB",
-            timestamp="2026-01-01T00:00:00Z",
-            model="claude-opus-4-7",
-            prompt_sha="abc123",
-            candidates_considered=["TODO-10"],
-            picked=None,
-            rationale="All done",
-            blocked_reasons={},
-            in_flight=[],
-        )
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
 
-        (state_dir / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-        project_dir = state_dir.parent / "demo"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+        project_state = projects_dir / "demo" / ".hermes"
+        project_state.mkdir(parents=True)
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
 
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
 
-        result = _cmd_tick(args, config)
-        assert result == 0  # Should proceed despite observe_outcomes failure
-
-    def test_tick_picked_none_writes_sentinel(self, state_dir, mocker):
-        """picked=None -> writes picked_none sentinel, persists tick_id."""
-        from hermes_pipeline.cli import _cmd_tick
-
+    def test_tick_picked_none_writes_sentinel(self, tmp_path, mocker):
+        """picked=None -> writes picked_none sentinel in per-project state dir."""
         mocker.patch(
             "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
         )
@@ -376,30 +265,24 @@ class TestTickSubcommand:
             in_flight=[],
         )
 
-        # No prior tick — skip the observe_outcomes path entirely
-        assert not (state_dir / "current_tick_id.txt").exists()
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
 
-        project_dir = state_dir.parent / "demo"
-        project_dir.mkdir(parents=True, exist_ok=True)
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
 
-        args = mocker.MagicMock()
-        args.project = "demo"
-        config = mocker.MagicMock()
-        config.state_dir = state_dir
-        config.projects_dir = state_dir.parent
-        config.slack_channel = "#alerts"
-
-        result = _cmd_tick(args, config)
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
-        # Check sentinel was written (tick_id is dynamically generated)
-        outcomes_dir = state_dir / "outcomes"
+        # Check sentinel in per-project state dir
+        project_state = projects_dir / "demo" / ".hermes"
+        outcomes_dir = project_state / "outcomes"
         assert outcomes_dir.exists()
         sentinel_files = list(outcomes_dir.glob("*-phases.json"))
         assert len(sentinel_files) > 0
 
-        # Verify the sentinel content
         content = sentinel_files[0].read_text().strip()
         data = json.loads(content)
         assert data.get("outcome") == "picked_none"
@@ -408,30 +291,28 @@ class TestTickSubcommand:
 class TestCliHelpers:
     """Tests for _cmd_tick helper functions."""
 
-    def test_read_prior_tick_id_existing(self, state_dir):
+    def test_read_prior_tick_id_existing(self, tmp_path):
         """Reads prior tick_id when file exists."""
         from hermes_pipeline.cli import _read_prior_tick_id
 
-        (state_dir / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
-        result = _read_prior_tick_id(state_dir)
+        (tmp_path / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        result = _read_prior_tick_id(tmp_path)
         assert result == "01HA6PH2V0ZJ7GK0S39D243TQX"
 
-    def test_read_prior_tick_id_missing(self, state_dir):
+    def test_read_prior_tick_id_missing(self, tmp_path):
         """Returns None when file doesn't exist."""
         from hermes_pipeline.cli import _read_prior_tick_id
 
-        assert not (state_dir / "current_tick_id.txt").exists()
-        result = _read_prior_tick_id(state_dir)
+        assert not (tmp_path / "current_tick_id.txt").exists()
+        result = _read_prior_tick_id(tmp_path)
         assert result is None
 
-    def test_read_prior_tick_id_invalid_json(self, state_dir):
+    def test_read_prior_tick_id_invalid_json(self, tmp_path):
         """Returns None when file has invalid content."""
         from hermes_pipeline.cli import _read_prior_tick_id
 
-        (state_dir / "current_tick_id.txt").write_text("not json {")
-        result = _read_prior_tick_id(state_dir)
-        # Should handle gracefully - the file stores plain text, not JSON
-        # So it should just return the text
+        (tmp_path / "current_tick_id.txt").write_text("not json {")
+        result = _read_prior_tick_id(tmp_path)
         assert result == "not json {"
 
     def test_generate_tick_id_format(self):
@@ -457,21 +338,20 @@ class TestCliHelpers:
 
         result = _generate_tick_id()
         assert isinstance(result, str)
-        assert len(result) > 10  # Format: 20260101120000012345 (16+6=22 chars)
+        assert len(result) > 10
 
-    def test_persist_tick_id_writes(self, state_dir):
+    def test_persist_tick_id_writes(self, tmp_path):
         """_persist_tick_id writes the tick_id file."""
         from hermes_pipeline.cli import _persist_tick_id
 
-        _persist_tick_id(state_dir, "01HA6PH2V0ZJ7GK0S39D243TQX")
-        content = (state_dir / "current_tick_id.txt").read_text()
+        _persist_tick_id(tmp_path, "01HA6PH2V0ZJ7GK0S39D243TQX")
+        content = (tmp_path / "current_tick_id.txt").read_text()
         assert content == "01HA6PH2V0ZJ7GK0S39D243TQX"
 
-    def test_persist_tick_id_oserror(self, state_dir, mocker):
+    def test_persist_tick_id_oserror(self, tmp_path, mocker):
         """_persist_tick_id handles OSError gracefully."""
         from hermes_pipeline.cli import _persist_tick_id
 
         mocker.patch("pathlib.Path.write_text", side_effect=OSError("disk full"))
 
-        # Should not raise - OSError is caught and logged
-        _persist_tick_id(state_dir, "01HA6PH2V0ZJ7GK0S39D243TQX")
+        _persist_tick_id(tmp_path, "01HA6PH2V0ZJ7GK0S39D243TQX")
