@@ -262,3 +262,26 @@ This runs once per project on the first scan. If there are multiple projects sha
 ## What I noticed about how you think
 
 You chose "full spec" when offered a minimal path — you want the kanban control tower and the Slack notifications in one shot, not in phases. You pushed back on deferring `project.toml` because `enabled` and `slack_channel` are thin features that solve real problems (archiving without deleting TODOS.md, routing alerts to the right channel). That's the right call — the 30 lines of project.toml parsing are worth including rather than creating a follow-up TODO that never ships.
+
+
+## Resolved Decisions (Eng Review)
+
+1. **Quiescence check:** Migration runs inside the TickLock. Inside the lock, no other tick/phase/kill can be active — the lock IS the quiescence check. T13 absorbed.
+2. **CLI audit — kill:** `pipeline-watch kill` takes optional project arg. Omitted → scan all projects for in-flight phases. Specified → kill only in that project.
+3. **Docs update:** Tutorial, howto, README updated to show `pipeline-watch tick` for scan and `pipeline-watch tick myproject` for manual debug. install-cron.sh unchanged (fires `auto`).
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 2 | clean | 8 issues, 3 cross-model tensions resolved, 3 decisions resolved |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+CODEX: 14 findings from Codex outside voice (gpt-5.5), 3 cross-model tensions resolved with user
+
+VERDICT: ENG CLEARED — all decisions resolved
+
+NO UNRESOLVED DECISIONS
