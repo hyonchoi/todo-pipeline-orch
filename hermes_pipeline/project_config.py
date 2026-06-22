@@ -35,3 +35,37 @@ def _is_enabled(project_dir: Path) -> bool:
         return True
     active = toml_data.get("active", {})
     return active.get("enabled", True)
+
+
+def _resolve_slack_channel(
+    project_dir: Path,
+    env_channel: str,
+) -> str:
+    """Resolve the Slack channel for a project.
+
+    Priority:
+      1. project.toml's [notifications] slack_channel
+      2. PIPELINE_SLACK_CHANNEL env var (env_channel parameter)
+      3. #alert (hardcoded fallback)
+
+    Args:
+        project_dir: Project root directory.
+        env_channel: Value from PIPELINE_SLACK_CHANNEL env var.
+
+    Returns:
+        Slack channel string (e.g., "project__my-slug" or "#alert").
+    """
+    # Level 1: project.toml
+    toml_data = _read_project_toml(project_dir)
+    if toml_data is not None:
+        notifications = toml_data.get("notifications", {})
+        channel = notifications.get("slack_channel", "")
+        if channel:
+            return channel
+
+    # Level 2: env var
+    if env_channel:
+        return env_channel
+
+    # Level 3: hardcoded default
+    return DEFAULT_SLACK_CHANNEL

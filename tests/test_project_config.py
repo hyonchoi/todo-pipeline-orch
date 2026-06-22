@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from hermes_pipeline.project_config import _is_enabled, _read_project_toml
+from hermes_pipeline.project_config import _is_enabled, _read_project_toml, _resolve_slack_channel
 
 
 def test_is_enabled_default_true_when_no_file(tmp_path: Path):
@@ -62,3 +62,41 @@ def test_is_enabled_returns_true_on_parse_error(tmp_path: Path):
     project_toml.parent.mkdir()
     project_toml.write_text("this is not valid toml {{{")
     assert _is_enabled(project_dir) is True
+
+
+def test_resolve_channel_project_toml_priority(tmp_path: Path):
+    """project.toml slack_channel takes priority over env var."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    project_toml = project_dir / ".hermes" / "project.toml"
+    project_toml.parent.mkdir()
+    project_toml.write_text("[notifications]\nslack_channel = \"project__test\"\n")
+    result = _resolve_slack_channel(project_dir, env_channel="env_channel")
+    assert result == "project__test"
+
+
+def test_resolve_channel_env_fallback(tmp_path: Path):
+    """PIPELINE_SLACK_CHANNEL env var is used when project.toml has none."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    result = _resolve_slack_channel(project_dir, env_channel="env_channel")
+    assert result == "env_channel"
+
+
+def test_resolve_channel_default_fallback(tmp_path: Path):
+    """#alert is the final fallback when no config source provides channel."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    result = _resolve_slack_channel(project_dir, env_channel="")
+    assert result == "#alert"
+
+
+def test_resolve_channel_empty_project_toml_channel_uses_env(tmp_path: Path):
+    """Empty slack_channel in project.toml falls through to env var."""
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    project_toml = project_dir / ".hermes" / "project.toml"
+    project_toml.parent.mkdir()
+    project_toml.write_text("[notifications]\nslack_channel = \"\"\n")
+    result = _resolve_slack_channel(project_dir, env_channel="env_channel")
+    assert result == "env_channel"
