@@ -427,6 +427,58 @@ class TestGetTodoKanbanStatus:
         assert result == {}
 
 
+class TestPersistExpectedPhases:
+    """Tests for _persist_expected_phases()."""
+
+    def test_writes_to_project_hermes_dir(self, tmp_path: Path):
+        """_persist_expected_phases writes to project_dir/.hermes/outcomes/."""
+        from hermes_pipeline.kanban_tasks import _persist_expected_phases
+
+        class FakePhase:
+            def __init__(self, key):
+                self.phase_key = key
+                self.name = key
+                self.prompt = ""
+                self.turns = 1
+
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+
+        phases = [FakePhase("P1_research"), FakePhase("P2_implementation")]
+
+        _persist_expected_phases(phases, project_dir=project_dir)
+
+        expected = project_dir / ".hermes" / "outcomes" / "expected-phases.json"
+        assert expected.exists()
+        data = json.loads(expected.read_text())
+        assert data == ["P1_research", "P2_implementation"]
+
+    def test_backward_compat_defaults_to_dot_hermes(self, tmp_path: Path, monkeypatch):
+        """Without project_dir, falls back to .hermes/outcomes/ (cwd-relative)."""
+        from hermes_pipeline.kanban_tasks import _persist_expected_phases
+
+        class FakePhase:
+            def __init__(self, key):
+                self.phase_key = key
+                self.name = key
+                self.prompt = ""
+                self.turns = 1
+
+        monkeypatch.chdir(tmp_path)
+
+        phases = [FakePhase("P1")]
+        _persist_expected_phases(phases)
+
+        expected = tmp_path / ".hermes" / "outcomes" / "expected-phases.json"
+        assert expected.exists()
+        data = json.loads(expected.read_text())
+        assert data == ["P1"]
+
+        # Cleanup: remove the sentinel so it doesn't pollute other tests
+        import shutil
+        shutil.rmtree(tmp_path / ".hermes")
+
+
 class TestObserveOutcomes:
     """Tests for observe_outcomes() — kanban -> decision store sync."""
 
