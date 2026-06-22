@@ -320,7 +320,8 @@ def all_phases_complete(
     # Guard against partial registration: if we have an expected-phases
     # sentinel, verify all expected phases are in the status map.
     try:
-        outcomes_dir = Path(".hermes") / "outcomes"
+        state_dir_path = Path(state_dir) if state_dir else Path(".hermes")
+        outcomes_dir = state_dir_path / "outcomes"
         expected_file = outcomes_dir / "expected-phases.json"
         if expected_file.exists():
             expected_keys = json.loads(expected_file.read_text())
