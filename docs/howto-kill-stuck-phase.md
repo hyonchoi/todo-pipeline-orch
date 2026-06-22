@@ -19,6 +19,9 @@ if) the killed tick owned it.
 ls .hermes/phase_started/
 ```
 
+In a multi-project setup, each project has its own state directory, so look
+under `<project>/.hermes/phase_started/` as well.
+
 Each `TODO-N.json` file represents one running phase. Inspect for context:
 
 ```bash
@@ -39,17 +42,18 @@ uv run pipeline-watch kill --todo TODO-7
 
 What happens (`hermes_pipeline.cli.cmd_kill`):
 
-1. Read `.hermes/phase_started/TODO-7.json`.
+1. Read `<project>/.hermes/phase_started/TODO-7.json` (in single-project
+   mode, this is just `.hermes/phase_started/TODO-7.json`).
 2. SIGTERM the session process group of `child_pid`. Wait up to 5s, then
    SIGKILL. Confirm the pid is gone.
 3. If `job_id` present, also send `hermes run kill <job_id>` as a belt-and-
    suspenders second handle.
-4. Append `outcome=killed_by_operator` to `.hermes/outcomes/<tick_id>.json`
+4. Append `outcome=killed_by_operator` to `<project>/.hermes/outcomes/<tick_id>.json`
    (the immutable sidecar; existing terminal outcomes are not overwritten —
    `FileExistsError` is swallowed).
-5. Delete `.hermes/phase_started/TODO-7.json`.
+5. Delete `<project>/.hermes/phase_started/TODO-7.json`.
 6. If the tick lock's holder.json names the killed tick, release
-   `.hermes/tick.lock/`.
+   `<project>/.hermes/tick.lock/`.
 
 Exit code:
 - `0` — every targeted phase exited cleanly.
@@ -68,26 +72,41 @@ Same per-phase semantics; iterates every `*.json` in
 `.hermes/phase_started/`. Use after a system-wide stall (e.g. host reboot
 left orphans).
 
+### Kill across all projects
+
+```bash
+# Kill all in-flight phases across all projects
+pipeline-watch kill --all
+
+# Kill a specific TODO across all projects
+pipeline-watch kill --todo TODO-3
+```
+
+Without a project argument, kill scans all projects for in-flight phases
+(reads `<project>/.hermes/phase_started/` markers). Same per-phase semantics;
+iterates every `*.json` found across project state directories. Use when a
+stall affects multiple project pipelines simultaneously.
+
 ## Verification
 
 1. The phase marker is gone:
 
    ```bash
-   ls .hermes/phase_started/ | grep TODO-7  # should print nothing
+   ls <project>/.hermes/phase_started/ | grep TODO-7  # should print nothing
    ```
 
 2. The outcome sidecar records the kill:
 
    ```bash
    jq '.outcomes[] | select(.outcome=="killed_by_operator")' \
-     .hermes/outcomes/<tick_id>.json
+     <project>/.hermes/outcomes/<tick_id>.json
    ```
 
 3. If the killed tick owned the lock, the next Hermes cron tick should
    acquire the tick lock without complaining about a stale holder:
 
    ```bash
-   ls .hermes/tick.lock/ 2>/dev/null  # should print nothing
+   ls <project>/.hermes/tick.lock/ 2>/dev/null  # should print nothing
    ```
 
 ## Why the confirmation step matters
@@ -97,7 +116,8 @@ tests, editing files, pushing commits) after the kill command "succeeds".
 If `_confirm_pid_exited` (in `cli.py:82`) cannot prove the pid is gone,
 `pipeline-watch kill` leaves the marker in place and exits non-zero. The
 next tick will still see the TODO as in-flight and skip it — preventing two
-runners from racing on the same TODO.
+runners from racing on the same TODO. In multi-project mode, the marker lives
+under `<project>/.hermes/phase_started/`.
 
 **Do not delete the marker by hand to "fix" a failed kill.** The pid is
 still alive. Track it down (`ps -p <pid>`) and SIGKILL the process group
@@ -106,8 +126,10 @@ yourself before retrying.
 ## Troubleshooting
 
 **`no in-flight phases`.**
-Nothing under `.hermes/phase_started/`. Either nothing is running, or you're
-pointing at the wrong state dir. Check `PIPELINE_STATE_DIR`.
+Nothing under `<project>/.hermes/phase_started/`. In multi-project mode, also
+check other project state directories — the killed phase may live under a
+different project's `<project>/.hermes/phase_started/`. If nothing is running
+anywhere, you're pointing at the wrong state dir. Check `PIPELINE_STATE_DIR`.
 
 **`no in-flight phase for TODO-7`.**
 The marker doesn't exist. If you expected one, the phase already terminated
@@ -120,20 +142,21 @@ surviving processes, then delete the marker:
 
 ```bash
 ps -ef | grep claude
-rm .hermes/phase_started/TODO-7.json
+rm <project>/.hermes/phase_started/TODO-7.json
 ```
 
 **`error: failed to confirm exit for TODO-7.json (pid=12345 ...)`.**
 The pid is still alive after SIGTERM + 5s + SIGKILL + 2s. The process group
 is probably stuck in uninterruptible I/O (network, NFS, FUSE). Investigate
 the pid manually. Re-run `pipeline-watch kill --todo TODO-7` once the
-process actually exits.
+process actually exits. The marker under `<project>/.hermes/phase_started/`
+remains in place until confirmed dead.
 
 **The tick lock is still held after kill.**
 By design — the lock is only released when its holder.json names a tick
 that we just confirmed dead. If you killed a phase whose tick already
 finished, the current lock holder is some other tick. Inspect
-`.hermes/tick.lock/holder.json` to see whose it is, and decide whether to
+`<project>/.hermes/tick.lock/holder.json` to see whose it is, and decide whether to
 kill that tick as well.
 
 ## Related
