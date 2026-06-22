@@ -162,8 +162,6 @@ def cmd_kill(
     - Deletes markers
     - Releases tick.lock ONLY if its holder is one of the killed ticks
     """
-    from .project_config import _discover_projects
-
     # Multi-project kill: scan all projects
     if project is None and config is not None:
         return _kill_all_projects(config, all_=all_, todo=todo)
@@ -269,7 +267,6 @@ def _kill_all_projects(
     total_unconfirmed = 0
 
     for project_dir in projects:
-        project_slug = project_dir.name
         project_state = project_dir / ".hermes"
         ps_dir = project_state / "phase_started"
 
