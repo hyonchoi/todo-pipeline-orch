@@ -143,8 +143,18 @@ def _release_tick_lock_if_owned_by(state_dir: Path, tick_ids: set[str]) -> None:
     except OSError:
         pass
 
-def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) -> int:
+def cmd_kill(
+    *,
+    state_dir: Path,
+    all_: bool = False,
+    todo: str | None = None,
+    project: str | None = None,
+    config: Config | None = None,
+) -> int:
     """Kill in-flight phase(s) and write killed_by_operator outcome sidecars.
+
+    When project is specified, kills in that project's state directory.
+    When project is omitted, scans all projects for in-flight phases.
 
     - Reads phase_started/* markers
     - SIGTERMs the recorded child_pid (and/or sends hermes run kill <job_id>)
@@ -152,6 +162,11 @@ def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) ->
     - Deletes markers
     - Releases tick.lock ONLY if its holder is one of the killed ticks
     """
+    from .project_config import _discover_projects
+
+    # Multi-project kill: scan all projects
+    if project is None and config is not None:
+        return _kill_all_projects(config, all_=all_, todo=todo)
     ps_dir = state_dir / "phase_started"
     if not ps_dir.exists():
         print("no in-flight phases")
@@ -227,6 +242,71 @@ def cmd_kill(*, state_dir: Path, all_: bool = False, todo: str | None = None) ->
     _release_tick_lock_if_owned_by(state_dir, killed_tick_ids)
     return 1 if unconfirmed else 0
 
+def _kill_all_projects(
+    config: Config,
+    *,
+    all_: bool = False,
+    todo: str | None = None,
+) -> int:
+    """Scan all projects and kill in-flight phases.
+
+    Args:
+        config: Global config.
+        all_: Kill all in-flight phases across all projects.
+        todo: Kill a specific TODO across all projects.
+
+    Returns:
+        0 if successful, 1 if some kills unconfirmed, 2 on error.
+    """
+    from .project_config import _discover_projects
+
+    projects = _discover_projects(config)
+    if not projects:
+        print("no active projects found")
+        return 0
+
+    total_killed = 0
+    total_unconfirmed = 0
+
+    for project_dir in projects:
+        project_slug = project_dir.name
+        project_state = project_dir / ".hermes"
+        ps_dir = project_state / "phase_started"
+
+        if not ps_dir.exists():
+            continue
+
+        # Count targets in this project
+        if all_:
+            targets = [f for f in ps_dir.iterdir() if f.is_file() and f.suffix == ".json"]
+        elif todo:
+            p = ps_dir / f"{todo}.json"
+            targets = [p] if p.exists() else []
+        else:
+            continue
+
+        if not targets:
+            continue
+
+        # Kill phases in this project using existing cmd_kill logic
+        result = cmd_kill(
+            state_dir=project_state,
+            all_=all_,
+            todo=todo,
+        )
+        if result == 0:
+            total_killed += len(targets)
+        else:
+            total_unconfirmed += 1
+
+    if total_killed == 0 and total_unconfirmed == 0:
+        print("no in-flight phases found")
+        return 0
+    elif total_unconfirmed > 0:
+        return 1
+    else:
+        return 0
+
 def _parse_todo_id(value: str) -> int:
     """Parse todo_id argument with helpful error message."""
     try:
@@ -299,6 +379,7 @@ def build_parser() -> argparse.ArgumentParser:
     kill_group = kill_parser.add_mutually_exclusive_group(required=True)
     kill_group.add_argument("--all", dest="all_", action="store_true", help="Kill all in-flight phases")
     kill_group.add_argument("--todo", help="Kill a specific TODO (e.g., TODO-1)")
+    kill_parser.add_argument("project", nargs="?", default=None, help="Project name (optional — omit to scan all projects)")
     kill_parser.set_defaults(func=_cmd_kill)
 
     # tick: Pipeline tick — select TODO, register kanban phases
@@ -388,11 +469,18 @@ def _cmd_status(args, config: Config) -> int:
         return 2
 
 def _cmd_kill(args, config: Config) -> int:
-    """Handle 'kill' subcommand."""
+    """Handle 'kill' subcommand.
+
+    If project is specified, kill in that project.
+    If project is omitted and --all, scan all projects for in-flight phases.
+    If project is omitted and --todo, kill that TODO across all projects.
+    """
     return cmd_kill(
         state_dir=config.state_dir,
         all_=args.all_,
         todo=args.todo,
+        project=args.project,
+        config=config,
     )
 
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 
-from hermes_pipeline.cli import cmd_kill
+from hermes_pipeline.cli import cmd_kill, build_parser, _cmd_kill
 
 def _marker(d: Path, todo_id: str, tick_id: str = "01JT", job_id: str = "job-1") -> Path:
     p = d / "phase_started" / f"{todo_id}.json"
@@ -131,3 +131,90 @@ def test_kill_does_not_release_lock_when_exit_unconfirmed(tmp_path):
     assert rc == 1
     assert (tmp_path / "tick.lock").exists(), \
         "unconfirmed kill must NOT release the tick lock"
+
+# ---- Task 2: multi-project kill ----
+
+def test_kill_parser_accepts_project_argument():
+    """kill should parse with an optional project argument."""
+    parser = build_parser()
+    args = parser.parse_args(["kill", "--all"])
+    assert args.all_ is True
+    assert not hasattr(args, "project") or getattr(args, "project", None) is None
+
+    args2 = parser.parse_args(["kill", "--all", "myproject"])
+    assert args2.project == "myproject"
+
+    args3 = parser.parse_args(["kill", "--todo", "TODO-1", "myproject"])
+    assert args3.todo == "TODO-1"
+    assert args3.project == "myproject"
+
+
+def test_kill_without_project_scans_all_projects(tmp_path: Path):
+    """kill without a project argument should scan all projects for in-flight phases."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    pa = projects_dir / "project-a"
+    pa.mkdir()
+    (pa / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+
+    pb = projects_dir / "project-b"
+    pb.mkdir()
+    (pb / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    from hermes_pipeline.config import Config
+    config = Config(projects_dir=projects_dir, state_dir=state_dir)
+
+    parser = build_parser()
+    args = parser.parse_args(["kill", "--all"])
+
+    with patch("hermes_pipeline.cli.cmd_kill") as mock_kill:
+        mock_kill.return_value = 0
+        result = _cmd_kill(args, config)
+
+        assert result == 0
+        # cmd_kill should be called with all_=True and config
+        mock_kill.assert_called_once()
+        call_kwargs = mock_kill.call_args.kwargs
+        assert call_kwargs["all_"] is True
+        assert "config" in call_kwargs
+
+
+def test_cmd_kill_without_project_routes_to_multi_project(tmp_path: Path):
+    """cmd_kill with project=None and config should route to _kill_all_projects."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+
+    pa = projects_dir / "project-a"
+    pa.mkdir()
+    (pa / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+
+    # Create in-flight marker in project-a
+    project_state = pa / ".hermes"
+    ps_dir = project_state / "phase_started"
+    ps_dir.mkdir(parents=True, exist_ok=True)
+    (ps_dir / "TODO-1.json").write_text(json.dumps({
+        "todo_id": "TODO-1",
+        "tick_id": "01JA",
+        "job_id": "job-A",
+    }))
+
+    state_dir = tmp_path / "state"
+    state_dir.mkdir()
+
+    from hermes_pipeline.config import Config
+    config = Config(projects_dir=projects_dir, state_dir=state_dir)
+
+    sent = []
+    with patch("hermes_pipeline.cli._hermes_run_kill", lambda jid: sent.append(jid) or 0):
+        rc = cmd_kill(
+            state_dir=state_dir,
+            all_=True,
+            project=None,
+            config=config,
+        )
+    assert rc == 0
+    assert "job-A" in sent
