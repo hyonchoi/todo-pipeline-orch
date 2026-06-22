@@ -2,7 +2,7 @@
 
 A tick is one pass of the pipeline: select a TODO via the Hermes agent,
 register phases as kanban tasks, and observe the circuit breaker. The
-`pipeline-watch tick` command fires a single tick immediately so you can
+`pipeline-watch tick` command fires a single scan-loop tick immediately so you can
 iterate without waiting for the cron schedule.
 
 By the end of this guide, you'll have run a tick, inspected the kanban
@@ -22,28 +22,21 @@ board, and verified the outcome files.
 ### 1. Run a tick
 
 ```bash
-uv run pipeline-watch tick <project>
+uv run pipeline-watch tick
 ```
 
-For example:
-```bash
-uv run pipeline-watch tick demo
+This runs the full scan-loop tick:
 ```
-
-This runs the full tick flow:
-1. **Prior-tick check** — if a previous tick's kanban tasks are still in-flight,
-   the new tick skips ("tick already in flight, skipping").
-2. **Outcome observation** — if a prior tick completed, reads kanban statuses
-   and writes outcomes to `.hermes/outcomes/<tick_id>-phases.json`.
-3. **Circuit breaker** — feeds the outcomes into the circuit breaker
-   (`observe_from_outcomes`).
-4. **Lock acquisition** — acquires `.hermes/tick.lock` via atomic mkdir.
-   If the lock is held by a PID older than `max_tick_duration_min` (10 min
-   default), the stale marker is swept and the lock is reclaimed.
-5. **Selection** — runs `run_selection` via the Hermes agent. The agent picks
-   a TODO (or `picked=None` if nothing is ready).
-6. **Phase registration** — if a TODO was picked, registers phases as kanban
-   tasks with `--parent` dependency chains (see [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md)).
+tick:
+  1. Acquire global TickLock
+  2. Discover active projects (scans projects_dir)
+  3. For each project:
+     a. Migrate per-project state (one-time)
+     b. Check prior tick (per-project)
+     c. Run selection (per-project)
+     d. Register kanban phases or observe circuit breaker
+  4. Release lock
+```
 
 ### 2. Check what the selection picked
 
@@ -108,6 +101,18 @@ Key fields:
   increments on `failed_at_phase_*` outcomes.
 - `backed_off` — becomes `true` when the counter hits `no_progress_threshold`
   (default: 3). Cron backoff engages at this point.
+
+## Debugging a Single Project
+
+The scan loop runs over all active projects. To debug a specific project's
+selection, temporarily set all other projects to `enabled = false` in their
+`.hermes/project.toml`, or temporarily rename their `TODOS.md`.
+
+## State Directory
+
+Per-project state (selection decisions, outcomes, circuit breaker) now lives
+at `<project>/.hermes/`. Global state (`tick.lock`, `config.toml`) remains
+in `~/.hermes/`.
 
 ## Troubleshooting
 
