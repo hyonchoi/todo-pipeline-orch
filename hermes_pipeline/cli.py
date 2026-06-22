@@ -254,7 +254,7 @@ def _kill_all_projects(
         todo: Kill a specific TODO across all projects.
 
     Returns:
-        0 if successful, 1 if some kills unconfirmed, 2 on error.
+        0 if successful, 1 if some kills unconfirmed.
     """
     from .project_config import _discover_projects
 
@@ -267,10 +267,12 @@ def _kill_all_projects(
     total_unconfirmed = 0
 
     for project_dir in projects:
+        project_slug = project_dir.name
         project_state = project_dir / ".hermes"
         ps_dir = project_state / "phase_started"
 
         if not ps_dir.exists():
+            log.debug("project %s: no phase_started dir, skipping", project_slug)
             continue
 
         # Count targets in this project
@@ -283,8 +285,10 @@ def _kill_all_projects(
             continue
 
         if not targets:
+            log.debug("project %s: no targets for kill, skipping", project_slug)
             continue
 
+        log.info("project %s: killing %d in-flight phases", project_slug, len(targets))
         # Kill phases in this project using existing cmd_kill logic
         result = cmd_kill(
             state_dir=project_state,
