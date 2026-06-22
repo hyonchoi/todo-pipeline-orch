@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from hermes_pipeline.project_config import _is_enabled, _read_project_toml, _resolve_slack_channel
+from hermes_pipeline.config import Config
+from hermes_pipeline.project_config import (
+    _discover_projects,
+    _is_enabled,
+    _read_project_toml,
+    _resolve_slack_channel,
+)
 
 
 def test_is_enabled_default_true_when_no_file(tmp_path: Path):
@@ -100,3 +106,98 @@ def test_resolve_channel_empty_project_toml_channel_uses_env(tmp_path: Path):
     project_toml.write_text("[notifications]\nslack_channel = \"\"\n")
     result = _resolve_slack_channel(project_dir, env_channel="env_channel")
     assert result == "env_channel"
+
+
+def test_discover_projects_finds_active_projects(tmp_path: Path):
+    """Should find projects with TODOS.md and enabled=true."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    p1 = projects_dir / "project-a"
+    p1.mkdir()
+    (p1 / "TODOS.md").write_text("# TODOS\n")
+    p2 = projects_dir / "project-b"
+    p2.mkdir()
+    (p2 / "TODOS.md").write_text("# TODOS\n")
+    config = Config(projects_dir=projects_dir)
+    result = _discover_projects(config)
+    assert len(result) == 2
+    assert projects_dir / "project-a" in result
+    assert projects_dir / "project-b" in result
+
+
+def test_discover_projects_skips_disabled(tmp_path: Path):
+    """Projects with enabled=false should be skipped."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    p1 = projects_dir / "project-a"
+    p1.mkdir()
+    (p1 / "TODOS.md").write_text("# TODOS\n")
+    p2 = projects_dir / "project-b"
+    p2.mkdir()
+    (p2 / "TODOS.md").write_text("# TODOS\n")
+    p2_hermes = p2 / ".hermes"
+    p2_hermes.mkdir()
+    (p2_hermes / "project.toml").write_text("[active]\nenabled = false\n")
+    config = Config(projects_dir=projects_dir)
+    result = _discover_projects(config)
+    assert len(result) == 1
+    assert projects_dir / "project-a" in result
+    assert projects_dir / "project-b" not in result
+
+
+def test_discover_projects_skips_no_todos(tmp_path: Path):
+    """Directories without TODOS.md are skipped."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    p1 = projects_dir / "project-a"
+    p1.mkdir()
+    p2 = projects_dir / "project-b"
+    p2.mkdir()
+    (p2 / "TODOS.md").write_text("# TODOS\n")
+    config = Config(projects_dir=projects_dir)
+    result = _discover_projects(config)
+    assert len(result) == 1
+    assert projects_dir / "project-b" in result
+
+
+def test_discover_projects_skips_invalid_slugs(tmp_path: Path):
+    """Directories with invalid project slugs are skipped."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    p1 = projects_dir / "project-a"
+    p1.mkdir()
+    (p1 / "TODOS.md").write_text("# TODOS\n")
+    p2 = projects_dir / "-invalid"
+    p2.mkdir()
+    (p2 / "TODOS.md").write_text("# TODOS\n")
+    config = Config(projects_dir=projects_dir)
+    result = _discover_projects(config)
+    assert len(result) == 1
+    assert projects_dir / "project-a" in result
+
+
+def test_discover_projects_skips_files(tmp_path: Path):
+    """Non-directory entries in projects_dir are skipped."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    (projects_dir / "README.md").write_text("readme\n")
+    p1 = projects_dir / "project-a"
+    p1.mkdir()
+    (p1 / "TODOS.md").write_text("# TODOS\n")
+    config = Config(projects_dir=projects_dir)
+    result = _discover_projects(config)
+    assert len(result) == 1
+
+
+def test_discover_projects_sorted(tmp_path: Path):
+    """Projects are returned in sorted order by directory name."""
+    projects_dir = tmp_path / "projects"
+    projects_dir.mkdir()
+    for name in ["zebra", "alpha", "beta"]:
+        p = projects_dir / name
+        p.mkdir()
+        (p / "TODOS.md").write_text("# TODOS\n")
+    config = Config(projects_dir=projects_dir)
+    result = _discover_projects(config)
+    names = [p.name for p in result]
+    assert names == ["alpha", "beta", "zebra"]

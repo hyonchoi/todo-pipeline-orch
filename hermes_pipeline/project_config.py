@@ -69,3 +69,34 @@ def _resolve_slack_channel(
 
     # Level 3: hardcoded default
     return DEFAULT_SLACK_CHANNEL
+
+
+def _discover_projects(config) -> list[Path]:
+    """Scan projects_dir for active projects with TODOS.md.
+
+    The project slug is the directory name (d.name). Directories that fail
+    _validate_project_slug are skipped with a warning. Projects with
+    enabled=false in project.toml are skipped (archived).
+
+    Args:
+        config: Config with projects_dir set.
+
+    Returns:
+        Sorted list of project directory paths.
+    """
+    from .cli import _validate_project_slug
+
+    projects = []
+    for d in sorted(config.projects_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        slug = d.name
+        if not _validate_project_slug(slug):
+            log.warning("skipping invalid project slug: %r", slug)
+            continue
+        if not (d / "TODOS.md").exists():
+            continue
+        if not _is_enabled(d):
+            continue
+        projects.append(d)
+    return projects
