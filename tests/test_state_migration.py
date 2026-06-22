@@ -14,7 +14,7 @@ def test_get_project_state_dir(tmp_path: Path):
 
 
 def test_migrate_current_tick_id(tmp_path: Path):
-    """Migration moves current_tick_id.txt from global to per-project dir."""
+    """Migration copies current_tick_id.txt from global to per-project dir."""
     global_state = tmp_path / "global"
     global_state.mkdir()
     project_dir = tmp_path / "myproject"
@@ -31,11 +31,12 @@ def test_migrate_current_tick_id(tmp_path: Path):
     per_project_state = project_dir / ".hermes"
     assert (per_project_state / "current_tick_id.txt").exists()
     assert (per_project_state / "current_tick_id.txt").read_text().strip() == "abc123"
-    assert not (global_state / "current_tick_id.txt").exists()
+    # Copy (not move) — global state remains
+    assert (global_state / "current_tick_id.txt").exists()
 
 
 def test_migrate_circuit_json(tmp_path: Path):
-    """Migration moves circuit.json from global to per-project dir."""
+    """Migration copies circuit.json from global to per-project dir."""
     global_state = tmp_path / "global"
     global_state.mkdir()
     project_dir = tmp_path / "myproject"
@@ -54,11 +55,12 @@ def test_migrate_circuit_json(tmp_path: Path):
     assert (per_project_state / "circuit.json").exists()
     data = json.loads((per_project_state / "circuit.json").read_text())
     assert data["consecutive_no_progress"] == 3
-    assert not (global_state / "circuit.json").exists()
+    # Copy (not move) — global state remains
+    assert (global_state / "circuit.json").exists()
 
 
 def test_migrate_outcomes_dir(tmp_path: Path):
-    """Migration moves outcomes/ directory from global to per-project dir."""
+    """Migration copies outcomes/ directory from global to per-project dir."""
     global_state = tmp_path / "global"
     global_state.mkdir()
     project_dir = tmp_path / "myproject"
@@ -77,7 +79,8 @@ def test_migrate_outcomes_dir(tmp_path: Path):
     per_project_state = project_dir / ".hermes"
     assert (per_project_state / "outcomes").is_dir()
     assert (per_project_state / "outcomes" / "abc123-phases.json").exists()
-    assert not (global_state / "outcomes").exists()
+    # Copy (not move) — global outcomes dir remains
+    assert (global_state / "outcomes").exists()
 
 
 def test_migrate_skips_if_already_migrated(tmp_path: Path):

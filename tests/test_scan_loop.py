@@ -187,6 +187,7 @@ def test_tick_performs_state_migration(tmp_path: Path):
     with patch("hermes_pipeline.cli.run_selection", mock_selection):
         _cmd_tick(args, config)
 
-    assert not (state_dir / "current_tick_id.txt").exists()
+    # Copy (not move) — global state remains after migration
+    assert (state_dir / "current_tick_id.txt").exists()
     assert (pa / ".hermes" / "current_tick_id.txt").exists()
     assert (pa / ".hermes" / "current_tick_id.txt").read_text().strip() == "old-tick-123"
