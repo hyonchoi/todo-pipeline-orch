@@ -331,18 +331,20 @@ def _parse_todo_id(value: str) -> int:
         )
 
 
-def _strip_global_flags(argv: list[str]) -> tuple[bool, bool, list[str]]:
+def _strip_global_flags(argv: Optional[list[str]]) -> tuple[bool, bool, list[str]]:
     """Strip --verbose/--debug from argv, returning (verbose, debug, remaining).
 
     This avoids the argparse subparser namespace overwrite: if --verbose lives
     on both the root parser and a subparser, the subparser's default (False)
     overwrites the root's True. By stripping the flags upfront we configure
     logging before argparse ever runs.
+
+    If argv is None, reads from sys.argv[1:] (same default as argparse).
     """
     verbose = False
     debug = False
     remaining = []
-    for arg in argv:
+    for arg in argv or sys.argv[1:]:
         if arg in ("--verbose",):
             verbose = True
         elif arg in ("--debug",):
@@ -859,7 +861,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     """
     # Strip --verbose/--debug before argparse to avoid the subparser namespace
     # overwrite issue (subparser defaults overwrite root-level True values).
-    verbose, debug, remaining = _strip_global_flags(argv or [])
+    verbose, debug, remaining = _strip_global_flags(argv)
 
     # Load config
     config = Config.from_env()
