@@ -37,6 +37,7 @@ def _create_project(projects_dir, name, todos=True):
 class FakeArgs:
     """Minimal argparse.Namespace for testing."""
     def __init__(self, **kwargs):
+        kwargs.setdefault("project", None)
         for k, v in kwargs.items():
             setattr(self, k, v)
 

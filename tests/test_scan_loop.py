@@ -9,6 +9,7 @@ from hermes_pipeline.cli import _cmd_tick, build_parser
 class FakeArgs:
     """Minimal argparse.Namespace for testing."""
     def __init__(self, **kwargs):
+        kwargs.setdefault("project", None)
         for k, v in kwargs.items():
             setattr(self, k, v)
 
