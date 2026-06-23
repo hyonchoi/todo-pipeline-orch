@@ -592,7 +592,6 @@ def _cmd_tick(args, config: Config) -> int:
     Each project's errors are isolated — one project's failure doesn't
     block the others.
     """
-    from .circuit import CircuitBreaker
     from .project_config import _discover_projects, _resolve_slack_channel
     from .state_migration import _get_project_state_dir, _migrate_global_state
     from .tick import TickLock, TickLockHeld
@@ -639,7 +638,7 @@ def _cmd_tick(args, config: Config) -> int:
                         cb_cfg=cb_cfg,
                     )
                 except Exception as e:
-                    log.error("project %s: %s", project_slug, e)
+                    log.error("project %s: %s", project_slug, e, exc_info=True)
                     # Continue to next project
 
     except TickLockHeld:

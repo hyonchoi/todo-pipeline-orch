@@ -55,7 +55,7 @@ def _migrate_global_state(project_dir: Path, config: Config) -> None:
         dest = dst / filename
         if src.is_file() and not dest.exists():
             log.info("Copying %s -> %s", src, dest)
-            shutil.copy2(str(src), str(dest))
+            shutil.copy2(src, dest)
 
     outcomes_src = config.state_dir / _OUTCOMES_DIR
     outcomes_dst = dst / _OUTCOMES_DIR
