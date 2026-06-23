@@ -135,3 +135,31 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** none (builds on existing tick infrastructure from TODO-11)
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/multi-project-tick`, Test Coverage `필요`, Security Review `불필요`
 
+- [ ] **TODO-15: design and register a dedicated Hermes profile for the pipeline orchestrator** — Purpose-built profile for kanban-as-scheduler
+  - **What:** Design a Hermes profile specifically matched to this pipeline orchestrator's needs, and provide a way to register it via `init` or a dedicated subcommand (e.g., `pipeline-watch setup-profile` or `hermes profile install` from the project repo). The profile should configure the right model, tool permissions, skills, and behavior for driving kanban phases autonomously.
+  - **Why:** The "default" Hermes profile is a general-purpose chat profile — not optimized for unattended, goal-driven kanban task execution. A purpose-built profile can lock in the right model (e.g., one with code and bash permissions), attach relevant skills (gstack autoplan, writing-plans, finishing-a-development-branch), and set safe-mode constraints appropriate for automated pipeline work. This avoids the risk of running the pipeline with a profile the operator customized for interactive use.
+  - **Pros:** Predictable pipeline behavior independent of the operator's personal Hermes setup. The profile can be versioned with the project, making onboarding trivial. `hermes profile install` or `pipeline-watch init` sets it up once.
+  - **Cons:** The profile definition needs to keep pace with Hermes profile schema changes. A second profile adds a small per-task memory overhead (profile context).
+  - **How — profile shape (tentative):**
+    - Profile name: `"pipeline"` or `"orchestrator"` — short, distinct from operator profiles.
+    - Model: auto-pinned to the selection model (respects TODO-5's fallback ladder via `hermes fallback`).
+    - Tools: `Read`, `Write`, `Bash` — the core set needed for phase execution.
+    - Skills: attach gstack skills used by phases (autoplan, writing-plans, finishing-a-development-branch).
+    - Safe-mode: enabled to prevent interactive prompts (no `input()`, no user-facing UI).
+  - **How — registration:** Provide a `pipeline-watch init` or `pipeline-watch setup-profile` subcommand that calls `hermes profile create <name> --model ... --tools ... --skills ...` or `hermes profile install <dist-url>`. The subcommand should detect whether the profile already exists and skip if so. Run once during onboarding.
+  - **Depends on:** none (can be designed now; the default for TODO-14 will point to this profile once it ships)
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Test Coverage `필요`, Security Review `필요`
+
+- [ ] **TODO-14: kanban assignee configuration** — Configurable profile for kanban task assignee
+  - **What:** Add a config setting for the Hermes profile used as the `--assignee` when registering kanban tasks via `register_todo_phases`. Default: the profile created by TODO-15.
+  - **Why:** Kanban tasks are created with `--assignee` so the dispatcher processes them. The hardcoded value should be configurable per-project so operators can route phases to different profiles (e.g., a dedicated pipeline profile).
+  - **How — config shape:**
+    ```toml
+    # <project>/.hermes/config.toml
+    [kanban]
+    assignee = "pipeline"  # Hermes profile name used as --assignee (default: TODO-15 profile)
+    ```
+  - **How — wiring:** Add `kanban.assignee` to `KanbanConfig` dataclass in `config.py`, loaded via the existing `load_toml_overlay` in `cli.py`, and passed to `register_todo_phases(assignee=...)`.
+  - **Depends on:** none (the `--assignee` flag was added in the circuit breaker / dispatch fix on this branch)
+  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `필요`, Security Review `불필요`
+
