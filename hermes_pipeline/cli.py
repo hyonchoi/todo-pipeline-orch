@@ -570,12 +570,20 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
         slack_channel=slack_channel,
     )
 
-def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
+def _persist_tick_id(state_dir: Path, tick_id: str, *, write_sentinel: bool = True) -> None:
     """Persist tick_id atomically for the next tick's prior check.
 
     Uses tmp+rename so a crash mid-write doesn't leave a partial file.
     Also writes a sentinel file so all_phases_complete can distinguish
     "persisted but never registered" from "persisted and registered".
+
+    Args:
+        state_dir: Per-project state directory.
+        tick_id: The tick_id to persist.
+        write_sentinel: If True (default), write tick_started sentinel.
+            Set to False when the caller has already written a picked_none
+            sentinel to the same file — the tick_started sentinel would
+            overwrite it.
     """
     from .state import _atomic_write_text
 
@@ -583,6 +591,9 @@ def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
         _atomic_write_text(state_dir / CURRENT_TICK_ID_FILE, tick_id)
     except OSError as e:
         log.warning("failed to persist current_tick_id: %s", e)
+        return
+
+    if not write_sentinel:
         return
 
     # Write sentinel so the next tick's all_phases_complete knows this
@@ -802,14 +813,17 @@ def _tick_project(
         log.info("project %s: selection picked None, observing circuit breaker",
                  project_slug)
         cb.observe(picked=None, counts_as_no_progress=True)
-        _persist_tick_id(project_state, tick_id)
+
+        # Write the picked_none sentinel BEFORE persisting the tick_id.
+        # If we persist first and crash before writing the sentinel, the
+        # next tick sees the new tick_id with no completion evidence and
+        # treats the project as permanently in-flight.
         try:
             observe_outcomes(
                 state_dir=project_state,
                 tick_id=tick_id,
                 status_map={},
             )
-            # Write picked_none sentinel
             outcomes_dir = project_state / "outcomes"
             outcomes_dir.mkdir(exist_ok=True)
             sentinel = outcomes_dir / f"{tick_id}-phases.json"
@@ -821,6 +835,10 @@ def _tick_project(
         except Exception as se:
             log.warning("project %s: failed to write picked_none sentinel: %s",
                         project_slug, se)
+
+        # Persist tick_id without the tick_started sentinel — we already
+        # wrote a picked_none sentinel to the same file above.
+        _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
     # Step 4: Register kanban phases
