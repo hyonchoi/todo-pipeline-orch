@@ -2,30 +2,34 @@ phases:
   - phase_key: "phase_2_autoplan"
     name: "Phase 2: Autoplan"
     prompt: |
-      Use the gstack autoplan skill.
-      1. Read TODOS.md and confirm the in-flight TODO is the one passed via context.
-      2. Run CEO/Eng/UI/DX reviews.
-      3. Write the plan into .hermes/plans/.
-      4. Create a new branch from main and commit the plan.
+      Use the gstack autoplan skill in claude code.
+
+      The selected TODO is {todo_id} — it is already marked in-flight in TODOS.md.
+      Work on {todo_id} only; do not pick a different TODO.
+
+      1. Run CEO/Eng/UI/DX reviews for {todo_id}.
+      2. Write all plan and auxiliary documents into docs/pipeline/ (e.g., {todo_id}-plan.md and any review artifacts).
+      3. Create a new branch from main.
+      4. Commit all generated docs.
       5. Save the branch name to .hermes/pipeline_branch.txt.
     tools: "Read,Write,Bash"
     turns: 20
     timeout: 1800
   - phase_key: "phase_3_writing_plan"
     name: "Phase 3: Writing Plan"
-    prompt: "Use superpowers writing-plans to convert .hermes/plans/ into superpowers plan format."
+    prompt: "Use the writing-plans skill in claude code. Read the plan from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the generated docs."
     tools: "Read,Write,Bash"
     turns: 15
     timeout: 1800
   - phase_key: "phase_4_development"
     name: "Phase 4: Development"
-    prompt: "Use superpowers subagent-driven-development or executing-plans to implement the plan."
+    prompt: "Use subagent-driven-development in claude code. Read the implementation plan from docs/pipeline/{todo_id}-impl-plan.md and implement it. Commit all generated docs."
     tools: "Read,Write,Edit,Bash"
     turns: 60
     timeout: 3600
   - phase_key: "phase_6_1_cso"
     name: "Phase 6.1: CSO Security Review"
-    prompt: "Use the gstack cso skill. Run a security review of the current branch."
+    prompt: "Use the gstack cso skill. Run a security review of the current branch. Save findings to docs/pipeline/ and commit."
     tools: "Read,Write,Bash"
     turns: 20
     timeout: 1800
