@@ -658,6 +658,18 @@ def _cmd_tick(args, config: Config) -> int:
 
             log.info("discovered %d active projects", len(projects))
 
+            # --- Step 3b: One-time global state migration ---
+            # The old single-project state (~/.hermes/) belongs to whichever
+            # project used it before.  Migrate it to the first project only —
+            # copying the same current_tick_id.txt / circuit.json to every
+            # project would cause new projects to inherit a stale tick_id they
+            # never owned, permanently stalling as "prior tick in-flight".
+            try:
+                _migrate_global_state(projects[0], config)
+            except Exception as e:
+                log.warning("one-time state migration to %s: %s",
+                            projects[0].name, e)
+
             # --- Step 4: Per-project tick ---
             for project_dir in projects:
                 project_slug = project_dir.name
@@ -692,10 +704,9 @@ def _tick_project(
 ) -> None:
     """Run the tick flow for a single project.
 
-    1. Migrate global state (if needed)
-    2. Check prior tick
-    3. Run selection
-    4. Register kanban phases or observe circuit breaker
+    1. Check prior tick
+    2. Run selection
+    3. Register kanban phases or observe circuit breaker
 
     Args:
         project_dir: Project root directory.
@@ -708,15 +719,8 @@ def _tick_project(
         Exception: On any error (caller logs and continues to next project).
     """
     from .project_config import _resolve_slack_channel
-    from .state_migration import _migrate_global_state
 
     vlog = logging.getLogger("pipeline.verbose")
-
-    # Step 1: Migrate global state (one-time, idempotent)
-    try:
-        _migrate_global_state(project_dir, config)
-    except Exception as e:
-        log.warning("state migration for %s: %s", project_slug, e)
 
     # Ensure per-project state directory exists
     project_state.mkdir(parents=True, exist_ok=True)
@@ -724,7 +728,7 @@ def _tick_project(
     # Resolve per-project Slack channel
     slack_channel = _resolve_slack_channel(project_dir, env_channel=config.slack_channel)
 
-    # Step 2: Check prior tick
+    # Step 1: Check prior tick
     prior_tick_id = _read_prior_tick_id(project_state)
 
     cb = _make_circuit_breaker(project_state, cb_cfg, slack_channel)
