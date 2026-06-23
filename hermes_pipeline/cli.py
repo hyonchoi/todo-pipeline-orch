@@ -254,7 +254,7 @@ def _kill_all_projects(
         todo: Kill a specific TODO across all projects.
 
     Returns:
-        0 if successful, 1 if some kills unconfirmed.
+        0 if successful, 1 if some kills unconfirmed, 2 if TODO not found.
     """
     from .project_config import _discover_projects
 
@@ -265,6 +265,9 @@ def _kill_all_projects(
 
     total_killed = 0
     total_unconfirmed = 0
+    # Track whether we checked any project for a specific TODO
+    todo_checked = False
+    todo_found = False
 
     for project_dir in projects:
         project_slug = project_dir.name
@@ -280,7 +283,10 @@ def _kill_all_projects(
             targets = [f for f in ps_dir.iterdir() if f.is_file() and f.suffix == ".json"]
         elif todo:
             p = ps_dir / f"{todo}.json"
+            todo_checked = True
             targets = [p] if p.exists() else []
+            if p.exists():
+                todo_found = True
         else:
             continue
 
@@ -299,6 +305,12 @@ def _kill_all_projects(
             total_killed += len(targets)
         else:
             total_unconfirmed += 1
+
+    # If the user asked for a specific TODO and it wasn't found anywhere,
+    # be explicit rather than hiding behind "no in-flight phases found".
+    if todo and todo_checked and not todo_found:
+        print(f"no in-flight phase for {todo} in any project")
+        return 2
 
     if total_killed == 0 and total_unconfirmed == 0:
         print("no in-flight phases found")
