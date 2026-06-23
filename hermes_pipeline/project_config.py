@@ -84,7 +84,7 @@ def _discover_projects(config) -> list[Path]:
     Returns:
         Sorted list of project directory paths.
     """
-    from .cli import _validate_project_slug
+    from .config import _validate_project_slug
 
     projects = []
     for d in sorted(config.projects_dir.iterdir()):

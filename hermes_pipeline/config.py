@@ -73,6 +73,28 @@ class FullConfig:
     def __getattr__(self, name):
         return getattr(self.base, name)
 
+def _validate_project_slug(slug: str) -> bool:
+    """Reject project slugs that could inject CLI flags or traverse paths.
+
+    Rules:
+    - Must start with a letter or digit (no leading dash, dot, or underscore)
+    - Only alphanumeric, single dash, single underscore, single dot (no consecutive
+      dots that could form '..' path traversal)
+    - No consecutive dots (blocks '..' path traversal)
+    - No leading dash (blocks CLI flag injection)
+    - Not a bare '.' or '..'
+    """
+    import re
+
+    if not slug or slug in (".", ".."):
+        return False
+    if slug.startswith(("-", ".")):
+        return False
+    if ".." in slug:
+        return False
+    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]+$', slug))
+
+
 def _coerce_section(cls, data: dict):
     fields = {f.name for f in cls.__dataclass_fields__.values()}
     return cls(**{k: v for k, v in data.items() if k in fields})

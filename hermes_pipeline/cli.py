@@ -21,7 +21,7 @@ from typing import Optional
 import subprocess as _cli_sp
 
 from .circuit import CircuitBreaker
-from .config import Config, CircuitBreakerConfig
+from .config import Config, CircuitBreakerConfig, _validate_project_slug
 from .decision import run_selection, store as _cli_dec_store
 from .decision.context import build_context
 from .kanban import NullKanbanAdapter, HermesKanbanAdapter
@@ -539,26 +539,6 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
         alert_dedup_hours=cb_cfg.alert_dedup_hours,
         slack_channel=slack_channel,
     )
-
-def _validate_project_slug(slug: str) -> bool:
-    """Reject project slugs that could inject CLI flags or traverse paths.
-
-    Rules:
-    - Must start with a letter or digit (no leading dash, dot, or underscore)
-    - Only alphanumeric, single dash, single underscore, single dot (no consecutive
-      dots that could form '..' path traversal)
-    - No consecutive dots (blocks '..' path traversal)
-    - No leading dash (blocks CLI flag injection)
-    - Not a bare '.' or '..'
-    """
-    if not slug or slug in (".", ".."):
-        return False
-    if slug.startswith(("-", ".")):
-        return False
-    if ".." in slug:
-        return False
-    import re as _re
-    return bool(_re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]+$', slug))
 
 def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
     """Persist tick_id atomically for the next tick's prior check.
