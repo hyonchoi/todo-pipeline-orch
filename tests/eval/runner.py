@@ -81,7 +81,7 @@ def test_selection_fixture(fixture_path):
     )
     r = call_agent(
         ctx=ctx, prompt_path=PROMPT_PATH,
-        model=os.environ.get("EVAL_MODEL", "claude-opus-4-7"),
+        model=os.environ.get("EVAL_MODEL", "auto"),
         max_tokens=2000, expected_sha=None,
         backend=_get_backend(),
     )

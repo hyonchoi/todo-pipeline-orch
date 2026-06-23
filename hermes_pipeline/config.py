@@ -50,7 +50,7 @@ class Config:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    model: str = "claude-opus-4-7"
+    model: str = "auto"
     max_tokens: int = 4000
     auto_execute: bool = False
     prompt_path: str = ".hermes/prompts/selection.md"
