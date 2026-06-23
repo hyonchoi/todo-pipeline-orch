@@ -662,6 +662,13 @@ def _cmd_tick(args, config: Config) -> int:
                     return 2
                 projects = [project_dir]
             else:
+                # Missing projects_dir is a configuration error, not "no
+                # projects to process".  Distinguish so the cron doesn't
+                # silently run forever on a misconfigured setup.
+                if not config.projects_dir.is_dir():
+                    log.error("projects_dir %s does not exist — check config",
+                              config.projects_dir)
+                    return 2
                 projects = _discover_projects(config)
                 if not projects:
                     log.info("no active projects found in %s", config.projects_dir)
@@ -675,11 +682,27 @@ def _cmd_tick(args, config: Config) -> int:
             # copying the same current_tick_id.txt / circuit.json to every
             # project would cause new projects to inherit a stale tick_id they
             # never owned, permanently stalling as "prior tick in-flight".
-            try:
-                _migrate_global_state(projects[0], config)
-            except Exception as e:
-                log.warning("one-time state migration to %s: %s",
-                            projects[0].name, e)
+            #
+            # Only auto-migrate when there's exactly one project.  With multiple
+            # projects we can't know which one owned the old state, so skip and
+            # ask the operator to handle it manually.
+            if len(projects) == 1:
+                try:
+                    _migrate_global_state(projects[0], config)
+                except Exception as e:
+                    log.warning("one-time state migration to %s: %s",
+                                projects[0].name, e)
+            else:
+                global_src = config.state_dir / "current_tick_id.txt"
+                if global_src.is_file():
+                    log.warning(
+                        "global state exists at %s but %d projects were "
+                        "discovered — can't determine which project owns the "
+                        "old state.  Migrate manually to the correct project "
+                        "or remove the file.",
+                        config.state_dir,
+                        len(projects),
+                    )
 
             # --- Step 4: Per-project tick ---
             for project_dir in projects:
@@ -818,6 +841,7 @@ def _tick_project(
         # If we persist first and crash before writing the sentinel, the
         # next tick sees the new tick_id with no completion evidence and
         # treats the project as permanently in-flight.
+        sentinel_written = False
         try:
             observe_outcomes(
                 state_dir=project_state,
@@ -832,13 +856,18 @@ def _tick_project(
                 sentinel,
                 json.dumps({"outcome": OUTCOME_PICKED_NONE}) + "\n",
             )
+            sentinel_written = True
         except Exception as se:
             log.warning("project %s: failed to write picked_none sentinel: %s",
                         project_slug, se)
 
-        # Persist tick_id without the tick_started sentinel — we already
-        # wrote a picked_none sentinel to the same file above.
-        _persist_tick_id(project_state, tick_id, write_sentinel=False)
+        # Only persist tick_id if the sentinel was actually written.
+        # Persisting without the sentinel would permanently stall the
+        # project on the next tick.
+        if sentinel_written:
+            # Persist tick_id without the tick_started sentinel — we already
+            # wrote a picked_none sentinel to the same file above.
+            _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
     # Step 4: Register kanban phases

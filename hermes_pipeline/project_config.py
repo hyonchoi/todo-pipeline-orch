@@ -23,7 +23,7 @@ def _read_project_toml(project_dir: Path) -> dict | None:
     try:
         data = toml_path.read_bytes()
         return tomllib.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError, tomllib.TOMLDecodeError) as e:
+    except (OSError, UnicodeDecodeError, ValueError) as e:
         log.warning("failed to parse %s: %s — using defaults", toml_path, e)
         return None
 
