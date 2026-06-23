@@ -208,7 +208,7 @@ class TestTickPicked:
     def test_prior_observe_outcomes_and_circuit_breaker(self, tmp_path, mocker):
         """When prior tick exists and is complete, observe_outcomes + circuit breaker are called."""
         mock_all_complete = mocker.patch(
-            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
         mock_get_status = mocker.patch(
             "hermes_pipeline.kanban_tasks.get_todo_kanban_status",

@@ -49,7 +49,7 @@ class TestTickSubcommand:
     def test_tick_prior_in_flight_skips(self, tmp_path, mocker):
         """Prior tick still has in-flight kanban tasks -> skip."""
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=False
+            "hermes_pipeline.cli.all_phases_complete", return_value=False
         )
 
         projects_dir = tmp_path / "projects"
@@ -70,7 +70,7 @@ class TestTickSubcommand:
     def test_tick_prior_complete_proceeds(self, tmp_path, mocker):
         """Prior tick complete -> proceed with new selection."""
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
         mock_selection.return_value = _make_decision()
@@ -185,7 +185,7 @@ class TestTickSubcommand:
     def test_tick_kanban_registration_failure_project_error(self, tmp_path, mocker):
         """Kanban registration raises RuntimeError -> project error logged, tick returns 0."""
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
@@ -222,10 +222,10 @@ class TestTickSubcommand:
     def test_tick_observe_outcomes_exception(self, tmp_path, mocker):
         """observe_outcomes for prior tick raises -> warning, tick proceeds."""
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.observe_outcomes",
+            "hermes_pipeline.cli.observe_outcomes",
             side_effect=RuntimeError("kanban error"),
         )
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
@@ -249,7 +249,7 @@ class TestTickSubcommand:
     def test_tick_picked_none_writes_sentinel(self, tmp_path, mocker):
         """picked=None -> writes picked_none sentinel in per-project state dir."""
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
@@ -337,7 +337,7 @@ class TestTickSubcommand:
     def test_tick_project_scoped_tocks_one_project(self, tmp_path, mocker):
         """tick myproject ticks only myproject, not others."""
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
         select_mock = mocker.patch(
             "hermes_pipeline.cli.run_selection",
