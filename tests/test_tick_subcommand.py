@@ -288,6 +288,72 @@ class TestTickSubcommand:
         data = json.loads(content)
         assert data.get("outcome") == "picked_none"
 
+    def test_tick_project_arg_help(self):
+        """tick --help shows the optional project argument."""
+        parser = build_parser()
+        args = parser.parse_args(["tick"])
+        assert args.project is None
+        args = parser.parse_args(["tick", "myproject"])
+        assert args.project == "myproject"
+
+    def test_tick_project_not_found(self, tmp_path, mocker):
+        """tick nonexistent-project returns error code 2."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        args = FakeArgs(project="nonexistent")
+        result = _cmd_tick(args, config)
+        assert result == 2
+
+    def test_tick_project_no_todos(self, tmp_path, mocker):
+        """tick project-without-TODOS.md returns error code 2."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        (projects_dir / "empty-project").mkdir()  # no TODOS.md
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        args = FakeArgs(project="empty-project")
+        result = _cmd_tick(args, config)
+        assert result == 2
+
+    def test_tick_project_scoped_tocks_one_project(self, tmp_path, mocker):
+        """tick myproject ticks only myproject, not others."""
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.all_phases_complete", return_value=True
+        )
+        select_mock = mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision(picked="TODO-42"),
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.register_todo_phases",
+            return_value=["task-001"],
+        )
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "alpha")
+        _create_project(projects_dir, "beta")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        args = FakeArgs(project="alpha")
+        result = _cmd_tick(args, config)
+        assert result == 0
+
+        # Only alpha was ticked (selection called once with alpha's project_dir)
+        assert select_mock.call_count == 1
+        called_ctx = select_mock.call_args.kwargs["ctx"]
+        assert called_ctx.project_slug == "alpha"
+
 
 class TestCliHelpers:
     """Tests for _cmd_tick helper functions."""

@@ -402,6 +402,7 @@ def build_parser() -> argparse.ArgumentParser:
         "tick",
         help="Run one pipeline tick: scan all projects and select TODOs",
     )
+    tick_parser.add_argument("project", nargs="?", default=None, help="Project name (optional — omit to scan all projects)")
     tick_parser.set_defaults(func=_cmd_tick)
 
     # recover-counter: Scan TODOS.md and initialize counter file
@@ -585,9 +586,12 @@ def _persist_tick_id(state_dir: Path, tick_id: str) -> None:
 def _cmd_tick(args, config: Config) -> int:
     """Handle 'tick' subcommand — kanban-as-scheduler pipeline scan tick.
 
+    If a project name is provided, tick only that project.
+    Otherwise, discover and tick all active projects.
+
     Flow:
     1. Acquire global TickLock
-    2. Discover active projects
+    2. Discover active projects (or use specified project)
     3. For each project: migrate state, check prior tick, run selection
     4. Release lock
 
@@ -619,10 +623,20 @@ def _cmd_tick(args, config: Config) -> int:
                       tick_lock.lock_dir, os.getpid())
 
             # --- Step 3: Discover projects ---
-            projects = _discover_projects(config)
-            if not projects:
-                log.info("no active projects found in %s", config.projects_dir)
-                return 0
+            if args.project is not None:
+                project_dir = config.projects_dir / args.project
+                if not project_dir.exists():
+                    log.error("project not found: %s", args.project)
+                    return 2
+                if not (project_dir / "TODOS.md").exists():
+                    log.error("no TODOS.md in project: %s", args.project)
+                    return 2
+                projects = [project_dir]
+            else:
+                projects = _discover_projects(config)
+                if not projects:
+                    log.info("no active projects found in %s", config.projects_dir)
+                    return 0
 
             log.info("discovered %d active projects", len(projects))
 
