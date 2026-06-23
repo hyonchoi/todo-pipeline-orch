@@ -45,6 +45,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
 | [Kill a stuck in-flight phase](docs/howto-kill-stuck-phase.md) | How-to | A phase is wedged past `max_phase_timeout_min` |
 | [Set up multiple projects](docs/howto-multi-project-setup.md) | How-to | Configuring per-project settings and the scan loop |
+| [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
+| [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
+| [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Why single global lock, state migration decisions, trade-offs |
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` replaces Anthropic SDK calls |
 | [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
 | [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works and design rationale |

@@ -98,3 +98,9 @@ To debug a specific project's selection:
 If one project's `TODOS.md` is malformed or an error occurs during selection,
 the error is logged and the scan continues to the next project. One project's
 failure does not block the others.
+
+## Related
+
+- [Multi-project scan tutorial](tutorial-multi-project-scan.md) — step-by-step walkthrough with two projects
+- [How the scan loop works](explanation-multi-project-scan.md) — why single global lock, state migration decisions
+- [How to troubleshoot state migration](howto-troubleshoot-state-migration.md) — fixing migration issues
