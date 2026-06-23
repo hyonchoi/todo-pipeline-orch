@@ -23,7 +23,7 @@ def _read_project_toml(project_dir: Path) -> dict | None:
     try:
         data = toml_path.read_bytes()
         return tomllib.loads(data.decode("utf-8"))
-    except Exception as e:
+    except (UnicodeDecodeError, ValueError, tomllib.TOMLDecodeError) as e:
         log.warning("failed to parse %s: %s — using defaults", toml_path, e)
         return None
 
@@ -85,6 +85,11 @@ def _discover_projects(config) -> list[Path]:
         Sorted list of project directory paths.
     """
     from .config import _validate_project_slug
+
+    if not config.projects_dir.is_dir():
+        log.warning("projects_dir %s does not exist or is not a directory",
+                     config.projects_dir)
+        return []
 
     projects = []
     for d in sorted(config.projects_dir.iterdir()):
