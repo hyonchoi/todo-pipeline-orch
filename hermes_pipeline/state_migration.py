@@ -15,7 +15,7 @@ from .config import Config
 
 log = logging.getLogger(__name__)
 
-_STATE_FILES: list[str] = ["current_tick_id.txt", "circuit.json", "config.toml"]
+_STATE_FILES: list[str] = ["current_tick_id.txt", "circuit.json"]
 _OUTCOMES_DIR = "outcomes"
 
 
