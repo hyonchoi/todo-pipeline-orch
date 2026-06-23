@@ -344,7 +344,7 @@ def _strip_global_flags(argv: Optional[list[str]]) -> tuple[bool, bool, list[str
     verbose = False
     debug = False
     remaining = []
-    for arg in argv or sys.argv[1:]:
+    for arg in (argv if argv is not None else sys.argv[1:]):
         if arg in ("--verbose",):
             verbose = True
         elif arg in ("--debug",):
