@@ -92,7 +92,7 @@ def _validate_project_slug(slug: str) -> bool:
         return False
     if ".." in slug:
         return False
-    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]+$', slug))
+    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$', slug))
 
 
 def _coerce_section(cls, data: dict):
