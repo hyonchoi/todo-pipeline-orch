@@ -491,8 +491,23 @@ def _cmd_kill(args, config: Config) -> int:
     If project is omitted and --all, scan all projects for in-flight phases.
     If project is omitted and --todo, kill that TODO across all projects.
     """
+    from .state_migration import _get_project_state_dir
+
+    # Resolve project-specific state directory when project is given
+    if args.project is not None:
+        if not _validate_project_slug(args.project):
+            log.error("invalid project slug: %s", args.project)
+            return 2
+        project_dir = config.projects_dir / args.project
+        if not project_dir.exists():
+            log.error("project not found: %s", args.project)
+            return 2
+        state_dir = _get_project_state_dir(project_dir)
+    else:
+        state_dir = config.state_dir
+
     return cmd_kill(
-        state_dir=config.state_dir,
+        state_dir=state_dir,
         all_=args.all_,
         todo=args.todo,
         project=args.project,
