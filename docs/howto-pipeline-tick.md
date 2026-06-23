@@ -60,7 +60,7 @@ Example output when a TODO is picked:
 If the selection picked a TODO, phases are now registered as kanban tasks:
 
 ```bash
-hermes kanban list --board demo
+hermes kanban list --tenant demo
 ```
 
 You should see the phases with statuses:
@@ -118,7 +118,7 @@ in `~/.hermes/`.
 
 **"tick already in flight, skipping".**
 A prior tick's kanban tasks are still running or ready. Check the board:
-`hermes kanban list --board demo`. If tasks are stuck in `running`,
+`hermes kanban list --tenant demo`. If tasks are stuck in `running`,
 use [pipeline-watch kill](howto-kill-stuck-phase.md) to clear them.
 
 **"Error: tick.lock held by pid X"**.

@@ -26,7 +26,7 @@ uv run pipeline-watch --version
 
 Expected output:
 ```
-pipeline-watch 0.3.1
+pipeline-watch 0.3.3
 ```
 
 If you see "command not found," run:
@@ -139,7 +139,7 @@ Run the tick a second time. This tick scans all active projects, observes outcom
 If a TODO was picked, phases are now registered as kanban tasks with `--parent` dependency chains. Check the board:
 
 ```bash
-hermes kanban list --board demo-app
+hermes kanban list --tenant demo-app
 ```
 
 You should see phases like `phase_2_autoplan` (running) and `phase_4_development` (ready — blocked on its parent).
@@ -180,9 +180,9 @@ uv run pipeline-watch status
 When TODOs are ready for review, you'll see a table like:
 
 ```
-Project | TODO ID | Status           | Age
---------|---------|------------------|------
-demo-app| 1       | ready-for-review | 5m
+PROJECT    | TODO | BRANCH               | PR | STATUS | AGE
+-----------|------|----------------------|----|--------|-----
+demo-app   | 1    | feature/todo-1-...   |    | pending| 5m
 ```
 
 ---

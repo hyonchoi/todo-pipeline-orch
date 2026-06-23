@@ -115,7 +115,8 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** `TODO-3`
   - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-llm-routing`, Test Coverage `필요`, Security Review `불필요`
 
-- [ ] **TODO-12: enable multi-project tick scanning with project-level config** — Scan-and-per-project-selection tick
+- [x] **TODO-12: enable multi-project tick scanning with project-level config** — Scan-and-per-project-selection tick
+  - **Completed:** this branch (2026-06-23)
   - **What:** Refactor `pipeline-watch tick` (no `project` argument) to scan `projects_dir` for active projects and run one selection per project. Introduce `<project>/.hermes/project.toml` as a per-project marker file for filtering and config.
   - **Why:** The current `tick <project>` requires one Hermes cron entry per project. With many projects this is unmanageable and defeats the kanban-as-scheduler model — one cron, one tick, one global lock should drive the whole pipeline.
   - **How — filtering:** `projects_dir.iterdir()` → `TODOS.md` exists? → `.hermes/project.toml` says `enabled = false`? → skip. Default (no file) is active — opt-out for archived projects.

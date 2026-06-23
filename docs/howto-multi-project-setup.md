@@ -64,24 +64,27 @@ Alerts for each project go to the Slack channel determined by:
 
 ## Cron Setup
 
-Replace the per-project cron entry with a single global entry:
+Replace the per-project cron entry with a single global entry. Use Hermes cron
+(recommended) or system crontab:
 
 ```bash
-# Before: one cron per project
-# 0 * * * * pipeline-watch tick project-a
-# 0 * * * * pipeline-watch tick project-b
-
-# After: one cron for all projects
-0 * * * * pipeline-watch tick
+# Hermes cron: one entry for all projects
+hermes cron set pipeline-tick '*/5 * * * *'
 ```
 
-If using `install-cron.sh`, the script fires `pipeline-watch tick` (no project argument).
+The old `scripts/install-cron.sh` is deprecated — it still registers `pipeline-watch auto`
+(which was removed in v0.2.0). Use Hermes cron instead.
 
 ## State Migration
 
-On the first run of `pipeline-watch tick` (no project argument), any existing
-state files in `~/.hermes/` (`current_tick_id.txt`, `circuit.json`, `outcomes/`)
-are automatically migrated to `<project>/.hermes/`. This is a one-time operation.
+On the first run of `pipeline-watch tick` (no project argument), state files
+in `~/.hermes/` (`current_tick_id.txt`, `circuit.json`, `outcomes/`) are
+migrated to `<project>/.hermes/`. This is a one-time operation.
+
+**Important:** Auto-migration only runs when exactly one project is discovered.
+If multiple projects exist, the tick warns and skips migration — you need to
+manually decide which project owned the global state. With multiple projects,
+each project starts with a fresh state directory.
 
 ## Debugging
 

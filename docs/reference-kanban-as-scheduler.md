@@ -75,7 +75,7 @@ archived before raising.
 **Behavior:**
 1. Reads `phases.yaml` (loaded via `hermes_pipeline.phases.load_phases`).
 2. For each phase in order, runs `hermes kanban create` with:
-   - `--board <board_slug>` — target board
+   - `--tenant <board_slug>` — target board
    - `--workspace <project_dir>` — project context
    - `--idempotency-key <tick_id>:<phase_key>` — dedup key (e.g., `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`)
    - `--parent <prev_task_id>` — dependency chain (second phase depends on first, etc.)
