@@ -296,6 +296,18 @@ class TestTickSubcommand:
         args = parser.parse_args(["tick", "myproject"])
         assert args.project == "myproject"
 
+    def test_tick_invalid_slug_rejected(self, tmp_path, mocker):
+        """tick with an invalid slug (e.g., path traversal) returns error code 2."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        args = FakeArgs(project="../etc")
+        result = _cmd_tick(args, config)
+        assert result == 2
+
     def test_tick_project_not_found(self, tmp_path, mocker):
         """tick nonexistent-project returns error code 2."""
         projects_dir = tmp_path / "projects"

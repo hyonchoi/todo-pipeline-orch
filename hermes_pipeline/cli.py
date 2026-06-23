@@ -624,6 +624,9 @@ def _cmd_tick(args, config: Config) -> int:
 
             # --- Step 3: Discover projects ---
             if args.project is not None:
+                if not _validate_project_slug(args.project):
+                    log.error("invalid project slug: %s", args.project)
+                    return 2
                 project_dir = config.projects_dir / args.project
                 if not project_dir.exists():
                     log.error("project not found: %s", args.project)
