@@ -115,7 +115,7 @@ from scratch.
 
 If auto-migration ran with only one project at the time, that project now has
 its own copy of `circuit.json`. If the circuit breaker trips (shows
-`backed_off: true`) right after migration, it inherited the counter.
+`consecutive_no_progress >= 3`) right after migration, it inherited the counter.
 
 Check:
 
@@ -126,7 +126,7 @@ cat ~/projects/<project>/.hermes/circuit.json | jq .
 If `consecutive_no_progress` is greater than 0 and you want to reset it:
 
 ```bash
-echo '{"consecutive_no_progress": 0, "backed_off": false}' \
+echo '{"consecutive_no_progress": 0, "last_alert_at": null}' \
   > ~/projects/<project>/.hermes/circuit.json
 ```
 

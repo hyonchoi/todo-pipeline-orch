@@ -40,11 +40,11 @@ tick:
 
 ### 2. Check what the selection picked
 
-The decision is persisted to `.hermes/decisions/<tick_id>.json`. Inspect it:
+In a multi-project setup, decisions are persisted per-project at `<project>/.hermes/decisions/<tick_id>.json`. Inspect the latest (substitute `<project>` with your project name):
 
 ```bash
 jq '{picked: .picked, rationale: .rationale}' \
-  .hermes/decisions/$(ls -t .hermes/decisions/ | head -1)
+  ~/projects/<project>/.hermes/decisions/$(ls -t ~/projects/<project>/.hermes/decisions/ | head -1)
 ```
 
 Example output when a TODO is picked:
@@ -74,10 +74,10 @@ automatically — the orchestrator doesn't need to manage the handoff.
 ### 4. Verify outcomes were written
 
 After a tick completes (or you run another tick that detects the prior tick
-is done), outcomes are written to `.hermes/outcomes/`:
+is done), outcomes are written to `<project>/.hermes/outcomes/`:
 
 ```bash
-cat .hermes/outcomes/$(ls -t .hermes/outcomes/ | head -1) | jq .
+cat ~/projects/<project>/.hermes/outcomes/$(ls -t ~/projects/<project>/.hermes/outcomes/ | head -1) | jq .
 ```
 
 You'll see JSONL entries like:
@@ -92,15 +92,18 @@ for all possible outcomes.
 
 ### 5. Check the circuit breaker state
 
+Circuit breaker state is per-project:
+
 ```bash
-cat .hermes/circuit.json | jq .
+cat ~/projects/<project>/.hermes/circuit.json | jq .
 ```
 
 Key fields:
-- `consecutive_no_progress` — resets to 0 when `phase_complete` is observed,
-  increments on `failed_at_phase_*` outcomes.
-- `backed_off` — becomes `true` when the counter hits `no_progress_threshold`
-  (default: 3). Cron backoff engages at this point.
+- `consecutive_no_progress` — resets to 0 when a TODO is selected,
+  increments on no-progress ticks. When it hits `no_progress_threshold`
+  (default: 3), a Slack alert is sent.
+- `last_alert_at` — ISO timestamp of the last Slack alert; used for dedup
+  (one alert per `alert_dedup_hours`, default: 24).
 
 ## Debugging a Single Project
 
@@ -135,11 +138,12 @@ If a task fails partway through, already-created tasks are archived. The
 outcome file will show `failed_at_phase_*` with `kanban_status: "archived"`.
 Check the kanban board for archived tasks and investigate the error.
 
-**Circuit breaker trips (backed_off = true).**
-Three consecutive no-progress ticks triggered the backoff. The cron interval
-switched from 5 minutes to `backoff_interval_min` (default: 30 min). Check
-`.hermes/decisions/` for `picked=None` decisions — the rationale explains
-why each tick found nothing to do. See [howto-config-toml.md](howto-config-toml.md#loosen-the-circuit-breaker-during-onboarding)
+**Circuit breaker trips (consecutive_no_progress >= 3).**
+Three consecutive no-progress ticks triggered a Slack alert. The gateway
+service manages tick scheduling and backoff — the circuit breaker no longer
+adjusts the cron interval. Check `<project>/.hermes/decisions/` for
+`picked=None` decisions — the rationale explains why each tick found nothing
+to do. See [howto-config-toml.md](howto-config-toml.md#loosen-the-circuit-breaker-during-onboarding)
 for how to temporarily loosen the threshold.
 
 ## Related

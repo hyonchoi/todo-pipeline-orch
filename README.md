@@ -16,7 +16,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 - **Logging flags**: `--verbose` and `--debug` global flags for detailed diagnostics (selection results, lock state, agent call summaries, circuit breaker transitions)
 - **Pending records table**: Display ready-for-review records with status and age
 - **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
-- **Circuit breaker**: no-progress counter, cron backoff, and Slack alert dedup to stop runaway ticks
+- **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
 
 ## Requirements
@@ -105,8 +105,8 @@ uv run pipeline-watch --debug tick     # full debug logging (agent call summarie
 ### Automated Ticks
 
 The pipeline is driven by Hermes cron, not system crontab. The Hermes CLI
-manages the tick schedule; the circuit breaker adjusts the interval
-automatically (normal 5-minute ticks, backoff to 30 minutes after repeated
+manages the tick schedule; the gateway service adjusts the interval
+automatically (normal 5-minute ticks, backoff after repeated
 no-progress ticks):
 
 ```bash
@@ -152,8 +152,7 @@ prompt_path = ".hermes/prompts/selection.md"
 expected_prompt_sha = "abc123..."  # if set, mismatch aborts the tick + alerts
 
 [circuit_breaker]
-no_progress_threshold = 3           # consecutive picked=None ticks before backoff
-backoff_interval_min = 30
+no_progress_threshold = 3           # consecutive picked=None ticks before Slack alert
 alert_dedup_hours = 24
 max_phase_timeout_min = 120
 max_tick_duration_min = 10

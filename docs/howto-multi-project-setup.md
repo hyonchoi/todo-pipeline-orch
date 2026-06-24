@@ -20,11 +20,7 @@ If your projects live outside `~/projects`, set the environment variable:
 export PIPELINE_PROJECTS_DIR=/path/to/your/projects
 ```
 
-Or set it in `~/.hermes/config.toml`:
-
-```toml
-projects_dir = "/path/to/your/projects"
-```
+This cannot be configured via `.hermes/config.toml` — it must be set as an environment variable.
 
 ### Per-Project Configuration
 
