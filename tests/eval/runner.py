@@ -84,6 +84,7 @@ def test_selection_fixture(fixture_path):
         model=os.environ.get("EVAL_MODEL", "auto"),
         max_tokens=2000, expected_sha=None,
         backend=_get_backend(),
+        timeout=120,
     )
     picked = r.parsed["picked"]
     if meta.get("expected_picked_is_none"):
