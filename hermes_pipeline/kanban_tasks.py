@@ -65,6 +65,7 @@ def register_todo_phases(
     board_slug: str,
     project_dir: str | Path,
     phases_path: str | Path | None = None,
+    assignee: str = "default",
 ) -> list[str]:
     """Register phases as kanban tasks with --parent dependency chain.
 
@@ -119,6 +120,7 @@ def register_todo_phases(
             "--body", body,
             "--workspace", f"dir:{project_dir}",
             "--idempotency-key", f"{tick_id}:{phase.phase_key}",
+            "--assignee", assignee,
             "--json",
         ]
 
