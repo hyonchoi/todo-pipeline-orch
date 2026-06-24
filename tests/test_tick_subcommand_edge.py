@@ -101,7 +101,6 @@ class TestMakeCircuitBreaker:
         """Creates CircuitBreaker with correct config values."""
         cb_cfg = mocker.MagicMock()
         cb_cfg.no_progress_threshold = 5
-        cb_cfg.backoff_interval_min = 60
         cb_cfg.alert_dedup_hours = 12
 
         state_dir = tmp_path / "state"
@@ -109,7 +108,6 @@ class TestMakeCircuitBreaker:
         cb = _make_circuit_breaker(state_dir, cb_cfg, "#my-channel")
 
         assert cb.no_progress_threshold == 5
-        assert cb.backoff_interval_min == 60
         assert cb.alert_dedup_hours == 12
         assert cb.slack_channel == "#my-channel"
         assert cb.state_path == state_dir / "circuit.json"

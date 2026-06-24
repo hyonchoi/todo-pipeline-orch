@@ -565,7 +565,6 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
     return CircuitBreaker(
         state_path=state_dir / "circuit.json",
         no_progress_threshold=cb_cfg.no_progress_threshold,
-        backoff_interval_min=cb_cfg.backoff_interval_min,
         alert_dedup_hours=cb_cfg.alert_dedup_hours,
         slack_channel=slack_channel,
     )
