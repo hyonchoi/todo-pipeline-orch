@@ -428,9 +428,10 @@ class TestCliHelpers:
         assert content == "01HA6PH2V0ZJ7GK0S39D243TQX"
 
     def test_persist_tick_id_oserror(self, tmp_path, mocker):
-        """_persist_tick_id handles OSError gracefully."""
+        """_persist_tick_id raises OSError on write failure."""
         from hermes_pipeline.cli import _persist_tick_id
 
         mocker.patch("pathlib.Path.write_text", side_effect=OSError("disk full"))
 
-        _persist_tick_id(tmp_path, "01HA6PH2V0ZJ7GK0S39D243TQX")
+        with pytest.raises(OSError, match="disk full"):
+            _persist_tick_id(tmp_path, "01HA6PH2V0ZJ7GK0S39D243TQX")

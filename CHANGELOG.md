@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Project discovery** — new `project_config` module with `_discover_projects()`, `_is_enabled()`, and `_resolve_slack_channel()` for filesystem-based project filtering
 
 ### Changed
+- **Selection model default** — `SelectionConfig.model` defaults to `"auto"` instead of `"claude-opus-4-7"`. Hermes resolves `"auto"` to the current best model.
 - **`tick` subcommand** — optional `project` argument; when omitted, scans all active projects instead of requiring a specific project
 - **`kill` subcommand** — optional `project` argument; when omitted, scans all projects for in-flight phases
 - **State migration** — first-run migration of global state (`~/.hermes/`) to per-project state (`<project>/.hermes/`) via new `state_migration` module

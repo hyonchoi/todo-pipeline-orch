@@ -57,7 +57,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -87,7 +86,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -115,7 +113,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -139,7 +136,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -157,7 +153,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -179,7 +174,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -203,7 +197,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -233,7 +226,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -266,7 +258,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )
@@ -286,7 +277,6 @@ class TestObserveFromOutcomes:
         cb = CircuitBreaker(
             state_path=state_dir / "circuit.json",
             no_progress_threshold=3,
-            
             alert_dedup_hours=24,
             slack_channel="#alerts",
         )

@@ -24,13 +24,19 @@ def _read_project_toml(project_dir: Path) -> dict | None:
         data = toml_path.read_bytes()
         return tomllib.loads(data.decode("utf-8"))
     except (OSError, UnicodeDecodeError, ValueError) as e:
-        log.warning("failed to parse %s: %s — using defaults", toml_path, e)
+        log.error("failed to parse %s: %s — using defaults (project will be treated as enabled)", toml_path, e)
         return None
 
 
-def _is_enabled(project_dir: Path) -> bool:
-    """Check if a project is active (not archived). Default: True."""
-    toml_data = _read_project_toml(project_dir)
+def _is_enabled(project_dir: Path, *, toml_data: dict | None = None) -> bool:
+    """Check if a project is active (not archived). Default: True.
+
+    Args:
+        project_dir: Project root directory.
+        toml_data: Pre-parsed project.toml data (optional — read from disk if not provided).
+    """
+    if toml_data is None:
+        toml_data = _read_project_toml(project_dir)
     if toml_data is None:
         return True
     active = toml_data.get("active", {})
@@ -40,6 +46,8 @@ def _is_enabled(project_dir: Path) -> bool:
 def _resolve_slack_channel(
     project_dir: Path,
     env_channel: str,
+    *,
+    toml_data: dict | None = None,
 ) -> str:
     """Resolve the Slack channel for a project.
 
@@ -51,12 +59,14 @@ def _resolve_slack_channel(
     Args:
         project_dir: Project root directory.
         env_channel: Value from PIPELINE_SLACK_CHANNEL env var.
+        toml_data: Pre-parsed project.toml data (optional — read from disk if not provided).
 
     Returns:
         Slack channel string (e.g., "project__my-slug" or "#alert").
     """
     # Level 1: project.toml
-    toml_data = _read_project_toml(project_dir)
+    if toml_data is None:
+        toml_data = _read_project_toml(project_dir)
     if toml_data is not None:
         notifications = toml_data.get("notifications", {})
         channel = notifications.get("slack_channel", "")
@@ -71,7 +81,7 @@ def _resolve_slack_channel(
     return DEFAULT_SLACK_CHANNEL
 
 
-def _discover_projects(config) -> list[Path]:
+def _discover_projects(config) -> list[tuple[Path, dict | None]]:
     """Scan projects_dir for active projects with TODOS.md.
 
     The project slug is the directory name (d.name). Directories that fail
@@ -82,7 +92,8 @@ def _discover_projects(config) -> list[Path]:
         config: Config with projects_dir set.
 
     Returns:
-        Sorted list of project directory paths.
+        Sorted list of (project_dir, parsed_project_toml) tuples.
+        The toml_data is None when the file is missing or unparseable.
     """
     from .config import _validate_project_slug
 
@@ -101,7 +112,8 @@ def _discover_projects(config) -> list[Path]:
             continue
         if not (d / "TODOS.md").exists():
             continue
-        if not _is_enabled(d):
+        toml_data = _read_project_toml(d)
+        if not _is_enabled(d, toml_data=toml_data):
             continue
-        projects.append(d)
+        projects.append((d, toml_data))
     return projects

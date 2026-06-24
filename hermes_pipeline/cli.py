@@ -269,7 +269,7 @@ def _kill_all_projects(
     todo_checked = False
     todo_found = False
 
-    for project_dir in projects:
+    for project_dir, _toml_data in projects:
         project_slug = project_dir.name
         project_state = project_dir / ".hermes"
         ps_dir = project_state / "phase_started"
@@ -519,14 +519,16 @@ def _read_prior_tick_id(state_dir: Path) -> str | None:
     """Read the prior tick_id from current_tick_id.txt.
 
     Returns None if the file doesn't exist (cold start).
+    Raises OSError if the file exists but can't be read (e.g., permissions).
     """
     path = state_dir / CURRENT_TICK_ID_FILE
     if not path.exists():
         return None
     try:
         return path.read_text().strip()
-    except OSError:
-        return None
+    except OSError as e:
+        log.error("can't read %s: %s — aborting tick (prior state unreadable)", path, e)
+        raise
 
 def _generate_tick_id() -> str:
     """Generate a new tick ID."""
@@ -589,8 +591,8 @@ def _persist_tick_id(state_dir: Path, tick_id: str, *, write_sentinel: bool = Tr
     try:
         _atomic_write_text(state_dir / CURRENT_TICK_ID_FILE, tick_id)
     except OSError as e:
-        log.warning("failed to persist current_tick_id: %s", e)
-        return
+        log.error("failed to persist current_tick_id: %s — aborting tick", e)
+        raise
 
     if not write_sentinel:
         return
@@ -623,7 +625,7 @@ def _cmd_tick(args, config: Config) -> int:
     Each project's errors are isolated — one project's failure doesn't
     block the others.
     """
-    from .project_config import _discover_projects, _resolve_slack_channel
+    from .project_config import _discover_projects
     from .state_migration import _get_project_state_dir, _migrate_global_state
     from .tick import TickLock, TickLockHeld
 
@@ -659,7 +661,12 @@ def _cmd_tick(args, config: Config) -> int:
                 if not (project_dir / "TODOS.md").exists():
                     log.error("no TODOS.md in project: %s", args.project)
                     return 2
-                projects = [project_dir]
+                from .project_config import _is_enabled, _read_project_toml
+                if not _is_enabled(project_dir):
+                    log.error("project is disabled: %s — remove .hermes/project.toml or set enabled = true", args.project)
+                    return 2
+                explicit_toml = _read_project_toml(project_dir)
+                projects = [(project_dir, explicit_toml)]
             else:
                 # Missing projects_dir is a configuration error, not "no
                 # projects to process".  Distinguish so the cron doesn't
@@ -686,11 +693,12 @@ def _cmd_tick(args, config: Config) -> int:
             # projects we can't know which one owned the old state, so skip and
             # ask the operator to handle it manually.
             if len(projects) == 1:
+                first_project, _ = projects[0]
                 try:
-                    _migrate_global_state(projects[0], config)
+                    _migrate_global_state(first_project, config)
                 except Exception as e:
                     log.warning("one-time state migration to %s: %s",
-                                projects[0].name, e)
+                                first_project.name, e)
             else:
                 global_src = config.state_dir / "current_tick_id.txt"
                 if global_src.is_file():
@@ -704,7 +712,7 @@ def _cmd_tick(args, config: Config) -> int:
                     )
 
             # --- Step 4: Per-project tick ---
-            for project_dir in projects:
+            for project_dir, project_toml in projects:
                 project_slug = project_dir.name
                 project_state = _get_project_state_dir(project_dir)
 
@@ -715,6 +723,7 @@ def _cmd_tick(args, config: Config) -> int:
                         project_state=project_state,
                         config=config,
                         cb_cfg=cb_cfg,
+                        project_toml=project_toml,
                     )
                 except Exception as e:
                     log.error("project %s: %s", project_slug, e, exc_info=True)
@@ -734,6 +743,7 @@ def _tick_project(
     project_state: Path,
     config: Config,
     cb_cfg,
+    project_toml: dict | None = None,
 ) -> None:
     """Run the tick flow for a single project.
 
@@ -747,6 +757,7 @@ def _tick_project(
         project_state: Per-project state directory (<project>/.hermes/).
         config: Global config.
         cb_cfg: Circuit breaker configuration.
+        project_toml: Pre-parsed project.toml data (from _discover_projects).
 
     Raises:
         Exception: On any error (caller logs and continues to next project).
@@ -759,7 +770,7 @@ def _tick_project(
     project_state.mkdir(parents=True, exist_ok=True)
 
     # Resolve per-project Slack channel
-    slack_channel = _resolve_slack_channel(project_dir, env_channel=config.slack_channel)
+    slack_channel = _resolve_slack_channel(project_dir, env_channel=config.slack_channel, toml_data=project_toml)
 
     # Step 1: Check prior tick
     prior_tick_id = _read_prior_tick_id(project_state)

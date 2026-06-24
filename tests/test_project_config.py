@@ -121,8 +121,9 @@ def test_discover_projects_finds_active_projects(tmp_path: Path):
     config = Config(projects_dir=projects_dir)
     result = _discover_projects(config)
     assert len(result) == 2
-    assert projects_dir / "project-a" in result
-    assert projects_dir / "project-b" in result
+    paths = [p for p, _ in result]
+    assert projects_dir / "project-a" in paths
+    assert projects_dir / "project-b" in paths
 
 
 def test_discover_projects_skips_disabled(tmp_path: Path):
@@ -141,8 +142,9 @@ def test_discover_projects_skips_disabled(tmp_path: Path):
     config = Config(projects_dir=projects_dir)
     result = _discover_projects(config)
     assert len(result) == 1
-    assert projects_dir / "project-a" in result
-    assert projects_dir / "project-b" not in result
+    paths = [p for p, _ in result]
+    assert projects_dir / "project-a" in paths
+    assert projects_dir / "project-b" not in paths
 
 
 def test_discover_projects_skips_no_todos(tmp_path: Path):
@@ -157,7 +159,8 @@ def test_discover_projects_skips_no_todos(tmp_path: Path):
     config = Config(projects_dir=projects_dir)
     result = _discover_projects(config)
     assert len(result) == 1
-    assert projects_dir / "project-b" in result
+    paths = [p for p, _ in result]
+    assert projects_dir / "project-b" in paths
 
 
 def test_discover_projects_skips_invalid_slugs(tmp_path: Path):
@@ -173,7 +176,8 @@ def test_discover_projects_skips_invalid_slugs(tmp_path: Path):
     config = Config(projects_dir=projects_dir)
     result = _discover_projects(config)
     assert len(result) == 1
-    assert projects_dir / "project-a" in result
+    paths = [p for p, _ in result]
+    assert projects_dir / "project-a" in paths
 
 
 def test_discover_projects_skips_files(tmp_path: Path):
@@ -199,5 +203,5 @@ def test_discover_projects_sorted(tmp_path: Path):
         (p / "TODOS.md").write_text("# TODOS\n")
     config = Config(projects_dir=projects_dir)
     result = _discover_projects(config)
-    names = [p.name for p in result]
+    names = [p.name for p, _ in result]
     assert names == ["alpha", "beta", "zebra"]

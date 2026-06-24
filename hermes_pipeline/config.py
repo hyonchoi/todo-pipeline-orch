@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -59,7 +61,6 @@ class SelectionConfig:
 @dataclass(frozen=True)
 class CircuitBreakerConfig:
     no_progress_threshold: int = 3
-    backoff_interval_min: int = 30
     alert_dedup_hours: int = 24
     max_phase_timeout_min: int = 120
     max_tick_duration_min: int = 10
@@ -83,16 +84,15 @@ def _validate_project_slug(slug: str) -> bool:
     - No consecutive dots (blocks '..' path traversal)
     - No leading dash (blocks CLI flag injection)
     - Not a bare '.' or '..'
+    - Minimum 2 characters (single-char slugs are too generic)
     """
-    import re
-
     if not slug or slug in (".", ".."):
         return False
     if slug.startswith(("-", ".")):
         return False
     if ".." in slug:
         return False
-    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]*$', slug))
+    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]+$', slug))
 
 
 def _coerce_section(cls, data: dict):
