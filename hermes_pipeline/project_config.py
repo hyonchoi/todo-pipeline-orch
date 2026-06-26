@@ -5,6 +5,7 @@ Reads <project>/.hermes/project.toml for project-specific settings.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 
 import tomllib
@@ -13,6 +14,17 @@ log = logging.getLogger(__name__)
 
 PROJECT_TOML_PATH = ".hermes/project.toml"
 DEFAULT_SLACK_CHANNEL = "#alert"
+
+# A valid Slack channel: optional #/@ sigil, then an alphanumeric first
+# character (no leading dash — that could inject a CLI flag into the
+# `hermes chan message <channel> ...` argv), then alnum/dot/dash/underscore.
+# \Z (not $) so a trailing newline can't sneak through.
+_SLACK_CHANNEL_RE = re.compile(r'^[#@]?[A-Za-z0-9][A-Za-z0-9._-]*\Z')
+
+
+def _is_valid_slack_channel(channel: str) -> bool:
+    """Return True if *channel* is safe to pass as a CLI argument."""
+    return bool(channel) and bool(_SLACK_CHANNEL_RE.match(channel))
 
 
 def _read_project_toml(project_dir: Path) -> dict | None:
@@ -71,11 +83,22 @@ def _resolve_slack_channel(
         notifications = toml_data.get("notifications", {})
         channel = notifications.get("slack_channel", "")
         if channel:
-            return channel
+            if _is_valid_slack_channel(channel):
+                return channel
+            log.warning(
+                "ignoring invalid slack_channel %r in %s/project.toml — "
+                "falling back to env/default",
+                channel, project_dir.name,
+            )
 
     # Level 2: env var
     if env_channel:
-        return env_channel
+        if _is_valid_slack_channel(env_channel):
+            return env_channel
+        log.warning(
+            "ignoring invalid PIPELINE_SLACK_CHANNEL %r — using default",
+            env_channel,
+        )
 
     # Level 3: hardcoded default
     return DEFAULT_SLACK_CHANNEL
@@ -104,6 +127,12 @@ def _discover_projects(config) -> list[tuple[Path, dict | None]]:
 
     projects = []
     for d in sorted(config.projects_dir.iterdir()):
+        # Skip symlinks before is_dir() (which follows them): a symlinked entry
+        # could point outside projects_dir and let a tick operate on an
+        # arbitrary path. Discovery only services real subdirectories.
+        if d.is_symlink():
+            log.warning("skipping symlinked project entry: %s", d.name)
+            continue
         if not d.is_dir():
             continue
         slug = d.name

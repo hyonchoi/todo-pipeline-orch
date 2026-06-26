@@ -92,7 +92,10 @@ def _validate_project_slug(slug: str) -> bool:
         return False
     if ".." in slug:
         return False
-    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]+$', slug))
+    # \Z (not $) anchors the absolute end of string: $ also matches just
+    # before a trailing newline, so "slug\n" would otherwise validate and the
+    # newline could smuggle into a path or CLI argument.
+    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]+\Z', slug))
 
 
 def _coerce_section(cls, data: dict):

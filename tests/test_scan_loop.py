@@ -43,7 +43,7 @@ def test_tick_scans_multiple_projects(tmp_path: Path):
 
     selection_calls = []
 
-    def mock_selection(*, tick_id, ctx, cfg):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
         selection_calls.append(ctx.project_slug)
         return _make_decision()
 
@@ -80,7 +80,7 @@ def test_tick_skips_disabled_projects(tmp_path: Path):
 
     selection_calls = []
 
-    def mock_selection(*, tick_id, ctx, cfg):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
         selection_calls.append(ctx.project_slug)
         return _make_decision()
 
@@ -114,7 +114,7 @@ def test_tick_error_isolation(tmp_path: Path):
 
     selection_calls = []
 
-    def mock_selection(*, tick_id, ctx, cfg):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
         if ctx.project_slug == "project-a":
             raise RuntimeError("simulated error in project-a")
         selection_calls.append(ctx.project_slug)
@@ -151,7 +151,7 @@ def test_tick_uses_per_project_state_dir(tmp_path: Path):
         ctx.project_slug = "project-a"
         return ctx
 
-    def mock_selection(*, tick_id, ctx, cfg):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
         return _make_decision()
 
     args = FakeArgs()
@@ -180,7 +180,7 @@ def test_tick_performs_state_migration(tmp_path: Path):
 
     config = Config(projects_dir=projects_dir, state_dir=state_dir)
 
-    def mock_selection(*, tick_id, ctx, cfg):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
         return _make_decision()
 
     args = FakeArgs()

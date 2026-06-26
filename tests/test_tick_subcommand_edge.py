@@ -315,7 +315,13 @@ class TestTickPicked:
         assert result == 0
 
     def test_kanban_registration_failure_writes_outcome(self, tmp_path, mocker):
-        """Kanban registration failure writes failed_to_spawn outcome."""
+        """Kanban registration failure writes failed_to_spawn outcome.
+
+        When register_todo_phases raises RuntimeError, _tick_project catches it,
+        writes a ``failed_to_spawn`` outcome sidecar via append_outcome, then
+        re-raises. The re-raise is caught at the _cmd_tick level (error
+        isolation), but the outcome persists for the circuit breaker.
+        """
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
         from hermes_pipeline.decision.schema import HermesSelectionDecision
@@ -343,12 +349,170 @@ class TestTickPicked:
             side_effect=RuntimeError("kanban error"),
         )
 
-        # Also need to mock _persist_tick_id to capture tick_id before the error
-        mock_persist = mocker.patch("hermes_pipeline.cli._persist_tick_id")
+        # Mock append_outcome to capture the failure record
+        mock_append = mocker.patch("hermes_pipeline.decision.store.append_outcome")
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
         result = _cmd_tick(FakeArgs(), config)
-        assert result == 0
 
-        # The error is caught at the _tick_project level, not the _cmd_tick level
-        # so no failed_to_spawn outcome is written by _tick_project
+        # Scan returns 0 (error isolation — one project's failure doesn't
+        # affect the exit code), but the failed_to_spawn outcome was written.
+        assert result == 0
+        mock_append.assert_called_once()
+        call_kwargs = mock_append.call_args
+        assert call_kwargs.kwargs.get("outcome", call_kwargs[0][2] if len(call_kwargs[0]) > 2 else None) == "failed_to_spawn"
+
+
+class TestPerProjectLockScanning:
+    """Tests for the per-project lock model and scan rotation."""
+
+    def test_per_project_lock_held_skips_only_that_project(self, tmp_path, mocker):
+        """A held lock on project-a should not block project-b."""
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "alpha")
+        _create_project(projects_dir, "beta")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        # Hold the lock for "alpha" only
+        alpha_state = projects_dir / "alpha" / ".hermes"
+        lock_dir = alpha_state / "tick.lock"
+        lock_dir.mkdir(parents=True, exist_ok=True)
+        (lock_dir / "holder.json").write_text(json.dumps({
+            "tick_id": "other",
+            "acquired_at": "2026-06-16T00:00:00Z",
+            "pid": 12345,
+        }))
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        mock_selection.reset_mock()
+        result = _cmd_tick(FakeArgs(), config)
+
+        assert result == 0
+        # run_selection was called once — for beta (alpha's lock was held)
+        assert mock_selection.call_count == 1
+
+    def test_scan_rotation_varies_first_project(self, tmp_path, mocker):
+        """_rotate_projects should advance a cursor so the first-project
+        advantage doesn't always land on the same project."""
+        from hermes_pipeline.cli import _rotate_projects
+
+        p1 = (Path("/fake/a"), None)
+        p2 = (Path("/fake/b"), None)
+        projects = [p1, p2]
+
+        # First rotation: cursor=0 → offset 0 → [a, b]; cursor becomes 1
+        r1 = _rotate_projects(projects, tmp_path)
+        # Second rotation: cursor=1 → offset 1 → [b, a]; cursor becomes 2
+        r2 = _rotate_projects(projects, tmp_path)
+
+        assert r1[0][0].name == "a"
+        assert r2[0][0].name == "b"
+
+    def test_scan_cursor_written(self, tmp_path):
+        """_rotate_projects persists the scan cursor for the next tick."""
+        from hermes_pipeline.cli import _rotate_projects
+
+        p1 = (Path("/fake/a"), None)
+        p2 = (Path("/fake/b"), None)
+        projects = [p1, p2]
+        _rotate_projects(projects, tmp_path)
+        assert (tmp_path / "scan_cursor.txt").exists()
+
+
+class TestSelectionTimeout:
+    """Tests for timeout threading through run_selection."""
+
+    def test_run_selection_receives_timeout(self, tmp_path, mocker):
+        """_tick_project derives a per-project timeout and passes it."""
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        _cmd_tick(FakeArgs(), config)
+
+        assert mock_selection.called
+        call_kwargs = mock_selection.call_args
+        # timeout is a keyword argument to run_selection
+        assert "timeout" in call_kwargs.kwargs
+        assert isinstance(call_kwargs.kwargs["timeout"], int)
+        assert call_kwargs.kwargs["timeout"] > 0
+
+
+class TestSecurityHardening:
+    """Tests for the security fixes: slug regex, slack channel, symlinks."""
+
+    def test_slug_rejects_trailing_newline(self):
+        """_validate_project_slug should reject slugs with trailing newlines
+        (the Z anchor prevents this, while $ would allow it)."""
+        from hermes_pipeline.config import _validate_project_slug
+        assert not _validate_project_slug("valid-slug\n")
+
+    def test_slack_channel_rejects_leading_dash(self):
+        """A leading dash in a slack channel could inject CLI flags."""
+        from hermes_pipeline.project_config import _is_valid_slack_channel
+        assert not _is_valid_slack_channel("-evil")
+
+    def test_slack_channel_accepts_valid(self):
+        """Normal channel names with # or @ prefix should be accepted."""
+        from hermes_pipeline.project_config import _is_valid_slack_channel
+        assert _is_valid_slack_channel("#alerts")
+        assert _is_valid_slack_channel("@person")
+        assert _is_valid_slack_channel("plain-channel")
+
+    def test_slack_channel_rejects_trailing_newline(self):
+        """A trailing newline could inject into CLI args."""
+        from hermes_pipeline.project_config import _is_valid_slack_channel
+        assert not _is_valid_slack_channel("#alerts\n")
+
+    def test_discover_projects_skips_symlinks(self, tmp_path, mocker):
+        """_discover_projects should skip symlinked project directories."""
+        from hermes_pipeline.project_config import _discover_projects
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+
+        # Real project
+        real_project = projects_dir / "real"
+        real_project.mkdir()
+        (real_project / "TODOS.md").write_text("# TODOS\n\nTODO-1 — test\n")
+
+        # Symlink pointing to the real project (escape attempt)
+        symlink = projects_dir / "symlink-project"
+        symlink.symlink_to(real_project)
+
+        config = mocker.MagicMock()
+        config.projects_dir = projects_dir
+
+        projects = _discover_projects(config)
+        slugs = [d.name for d, _ in projects]
+
+        assert "real" in slugs
+        assert "symlink-project" not in slugs
+
+    def test_resolve_slack_channel_falls_back_on_invalid(self, tmp_path, mocker):
+        """Invalid slack_channel in project.toml falls back to default."""
+        from hermes_pipeline.project_config import _resolve_slack_channel, DEFAULT_SLACK_CHANNEL
+
+        project_dir = tmp_path / "project"
+        project_dir.mkdir()
+        hermes = project_dir / ".hermes"
+        hermes.mkdir()
+        (hermes / "project.toml").write_text(
+            '[notifications]\nslack_channel = "-evil"\n'
+        )
+
+        result = _resolve_slack_channel(project_dir, env_channel="")
+        assert result == DEFAULT_SLACK_CHANNEL

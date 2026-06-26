@@ -45,12 +45,19 @@ def run_selection(
     tick_id: str,
     ctx: SelectionContext,
     cfg,
+    timeout: int | None = None,
 ) -> HermesSelectionDecision:
     """Build prompt -> call agent -> persist immutable decision -> return.
 
     On `PromptShaMismatch`: return `picked=None`, fire Slack alert, do NOT
     raise. The caller treats this as a config-fault tick (not a no-progress
     tick) by inspecting the rationale prefix.
+
+    Args:
+        timeout: Hard ceiling (seconds) for the agent call. When None, the
+            agent auto-derives a timeout from ``max_tokens``. Callers bound by
+            a per-project tick budget pass an explicit value so the call cannot
+            outlive the lock that protects it.
     """
     state_dir = _P(cfg.base.state_dir)
     prompt_path = _P(cfg.selection.prompt_path)
@@ -63,6 +70,7 @@ def run_selection(
             model=model,
             max_tokens=cfg.selection.max_tokens,
             expected_sha=cfg.selection.expected_prompt_sha,
+            timeout=timeout,
         )
         parsed = result.parsed
         prompt_sha = result.prompt_sha

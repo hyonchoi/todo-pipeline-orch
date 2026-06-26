@@ -37,6 +37,30 @@ from .tick import TickLock, TickLockHeld
 log = logging.getLogger(__name__)
 vlog = logging.getLogger("pipeline.verbose")
 
+# Seconds reserved from a project's tick budget for the non-LLM work
+# (kanban registration, outcome observation) so the selection call is bounded
+# strictly below the per-project lock's stale-reclaim window.
+_SELECTION_TIMEOUT_RESERVE_S = 30
+
+
+def _resolve_project_dir(config: Config, slug: str) -> Optional[Path]:
+    """Validate *slug* and resolve it to an existing project directory.
+
+    Returns the resolved Path, or None if the slug is invalid or the directory
+    doesn't exist — in which case the reason is logged and the caller should
+    return exit code 2. Centralizes the validate-then-resolve idiom so slug
+    validation (CLI-flag / path-traversal defense) can't be forgotten at a
+    call site.
+    """
+    if not _validate_project_slug(slug):
+        log.error("invalid project slug: %s", slug)
+        return None
+    project_dir = config.projects_dir / slug
+    if not project_dir.exists():
+        log.error("project not found: %s", slug)
+        return None
+    return project_dir
+
 
 def _hermes_run_kill(job_id: str) -> int:
     """Send hermes run kill for a job."""
@@ -263,8 +287,11 @@ def _kill_all_projects(
         print("no active projects found")
         return 0
 
-    total_killed = 0
-    total_unconfirmed = 0
+    # Both counters are project-scoped (a project is "unconfirmed" if its
+    # cmd_kill couldn't confirm every kill). Don't mix phase counts with
+    # project counts — only their zero/non-zero state drives the result below.
+    projects_with_kills = 0
+    projects_unconfirmed = 0
     # Track whether we checked any project for a specific TODO
     todo_checked = False
     todo_found = False
@@ -302,9 +329,9 @@ def _kill_all_projects(
             todo=todo,
         )
         if result == 0:
-            total_killed += len(targets)
+            projects_with_kills += 1
         else:
-            total_unconfirmed += 1
+            projects_unconfirmed += 1
 
     # If the user asked for a specific TODO and it wasn't found anywhere,
     # be explicit rather than hiding behind "no in-flight phases found".
@@ -312,10 +339,10 @@ def _kill_all_projects(
         print(f"no in-flight phase for {todo} in any project")
         return 2
 
-    if total_killed == 0 and total_unconfirmed == 0:
+    if projects_with_kills == 0 and projects_unconfirmed == 0:
         print("no in-flight phases found")
         return 0
-    elif total_unconfirmed > 0:
+    elif projects_unconfirmed > 0:
         return 1
     else:
         return 0
@@ -424,9 +451,8 @@ def _cmd_merge(args, config: Config) -> int:
         abandon = args.abandon
 
         # Find the project directory
-        project_dir = config.projects_dir / project
-        if not project_dir.exists():
-            log.error(f"project not found: {project}")
+        project_dir = _resolve_project_dir(config, project)
+        if project_dir is None:
             return 2
 
         # Build kanban adapter
@@ -495,12 +521,8 @@ def _cmd_kill(args, config: Config) -> int:
 
     # Resolve project-specific state directory when project is given
     if args.project is not None:
-        if not _validate_project_slug(args.project):
-            log.error("invalid project slug: %s", args.project)
-            return 2
-        project_dir = config.projects_dir / args.project
-        if not project_dir.exists():
-            log.error("project not found: %s", args.project)
+        project_dir = _resolve_project_dir(config, args.project)
+        if project_dir is None:
             return 2
         state_dir = _get_project_state_dir(project_dir)
     else:
@@ -610,6 +632,40 @@ def _persist_tick_id(state_dir: Path, tick_id: str, *, write_sentinel: bool = Tr
     except OSError as e:
         log.warning("failed to write tick_started sentinel: %s", e)
 
+def _rotate_projects(
+    projects: list[tuple[Path, dict | None]],
+    state_dir: Path,
+) -> list[tuple[Path, dict | None]]:
+    """Rotate scan order by a persisted cursor for fairness.
+
+    With per-project locks a slow or hung project no longer starves the
+    others, but a fixed (alphabetical) discovery order would still always tick
+    the same project first.  Rotating by a monotonically-increasing cursor
+    spreads first-pick evenly across ticks and helps overlapping crons start on
+    different projects, reducing lock contention.
+
+    Best-effort: a missing/corrupt cursor restarts from 0, and a failed persist
+    just means the next scan reuses the same offset (correctness is unaffected,
+    only fairness).
+    """
+    n = len(projects)
+    if n <= 1:
+        return projects
+    from .state import _atomic_write_text
+
+    cursor_file = state_dir / "scan_cursor.txt"
+    try:
+        cursor = int(cursor_file.read_text().strip())
+    except (FileNotFoundError, ValueError, OSError):
+        cursor = 0
+    offset = cursor % n
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(cursor_file, f"{cursor + 1}\n")
+    except OSError as e:
+        log.warning("failed to persist scan cursor: %s — scan order may repeat", e)
+    return projects[offset:] + projects[:offset]
+
 def _cmd_tick(args, config: Config) -> int:
     """Handle 'tick' subcommand — kanban-as-scheduler pipeline scan tick.
 
@@ -617,13 +673,19 @@ def _cmd_tick(args, config: Config) -> int:
     Otherwise, discover and tick all active projects.
 
     Flow:
-    1. Acquire global TickLock
-    2. Discover active projects (or use specified project)
-    3. For each project: migrate state, check prior tick, run selection
-    4. Release lock
+    1. Discover active projects (or use specified project)
+    2. One-time global state migration (single-project setups only)
+    3. Rotate scan order for fairness
+    4. For each project: acquire its own per-project lock, then run the
+       per-project tick flow (prior-tick check, selection, circuit breaker,
+       kanban registration) under that lock
 
-    Each project's errors are isolated — one project's failure doesn't
-    block the others.
+    There is deliberately no single global lock.  Each project's tick is
+    bounded independently by ``max_tick_duration_min`` (the per-project lock's
+    stale-reclaim budget), so a slow or hung project cannot starve the rest of
+    the scan, and an overlapping cron simply skips any project whose tick is
+    already in flight.  Per-project errors are isolated — one project's failure
+    (or held lock) doesn't block the others.
     """
     from .project_config import _discover_projects
     from .state_migration import _get_project_state_dir, _migrate_global_state
@@ -632,108 +694,117 @@ def _cmd_tick(args, config: Config) -> int:
     state_dir = config.state_dir
 
     # --- Step 1: Load global config overlay ---
+    # Only the circuit-breaker config is needed at scan scope; the full overlay
+    # is re-loaded per-project (each project may have its own config.toml).
     try:
-        toml_cfg, cb_cfg = _load_toml_overlay(state_dir, config)
+        _, cb_cfg = _load_toml_overlay(state_dir, config)
     except Exception as e:
         log.warning("failed to load config overlay: %s — using defaults", e)
         from .config import CircuitBreakerConfig
-        toml_cfg, cb_cfg = None, CircuitBreakerConfig()
+        cb_cfg = CircuitBreakerConfig()
 
-    # --- Step 2: Acquire global lock ---
-    tick_lock = TickLock(state_dir, max_age_min=cb_cfg.max_tick_duration_min)
-    tick_id = _generate_tick_id()
+    scan_id = _generate_tick_id()  # scan-level id, for log correlation only
+    vlog.info("starting scan: scan_id=%s state_dir=%s", scan_id, state_dir)
 
-    try:
-        vlog.info("acquiring tick lock: lock_dir=%s tick_id=%s", tick_lock.lock_dir, tick_id)
-        with tick_lock.acquire(tick_id):
-            log.debug("tick lock acquired: lock_dir=%s holder_pid=%d",
-                      tick_lock.lock_dir, os.getpid())
+    # --- Step 2: Discover projects ---
+    if args.project is not None:
+        project_dir = _resolve_project_dir(config, args.project)
+        if project_dir is None:
+            return 2
+        if not (project_dir / "TODOS.md").exists():
+            log.error("no TODOS.md in project: %s", args.project)
+            return 2
+        from .project_config import _is_enabled, _read_project_toml
+        if not _is_enabled(project_dir):
+            log.error("project is disabled: %s — remove .hermes/project.toml or set enabled = true", args.project)
+            return 2
+        explicit_toml = _read_project_toml(project_dir)
+        projects = [(project_dir, explicit_toml)]
+    else:
+        # Missing projects_dir is a configuration error, not "no projects to
+        # process".  Distinguish so the cron doesn't silently run forever on a
+        # misconfigured setup.
+        if not config.projects_dir.is_dir():
+            log.error("projects_dir %s does not exist — check config",
+                      config.projects_dir)
+            return 2
+        projects = _discover_projects(config)
+        if not projects:
+            log.info("no active projects found in %s", config.projects_dir)
+            return 0
 
-            # --- Step 3: Discover projects ---
-            if args.project is not None:
-                if not _validate_project_slug(args.project):
-                    log.error("invalid project slug: %s", args.project)
-                    return 2
-                project_dir = config.projects_dir / args.project
-                if not project_dir.exists():
-                    log.error("project not found: %s", args.project)
-                    return 2
-                if not (project_dir / "TODOS.md").exists():
-                    log.error("no TODOS.md in project: %s", args.project)
-                    return 2
-                from .project_config import _is_enabled, _read_project_toml
-                if not _is_enabled(project_dir):
-                    log.error("project is disabled: %s — remove .hermes/project.toml or set enabled = true", args.project)
-                    return 2
-                explicit_toml = _read_project_toml(project_dir)
-                projects = [(project_dir, explicit_toml)]
-            else:
-                # Missing projects_dir is a configuration error, not "no
-                # projects to process".  Distinguish so the cron doesn't
-                # silently run forever on a misconfigured setup.
-                if not config.projects_dir.is_dir():
-                    log.error("projects_dir %s does not exist — check config",
-                              config.projects_dir)
-                    return 2
-                projects = _discover_projects(config)
-                if not projects:
-                    log.info("no active projects found in %s", config.projects_dir)
-                    return 0
+    log.info("discovered %d active projects", len(projects))
 
-            log.info("discovered %d active projects", len(projects))
-
-            # --- Step 3b: One-time global state migration ---
-            # The old single-project state (~/.hermes/) belongs to whichever
-            # project used it before.  Migrate it to the first project only —
-            # copying the same current_tick_id.txt / circuit.json to every
-            # project would cause new projects to inherit a stale tick_id they
-            # never owned, permanently stalling as "prior tick in-flight".
-            #
-            # Only auto-migrate when there's exactly one project.  With multiple
-            # projects we can't know which one owned the old state, so skip and
-            # ask the operator to handle it manually.
-            if len(projects) == 1:
-                first_project, _ = projects[0]
-                try:
-                    _migrate_global_state(first_project, config)
-                except Exception as e:
-                    log.warning("one-time state migration to %s: %s",
-                                first_project.name, e)
-            else:
-                global_src = config.state_dir / "current_tick_id.txt"
-                if global_src.is_file():
+    # --- Step 3: One-time global state migration ---
+    # The old single-project state (~/.hermes/) belongs to whichever project
+    # used it before.  Migrate it to the first project only — copying the same
+    # current_tick_id.txt / circuit.json to every project would cause new
+    # projects to inherit a stale tick_id they never owned, permanently
+    # stalling as "prior tick in-flight".
+    #
+    # Only auto-migrate when there's exactly one project.  With multiple
+    # projects we can't know which one owned the old state, so skip and ask the
+    # operator to handle it manually.
+    if len(projects) == 1:
+        first_project, _ = projects[0]
+        try:
+            _migrate_global_state(first_project, config)
+        except Exception as e:
+            log.warning("one-time state migration to %s: %s",
+                        first_project.name, e)
+    else:
+        global_src = config.state_dir / "current_tick_id.txt"
+        if global_src.is_file():
+            # Only warn once per session, not every tick — a persistent
+            # global file is a known multi-project situation and the
+            # operator is responsible for resolving it.
+            warn_suppressed = state_dir / "migration_warning_suppressed"
+            try:
+                if not warn_suppressed.exists():
                     log.warning(
-                        "global state exists at %s but %d projects were "
-                        "discovered — can't determine which project owns the "
-                        "old state.  Migrate manually to the correct project "
-                        "or remove the file.",
+                        "global state exists at %s but %d projects were discovered — "
+                        "can't determine which project owns the old state.  Migrate "
+                        "manually to the correct project or remove the file.",
                         config.state_dir,
                         len(projects),
                     )
+                    warn_suppressed.touch(exist_ok=True)
+            except OSError:
+                pass
 
-            # --- Step 4: Per-project tick ---
-            for project_dir, project_toml in projects:
-                project_slug = project_dir.name
-                project_state = _get_project_state_dir(project_dir)
+    # --- Step 4: Fairness rotation, then per-project tick ---
+    projects = _rotate_projects(projects, state_dir)
 
-                try:
-                    _tick_project(
-                        project_dir=project_dir,
-                        project_slug=project_slug,
-                        project_state=project_state,
-                        config=config,
-                        cb_cfg=cb_cfg,
-                        project_toml=project_toml,
-                    )
-                except Exception as e:
-                    log.error("project %s: %s", project_slug, e, exc_info=True)
-                    # Continue to next project
+    for project_dir, project_toml in projects:
+        project_slug = project_dir.name
+        project_state = _get_project_state_dir(project_dir)
+        project_state.mkdir(parents=True, exist_ok=True)
 
-    except TickLockHeld:
-        log.error("tick lock held, exiting")
-        return 1
+        # Each project takes its own lock, identified by the same tick_id the
+        # selection will use, so `kill` can correlate the lock holder with the
+        # phase_started markers it writes.  The lock's max_age == the
+        # per-project tick budget.
+        project_tick_id = _generate_tick_id()
+        tick_lock = TickLock(project_state, max_age_min=cb_cfg.max_tick_duration_min)
+        try:
+            with tick_lock.acquire(project_tick_id):
+                _tick_project(
+                    project_dir=project_dir,
+                    project_slug=project_slug,
+                    project_state=project_state,
+                    config=config,
+                    cb_cfg=cb_cfg,
+                    project_toml=project_toml,
+                    tick_id=project_tick_id,
+                )
+        except TickLockHeld:
+            log.info("project %s: tick already in flight (lock held), skipping",
+                     project_slug)
+        except Exception as e:
+            log.error("project %s: %s", project_slug, e, exc_info=True)
+            # Continue to next project
 
-    vlog.info("tick lock released: tick_id=%s", tick_id)
+    vlog.info("scan complete: scan_id=%s", scan_id)
     return 0
 
 def _tick_project(
@@ -743,6 +814,7 @@ def _tick_project(
     project_state: Path,
     config: Config,
     cb_cfg,
+    tick_id: str,
     project_toml: dict | None = None,
 ) -> None:
     """Run the tick flow for a single project.
@@ -757,17 +829,18 @@ def _tick_project(
         project_state: Per-project state directory (<project>/.hermes/).
         config: Global config.
         cb_cfg: Circuit breaker configuration.
+        tick_id: The tick_id for this project's tick. Generated by the caller
+            and used as the per-project lock holder id so `kill` can correlate
+            the lock with the phase_started markers written under it.
         project_toml: Pre-parsed project.toml data (from _discover_projects).
 
     Raises:
         Exception: On any error (caller logs and continues to next project).
+
+    Note:
+        The caller holds this project's TickLock for the duration of this call.
     """
     from .project_config import _resolve_slack_channel
-
-    vlog = logging.getLogger("pipeline.verbose")
-
-    # Ensure per-project state directory exists
-    project_state.mkdir(parents=True, exist_ok=True)
 
     # Resolve per-project Slack channel
     slack_channel = _resolve_slack_channel(project_dir, env_channel=config.slack_channel, toml_data=project_toml)
@@ -801,7 +874,6 @@ def _tick_project(
                         project_slug, prior_tick_id, e)
 
     # Step 3: Build context & run selection
-    tick_id = _generate_tick_id()
     todos_path = project_dir / "TODOS.md"
     if not todos_path.exists():
         raise FileNotFoundError(f"TODOS.md not found in {project_dir}")
@@ -832,10 +904,25 @@ def _tick_project(
             circuit_breaker=cb_cfg,
         )
 
+    # The selection LLM call is the dominant blocking step of a project tick.
+    # It must finish before the per-project lock's stale-reclaim budget
+    # (max_tick_duration_min) elapses — otherwise a concurrent cron could
+    # reclaim the lock mid-call and double-tick the project. Bound the call by
+    # the budget (less a reserve for registration/observe), clamped to the
+    # agent's own sane floor/ceiling.
+    from .decision.agent import MAX_TIMEOUT_SECONDS, MIN_TIMEOUT_SECONDS
+
+    budget_s = cb_cfg.max_tick_duration_min * 60
+    selection_timeout_s = max(
+        MIN_TIMEOUT_SECONDS,
+        min(MAX_TIMEOUT_SECONDS, budget_s - _SELECTION_TIMEOUT_RESERVE_S),
+    )
+
     decision = run_selection(
         tick_id=tick_id,
         ctx=ctx,
         cfg=full_cfg,
+        timeout=selection_timeout_s,
     )
     picked = decision.picked
 
@@ -880,7 +967,15 @@ def _tick_project(
             _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
-    # Step 4: Register kanban phases
+    # Step 4: Persist tick_id before registering kanban phases.
+    # This prevents a crash window: if register_todo_phases succeeds but
+    # persist fails (or we crash between them), the next tick has no
+    # record of this tick and cold-starts → duplicate agent spawn.
+    # The tick_started sentinel tells all_phases_complete that this tick
+    # was legitimate even if registration crashed before creating kanban tasks.
+    _persist_tick_id(project_state, tick_id)
+
+    # Step 5: Register kanban phases
     log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
     try:
         task_ids = register_todo_phases(
@@ -909,21 +1004,13 @@ def _tick_project(
     # Observe circuit breaker
     cb.observe(picked=picked, counts_as_no_progress=False)
 
-    # Persist tick_id inside lock
-    _persist_tick_id(project_state, tick_id)
-
 def _cmd_recover_counter(args, config: Config) -> int:
     """Handle 'recover-counter' subcommand."""
     project = args.project
 
-    # Validate project slug
-    if not _validate_project_slug(project):
-        log.error("invalid project slug: %r (must be alphanumeric, dot, dash, underscore)", project)
-        return 2
-
-    project_dir = config.projects_dir / project
-    if not project_dir.exists():
-        log.error("project not found: %s", project)
+    # Validate slug and resolve the project directory
+    project_dir = _resolve_project_dir(config, project)
+    if project_dir is None:
         return 2
 
     from .counter import recover_counter

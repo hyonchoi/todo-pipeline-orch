@@ -735,8 +735,3 @@ def _kill_all_projects(
     else:
         return 0
 ```
-
-<tool_call>
-<function=mcp__plugin_context-mode_context-mode__ctx_execute_file>
-<parameter=path>
-/Users/hyonchoi/Personal/todo-pipeline-orchestrator/hermes_pipeline/phases.py

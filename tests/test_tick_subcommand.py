@@ -106,16 +106,26 @@ class TestTickSubcommand:
         result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
-    def test_tick_lock_held_exits_early(self, tmp_path):
-        """Tick lock already held -> exit early with error."""
+    def test_tick_lock_held_skips_that_project(self, tmp_path, mocker):
+        """A held per-project lock skips that project; scan still returns 0.
+
+        Under the per-project lock model there is no single global lock, so a
+        lock held on one project must not abort the whole scan — that project
+        is simply skipped (its selection never runs) and the loop continues.
+        """
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
+
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
 
-        # Hold the lock
-        lock_dir = state_dir / "tick.lock"
+        # Hold the per-project lock for "demo" with a fresh (non-stale) holder.
+        project_state = projects_dir / "demo" / ".hermes"
+        lock_dir = project_state / "tick.lock"
         lock_dir.mkdir(parents=True, exist_ok=True)
         (lock_dir / "holder.json").write_text(
             json.dumps({
@@ -127,7 +137,10 @@ class TestTickSubcommand:
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
         result = _cmd_tick(FakeArgs(), config)
-        assert result == 1  # Exit code for lock held
+
+        # Scan succeeds overall, but the locked project's selection is skipped.
+        assert result == 0
+        mock_selection.assert_not_called()
 
     def test_tick_no_projects(self, tmp_path):
         """No projects found -> return 0."""
