@@ -3,7 +3,7 @@
 Pipeline behavior that doesn't fit the environment-variable surface lives in
 a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 `[selection]` (Hermes-agent model + prompt pinning) and `[circuit_breaker]`
-(stall detection + cron backoff).
+(stall detection and Slack alerting).
 
 ## Prerequisites
 
@@ -28,7 +28,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 
    ```toml
    [selection]
-   model = "claude-opus-4-7"
+   model = "auto"
    max_tokens = 4000
    auto_execute = false
    prompt_path = ".hermes/prompts/selection.md"
@@ -36,7 +36,6 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 
    [circuit_breaker]
    no_progress_threshold = 3
-   backoff_interval_min = 30
    alert_dedup_hours = 24
    max_phase_timeout_min = 120
    max_tick_duration_min = 10
@@ -57,7 +56,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 
 | Key | Default | Effect |
 |---|---|---|
-| `model` | `claude-opus-4-7` | Model id passed to `hermes chat -q -m <model>`. Pin a specific snapshot to keep eval results stable; bumping this is a real change — re-run the eval suite. |
+| `model` | `auto` | Model id passed to `hermes chat -q -m <model>`. `"auto"` lets Hermes resolve the current best model. Pin a specific snapshot to keep eval results stable; bumping this is a real change — re-run the eval suite. |
 | `max_tokens` | `4000` | Cap on the model's response. The selection JSON is small (<1KB typical); raising this rarely helps and costs more. |
 | `auto_execute` | `false` | When `false`, decisions are persisted but the phase does not run (shadow mode). Set `true` only after the eval suite passes against the current prompt. |
 | `prompt_path` | `.hermes/prompts/selection.md` | File the agent loads and hashes. Path is resolved relative to the working directory of `pipeline-watch`, not the state dir. |
@@ -67,8 +66,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 
 | Key | Default | Effect |
 |---|---|---|
-| `no_progress_threshold` | `3` | Consecutive `picked=null` decisions (excluding `prompt_sha_mismatch:` and `tick_lock_held:`) before backoff engages. |
-| `backoff_interval_min` | `30` | Minutes the cron skip-window holds once the breaker trips. |
+| `no_progress_threshold` | `3` | Consecutive `picked=null` decisions before a Slack alert is sent (the gateway service manages tick scheduling — the circuit breaker no longer adjusts cron). |
 | `alert_dedup_hours` | `24` | Identical alert bodies inside this window are suppressed by the sink. |
 | `max_phase_timeout_min` | `120` | Upper bound on a single phase invocation. A phase that exceeds this is killable by `pipeline-watch kill` and surfaces as orphaned. |
 | `max_tick_duration_min` | `10` | Upper bound on one tick (selection + phase invocation). Beyond this, the stale-marker sweep treats the tick lock as abandoned. |
@@ -102,14 +100,14 @@ The loaded config takes effect on the next tick. Confirm by inspecting the
 newest decision and outcome files:
 
 ```bash
-ls -t .hermes/decisions/ | head -1
-ls -t .hermes/outcomes/ 2>/dev/null | head -1
+ls -t ~/projects/<project>/.hermes/decisions/ | head -1
+ls -t ~/projects/<project>/.hermes/outcomes/ 2>/dev/null | head -1
 ```
 
 Or inspect the newest decision file to confirm the config took effect:
 
 ```bash
-jq '.model, .max_tokens' .hermes/decisions/$(ls -t .hermes/decisions/ | head -1)
+jq '.model, .max_tokens' ~/projects/<project>/.hermes/decisions/$(ls -t ~/projects/<project>/.hermes/decisions/ | head -1)
 ```
 
 ## Troubleshooting

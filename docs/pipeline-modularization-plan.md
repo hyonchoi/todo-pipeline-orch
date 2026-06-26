@@ -42,20 +42,22 @@ hermes-pipeline/
 phases:
   - name: "Phase 2: Autoplan"
     prompt: |
-      gstack autoplan 스킬을 사용하세요.
-      1. TODOS.md를 읽고 다음 작업을 선택하세요
-      2. CEO/ENG/UI/DX 리뷰를 수행하세요
-      3. Plan 문서를 .hermes/plans/에 생성하세요
-      4. main에서 새 브랜치를 생성하고 계획서를 커밋하세요
-      5. 브랜치명을 .hermes/pipeline_branch.txt에 저장하세요
+      gstack autoplan skill을 사용하세요.
+
+      선택된 TODO는 {todo_id}입니다 — 이미 TODOS.md에서 in-flight로 표시됩니다.
+      {todo_id}만 작업하세요.
+
+      1. {todo_id}에 대한 CEO/Eng/UI/DX 리뷰를 수행하세요.
+      2. 모든 계획 및 보조 문서를 docs/pipeline/에 저장하세요 (예: {todo_id}-plan.md).
+      3. main에서 새 브랜치를 생성하세요.
+      4. 생성된 문서를 커밋하세요.
+      5. 브랜치명을 .hermes/pipeline_branch.txt에 저장하세요.
     tools: "Read,Write,Bash"
     turns: 20
     timeout: 1800
 
   - name: "Phase 3: Writing Plan"
-    prompt: |
-      superpowers writing-plan 스킬을 사용하세요.
-      .hermes/plans/의 plan 문서를 superpowers 형식으로 변환하세요.
+    prompt: "writing-plans skill을 사용하세요. docs/pipeline/{todo_id}-plan.md를 읽어서 superpowers 형식으로 변환 후 docs/pipeline/{todo_id}-impl-plan.md에 저장하세요. 생성된 문서를 커밋하세요."
     tools: "Read,Write,Bash"
     turns: 15
     timeout: 1800

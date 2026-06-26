@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -50,7 +52,7 @@ class Config:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    model: str = "claude-opus-4-7"
+    model: str = "auto"
     max_tokens: int = 4000
     auto_execute: bool = False
     prompt_path: str = ".hermes/prompts/selection.md"
@@ -59,7 +61,6 @@ class SelectionConfig:
 @dataclass(frozen=True)
 class CircuitBreakerConfig:
     no_progress_threshold: int = 3
-    backoff_interval_min: int = 30
     alert_dedup_hours: int = 24
     max_phase_timeout_min: int = 120
     max_tick_duration_min: int = 10
@@ -72,6 +73,30 @@ class FullConfig:
 
     def __getattr__(self, name):
         return getattr(self.base, name)
+
+def _validate_project_slug(slug: str) -> bool:
+    """Reject project slugs that could inject CLI flags or traverse paths.
+
+    Rules:
+    - Must start with a letter or digit (no leading dash, dot, or underscore)
+    - Only alphanumeric, single dash, single underscore, single dot (no consecutive
+      dots that could form '..' path traversal)
+    - No consecutive dots (blocks '..' path traversal)
+    - No leading dash (blocks CLI flag injection)
+    - Not a bare '.' or '..'
+    - Minimum 2 characters (single-char slugs are too generic)
+    """
+    if not slug or slug in (".", ".."):
+        return False
+    if slug.startswith(("-", ".")):
+        return False
+    if ".." in slug:
+        return False
+    # \Z (not $) anchors the absolute end of string: $ also matches just
+    # before a trailing newline, so "slug\n" would otherwise validate and the
+    # newline could smuggle into a path or CLI argument.
+    return bool(re.match(r'^[a-zA-Z0-9][a-zA-Z0-9._-]+\Z', slug))
+
 
 def _coerce_section(cls, data: dict):
     fields = {f.name for f in cls.__dataclass_fields__.values()}

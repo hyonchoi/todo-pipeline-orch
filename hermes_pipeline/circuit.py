@@ -1,4 +1,4 @@
-"""Circuit breaker — N consecutive no-progress ticks -> backoff + Slack alert."""
+"""Circuit breaker — N consecutive no-progress ticks -> Slack alert."""
 from __future__ import annotations
 import datetime as _dt
 import fcntl
@@ -28,26 +28,16 @@ def _send_slack(*, channel: str, msg: str) -> None:
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
 
-def _set_cron_interval(*, minutes: int) -> None:
-    try:
-        subprocess.run(
-            ["hermes", "cron", "set", "pipeline-tick", f"*/{minutes} * * * *"],
-            timeout=10, check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
 @dataclass
 class CircuitBreaker:
     state_path: Path
     no_progress_threshold: int
-    backoff_interval_min: int
     alert_dedup_hours: int
     slack_channel: str
 
     def _load(self) -> dict:
         if not self.state_path.exists():
-            return {"consecutive_no_progress": 0, "last_alert_at": None, "backed_off": False}
+            return {"consecutive_no_progress": 0, "last_alert_at": None}
         return json.loads(self.state_path.read_text())
 
     def _save(self, st: dict) -> None:
@@ -60,17 +50,13 @@ class CircuitBreaker:
                   picked, counts_as_no_progress, st)
         if picked is not None:
             st["consecutive_no_progress"] = 0
-            if st.get("backed_off"):
-                log.debug("circuit breaker: resuming from backoff (was backed_off=True)")
-                _set_cron_interval(minutes=5)
-                st["backed_off"] = False
             self._save(st)
             return
         if not counts_as_no_progress:
             self._save(st)
             return
         st["consecutive_no_progress"] += 1
-        if st["consecutive_no_progress"] >= self.no_progress_threshold and not st.get("backed_off"):
+        if st["consecutive_no_progress"] >= self.no_progress_threshold:
             last = st.get("last_alert_at")
             dedup_ok = True
             if last:
@@ -82,12 +68,9 @@ class CircuitBreaker:
                           st["consecutive_no_progress"])
                 _send_slack(
                     channel=self.slack_channel,
-                    msg=f"pipeline-tick: {st['consecutive_no_progress']} consecutive no-progress ticks; backing off to {self.backoff_interval_min}m",
+                    msg=f"pipeline-tick: {st['consecutive_no_progress']} consecutive no-progress ticks",
                 )
                 st["last_alert_at"] = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
-            _set_cron_interval(minutes=self.backoff_interval_min)
-            st["backed_off"] = True
-            log.debug("circuit breaker: backed off to %d min interval", self.backoff_interval_min)
         self._save(st)
 
     def observe_from_outcomes(
@@ -162,12 +145,9 @@ class CircuitBreaker:
             return self.observe(picked=None, counts_as_no_progress=True)
 
         if has_all_complete or has_phase_complete:
-            # Progress detected — reset counter and backoff state
+            # Progress detected — reset counter
             st = self._load()
             st["consecutive_no_progress"] = 0
-            if st.get("backed_off"):
-                _set_cron_interval(minutes=5)
-                st["backed_off"] = False
             self._save(st)
             return
 

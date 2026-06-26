@@ -2,7 +2,7 @@
 
 A tick is one pass of the pipeline: select a TODO via the Hermes agent,
 register phases as kanban tasks, and observe the circuit breaker. The
-`pipeline-watch tick` command fires a single tick immediately so you can
+`pipeline-watch tick` command fires a single scan-loop tick immediately so you can
 iterate without waiting for the cron schedule.
 
 By the end of this guide, you'll have run a tick, inspected the kanban
@@ -22,36 +22,29 @@ board, and verified the outcome files.
 ### 1. Run a tick
 
 ```bash
-uv run pipeline-watch tick <project>
+uv run pipeline-watch tick
 ```
 
-For example:
-```bash
-uv run pipeline-watch tick demo
+This runs the full scan-loop tick:
 ```
-
-This runs the full tick flow:
-1. **Prior-tick check** — if a previous tick's kanban tasks are still in-flight,
-   the new tick skips ("tick already in flight, skipping").
-2. **Outcome observation** — if a prior tick completed, reads kanban statuses
-   and writes outcomes to `.hermes/outcomes/<tick_id>-phases.json`.
-3. **Circuit breaker** — feeds the outcomes into the circuit breaker
-   (`observe_from_outcomes`).
-4. **Lock acquisition** — acquires `.hermes/tick.lock` via atomic mkdir.
-   If the lock is held by a PID older than `max_tick_duration_min` (10 min
-   default), the stale marker is swept and the lock is reclaimed.
-5. **Selection** — runs `run_selection` via the Hermes agent. The agent picks
-   a TODO (or `picked=None` if nothing is ready).
-6. **Phase registration** — if a TODO was picked, registers phases as kanban
-   tasks with `--parent` dependency chains (see [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md)).
+tick:
+  1. Acquire global TickLock
+  2. Discover active projects (scans projects_dir)
+  3. For each project:
+     a. Migrate per-project state (one-time)
+     b. Check prior tick (per-project)
+     c. Run selection (per-project)
+     d. Register kanban phases or observe circuit breaker
+  4. Release lock
+```
 
 ### 2. Check what the selection picked
 
-The decision is persisted to `.hermes/decisions/<tick_id>.json`. Inspect it:
+In a multi-project setup, decisions are persisted per-project at `<project>/.hermes/decisions/<tick_id>.json`. Inspect the latest (substitute `<project>` with your project name):
 
 ```bash
 jq '{picked: .picked, rationale: .rationale}' \
-  .hermes/decisions/$(ls -t .hermes/decisions/ | head -1)
+  ~/projects/<project>/.hermes/decisions/$(ls -t ~/projects/<project>/.hermes/decisions/ | head -1)
 ```
 
 Example output when a TODO is picked:
@@ -67,7 +60,7 @@ Example output when a TODO is picked:
 If the selection picked a TODO, phases are now registered as kanban tasks:
 
 ```bash
-hermes kanban list --board demo
+hermes kanban list --tenant demo
 ```
 
 You should see the phases with statuses:
@@ -81,10 +74,10 @@ automatically — the orchestrator doesn't need to manage the handoff.
 ### 4. Verify outcomes were written
 
 After a tick completes (or you run another tick that detects the prior tick
-is done), outcomes are written to `.hermes/outcomes/`:
+is done), outcomes are written to `<project>/.hermes/outcomes/`:
 
 ```bash
-cat .hermes/outcomes/$(ls -t .hermes/outcomes/ | head -1) | jq .
+cat ~/projects/<project>/.hermes/outcomes/$(ls -t ~/projects/<project>/.hermes/outcomes/ | head -1) | jq .
 ```
 
 You'll see JSONL entries like:
@@ -99,21 +92,36 @@ for all possible outcomes.
 
 ### 5. Check the circuit breaker state
 
+Circuit breaker state is per-project:
+
 ```bash
-cat .hermes/circuit.json | jq .
+cat ~/projects/<project>/.hermes/circuit.json | jq .
 ```
 
 Key fields:
-- `consecutive_no_progress` — resets to 0 when `phase_complete` is observed,
-  increments on `failed_at_phase_*` outcomes.
-- `backed_off` — becomes `true` when the counter hits `no_progress_threshold`
-  (default: 3). Cron backoff engages at this point.
+- `consecutive_no_progress` — resets to 0 when a TODO is selected,
+  increments on no-progress ticks. When it hits `no_progress_threshold`
+  (default: 3), a Slack alert is sent.
+- `last_alert_at` — ISO timestamp of the last Slack alert; used for dedup
+  (one alert per `alert_dedup_hours`, default: 24).
+
+## Debugging a Single Project
+
+The scan loop runs over all active projects. To debug a specific project's
+selection, temporarily set all other projects to `enabled = false` in their
+`.hermes/project.toml`, or temporarily rename their `TODOS.md`.
+
+## State Directory
+
+Per-project state (selection decisions, outcomes, circuit breaker) now lives
+at `<project>/.hermes/`. Global state (`tick.lock`, `config.toml`) remains
+in `~/.hermes/`.
 
 ## Troubleshooting
 
 **"tick already in flight, skipping".**
 A prior tick's kanban tasks are still running or ready. Check the board:
-`hermes kanban list --board demo`. If tasks are stuck in `running`,
+`hermes kanban list --tenant demo`. If tasks are stuck in `running`,
 use [pipeline-watch kill](howto-kill-stuck-phase.md) to clear them.
 
 **"Error: tick.lock held by pid X"**.
@@ -130,11 +138,12 @@ If a task fails partway through, already-created tasks are archived. The
 outcome file will show `failed_at_phase_*` with `kanban_status: "archived"`.
 Check the kanban board for archived tasks and investigate the error.
 
-**Circuit breaker trips (backed_off = true).**
-Three consecutive no-progress ticks triggered the backoff. The cron interval
-switched from 5 minutes to `backoff_interval_min` (default: 30 min). Check
-`.hermes/decisions/` for `picked=None` decisions — the rationale explains
-why each tick found nothing to do. See [howto-config-toml.md](howto-config-toml.md#loosen-the-circuit-breaker-during-onboarding)
+**Circuit breaker trips (consecutive_no_progress >= 3).**
+Three consecutive no-progress ticks triggered a Slack alert. The gateway
+service manages tick scheduling and backoff — the circuit breaker no longer
+adjusts the cron interval. Check `<project>/.hermes/decisions/` for
+`picked=None` decisions — the rationale explains why each tick found nothing
+to do. See [howto-config-toml.md](howto-config-toml.md#loosen-the-circuit-breaker-during-onboarding)
 for how to temporarily loosen the threshold.
 
 ## Related

@@ -26,7 +26,7 @@ uv run pipeline-watch --version
 
 Expected output:
 ```
-pipeline-watch 0.3.1
+pipeline-watch 0.3.3
 ```
 
 If you see "command not found," run:
@@ -80,7 +80,7 @@ You now have a project that pipeline-watch can discover. Next, tell pipeline-wat
 
 ## Step 3: Configure pipeline-watch
 
-Pipeline-watch discovers projects by scanning a directory you specify. Tell it where your projects are:
+Pipeline-watch discovers projects by scanning a directory you specify via `PIPELINE_PROJECTS_DIR`. The default is `~/projects`. Tell it where your projects are:
 
 ```bash
 export PIPELINE_PROJECTS_DIR=~/my-projects
@@ -105,13 +105,13 @@ This is correct — no TODOs are ready for review yet. The status command shows 
 
 ## Step 4: Run a manual tick
 
-The `tick` command runs one pipeline tick immediately: it checks for in-flight work from a previous tick, observes outcomes, acquires a tick lock, runs selection via the Hermes agent, and registers phases as kanban tasks. This is the fastest way to see the pipeline in action.
+The `tick` command runs one pipeline tick immediately: it scans all active projects in your `projects_dir`, checks for in-flight work from a previous tick, observes outcomes, acquires a tick lock, runs selection via the Hermes agent, and registers phases as kanban tasks. This is the fastest way to see the pipeline in action.
 
 ```bash
-uv run pipeline-watch tick demo-app
+uv run pipeline-watch tick
 ```
 
-You'll see log output as the tick runs. The Hermes agent evaluates your TODOS.md and picks a TODO (or returns `picked=None` if nothing is ready yet).
+You'll see log output as the tick runs through each active project. The Hermes agent evaluates TODOS.md files and picks a TODO (or returns `picked=None` if nothing is ready yet).
 
 Check the decision record:
 
@@ -129,22 +129,43 @@ cd ~/my-projects/demo-app
 git add TODOS.md
 git commit -m "TODO-1: mark in progress"
 
-uv run pipeline-watch tick demo-app
+uv run pipeline-watch tick
 ```
 
-Run the tick a second time. This tick observes outcomes from the prior tick (if any) and then runs selection again.
+Run the tick a second time. This tick scans all active projects, observes outcomes from the prior tick (if any), and then runs selection again.
 
 ### Inspect the kanban board
 
 If a TODO was picked, phases are now registered as kanban tasks with `--parent` dependency chains. Check the board:
 
 ```bash
-hermes kanban list --board demo-app
+hermes kanban list --tenant demo-app
 ```
 
 You should see phases like `phase_2_autoplan` (running) and `phase_4_development` (ready — blocked on its parent).
 
 See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
+
+---
+
+## Project Configuration
+
+Each project can have a `.hermes/project.toml` file to configure project-specific settings:
+
+```toml
+[active]
+enabled = true  # default; set to false to archive a project
+
+[notifications]
+slack_channel = "project__my-slug"  # per-project alert channel
+```
+
+If the file doesn't exist, the project is active by default. To archive a project (stop scanning it without deleting TODOS.md), create the file with `enabled = false`.
+
+**Slack channel resolution (priority):**
+1. `project.toml`'s `slack_channel`
+2. `PIPELINE_SLACK_CHANNEL` environment variable
+3. `#alert` (hardcoded fallback)
 
 ---
 
@@ -159,9 +180,9 @@ uv run pipeline-watch status
 When TODOs are ready for review, you'll see a table like:
 
 ```
-Project | TODO ID | Status           | Age
---------|---------|------------------|------
-demo-app| 1       | ready-for-review | 5m
+PROJECT    | TODO | BRANCH               | PR | STATUS | AGE
+-----------|------|----------------------|----|--------|-----
+demo-app   | 1    | feature/todo-1-...   |    | pending| 5m
 ```
 
 ---

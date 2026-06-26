@@ -65,6 +65,7 @@ def register_todo_phases(
     board_slug: str,
     project_dir: str | Path,
     phases_path: str | Path | None = None,
+    assignee: str = "default",
 ) -> list[str]:
     """Register phases as kanban tasks with --parent dependency chain.
 
@@ -119,6 +120,7 @@ def register_todo_phases(
             "--body", body,
             "--workspace", f"dir:{project_dir}",
             "--idempotency-key", f"{tick_id}:{phase.phase_key}",
+            "--assignee", assignee,
             "--json",
         ]
 
@@ -168,20 +170,32 @@ def register_todo_phases(
 
     # Persist expected phase keys so all_phases_complete can verify
     # completeness (guards against partial registration on crash).
-    _persist_expected_phases(phases)
+    _persist_expected_phases(phases, project_dir=project_dir)
 
     return task_ids
 
 
-def _persist_expected_phases(phases: list) -> None:
+def _persist_expected_phases(
+    phases: list,
+    *,
+    project_dir: Path | str | None = None,
+) -> None:
     """Write expected phase keys to a sentinel file for crash recovery.
 
     Called after successful registration so all_phases_complete can verify
     all expected phases are present (guards against partial registration).
+
+    Args:
+        phases: List of phase objects.
+        project_dir: If given, write to <project_dir>/.hermes/outcomes/.
+            Defaults to .hermes/outcomes/ for backward compatibility.
     """
     try:
         phase_keys = [p.phase_key for p in phases]
-        outcomes_dir = Path(".hermes") / "outcomes"
+        if project_dir is not None:
+            outcomes_dir = Path(project_dir) / ".hermes" / "outcomes"
+        else:
+            outcomes_dir = Path(".hermes") / "outcomes"
         outcomes_dir.mkdir(parents=True, exist_ok=True)
         # Overwrite previous — only the latest registration matters.
         sentinel = outcomes_dir / "expected-phases.json"
@@ -320,7 +334,8 @@ def all_phases_complete(
     # Guard against partial registration: if we have an expected-phases
     # sentinel, verify all expected phases are in the status map.
     try:
-        outcomes_dir = Path(".hermes") / "outcomes"
+        state_dir_path = Path(state_dir) if state_dir else Path(".hermes")
+        outcomes_dir = state_dir_path / "outcomes"
         expected_file = outcomes_dir / "expected-phases.json"
         if expected_file.exists():
             expected_keys = json.loads(expected_file.read_text())

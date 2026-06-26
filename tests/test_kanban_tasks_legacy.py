@@ -151,6 +151,37 @@ class TestRegisterTodoPhasesLegacy:
         idx = call_args.index("--goal-max-turns")
         assert call_args[idx + 1] == "20"
 
+    def test_assignee_flag_present(self, tmp_path, mocker):
+        """--assignee flag defaults to 'default' in the command."""
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0, stdout=json.dumps({"id": "task-001"})
+        )
+
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        register_todo_phases(
+            todo_id="TODO-10",
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            board_slug="demo",
+            project_dir=str(tmp_path),
+            phases_path=str(phases_cfg),
+        )
+
+        call_args = mock_run.call_args_list[0][0][0]
+        assert "--assignee" in call_args
+        idx = call_args.index("--assignee")
+        assert call_args[idx + 1] == "default"
+
     def test_archive_tasks_failure_best_effort(self, mocker):
         """_archive_tasks does not raise when archive fails — best-effort."""
         mock_run = mocker.patch("subprocess.run")

@@ -17,7 +17,6 @@ expected_prompt_sha = "abc123"
 
 [circuit_breaker]
 no_progress_threshold = 3
-backoff_interval_min = 30
 alert_dedup_hours = 24
 """)
     cfg = load_toml_overlay(Config.default(), f)

@@ -71,10 +71,11 @@ TOKENS_PER_SECOND = 100  # estimated throughput for timeout estimation
 MIN_TIMEOUT_SECONDS = 30  # minimum hermes call timeout
 MAX_TIMEOUT_SECONDS = 300  # maximum hermes call timeout (5 minutes)
 
-def _api_call(*, model: str, max_tokens: int, prompt: str, backend: str = "hermes") -> str:
+def _api_call(*, model: str, max_tokens: int, prompt: str, backend: str = "hermes", timeout: int | None = None) -> str:
     from .. import hermes_adapter
 
-    timeout = min(max(max_tokens // TOKENS_PER_SECOND, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS)
+    if timeout is None:
+        timeout = min(max(max_tokens // TOKENS_PER_SECOND, MIN_TIMEOUT_SECONDS), MAX_TIMEOUT_SECONDS)
 
     if backend == "claude":
         return hermes_adapter.claude_call(model=model, prompt=prompt, timeout=timeout)
@@ -115,6 +116,7 @@ def call_agent(
     max_tokens: int,
     expected_sha: str | None,
     backend: str = "hermes",
+    timeout: int | None = None,
 ) -> AgentResult:
     """Call the selection agent via the specified backend.
 
@@ -125,6 +127,8 @@ def call_agent(
         max_tokens: Maximum tokens for the response.
         expected_sha: Expected SHA of the prompt (for pin verification).
         backend: API backend to use — "hermes" or "claude".
+        timeout: Override the auto-calculated timeout (defaults to
+            max(max_tokens // TOKENS_PER_SECOND, MIN_TIMEOUT_SECONDS)).
 
     Returns:
         AgentResult with parsed response, prompt SHA, and raw output.
@@ -136,6 +140,6 @@ def call_agent(
     # DEBUG-level so --debug surfaces raw agent prompts/responses to stderr
     # and the file handler. Truncated to MAX_TRACE_CHARS to avoid bloating logs.
     log.debug("agent prompt (truncated to %d chars): %s", MAX_TRACE_CHARS, rendered[:MAX_TRACE_CHARS])
-    raw = _api_call(model=model, max_tokens=max_tokens, prompt=rendered, backend=backend)
+    raw = _api_call(model=model, max_tokens=max_tokens, prompt=rendered, backend=backend, timeout=timeout)
     log.debug("agent raw response (truncated to %d chars): %s", MAX_TRACE_CHARS, raw[:MAX_TRACE_CHARS])
     return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)

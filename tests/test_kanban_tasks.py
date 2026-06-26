@@ -333,6 +333,57 @@ class TestAllPhasesComplete:
 
         assert all_phases_complete("demo", "01HA") is False
 
+    def test_all_phases_complete_reads_expected_from_state_dir(self, tmp_path, mocker):
+        """expected-phases.json should be read from state_dir, not .hermes/."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        state_dir = tmp_path / "myproject" / ".hermes"
+        state_dir.mkdir(parents=True)
+        outcomes_dir = state_dir / "outcomes"
+        outcomes_dir.mkdir()
+
+        expected_file = outcomes_dir / "expected-phases.json"
+        expected_file.write_text(json.dumps(["P1_research", "P2_implementation"]))
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps([])  # No kanban CLI call needed; patch instead
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"P1_research": "done", "P2_implementation": "done"},
+        )
+        result = all_phases_complete(
+            tenant="myproject",
+            tick_id="abc123",
+            state_dir=state_dir,
+        )
+        assert result is True
+
+    def test_all_phases_complete_partial_reg_from_state_dir(self, tmp_path, mocker):
+        """Missing phase in status map should be detected using state_dir sentinel."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        state_dir = tmp_path / "myproject" / ".hermes"
+        state_dir.mkdir(parents=True)
+        outcomes_dir = state_dir / "outcomes"
+        outcomes_dir.mkdir()
+
+        expected_file = outcomes_dir / "expected-phases.json"
+        expected_file.write_text(json.dumps(["P1_research", "P2_implementation", "P3_review"]))
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"P1_research": "done", "P2_implementation": "done"},
+        )
+        result = all_phases_complete(
+            tenant="myproject",
+            tick_id="abc123",
+            state_dir=state_dir,
+        )
+        assert result is False  # Partial registration detected
+
 
 class TestGetTodoKanbanStatus:
     """Tests for get_todo_kanban_status()."""
@@ -374,6 +425,58 @@ class TestGetTodoKanbanStatus:
 
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {}
+
+
+class TestPersistExpectedPhases:
+    """Tests for _persist_expected_phases()."""
+
+    def test_writes_to_project_hermes_dir(self, tmp_path: Path):
+        """_persist_expected_phases writes to project_dir/.hermes/outcomes/."""
+        from hermes_pipeline.kanban_tasks import _persist_expected_phases
+
+        class FakePhase:
+            def __init__(self, key):
+                self.phase_key = key
+                self.name = key
+                self.prompt = ""
+                self.turns = 1
+
+        project_dir = tmp_path / "myproject"
+        project_dir.mkdir()
+
+        phases = [FakePhase("P1_research"), FakePhase("P2_implementation")]
+
+        _persist_expected_phases(phases, project_dir=project_dir)
+
+        expected = project_dir / ".hermes" / "outcomes" / "expected-phases.json"
+        assert expected.exists()
+        data = json.loads(expected.read_text())
+        assert data == ["P1_research", "P2_implementation"]
+
+    def test_backward_compat_defaults_to_dot_hermes(self, tmp_path: Path, monkeypatch):
+        """Without project_dir, falls back to .hermes/outcomes/ (cwd-relative)."""
+        from hermes_pipeline.kanban_tasks import _persist_expected_phases
+
+        class FakePhase:
+            def __init__(self, key):
+                self.phase_key = key
+                self.name = key
+                self.prompt = ""
+                self.turns = 1
+
+        monkeypatch.chdir(tmp_path)
+
+        phases = [FakePhase("P1")]
+        _persist_expected_phases(phases)
+
+        expected = tmp_path / ".hermes" / "outcomes" / "expected-phases.json"
+        assert expected.exists()
+        data = json.loads(expected.read_text())
+        assert data == ["P1"]
+
+        # Cleanup: remove the sentinel so it doesn't pollute other tests
+        import shutil
+        shutil.rmtree(tmp_path / ".hermes")
 
 
 class TestObserveOutcomes:

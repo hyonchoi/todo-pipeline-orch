@@ -12,10 +12,11 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 
 - **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
 - **CLI subcommands**: `tick`, `merge`, `status`, `kill`, `recover-counter` for pipeline management
+- **Multi-project scan loop**: `tick` and `kill` without a project argument scan all active projects in one execution
 - **Logging flags**: `--verbose` and `--debug` global flags for detailed diagnostics (selection results, lock state, agent call summaries, circuit breaker transitions)
 - **Pending records table**: Display ready-for-review records with status and age
 - **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
-- **Circuit breaker**: no-progress counter, cron backoff, and Slack alert dedup to stop runaway ticks
+- **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
 
 ## Requirements
@@ -43,6 +44,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
 | [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
 | [Kill a stuck in-flight phase](docs/howto-kill-stuck-phase.md) | How-to | A phase is wedged past `max_phase_timeout_min` |
+| [Set up multiple projects](docs/howto-multi-project-setup.md) | How-to | Configuring per-project settings and the scan loop |
+| [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
+| [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
+| [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Why single global lock, state migration decisions, trade-offs |
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` replaces Anthropic SDK calls |
 | [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
 | [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works and design rationale |
@@ -61,9 +66,9 @@ uv sync
 
 ### CLI Commands
 
-Run a single pipeline tick (select a TODO, register kanban phases, observe the circuit breaker):
+Run a single pipeline tick (scans all active projects, select a TODO, register kanban phases, observe the circuit breaker):
 ```bash
-uv run pipeline-watch tick <project>
+uv run pipeline-watch tick
 ```
 
 Display pipeline status:
@@ -78,10 +83,11 @@ uv run pipeline-watch merge <project> <todo_id>
 uv run pipeline-watch merge <project> <todo_id> --abandon
 ```
 
-Kill an in-flight phase (writes a `killed_by_operator` outcome sidecar and releases the tick lock if held by the killed tick):
+Kill in-flight phases (writes a `killed_by_operator` outcome sidecar and releases the tick lock if held by the killed tick). Without a project argument, scans all active projects:
 ```bash
+# Kill a specific TODO across all projects
 uv run pipeline-watch kill --todo TODO-N
-# Or kill every in-flight phase
+# Kill every in-flight phase across all projects
 uv run pipeline-watch kill --all
 ```
 
@@ -92,15 +98,15 @@ uv run pipeline-watch recover-counter <project>
 
 Global flags available on all subcommands:
 ```bash
-uv run pipeline-watch --verbose tick <project>   # increased log detail (selection results, lock state)
-uv run pipeline-watch --debug tick <project>     # full debug logging (agent call summaries, circuit breaker transitions)
+uv run pipeline-watch --verbose tick   # increased log detail (selection results, lock state)
+uv run pipeline-watch --debug tick     # full debug logging (agent call summaries, circuit breaker transitions)
 ```
 
 ### Automated Ticks
 
 The pipeline is driven by Hermes cron, not system crontab. The Hermes CLI
-manages the tick schedule; the circuit breaker adjusts the interval
-automatically (normal 5-minute ticks, backoff to 30 minutes after repeated
+manages the tick schedule; the gateway service adjusts the interval
+automatically (normal 5-minute ticks, backoff after repeated
 no-progress ticks):
 
 ```bash
@@ -116,15 +122,17 @@ Set these environment variables to customize behavior:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PIPELINE_LOCK_DIR` | `~/.hermes/locks` | Directory for merge operation locks |
-| `PIPELINE_PROJECTS_DIR` | (required) | Path to scan for `TODOS.md` files |
+| `PIPELINE_LOCK_DIR` | `~/.hermes/pipeline_locks` | Directory for merge operation locks |
+| `PIPELINE_PROJECTS_DIR` | `~/projects` | Path to scan for `TODOS.md` files |
+| `PIPELINE_STATE_DIR` | `~/.hermes` | Global state directory (tick lock, config) |
+| `PIPELINE_SLACK_CHANNEL` | `#alert` | Default Slack channel for alerts (overridden by per-project config) |
 | `PIPELINE_CLAUDE_CMD` | `claude` | Command to invoke Claude Code (deprecated in v0.3 — phases now use `hermes chat -q` instead) |
 | `PIPELINE_KANBAN_ADAPTER` | `null` | Kanban adapter: `hermes` or `null` |
 
 Example:
 ```bash
 export PIPELINE_PROJECTS_DIR=~/my-projects
-export PIPELINE_LOCK_DIR=~/.hermes/locks
+export PIPELINE_LOCK_DIR=~/.hermes/pipeline_locks
 hermes login  # authenticate with your provider
 hermes cron set pipeline-tick '*/5 * * * *'  # start the tick loop
 ```
@@ -144,8 +152,7 @@ prompt_path = ".hermes/prompts/selection.md"
 expected_prompt_sha = "abc123..."  # if set, mismatch aborts the tick + alerts
 
 [circuit_breaker]
-no_progress_threshold = 3           # consecutive picked=None ticks before backoff
-backoff_interval_min = 30
+no_progress_threshold = 3           # consecutive picked=None ticks before Slack alert
 alert_dedup_hours = 24
 max_phase_timeout_min = 120
 max_tick_duration_min = 10
@@ -184,7 +191,7 @@ The package is organized into lanes:
 - **Lane C**: Kanban integration (kanban-as-scheduler — phases as kanban tasks with `--parent` dependency chains; see [reference-kanban-as-scheduler.md](docs/reference-kanban-as-scheduler.md))
 - **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)
 - **Lane E**: Merge orchestration (Phase 9)
-- **Lane F**: CLI, watcher, status, and installation (this lane)
+- **Lane F**: CLI, watcher, status, and installation (this lane; includes `project_config.py` for multi-project scanning and `state_migration.py` for per-project state)
 - **Lane G**: Hermes adapter (`hermes_adapter.py` — wraps `hermes chat -q` for all LLM calls, replaces direct Anthropic SDK usage)
 
 State transitions and the file layout under `.hermes/` (decisions, outcomes, phase_started, tick.lock, ready_for_review) are documented in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). The selection seat contract lives in [hermes_pipeline/decision/README.md](hermes_pipeline/decision/README.md). See `docs/gstack/hermes-pipeline/design-plan.md` for the full design specification.

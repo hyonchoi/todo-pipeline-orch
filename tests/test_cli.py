@@ -184,11 +184,14 @@ class TestMain:
             import io
             import sys
             old_stdout = sys.stdout
+            old_argv = sys.argv
             sys.stdout = io.StringIO()
+            sys.argv = ['pipeline-watch']
             try:
-                result = main([])
+                result = main(None)
             finally:
                 sys.stdout = old_stdout
+                sys.argv = old_argv
             # Should return 0 (help is not an error)
             assert result == 0
         finally:
