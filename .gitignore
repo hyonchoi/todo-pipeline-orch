@@ -14,6 +14,9 @@ docs/gstack/**/.gbrain-*
 # Only allow tracking of human-readable documentation and plans
 !docs/gstack/**/*.md
 
+# Transient autoplan/skill recovery artifacts (backups, not deliverables)
+docs/gstack/**/*-autoplan-restore-*.md
+
 # ---- Environment files ----
 .env
 .env.*
