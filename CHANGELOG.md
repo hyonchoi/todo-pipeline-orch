@@ -132,6 +132,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Preflight hermes check** — `check_hermes()` validates the hermes CLI availability before pipeline operations, failing fast with a clear error.
 - **Renamed claude functions** — `_anthropic_call()` and `_run_claude_subprocess()` renamed to `_hermes_call()` and `_run_hermes_subprocess()` to reflect the new dependency.
 
+## [0.3.4] - 2026-06-29
+
+### Added
+- **Ship gate (Phase 9)** — New `phase_9_ship` blocked kanban task that holds every completed TODO in-flight until a human approves via `pipeline-watch approve`. The blocked gate replaces the `terminal: true` flag on Phase 8, keeping the pipeline loop running until approval.
+- **`pipeline-watch approve` subcommand** — Deterministically ships an approved TODO: bumps VERSION/pyproject.toml/CHANGELOG on the work branch, gates on CI-green, and squash-merges to main with `--match-head-commit`. Idempotent — re-running on an already-merged PR just completes the gate.
+- **SHA-staleness guard** — Refuses to merge if the PR head SHA has changed since review. `--force --force` (double pass) bypasses this guard and writes an audit log entry.
+- **Dirty-tree and CI-green guards** — Refuses approve if the working tree is dirty or CI is not green. Force flag never bypasses these guards.
+- **"Ready to ship" Slack alert** — Fired exactly once when all phases complete except the blocked gate. Deduped by the existence of the ship sidecar file.
+- **`ShipSidecar` dataclass + atomic sidecar I/O** — Writes `outcomes/<tick_id>-ship.json` with PR details, head SHA, and branch names. Read by `approve` to verify SHA and complete the merge.
+- **`approve_lock` via fcntl** — Serializes concurrent approve calls so two operators can't race the same merge.
+- **`get_todo_kanban_tasks`** — Queries kanban for all tasks of a tick, returning `KanbanTaskInfo` with task IDs and statuses. Used by `approve` to resolve and complete the gate task.
+- **`bump_in_pr`** — Writes VERSION, pyproject.toml, and CHANGELOG on the work branch, commits, and pushes. Restores the original branch after completion (even on failure).
+
+### Changed
+- **`Phase` dataclass** — `gate` flag added; `prompt`, `tools`, `turns` now optional with defaults so gate phases need no LLM fields.
+- **`configs/phases.yaml`** — `phase_9_ship` added as a `gate: true` phase; `terminal: true` moved from Phase 8 to Phase 9.
+- **`register_todo_phases`** — Gate phases are created with `--initial-status blocked` and no `--goal` flags (pure markers, never dispatched to an agent).
+- **`_tick_project`** — Calls `maybe_ship_ready` before the `all_phases_complete` early-return, so the "ready to ship" alert fires even though the blocked gate keeps `all_phases_complete` returning False.
+
+### Fixed
+- **Branch left on `work_branch` after bump failure** — `bump_in_pr` wraps `git checkout work_branch` in try/finally that restores the original branch, so a CI-red refusal or merge failure doesn't leave the operator on the wrong branch.
+
 ## [Unreleased]
 
 ### Planned
