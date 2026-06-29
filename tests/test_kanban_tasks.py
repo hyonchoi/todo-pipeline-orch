@@ -851,3 +851,56 @@ class TestObserveOutcomes:
 
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {"phase_4_dev": "running"}
+
+
+class TestGetTodoKanbanTasks:
+    """Tests for get_todo_kanban_tasks() — task id + status per phase."""
+
+    def test_get_todo_kanban_tasks_returns_ids_and_status(self, mocker):
+        import json as _json
+        tasks = [
+            {
+                "id": "t_8",
+                "status": "done",
+                "body": _json.dumps(
+                    {"tick_id": "01TICK", "phase_key": "phase_8_finish_branch",
+                     "todo_id": "TODO-5", "project_slug": "demo"},
+                    sort_keys=True,
+                ) + "\nbody text",
+            },
+            {
+                "id": "t_9",
+                "status": "blocked",
+                "body": _json.dumps(
+                    {"tick_id": "01TICK", "phase_key": "phase_9_ship",
+                     "todo_id": "TODO-5", "project_slug": "demo"},
+                    sort_keys=True,
+                ) + "\ngate",
+            },
+            {
+                "id": "t_other",
+                "status": "done",
+                "body": _json.dumps(
+                    {"tick_id": "OTHER", "phase_key": "phase_9_ship",
+                     "todo_id": "TODO-9", "project_slug": "demo"},
+                    sort_keys=True,
+                ),
+            },
+        ]
+        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(tasks), stderr="")
+
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+        out = get_todo_kanban_tasks("demo", "01TICK")
+
+        assert set(out) == {"phase_8_finish_branch", "phase_9_ship"}
+        assert out["phase_9_ship"].task_id == "t_9"
+        assert out["phase_9_ship"].status == "blocked"
+        assert out["phase_9_ship"].todo_id == "TODO-5"
+        assert out["phase_8_finish_branch"].task_id == "t_8"
+
+    def test_get_todo_kanban_tasks_empty_on_cli_failure(self, mocker):
+        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=1, stdout="", stderr="boom")
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+        assert get_todo_kanban_tasks("demo", "01TICK") == {}
