@@ -313,7 +313,73 @@ def test_retry_skips_bump_and_merges_when_green(mocker, tmp_path):
 
 # --- Task 12: approve_ship ---
 
-from hermes_pipeline.ship import approve_ship, write_sidecar
+from hermes_pipeline.ship import approve_ship, write_sidecar, maybe_ship_ready
+
+
+def _ready_tasks():
+    return {
+        "phase_8_finish_branch": KanbanTaskInfo("t_8", "phase_8_finish_branch", "done", "TODO-5"),
+        GATE_PHASE_KEY: KanbanTaskInfo("t_9", GATE_PHASE_KEY, "blocked", "TODO-5"),
+    }
+
+
+def test_maybe_ship_ready_writes_sidecar_and_alerts(tmp_path, mocker):
+    (tmp_path / "pipeline_branch.txt").write_text("todo-5-feat\n")
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value=_ready_tasks())
+    mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value={
+        "number": 42, "headRefOid": "reviewed_sha", "baseRefName": "main",
+        "state": "OPEN", "statusCheckRollup": [],
+    })
+    notify = mocker.patch("hermes_pipeline.ship.slack.notify")
+
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path,
+                     slack_channel="#ship")
+
+    sc = read_sidecar(tmp_path, "01TICK")
+    assert sc is not None
+    assert sc.todo_id == 5
+    assert sc.pr_number == 42
+    assert sc.pr_head_sha == "reviewed_sha"
+    assert sc.work_branch == "todo-5-feat"
+    notify.assert_called_once()
+    assert "#ship" == notify.call_args[0][0]
+
+
+def test_maybe_ship_ready_dedups_on_existing_sidecar(tmp_path, mocker):
+    write_sidecar(ShipSidecar(
+        tick_id="01TICK", todo_id=5, pr_number=42, pr_head_sha="x",
+        base_branch="main", work_branch="b"), state_dir=tmp_path)
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value=_ready_tasks())
+    notify = mocker.patch("hermes_pipeline.ship.slack.notify")
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path, slack_channel="#ship")
+    notify.assert_not_called()
+
+
+def test_maybe_ship_ready_noop_when_phase_unfinished(tmp_path, mocker):
+    tasks = {
+        "phase_8_finish_branch": KanbanTaskInfo("t_8", "phase_8_finish_branch", "running", "TODO-5"),
+        GATE_PHASE_KEY: KanbanTaskInfo("t_9", GATE_PHASE_KEY, "blocked", "TODO-5"),
+    }
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value=tasks)
+    notify = mocker.patch("hermes_pipeline.ship.slack.notify")
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path, slack_channel="#ship")
+    assert read_sidecar(tmp_path, "01TICK") is None
+    notify.assert_not_called()
+
+
+def test_maybe_ship_ready_noop_when_no_gate(tmp_path, mocker):
+    tasks = {
+        "phase_8_finish_branch": KanbanTaskInfo("t_8", "phase_8_finish_branch", "done", "TODO-5"),
+    }
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value=tasks)
+    notify = mocker.patch("hermes_pipeline.ship.slack.notify")
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path, slack_channel="#ship")
+    assert read_sidecar(tmp_path, "01TICK") is None
+    notify.assert_not_called()
 
 
 def _seed_sidecar(tmp_path, **kw):

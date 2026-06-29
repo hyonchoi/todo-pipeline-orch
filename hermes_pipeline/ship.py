@@ -19,7 +19,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .kanban_tasks import KanbanTaskInfo, get_todo_kanban_tasks
+from . import slack
+from .kanban_tasks import BLOCKED, COMPLETION_STATUSES, KanbanTaskInfo, get_todo_kanban_tasks
 
 log = logging.getLogger(__name__)
 
@@ -394,3 +395,66 @@ def approve_ship(
             f"Shipped TODO-{todo_id}: merged {sidecar.work_branch} to "
             f"{sidecar.base_branch} (v{sidecar.bump_version}); gate completed."
         )
+
+
+def maybe_ship_ready(
+    *,
+    project_dir: Path | str,
+    project_slug: str,
+    prior_tick_id: str,
+    state_dir: Path | str,
+    slack_channel: str,
+) -> None:
+    """Detect a ship-ready TODO, record a sidecar, and alert once.
+
+    Best-effort: any failure is logged and swallowed so the tick continues.
+    MUST be called before _tick_project's all_phases_complete early-return,
+    because a blocked gate makes all_phases_complete return False.
+    """
+    try:
+        if read_sidecar(state_dir, prior_tick_id) is not None:
+            return  # already detected + alerted for this tick
+
+        tasks = get_todo_kanban_tasks(project_slug, prior_tick_id)
+        gate = tasks.get(GATE_PHASE_KEY)
+        if gate is None or gate.status != BLOCKED:
+            return  # no gate, or gate already moved past blocked
+
+        non_gate = [t for k, t in tasks.items() if k != GATE_PHASE_KEY]
+        if not non_gate or any(t.status not in COMPLETION_STATUSES for t in non_gate):
+            return  # real work still in flight
+
+        branch_file = Path(state_dir) / "pipeline_branch.txt"
+        if not branch_file.exists():
+            log.warning("ship-ready but no pipeline_branch.txt at %s", branch_file)
+            return
+        work_branch = branch_file.read_text().strip()
+        if not work_branch:
+            return
+
+        view = gh_pr_view(work_branch, cwd=project_dir)
+        todo_num = int(gate.todo_id.removeprefix("TODO-"))
+        sidecar = ShipSidecar(
+            tick_id=prior_tick_id,
+            todo_id=todo_num,
+            pr_number=int(view.get("number", 0)),
+            pr_head_sha=view.get("headRefOid", ""),
+            base_branch=view.get("baseRefName", "main"),
+            work_branch=work_branch,
+            phase_8_task_id=(
+                tasks["phase_8_finish_branch"].task_id
+                if "phase_8_finish_branch" in tasks else None
+            ),
+            bump_version=None,
+        )
+        write_sidecar(sidecar, state_dir=state_dir)
+
+        slack.notify(
+            slack_channel,
+            f":rocket: {project_slug} TODO-{todo_num} is ready to ship — "
+            f"PR #{sidecar.pr_number} passed all phases. "
+            f"Run: pipeline-watch approve {project_slug} --todo TODO-{todo_num}",
+        )
+    except Exception as e:  # never break the tick
+        log.warning("maybe_ship_ready failed for %s tick %s: %s",
+                    project_slug, prior_tick_id, e)
