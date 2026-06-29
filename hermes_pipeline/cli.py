@@ -851,6 +851,17 @@ def _tick_project(
     cb = _make_circuit_breaker(project_state, cb_cfg, slack_channel)
 
     if prior_tick_id is not None:
+        # Ship-gate: a blocked phase_9_ship makes all_phases_complete return
+        # False, so detect/alert "ready to ship" BEFORE the early-return below.
+        from . import ship
+        ship.maybe_ship_ready(
+            project_dir=project_dir,
+            project_slug=project_slug,
+            prior_tick_id=prior_tick_id,
+            state_dir=project_state,
+            slack_channel=slack_channel,
+        )
+
         if not all_phases_complete(project_slug, prior_tick_id, state_dir=project_state):
             log.info("project %s: prior tick %s still in-flight, skipping",
                      project_slug, prior_tick_id)

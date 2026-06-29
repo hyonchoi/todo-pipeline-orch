@@ -439,3 +439,35 @@ def test_approve_refuses_when_no_gate_task(tmp_path, mocker):
     with pytest.raises(ApproveRefused, match="gate task"):
         approve_ship(project_dir=tmp_path, project_slug="demo",
                      todo_id=5, state_dir=tmp_path)
+
+
+# --- Task 14: wire maybe_ship_ready into _tick_project ---
+
+def test_tick_project_calls_maybe_ship_ready_before_early_return(mocker, tmp_path):
+    """maybe_ship_ready must run even when all_phases_complete is False."""
+    import hermes_pipeline.cli as cli
+
+    # Force the in-flight early-return path.
+    mocker.patch.object(cli, "_read_prior_tick_id", return_value="01TICK")
+    mocker.patch.object(cli, "all_phases_complete", return_value=False)
+    mocker.patch.object(cli, "_make_circuit_breaker", return_value=mocker.Mock())
+    mocker.patch("hermes_pipeline.project_config._resolve_slack_channel",
+                 return_value="#ship")
+    called = mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+
+    # all_phases_complete is False, so _tick_project returns cleanly at the
+    # early-return — but maybe_ship_ready must have already fired before it.
+    cli._tick_project(
+        project_dir=tmp_path,
+        project_slug="demo",
+        project_state=tmp_path,
+        tick_id="02NEXT",
+        config=mocker.Mock(slack_channel=None),
+        cb_cfg=mocker.Mock(),
+        project_toml={},
+    )
+
+    called.assert_called_once()
+    kwargs = called.call_args.kwargs
+    assert kwargs["prior_tick_id"] == "01TICK"
+    assert kwargs["project_slug"] == "demo"
