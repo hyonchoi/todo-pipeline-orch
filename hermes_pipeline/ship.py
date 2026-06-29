@@ -292,3 +292,40 @@ def _check_ship_guards(
             f"(reviewed={sidecar.pr_head_sha}, live={live_head_sha}); "
             f"re-review, or pass --force --force to override"
         )
+
+
+def _bump_and_merge(
+    *,
+    sidecar: ShipSidecar,
+    project_dir: Path | str,
+    state_dir: Path | str,
+) -> None:
+    """Bump-in-PR (once), gate on CI, then squash-merge at the exact SHA."""
+    if sidecar.bump_version is None:
+        new_version, new_sha = bump_in_pr(
+            project_dir=project_dir,
+            work_branch=sidecar.work_branch,
+            todo_id=sidecar.todo_id,
+        )
+        # Re-baseline: the bump commit invalidated the reviewed SHA. Persist so
+        # a retry (after CI passes) skips the bump and merges this exact SHA.
+        sidecar.bump_version = new_version
+        sidecar.pr_head_sha = new_sha
+        write_sidecar(sidecar, state_dir=state_dir)
+
+    view = gh_pr_view(sidecar.work_branch, cwd=project_dir)
+    checks = view.get("statusCheckRollup") or []
+    if not checks:
+        log.warning(
+            "no CI checks found for %s; proceeding (nothing to gate on)",
+            sidecar.work_branch,
+        )
+    if not ci_is_green(checks):
+        raise ApproveRefused(
+            "CI is not green yet; re-run approve once checks pass "
+            "(the bump commit is already pushed)"
+        )
+
+    gh_pr_merge_squash(
+        sidecar.work_branch, match_head=sidecar.pr_head_sha, cwd=project_dir
+    )

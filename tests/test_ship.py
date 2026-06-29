@@ -262,3 +262,50 @@ def test_guards_skip_sha_check_after_bump(mocker, tmp_path):
         sidecar=_guard_sidecar(bump_version="0.3.4", pr_head_sha="bumped"),
         live_head_sha="something_else",
         project_dir=tmp_path, state_dir=tmp_path, force_count=0)
+
+
+# --- Task 11: _bump_and_merge ---
+
+from hermes_pipeline.ship import _bump_and_merge
+
+
+def _merge_sidecar(**kw):
+    base = dict(
+        tick_id="01TICK", todo_id=5, pr_number=42, pr_head_sha="reviewed_sha",
+        base_branch="main", work_branch="todo-5-feat",
+        phase_8_task_id="t_8", bump_version=None,
+    )
+    base.update(kw)
+    return ShipSidecar(**base)
+
+
+def test_bump_then_ci_pending_refuses_with_retry(mocker, tmp_path):
+    mocker.patch("hermes_pipeline.ship.bump_in_pr", return_value=("0.3.4", "bumpedsha"))
+    mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value={
+        "state": "OPEN", "headRefOid": "bumpedsha",
+        "statusCheckRollup": [{"status": "IN_PROGRESS", "conclusion": ""}],
+    })
+    merge = mocker.patch("hermes_pipeline.ship.gh_pr_merge_squash")
+    sc = _merge_sidecar()
+    with pytest.raises(ApproveRefused, match="CI"):
+        _bump_and_merge(sidecar=sc, project_dir=tmp_path, state_dir=tmp_path)
+    merge.assert_not_called()
+    # Sidecar must have been re-baselined so a retry skips the bump.
+    persisted = read_sidecar(tmp_path, "01TICK")
+    assert persisted.bump_version == "0.3.4"
+    assert persisted.pr_head_sha == "bumpedsha"
+
+
+def test_retry_skips_bump_and_merges_when_green(mocker, tmp_path):
+    bump = mocker.patch("hermes_pipeline.ship.bump_in_pr")
+    mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value={
+        "state": "OPEN", "headRefOid": "bumpedsha",
+        "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
+    })
+    merge = mocker.patch("hermes_pipeline.ship.gh_pr_merge_squash")
+    sc = _merge_sidecar(bump_version="0.3.4", pr_head_sha="bumpedsha")
+    _bump_and_merge(sidecar=sc, project_dir=tmp_path, state_dir=tmp_path)
+    bump.assert_not_called()
+    merge.assert_called_once()
+    _, kwargs = merge.call_args
+    assert kwargs["match_head"] == "bumpedsha"
