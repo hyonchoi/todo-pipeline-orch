@@ -1,6 +1,6 @@
 """Hermes pipeline orchestrator CLI.
 
-Subcommands: merge, status, kill.
+Subcommands: merge, approve, status, kill.
 Scheduling is owned by the Hermes command repo.
 """
 
@@ -358,6 +358,18 @@ def _parse_todo_id(value: str) -> int:
         )
 
 
+def _parse_todo_id_flag(value: str) -> int:
+    """Parse --todo argument, accepting 'TODO-N' or plain 'N' formats."""
+    cleaned = value.removeprefix("TODO-").removeprefix("todo-")
+    try:
+        return int(cleaned)
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--todo must be a TODO id (you provided '{value}'). "
+            f"Example: --todo TODO-5 or --todo 5"
+        )
+
+
 def _strip_global_flags(argv: Optional[list[str]]) -> tuple[bool, bool, list[str]]:
     """Strip --verbose/--debug from argv, returning (verbose, debug, remaining).
 
@@ -384,7 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
         prog="pipeline-watch",
-        description="Hermes pipeline orchestrator: merge, status, and kill commands.",
+        description="Hermes pipeline orchestrator: merge, approve, status, and kill commands.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -405,6 +417,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="Abandon the merge without confirmation",
     )
     merge_parser.set_defaults(func=_cmd_merge)
+
+    # approve: Phase 9 ship gate — bump-in-PR, merge, complete gate
+    approve_parser = subparsers.add_parser(
+        "approve",
+        help="Ship a ready TODO: bump version in PR, merge to main, complete the gate",
+    )
+    approve_parser.add_argument("project", help="Project name")
+    approve_parser.add_argument(
+        "--todo", required=True, type=_parse_todo_id_flag,
+        help="TODO to ship (e.g. TODO-5)",
+    )
+    approve_parser.add_argument(
+        "--force", action="count", default=0,
+        help="Pass twice (--force --force) to bypass ONLY the SHA-staleness guard (audited)",
+    )
+    approve_parser.set_defaults(func=_cmd_approve)
 
     # status: List pending records
     status_parser = subparsers.add_parser(
@@ -441,6 +469,37 @@ def build_parser() -> argparse.ArgumentParser:
     rc_parser.set_defaults(func=_cmd_recover_counter)
 
     return parser
+
+
+def _cmd_approve(args, config: Config) -> int:
+    """Handle 'approve' subcommand: deterministically ship a ready TODO.
+
+    Exit codes: 0 shipped, 3 refused by a guard, 2 unexpected error.
+    """
+    from . import ship
+    from .state_migration import _get_project_state_dir
+
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+
+    state_dir = _get_project_state_dir(project_dir)
+    try:
+        summary = ship.approve_ship(
+            project_dir=project_dir,
+            project_slug=args.project,
+            todo_id=args.todo,
+            state_dir=state_dir,
+            force_count=args.force,
+        )
+        print(summary)
+        return 0
+    except ship.ApproveRefused as e:
+        print(f"approve refused: {e}", file=sys.stderr)
+        return 3
+    except Exception as e:
+        log.error("approve command failed: %s", e, exc_info=True)
+        return 2
 
 
 def _cmd_merge(args, config: Config) -> int:
