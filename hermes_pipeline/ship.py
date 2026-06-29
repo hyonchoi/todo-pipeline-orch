@@ -11,6 +11,7 @@ import dataclasses
 import json
 import logging
 import os
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,3 +81,65 @@ def delete_sidecar(state_dir: Path | str, tick_id: str) -> None:
         _sidecar_path(state_dir, tick_id).unlink()
     except FileNotFoundError:
         pass
+
+GH_TIMEOUT = 60
+GIT_TIMEOUT = 60
+_GH_PR_VIEW_FIELDS = "number,state,headRefOid,baseRefName,headRefName,statusCheckRollup"
+
+
+class ShipError(Exception):
+    """An unexpected gh/git failure during the ship transaction."""
+
+
+def gh_pr_view(branch: str, *, cwd: Path | str) -> dict:
+    result = subprocess.run(
+        ["gh", "pr", "view", branch, "--json", _GH_PR_VIEW_FIELDS],
+        cwd=str(cwd), capture_output=True, text=True, timeout=GH_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise ShipError(f"gh pr view {branch} failed: {result.stderr.strip()[:200]}")
+    try:
+        return json.loads(result.stdout)
+    except json.JSONDecodeError as e:
+        raise ShipError(f"gh pr view returned non-JSON: {e}")
+
+
+def gh_pr_merge_squash(branch: str, *, match_head: str, cwd: Path | str) -> None:
+    result = subprocess.run(
+        ["gh", "pr", "merge", branch, "--squash", "--match-head-commit", match_head],
+        cwd=str(cwd), capture_output=True, text=True, timeout=GH_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise ShipError(f"gh pr merge {branch} failed: {result.stderr.strip()[:200]}")
+
+
+def git_tree_clean(cwd: Path | str) -> bool:
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=str(cwd), capture_output=True, text=True, timeout=GIT_TIMEOUT,
+    )
+    return result.returncode == 0 and result.stdout.strip() == ""
+
+
+def ci_is_green(checks: list) -> bool:
+    """True if every status-rollup entry is a success.
+
+    An empty list means no CI checks are configured for the repo — treated as
+    green so approve does not deadlock on repos without required checks.
+    Handles both CheckRun ({status, conclusion}) and StatusContext ({state}).
+    """
+    if not checks:
+        return True
+    for c in checks:
+        state = (c.get("state") or "").upper()
+        if state:  # StatusContext
+            if state != "SUCCESS":
+                return False
+            continue
+        status = (c.get("status") or "").upper()
+        conclusion = (c.get("conclusion") or "").upper()
+        if status != "COMPLETED":
+            return False
+        if conclusion not in ("SUCCESS", "NEUTRAL", "SKIPPED"):
+            return False
+    return True

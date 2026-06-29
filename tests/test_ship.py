@@ -8,6 +8,11 @@ from hermes_pipeline.ship import (
     read_sidecar,
     find_ship_sidecar,
     delete_sidecar,
+    ShipError,
+    gh_pr_view,
+    gh_pr_merge_squash,
+    git_tree_clean,
+    ci_is_green,
 )
 
 
@@ -61,3 +66,55 @@ def test_delete_sidecar(tmp_path):
     assert read_sidecar(tmp_path, "01TICK") is None
     # idempotent
     delete_sidecar(tmp_path, "01TICK")
+
+
+# --- Task 6: gh/git subprocess wrappers + CI-green parser ---
+
+
+def test_gh_pr_view_parses_json(mocker, tmp_path):
+    mock_run = mocker.patch("hermes_pipeline.ship.subprocess.run")
+    mock_run.return_value = mocker.Mock(
+        returncode=0, stdout='{"number": 42, "state": "OPEN"}', stderr="")
+    out = gh_pr_view("todo-5-feature", cwd=tmp_path)
+    assert out["number"] == 42
+    cmd = mock_run.call_args[0][0]
+    assert cmd[:3] == ["gh", "pr", "view"]
+    assert "--json" in cmd
+
+
+def test_gh_pr_view_raises_on_failure(mocker, tmp_path):
+    mock_run = mocker.patch("hermes_pipeline.ship.subprocess.run")
+    mock_run.return_value = mocker.Mock(returncode=1, stdout="", stderr="no pr")
+    with pytest.raises(ShipError):
+        gh_pr_view("nope", cwd=tmp_path)
+
+
+def test_gh_pr_merge_squash_uses_match_head(mocker, tmp_path):
+    mock_run = mocker.patch("hermes_pipeline.ship.subprocess.run")
+    mock_run.return_value = mocker.Mock(returncode=0, stdout="", stderr="")
+    gh_pr_merge_squash("todo-5-feature", match_head="deadbeef", cwd=tmp_path)
+    cmd = mock_run.call_args[0][0]
+    assert cmd[:3] == ["gh", "pr", "merge"]
+    assert "--squash" in cmd
+    assert cmd[cmd.index("--match-head-commit") + 1] == "deadbeef"
+
+
+def test_git_tree_clean(mocker, tmp_path):
+    mock_run = mocker.patch("hermes_pipeline.ship.subprocess.run")
+    mock_run.return_value = mocker.Mock(returncode=0, stdout="", stderr="")
+    assert git_tree_clean(tmp_path) is True
+    mock_run.return_value = mocker.Mock(returncode=0, stdout=" M file.py\n", stderr="")
+    assert git_tree_clean(tmp_path) is False
+
+
+def test_ci_is_green():
+    assert ci_is_green([]) is True  # no checks configured
+    assert ci_is_green([{"status": "COMPLETED", "conclusion": "SUCCESS"}]) is True
+    assert ci_is_green([{"state": "SUCCESS"}]) is True
+    assert ci_is_green([{"status": "IN_PROGRESS", "conclusion": ""}]) is False
+    assert ci_is_green([{"status": "COMPLETED", "conclusion": "FAILURE"}]) is False
+    assert ci_is_green([{"state": "PENDING"}]) is False
+    assert ci_is_green([
+        {"status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"status": "COMPLETED", "conclusion": "FAILURE"},
+    ]) is False
