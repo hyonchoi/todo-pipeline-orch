@@ -13,6 +13,7 @@ from hermes_pipeline.ship import (
     gh_pr_merge_squash,
     git_tree_clean,
     ci_is_green,
+    bump_in_pr,
 )
 
 
@@ -118,3 +119,36 @@ def test_ci_is_green():
         {"status": "COMPLETED", "conclusion": "SUCCESS"},
         {"status": "COMPLETED", "conclusion": "FAILURE"},
     ]) is False
+
+
+# --- Task 7: bump_in_pr ---
+
+def test_bump_in_pr_writes_files_and_pushes(mocker, tmp_path):
+    (tmp_path / "VERSION").write_text("0.3.3\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "hermes-pipeline"\nversion = "0.3.3"\n')
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n")
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        stdout = "newsha999\n" if cmd[:2] == ["git", "rev-parse"] else ""
+        return mocker.Mock(returncode=0, stdout=stdout, stderr="")
+
+    mocker.patch("hermes_pipeline.ship.subprocess.run", side_effect=fake_run)
+
+    new_version, new_sha = bump_in_pr(
+        project_dir=tmp_path, work_branch="todo-5-feat", todo_id=5)
+
+    assert new_version == "0.3.4"
+    assert new_sha == "newsha999"
+    assert (tmp_path / "VERSION").read_text() == "0.3.4\n"
+    assert 'version = "0.3.4"' in (tmp_path / "pyproject.toml").read_text()
+    assert "0.3.4" in (tmp_path / "CHANGELOG.md").read_text()
+    assert "TODO-5" in (tmp_path / "CHANGELOG.md").read_text()
+
+    flat = [" ".join(c) for c in calls]
+    assert any(c.startswith("git checkout todo-5-feat") for c in flat)
+    assert any(c.startswith("git commit") for c in flat)
+    assert any(c.startswith("git push origin todo-5-feat") for c in flat)
