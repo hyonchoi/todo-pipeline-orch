@@ -154,6 +154,37 @@ def test_bump_in_pr_writes_files_and_pushes(mocker, tmp_path):
     assert any(c.startswith("git push origin todo-5-feat") for c in flat)
 
 
+def test_bump_in_pr_restores_original_branch_on_failure(mocker, tmp_path):
+    """bump_in_pr restores the original branch even if bump fails."""
+    (tmp_path / "VERSION").write_text("0.3.3\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "hermes-pipeline"\nversion = "0.3.3"\n')
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n")
+
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        if cmd[:2] == ["git", "rev-parse"]:
+            if "--abbrev-ref" in cmd:
+                return mocker.Mock(returncode=0, stdout="main\n", stderr="")
+            return mocker.Mock(returncode=0, stdout="newsha999\n", stderr="")
+        if cmd[:2] == ["git", "push"]:
+            raise Exception("push failed")  # simulate CI-red before push
+        return mocker.Mock(returncode=0, stdout="", stderr="")
+
+    mocker.patch("hermes_pipeline.ship.subprocess.run", side_effect=fake_run)
+
+    with pytest.raises(Exception, match="push failed"):
+        bump_in_pr(
+            project_dir=tmp_path, work_branch="todo-5-feat", todo_id=5)
+
+    # The last git command should be checkout back to main.
+    checkouts = [c for c in calls if c[:2] == ["git", "checkout"]]
+    assert checkouts[0] == ["git", "checkout", "todo-5-feat"]
+    assert checkouts[1] == ["git", "checkout", "main"]
+
+
 # --- Task 8: resolve_ship_task ---
 
 from hermes_pipeline.ship import resolve_ship_task, GATE_PHASE_KEY
@@ -268,15 +299,7 @@ def test_guards_skip_sha_check_after_bump(mocker, tmp_path):
 
 from hermes_pipeline.ship import _bump_and_merge
 
-
-def _merge_sidecar(**kw):
-    base = dict(
-        tick_id="01TICK", todo_id=5, pr_number=42, pr_head_sha="reviewed_sha",
-        base_branch="main", work_branch="todo-5-feat",
-        phase_8_task_id="t_8", bump_version=None,
-    )
-    base.update(kw)
-    return ShipSidecar(**base)
+# Reuse _guard_sidecar defined above — no need for duplicate
 
 
 def test_bump_then_ci_pending_refuses_with_retry(mocker, tmp_path):
@@ -286,7 +309,7 @@ def test_bump_then_ci_pending_refuses_with_retry(mocker, tmp_path):
         "statusCheckRollup": [{"status": "IN_PROGRESS", "conclusion": ""}],
     })
     merge = mocker.patch("hermes_pipeline.ship.gh_pr_merge_squash")
-    sc = _merge_sidecar()
+    sc = _guard_sidecar()
     with pytest.raises(ApproveRefused, match="CI"):
         _bump_and_merge(sidecar=sc, project_dir=tmp_path, state_dir=tmp_path)
     merge.assert_not_called()
@@ -303,7 +326,7 @@ def test_retry_skips_bump_and_merges_when_green(mocker, tmp_path):
         "statusCheckRollup": [{"status": "COMPLETED", "conclusion": "SUCCESS"}],
     })
     merge = mocker.patch("hermes_pipeline.ship.gh_pr_merge_squash")
-    sc = _merge_sidecar(bump_version="0.3.4", pr_head_sha="bumpedsha")
+    sc = _guard_sidecar(bump_version="0.3.4", pr_head_sha="bumpedsha")
     _bump_and_merge(sidecar=sc, project_dir=tmp_path, state_dir=tmp_path)
     bump.assert_not_called()
     merge.assert_called_once()

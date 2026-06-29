@@ -205,45 +205,52 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
     Returns (new_version, new_head_sha). The pushed commit becomes part of the
     squash merge, so the caller MUST re-baseline the sidecar's pr_head_sha to
     the returned sha.
+
+    The original branch is saved and restored so a crash (CI-red refusal,
+    merge failure) never leaves the operator on the wrong branch.
     """
     from .merge import make_default_bump_fn
 
     project_dir = Path(project_dir)
     new_version, _label = make_default_bump_fn(project_dir)(None)
 
-    _run_git(["checkout", work_branch], cwd=project_dir)
+    orig_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_dir)
+    try:
+        _run_git(["checkout", work_branch], cwd=project_dir)
 
-    (project_dir / "VERSION").write_text(f"{new_version}\n")
+        (project_dir / "VERSION").write_text(f"{new_version}\n")
 
-    pyproject = project_dir / "pyproject.toml"
-    text = pyproject.read_text()
-    new_text = re.sub(
-        r'(?m)^version = "[^"]*"',
-        f'version = "{new_version}"',
-        text,
-        count=1,
-    )
-    pyproject.write_text(new_text)
+        pyproject = project_dir / "pyproject.toml"
+        text = pyproject.read_text()
+        new_text = re.sub(
+            r'(?m)^version = "[^"]*"',
+            f'version = "{new_version}"',
+            text,
+            count=1,
+        )
+        pyproject.write_text(new_text)
 
-    changelog = project_dir / "CHANGELOG.md"
-    timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
-    entry = (
-        f"\n## [{new_version}] - {timestamp}\n"
-        f"- Ship TODO-{todo_id}: bump to {new_version}\n"
-    )
-    if changelog.exists():
-        changelog.write_text(entry + "\n" + changelog.read_text())
-    else:
-        changelog.write_text(f"# Changelog\n{entry}")
+        changelog = project_dir / "CHANGELOG.md"
+        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        entry = (
+            f"\n## [{new_version}] - {timestamp}\n"
+            f"- Ship TODO-{todo_id}: bump to {new_version}\n"
+        )
+        if changelog.exists():
+            changelog.write_text(entry + "\n" + changelog.read_text())
+        else:
+            changelog.write_text(f"# Changelog\n{entry}")
 
-    _run_git(["add", "VERSION", "pyproject.toml", "CHANGELOG.md"], cwd=project_dir)
-    _run_git(
-        ["commit", "-m", f"chore: bump to {new_version} for TODO-{todo_id}"],
-        cwd=project_dir,
-    )
-    _run_git(["push", "origin", work_branch], cwd=project_dir)
+        _run_git(["add", "VERSION", "pyproject.toml", "CHANGELOG.md"], cwd=project_dir)
+        _run_git(
+            ["commit", "-m", f"chore: bump to {new_version} for TODO-{todo_id}"],
+            cwd=project_dir,
+        )
+        _run_git(["push", "origin", work_branch], cwd=project_dir)
 
-    new_sha = _run_git(["rev-parse", "HEAD"], cwd=project_dir)
+        new_sha = _run_git(["rev-parse", "HEAD"], cwd=project_dir)
+    finally:
+        _run_git(["checkout", orig_branch], cwd=project_dir)
     return new_version, new_sha
 
 
