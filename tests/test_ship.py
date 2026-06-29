@@ -152,3 +152,25 @@ def test_bump_in_pr_writes_files_and_pushes(mocker, tmp_path):
     assert any(c.startswith("git checkout todo-5-feat") for c in flat)
     assert any(c.startswith("git commit") for c in flat)
     assert any(c.startswith("git push origin todo-5-feat") for c in flat)
+
+
+# --- Task 8: resolve_ship_task ---
+
+from hermes_pipeline.ship import resolve_ship_task, GATE_PHASE_KEY
+from hermes_pipeline.kanban_tasks import KanbanTaskInfo
+
+
+def test_resolve_ship_task_returns_gate(mocker):
+    tasks = {
+        "phase_8_finish_branch": KanbanTaskInfo("t_8", "phase_8_finish_branch", "done", "TODO-5"),
+        GATE_PHASE_KEY: KanbanTaskInfo("t_9", GATE_PHASE_KEY, "blocked", "TODO-5"),
+    }
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value=tasks)
+    got = resolve_ship_task(project_slug="demo", tick_id="01TICK")
+    assert got is not None
+    assert got.task_id == "t_9"
+
+
+def test_resolve_ship_task_none_when_absent(mocker):
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value={})
+    assert resolve_ship_task(project_slug="demo", tick_id="01TICK") is None

@@ -21,6 +21,10 @@ log = logging.getLogger(__name__)
 
 SHIP_SIDECAR_SUFFIX = "-ship.json"
 
+GATE_PHASE_KEY = "phase_9_ship"
+
+from .kanban_tasks import get_todo_kanban_tasks, KanbanTaskInfo
+
 
 @dataclass
 class ShipSidecar:
@@ -83,6 +87,12 @@ def delete_sidecar(state_dir: Path | str, tick_id: str) -> None:
         _sidecar_path(state_dir, tick_id).unlink()
     except FileNotFoundError:
         pass
+
+
+def resolve_ship_task(*, project_slug: str, tick_id: str) -> KanbanTaskInfo | None:
+    """Return the ship-gate KanbanTaskInfo for a tick, or None if absent."""
+    tasks = get_todo_kanban_tasks(project_slug, tick_id)
+    return tasks.get(GATE_PHASE_KEY)
 
 GH_TIMEOUT = 60
 GIT_TIMEOUT = 60
