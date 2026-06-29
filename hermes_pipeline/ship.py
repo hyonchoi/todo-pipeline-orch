@@ -329,3 +329,68 @@ def _bump_and_merge(
     gh_pr_merge_squash(
         sidecar.work_branch, match_head=sidecar.pr_head_sha, cwd=project_dir
     )
+
+
+def complete_gate_task(task_id: str) -> None:
+    """Complete the gate task in kanban so the tick can advance."""
+    result = subprocess.run(
+        ["hermes", "kanban", "complete", task_id],
+        capture_output=True, text=True, timeout=GH_TIMEOUT,
+    )
+    if result.returncode != 0:
+        raise ShipError(
+            f"hermes kanban complete {task_id} failed: {result.stderr.strip()[:200]}"
+        )
+
+
+def approve_ship(
+    *,
+    project_dir: Path | str,
+    project_slug: str,
+    todo_id: int,
+    state_dir: Path | str,
+    force_count: int = 0,
+) -> str:
+    """Deterministically ship an approved TODO. Returns a success summary.
+
+    Raises ApproveRefused on any guard refusal, ShipError on subprocess failure.
+    """
+    with approve_lock(state_dir):
+        sidecar = find_ship_sidecar(state_dir, todo_id)
+        if sidecar is None:
+            raise ApproveRefused(
+                f"no pending ship for TODO-{todo_id} "
+                f"(not ready, or already shipped)"
+            )
+
+        gate = resolve_ship_task(project_slug=project_slug, tick_id=sidecar.tick_id)
+        if gate is None:
+            raise ApproveRefused(
+                f"no gate task found for tick {sidecar.tick_id}; cannot ship"
+            )
+
+        view = gh_pr_view(sidecar.work_branch, cwd=project_dir)
+
+        # Idempotency: if the PR is already merged (e.g. a crash after merge
+        # but before completing the gate), just finish the gate and clean up.
+        if (view.get("state") or "").upper() == "MERGED":
+            complete_gate_task(gate.task_id)
+            delete_sidecar(state_dir, sidecar.tick_id)
+            return f"TODO-{todo_id} PR already merged; gate completed."
+
+        _check_ship_guards(
+            sidecar=sidecar,
+            live_head_sha=view.get("headRefOid", ""),
+            project_dir=project_dir,
+            state_dir=state_dir,
+            force_count=force_count,
+        )
+
+        _bump_and_merge(sidecar=sidecar, project_dir=project_dir, state_dir=state_dir)
+
+        complete_gate_task(gate.task_id)
+        delete_sidecar(state_dir, sidecar.tick_id)
+        return (
+            f"Shipped TODO-{todo_id}: merged {sidecar.work_branch} to "
+            f"{sidecar.base_branch} (v{sidecar.bump_version}); gate completed."
+        )

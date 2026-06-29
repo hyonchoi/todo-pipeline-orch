@@ -309,3 +309,67 @@ def test_retry_skips_bump_and_merges_when_green(mocker, tmp_path):
     merge.assert_called_once()
     _, kwargs = merge.call_args
     assert kwargs["match_head"] == "bumpedsha"
+
+
+# --- Task 12: approve_ship ---
+
+from hermes_pipeline.ship import approve_ship, write_sidecar
+
+
+def _seed_sidecar(tmp_path, **kw):
+    base = dict(
+        tick_id="01TICK", todo_id=5, pr_number=42, pr_head_sha="reviewed_sha",
+        base_branch="main", work_branch="todo-5-feat",
+        phase_8_task_id="t_8", bump_version=None,
+    )
+    base.update(kw)
+    write_sidecar(ShipSidecar(**base), state_dir=tmp_path)
+
+
+def test_approve_refuses_without_sidecar(tmp_path, mocker):
+    mocker.patch("hermes_pipeline.ship.resolve_ship_task")
+    with pytest.raises(ApproveRefused, match="no pending ship"):
+        approve_ship(project_dir=tmp_path, project_slug="demo",
+                     todo_id=5, state_dir=tmp_path)
+
+
+def test_approve_idempotent_when_already_merged(tmp_path, mocker):
+    _seed_sidecar(tmp_path)
+    mocker.patch("hermes_pipeline.ship.resolve_ship_task",
+                 return_value=KanbanTaskInfo("t_9", GATE_PHASE_KEY, "blocked", "TODO-5"))
+    mocker.patch("hermes_pipeline.ship.gh_pr_view",
+                 return_value={"state": "MERGED", "headRefOid": "x", "statusCheckRollup": []})
+    complete = mocker.patch("hermes_pipeline.ship.complete_gate_task")
+    bump = mocker.patch("hermes_pipeline.ship._bump_and_merge")
+    summary = approve_ship(project_dir=tmp_path, project_slug="demo",
+                           todo_id=5, state_dir=tmp_path)
+    bump.assert_not_called()
+    complete.assert_called_once_with("t_9")
+    assert find_ship_sidecar(tmp_path, 5) is None
+    assert "already" in summary.lower()
+
+
+def test_approve_happy_path_merges_and_completes(tmp_path, mocker):
+    _seed_sidecar(tmp_path)
+    mocker.patch("hermes_pipeline.ship.resolve_ship_task",
+                 return_value=KanbanTaskInfo("t_9", GATE_PHASE_KEY, "blocked", "TODO-5"))
+    mocker.patch("hermes_pipeline.ship.gh_pr_view",
+                 return_value={"state": "OPEN", "headRefOid": "reviewed_sha",
+                               "statusCheckRollup": []})
+    mocker.patch("hermes_pipeline.ship.git_tree_clean", return_value=True)
+    bump = mocker.patch("hermes_pipeline.ship._bump_and_merge")
+    complete = mocker.patch("hermes_pipeline.ship.complete_gate_task")
+    summary = approve_ship(project_dir=tmp_path, project_slug="demo",
+                           todo_id=5, state_dir=tmp_path)
+    bump.assert_called_once()
+    complete.assert_called_once_with("t_9")
+    assert find_ship_sidecar(tmp_path, 5) is None
+    assert "TODO-5" in summary
+
+
+def test_approve_refuses_when_no_gate_task(tmp_path, mocker):
+    _seed_sidecar(tmp_path)
+    mocker.patch("hermes_pipeline.ship.resolve_ship_task", return_value=None)
+    with pytest.raises(ApproveRefused, match="gate task"):
+        approve_ship(project_dir=tmp_path, project_slug="demo",
+                     todo_id=5, state_dir=tmp_path)
