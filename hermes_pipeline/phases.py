@@ -13,11 +13,12 @@ log = logging.getLogger(__name__)
 class Phase:
     phase_key: str
     name: str
-    prompt: str
-    tools: str
-    turns: int
+    prompt: str = ""
+    tools: str = ""
+    turns: int = 0
     timeout: int = 1800
     terminal: bool = False
+    gate: bool = False
 
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:
     if config_path is None:
