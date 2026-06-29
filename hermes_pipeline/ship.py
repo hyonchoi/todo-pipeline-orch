@@ -8,22 +8,24 @@ the PR, squash-merges, and completes the gate task.
 from __future__ import annotations
 
 import dataclasses
+import fcntl
 import json
 import logging
 import os
 import re
 import subprocess
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+
+from .kanban_tasks import KanbanTaskInfo, get_todo_kanban_tasks
 
 log = logging.getLogger(__name__)
 
 SHIP_SIDECAR_SUFFIX = "-ship.json"
 
 GATE_PHASE_KEY = "phase_9_ship"
-
-from .kanban_tasks import get_todo_kanban_tasks, KanbanTaskInfo
 
 
 @dataclass
@@ -93,6 +95,35 @@ def resolve_ship_task(*, project_slug: str, tick_id: str) -> KanbanTaskInfo | No
     """Return the ship-gate KanbanTaskInfo for a tick, or None if absent."""
     tasks = get_todo_kanban_tasks(project_slug, tick_id)
     return tasks.get(GATE_PHASE_KEY)
+
+
+class ApproveRefused(Exception):
+    """A deterministic guard refused the approve. Not an internal error."""
+
+
+@contextmanager
+def approve_lock(state_dir: Path | str):
+    """Serialize approve via a non-blocking exclusive flock.
+
+    Uses a dedicated <state_dir>/approve.lock — NOT TickLock, whose
+    stale-reclamation is wrong for a human-driven, possibly-slow merge.
+    """
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = state_dir / "approve.lock"
+    f = open(lock_path, "w")
+    try:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            raise ApproveRefused("another approve is already in progress")
+        yield
+    finally:
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        finally:
+            f.close()
+
 
 GH_TIMEOUT = 60
 GIT_TIMEOUT = 60

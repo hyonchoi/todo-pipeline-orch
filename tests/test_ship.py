@@ -174,3 +174,23 @@ def test_resolve_ship_task_returns_gate(mocker):
 def test_resolve_ship_task_none_when_absent(mocker):
     mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value={})
     assert resolve_ship_task(project_slug="demo", tick_id="01TICK") is None
+
+
+# --- Task 9: approve_lock ---
+
+from hermes_pipeline.ship import approve_lock, ApproveRefused
+
+
+def test_approve_lock_excludes_second_holder(tmp_path):
+    with approve_lock(tmp_path):
+        with pytest.raises(ApproveRefused):
+            with approve_lock(tmp_path):
+                pass
+
+
+def test_approve_lock_reacquirable_after_release(tmp_path):
+    with approve_lock(tmp_path):
+        pass
+    # Should not raise the second time.
+    with approve_lock(tmp_path):
+        pass
