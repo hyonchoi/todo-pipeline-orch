@@ -244,3 +244,51 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
 
     new_sha = _run_git(["rev-parse", "HEAD"], cwd=project_dir)
     return new_version, new_sha
+
+
+def _audit(state_dir: Path | str, message: str) -> None:
+    """Append a timestamped audit line; also log at WARNING."""
+    state_dir = Path(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    line = f"{ts} {message}\n"
+    with open(state_dir / "approve_audit.log", "a") as f:
+        f.write(line)
+    log.warning("AUDIT: %s", message)
+
+
+def _check_ship_guards(
+    *,
+    sidecar: ShipSidecar,
+    live_head_sha: str,
+    project_dir: Path | str,
+    state_dir: Path | str,
+    force_count: int,
+) -> None:
+    """Run the deterministic pre-merge guards.
+
+    - Dirty tree: ALWAYS refuses (force can never bypass).
+    - SHA staleness: refuses unless force_count >= 2 (audited). Skipped once
+      the bump has re-baselined the SHA (sidecar.bump_version set).
+    """
+    if not git_tree_clean(project_dir):
+        raise ApproveRefused(
+            f"working tree is dirty in {project_dir}; commit or clean before approving"
+        )
+
+    if sidecar.bump_version is not None:
+        return  # SHA already re-baselined by the bump commit.
+
+    if live_head_sha != sidecar.pr_head_sha:
+        if force_count >= 2:
+            _audit(
+                state_dir,
+                f"force-bypass SHA guard for TODO-{sidecar.todo_id}: "
+                f"reviewed={sidecar.pr_head_sha} live={live_head_sha}",
+            )
+            return
+        raise ApproveRefused(
+            f"PR head SHA changed since review "
+            f"(reviewed={sidecar.pr_head_sha}, live={live_head_sha}); "
+            f"re-review, or pass --force --force to override"
+        )

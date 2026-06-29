@@ -194,3 +194,71 @@ def test_approve_lock_reacquirable_after_release(tmp_path):
     # Should not raise the second time.
     with approve_lock(tmp_path):
         pass
+
+
+# --- Task 10: _check_ship_guards ---
+
+from hermes_pipeline.ship import _check_ship_guards
+
+
+def _guard_sidecar(**kw):
+    base = dict(
+        tick_id="01TICK", todo_id=5, pr_number=42, pr_head_sha="reviewed_sha",
+        base_branch="main", work_branch="todo-5-feat",
+        phase_8_task_id="t_8", bump_version=None,
+    )
+    base.update(kw)
+    return ShipSidecar(**base)
+
+
+def test_guards_refuse_dirty_tree(mocker, tmp_path):
+    mocker.patch("hermes_pipeline.ship.git_tree_clean", return_value=False)
+    with pytest.raises(ApproveRefused, match="dirty"):
+        _check_ship_guards(
+            sidecar=_guard_sidecar(), live_head_sha="reviewed_sha",
+            project_dir=tmp_path, state_dir=tmp_path, force_count=0)
+
+
+def test_guards_dirty_tree_not_force_bypassable(mocker, tmp_path):
+    mocker.patch("hermes_pipeline.ship.git_tree_clean", return_value=False)
+    with pytest.raises(ApproveRefused, match="dirty"):
+        _check_ship_guards(
+            sidecar=_guard_sidecar(), live_head_sha="reviewed_sha",
+            project_dir=tmp_path, state_dir=tmp_path, force_count=2)
+
+
+def test_guards_refuse_stale_sha(mocker, tmp_path):
+    mocker.patch("hermes_pipeline.ship.git_tree_clean", return_value=True)
+    with pytest.raises(ApproveRefused, match="SHA"):
+        _check_ship_guards(
+            sidecar=_guard_sidecar(), live_head_sha="DIFFERENT",
+            project_dir=tmp_path, state_dir=tmp_path, force_count=0)
+
+
+def test_guards_stale_sha_bypassed_by_double_force_and_audited(mocker, tmp_path):
+    mocker.patch("hermes_pipeline.ship.git_tree_clean", return_value=True)
+    _check_ship_guards(
+        sidecar=_guard_sidecar(), live_head_sha="DIFFERENT",
+        project_dir=tmp_path, state_dir=tmp_path, force_count=2)
+    audit = (tmp_path / "approve_audit.log").read_text()
+    assert "force" in audit.lower()
+    assert "DIFFERENT" in audit
+
+
+def test_guards_single_force_does_not_bypass_sha(mocker, tmp_path):
+    mocker.patch("hermes_pipeline.ship.git_tree_clean", return_value=True)
+    with pytest.raises(ApproveRefused, match="SHA"):
+        _check_ship_guards(
+            sidecar=_guard_sidecar(), live_head_sha="DIFFERENT",
+            project_dir=tmp_path, state_dir=tmp_path, force_count=1)
+
+
+def test_guards_skip_sha_check_after_bump(mocker, tmp_path):
+    mocker.patch("hermes_pipeline.ship.git_tree_clean", return_value=True)
+    # bump_version set => SHA already re-baselined; live mismatch is fine here
+    # because the live sha equals the bumped sidecar sha in practice. Pass a
+    # mismatch to prove the check is skipped, not merely satisfied.
+    _check_ship_guards(
+        sidecar=_guard_sidecar(bump_version="0.3.4", pr_head_sha="bumped"),
+        live_head_sha="something_else",
+        project_dir=tmp_path, state_dir=tmp_path, force_count=0)
