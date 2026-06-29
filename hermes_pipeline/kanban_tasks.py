@@ -28,6 +28,10 @@ log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
 
+# A "blocked" kanban task is a GATE, not an error: it deliberately holds the
+# project in-flight (blocked ∉ COMPLETION_STATUSES) until a human approves.
+BLOCKED = "blocked"
+
 # Statuses that count as "complete" for the purpose of determining whether
 # a prior tick's work is done. Archived phases (from mid-registration
 # cleanup) are excluded — they indicate the tick didn't finish cleanly.
@@ -128,8 +132,12 @@ def register_todo_phases(
         if phase_idx > 0:
             cmd.extend(["--parent", task_ids[phase_idx - 1]])
 
-        # Add goal mode flags
-        cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])
+        # Gate phases are pure markers: created blocked, never dispatched to
+        # an agent. Everything else runs as a goal-mode kanban task.
+        if getattr(phase, "gate", False):
+            cmd.extend(["--initial-status", BLOCKED])
+        else:
+            cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])
 
         log.info(
             "registering kanban task: phase=%s todo=%s tick=%s",

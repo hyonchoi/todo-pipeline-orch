@@ -9,6 +9,15 @@ import pytest
 from hermes_pipeline.phases import load_phases
 
 
+class FakeGatePhase:
+    def __init__(self, phase_key, name="P", prompt="", tools="", turns=0, gate=False):
+        self.phase_key = phase_key
+        self.name = name
+        self.prompt = prompt
+        self.tools = tools
+        self.turns = turns
+        self.gate = gate
+
 class TestRegisterTodoPhases:
     """Tests for register_todo_phases()."""
 
@@ -225,6 +234,36 @@ class TestRegisterTodoPhases:
         )
 
         assert task_ids == ["task-001", "task-002"]
+
+    def test_gate_phase_registered_blocked_without_goal(self, tmp_path, mocker):
+        """Gate phases get --initial-status blocked, no --goal flags."""
+        from hermes_pipeline.kanban_tasks import register_todo_phases
+
+        phases = [
+            FakeGatePhase("phase_8_finish_branch", name="P8", turns=15),
+            FakeGatePhase("phase_9_ship", name="Ship Gate", gate=True),
+        ]
+        mocker.patch("hermes_pipeline.kanban_tasks.load_phases", return_value=phases)
+        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_x"}', stderr="")
+
+        register_todo_phases(
+            todo_id="TODO-5",
+            tick_id="01TICK",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+        # Gate phase (index 1) should have --initial-status blocked, no --goal
+        gate_cmd = mock_run.call_args_list[1][0][0]
+        assert "--initial-status" in gate_cmd
+        assert gate_cmd[gate_cmd.index("--initial-status") + 1] == "blocked"
+        assert "--goal" not in gate_cmd
+
+        # Normal phase (index 0) should have --goal, no --initial-status
+        phase8_cmd = mock_run.call_args_list[0][0][0]
+        assert "--goal" in phase8_cmd
+        assert "--initial-status" not in phase8_cmd
 
 
 class TestAllPhasesComplete:
