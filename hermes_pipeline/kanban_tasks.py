@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from pathlib import Path
 
 from .outcomes import (
@@ -27,6 +28,10 @@ _EXPECTED_PHASES_FILE_SUFFIX = ".expected-phases.json"
 log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
+
+# A "blocked" kanban task is a GATE, not an error: it deliberately holds the
+# project in-flight (blocked ∉ COMPLETION_STATUSES) until a human approves.
+BLOCKED = "blocked"
 
 # Statuses that count as "complete" for the purpose of determining whether
 # a prior tick's work is done. Archived phases (from mid-registration
@@ -128,8 +133,12 @@ def register_todo_phases(
         if phase_idx > 0:
             cmd.extend(["--parent", task_ids[phase_idx - 1]])
 
-        # Add goal mode flags
-        cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])
+        # Gate phases are pure markers: created blocked, never dispatched to
+        # an agent. Everything else runs as a goal-mode kanban task.
+        if getattr(phase, "gate", False):
+            cmd.extend(["--initial-status", BLOCKED])
+        else:
+            cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])
 
         log.info(
             "registering kanban task: phase=%s todo=%s tick=%s",
@@ -268,6 +277,60 @@ def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:
             pass
 
     return status_map
+
+
+@dataclass(frozen=True)
+class KanbanTaskInfo:
+    """One kanban task, resolved by phase_key for a single tick."""
+    task_id: str
+    phase_key: str
+    status: str
+    todo_id: str
+
+
+def get_todo_kanban_tasks(tenant: str, tick_id: str) -> dict[str, KanbanTaskInfo]:
+    """Query kanban for all tasks of a tick, return {phase_key: KanbanTaskInfo}.
+
+    Like get_todo_kanban_status but preserves the task id and todo id so
+    callers can complete the gate task and match it to a ship sidecar.
+    Returns an empty dict if no tasks match or the CLI fails.
+    """
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "list", "--tenant", tenant, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=HERMES_COMMAND_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return {}
+        snapshot = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
+        log.warning("kanban list failed for tenant=%s", tenant)
+        return {}
+
+    tasks = snapshot if isinstance(snapshot, list) else snapshot.get("tasks", [])
+
+    out: dict[str, KanbanTaskInfo] = {}
+    for task in tasks:
+        body = task.get("body", "")
+        first_line = body.split("\n")[0]
+        try:
+            header = json.loads(first_line)
+        except (json.JSONDecodeError, IndexError):
+            continue
+        if header.get("tick_id") != tick_id:
+            continue
+        phase_key = header.get("phase_key")
+        if not phase_key:
+            continue
+        out[phase_key] = KanbanTaskInfo(
+            task_id=task.get("id", ""),
+            phase_key=phase_key,
+            status=task.get("status", "unknown"),
+            todo_id=header.get("todo_id", ""),
+        )
+    return out
 
 
 def all_phases_complete(

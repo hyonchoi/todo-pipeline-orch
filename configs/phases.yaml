@@ -49,4 +49,7 @@ phases:
     tools: "Read,Write,Bash"
     turns: 15
     timeout: 1800
+  - phase_key: "phase_9_ship"
+    name: "Phase 9: Ship Gate"
+    gate: true
     terminal: true

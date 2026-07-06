@@ -9,6 +9,15 @@ import pytest
 from hermes_pipeline.phases import load_phases
 
 
+class FakeGatePhase:
+    def __init__(self, phase_key, name="P", prompt="", tools="", turns=0, gate=False):
+        self.phase_key = phase_key
+        self.name = name
+        self.prompt = prompt
+        self.tools = tools
+        self.turns = turns
+        self.gate = gate
+
 class TestRegisterTodoPhases:
     """Tests for register_todo_phases()."""
 
@@ -225,6 +234,36 @@ class TestRegisterTodoPhases:
         )
 
         assert task_ids == ["task-001", "task-002"]
+
+    def test_gate_phase_registered_blocked_without_goal(self, tmp_path, mocker):
+        """Gate phases get --initial-status blocked, no --goal flags."""
+        from hermes_pipeline.kanban_tasks import register_todo_phases
+
+        phases = [
+            FakeGatePhase("phase_8_finish_branch", name="P8", turns=15),
+            FakeGatePhase("phase_9_ship", name="Ship Gate", gate=True),
+        ]
+        mocker.patch("hermes_pipeline.kanban_tasks.load_phases", return_value=phases)
+        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_x"}', stderr="")
+
+        register_todo_phases(
+            todo_id="TODO-5",
+            tick_id="01TICK",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+        # Gate phase (index 1) should have --initial-status blocked, no --goal
+        gate_cmd = mock_run.call_args_list[1][0][0]
+        assert "--initial-status" in gate_cmd
+        assert gate_cmd[gate_cmd.index("--initial-status") + 1] == "blocked"
+        assert "--goal" not in gate_cmd
+
+        # Normal phase (index 0) should have --goal, no --initial-status
+        phase8_cmd = mock_run.call_args_list[0][0][0]
+        assert "--goal" in phase8_cmd
+        assert "--initial-status" not in phase8_cmd
 
 
 class TestAllPhasesComplete:
@@ -812,3 +851,56 @@ class TestObserveOutcomes:
 
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {"phase_4_dev": "running"}
+
+
+class TestGetTodoKanbanTasks:
+    """Tests for get_todo_kanban_tasks() — task id + status per phase."""
+
+    def test_get_todo_kanban_tasks_returns_ids_and_status(self, mocker):
+        import json as _json
+        tasks = [
+            {
+                "id": "t_8",
+                "status": "done",
+                "body": _json.dumps(
+                    {"tick_id": "01TICK", "phase_key": "phase_8_finish_branch",
+                     "todo_id": "TODO-5", "project_slug": "demo"},
+                    sort_keys=True,
+                ) + "\nbody text",
+            },
+            {
+                "id": "t_9",
+                "status": "blocked",
+                "body": _json.dumps(
+                    {"tick_id": "01TICK", "phase_key": "phase_9_ship",
+                     "todo_id": "TODO-5", "project_slug": "demo"},
+                    sort_keys=True,
+                ) + "\ngate",
+            },
+            {
+                "id": "t_other",
+                "status": "done",
+                "body": _json.dumps(
+                    {"tick_id": "OTHER", "phase_key": "phase_9_ship",
+                     "todo_id": "TODO-9", "project_slug": "demo"},
+                    sort_keys=True,
+                ),
+            },
+        ]
+        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(tasks), stderr="")
+
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+        out = get_todo_kanban_tasks("demo", "01TICK")
+
+        assert set(out) == {"phase_8_finish_branch", "phase_9_ship"}
+        assert out["phase_9_ship"].task_id == "t_9"
+        assert out["phase_9_ship"].status == "blocked"
+        assert out["phase_9_ship"].todo_id == "TODO-5"
+        assert out["phase_8_finish_branch"].task_id == "t_8"
+
+    def test_get_todo_kanban_tasks_empty_on_cli_failure(self, mocker):
+        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=1, stdout="", stderr="boom")
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+        assert get_todo_kanban_tasks("demo", "01TICK") == {}
