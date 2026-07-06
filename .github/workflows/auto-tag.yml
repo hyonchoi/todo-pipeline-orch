@@ -1,0 +1,39 @@
+name: Auto Tag
+
+on:
+  push:
+    branches: [main]
+
+# Only one tagging job at a time per ref — newer pushes cancel older ones.
+concurrency:
+  group: tag-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  auto-tag:
+    name: tag latest version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
+
+      - name: Read version
+        run: |
+          VERSION=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          echo "version=${VERSION}"
+          echo "VERSION=${VERSION}" >> $GITHUB_ENV
+
+      - name: Create tag if missing
+        run: |
+          TAG="v${VERSION}"
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "::notice::Tag ${TAG} already exists — skipping"
+            exit 0
+          fi
+          echo "::notice::Creating and pushing tag ${TAG}"
+          git config user.name "${GITHUB_ACTOR}"
+          git config user.email "${GITHUB_ACTOR}@users.noreply.github.com"
+          git tag -a "${TAG}" -m "Release ${TAG}"
+          git push origin "refs/tags/${TAG}"
