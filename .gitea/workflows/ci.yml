@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel in-progress runs for the same ref when a new commit is pushed.
+concurrency:
+  group: ci-${{ gitea.workflow }}-${{ gitea.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.12', '3.13', '3.14']
+
+    steps:
+      - uses: gitea/checkout@refs/tags/v1.0.0
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf  # v3
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --python ${{ matrix.python-version }}
+
+      - name: Check version file consistency
+        run: |
+          PYPROJ=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          VFILE=$(tr -d '[:space:]' < VERSION)
+          if [ "$PYPROJ" != "$VFILE" ]; then
+            echo "::error=VERSION ($VFILE) and pyproject.toml ($PYPROJ) differ"
+            exit 1
+          fi
+
+      - name: Run tests
+        run: uv run --python ${{ matrix.python-version }} pytest --cov=hermes_pipeline --cov-report=term-missing
