@@ -494,3 +494,142 @@ def test_tick_project_calls_maybe_ship_ready_before_early_return(mocker, tmp_pat
     kwargs = called.call_args.kwargs
     assert kwargs["prior_tick_id"] == "01TICK"
     assert kwargs["project_slug"] == "demo"
+
+# --- Task 15: uncovered codepaths ---
+
+
+def test_read_sidecar_corrupt_json_returns_none(tmp_path, mocker, caplog):
+    """read_sidecar handles corrupt JSON gracefully, returns None and warns."""
+    from hermes_pipeline.ship import write_sidecar
+    # Write a valid sidecar first, then corrupt it.
+    sc = _sidecar()
+    path = write_sidecar(sc, state_dir=tmp_path)
+    path.write_text("not valid json{{{")
+    assert read_sidecar(tmp_path, "01TICK") is None
+    assert "corrupt" in caplog.text.lower()
+
+
+def test_ci_is_green_neutral_and_skipped_treated_as_green():
+    """NEUTRAL and SKIPPED conclusions are considered green."""
+    assert ci_is_green([{"status": "COMPLETED", "conclusion": "NEUTRAL"}]) is True
+    assert ci_is_green([{"status": "COMPLETED", "conclusion": "SKIPPED"}]) is True
+    assert ci_is_green([
+        {"status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"status": "COMPLETED", "conclusion": "SKIPPED"},
+    ]) is True
+
+
+def test_ci_is_green_mixed_checkrun_and_statuscontext():
+    """Mixed CheckRun and StatusContext entries all pass."""
+    assert ci_is_green([
+        {"status": "COMPLETED", "conclusion": "SUCCESS"},
+        {"state": "SUCCESS"},
+    ]) is True
+
+
+def test_ci_is_green_none_state_and_none_status():
+    """Missing state/status fields are treated as failure."""
+    assert ci_is_green([{}]) is False
+    assert ci_is_green([{"state": None}]) is False
+    assert ci_is_green([{"status": None, "conclusion": "SUCCESS"}]) is False
+
+
+def test_find_ship_sidecar_no_outcomes_dir(tmp_path):
+    """find_ship_sidecar returns None when outcomes dir doesn't exist."""
+    # Don't create the outcomes directory at all
+    assert find_ship_sidecar(tmp_path, 5) is None
+
+
+def test_find_ship_sidecar_skips_corrupt_files(tmp_path):
+    """find_ship_sidecar skips corrupt files and still finds valid ones."""
+    outcomes = tmp_path / "outcomes"
+    outcomes.mkdir()
+    (outcomes / "bad-ship.json").write_text("not json")
+    write_sidecar(_sidecar(tick_id="01GOOD", todo_id=5), state_dir=tmp_path)
+    got = find_ship_sidecar(tmp_path, 5)
+    assert got is not None
+    assert got.tick_id == "01GOOD"
+
+
+def test_complete_gate_task_raises_on_failure(mocker):
+    """complete_gate_task raises ShipError when hermes CLI fails."""
+    mock_run = mocker.patch("hermes_pipeline.ship.subprocess.run")
+    mock_run.return_value = mocker.Mock(returncode=1, stdout="", stderr="no task")
+    from hermes_pipeline.ship import complete_gate_task
+    with pytest.raises(ShipError, match="hermes kanban complete"):
+        complete_gate_task("t_nonexistent")
+
+
+def test_gh_pr_view_json_decode_error(mocker, tmp_path):
+    """gh_pr_view raises ShipError when output is not valid JSON."""
+    mock_run = mocker.patch("hermes_pipeline.ship.subprocess.run")
+    mock_run.return_value = mocker.Mock(returncode=0, stdout="not json{{{", stderr="")
+    with pytest.raises(ShipError, match="non-JSON"):
+        gh_pr_view("todo-5-feature", cwd=tmp_path)
+
+
+def test_bump_in_pr_no_changelog_creates_new(mocker, tmp_path):
+    """bump_in_pr creates CHANGELOG.md from scratch when it doesn't exist."""
+    (tmp_path / "VERSION").write_text("0.3.3\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.3.3"\n')
+    # No CHANGELOG.md
+
+    def fake_run(cmd, **kw):
+        stdout = "newsha\n" if cmd[:2] == ["git", "rev-parse"] else ""
+        return mocker.Mock(returncode=0, stdout=stdout, stderr="")
+
+    mocker.patch("hermes_pipeline.ship.subprocess.run", side_effect=fake_run)
+
+    new_version, _ = bump_in_pr(
+        project_dir=tmp_path, work_branch="todo-5-feat", todo_id=5)
+
+    changelog = tmp_path / "CHANGELOG.md"
+    assert changelog.exists()
+    content = changelog.read_text()
+    assert "# Changelog" in content
+    assert new_version in content
+
+
+def test_maybe_ship_ready_no_pipeline_branch_file(tmp_path, mocker, caplog):
+    """maybe_ship_ready returns when pipeline_branch.txt is missing."""
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks",
+                 return_value=_ready_tasks())
+    mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value={
+        "number": 42, "headRefOid": "x", "baseRefName": "main",
+    })
+    notify = mocker.patch("hermes_pipeline.ship.slack.notify")
+
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path,
+                     slack_channel="#ship")
+
+    assert read_sidecar(tmp_path, "01TICK") is None
+    notify.assert_not_called()
+    assert "no pipeline_branch.txt" in caplog.text
+
+
+def test_maybe_ship_ready_empty_pipeline_branch(tmp_path, mocker):
+    """maybe_ship_ready returns when pipeline_branch.txt is empty."""
+    (tmp_path / "pipeline_branch.txt").write_text("  \n")
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks",
+                 return_value=_ready_tasks())
+    notify = mocker.patch("hermes_pipeline.ship.slack.notify")
+
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path,
+                     slack_channel="#ship")
+
+    assert read_sidecar(tmp_path, "01TICK") is None
+    notify.assert_not_called()
+
+
+def test_maybe_ship_ready_exception_swallowed(tmp_path, mocker, caplog):
+    """maybe_ship_ready never breaks the tick — exceptions are logged."""
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks",
+                 side_effect=RuntimeError("oops"))
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path,
+                     slack_channel="#ship")
+    # Should not raise; the exception is swallowed
+    assert "maybe_ship_ready failed" in caplog.text

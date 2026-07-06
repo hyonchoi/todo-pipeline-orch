@@ -59,3 +59,20 @@ def test_cmd_approve_unknown_project_returns_two(mocker, tmp_path):
 
 def test_module_docstring_mentions_approve():
     assert "approve" in (cli.__doc__ or "")
+
+
+def test_parse_todo_id_flag_lowercase():
+    """_parse_todo_id_flag accepts lowercase 'todo-5'."""
+    assert cli._parse_todo_id_flag("todo-5") == 5
+
+
+def test_parse_todo_id_flag_plain_number():
+    """_parse_todo_id_flag accepts plain number '5'."""
+    assert cli._parse_todo_id_flag("5") == 5
+
+
+def test_parse_todo_id_flag_invalid_raises():
+    """_parse_todo_id_flag raises ArgumentTypeError on non-numeric input."""
+    import argparse
+    with pytest.raises(argparse.ArgumentTypeError, match="--todo"):
+        cli._parse_todo_id_flag("abc")
