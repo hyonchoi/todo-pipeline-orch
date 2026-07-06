@@ -27,6 +27,7 @@ log = logging.getLogger(__name__)
 SHIP_SIDECAR_SUFFIX = "-ship.json"
 
 GATE_PHASE_KEY = "phase_9_ship"
+PHASE_8_KEY = "phase_8_finish_branch"
 
 
 @dataclass
@@ -128,6 +129,7 @@ def approve_lock(state_dir: Path | str):
 
 GH_TIMEOUT = 60
 GIT_TIMEOUT = 60
+HERMES_TIMEOUT = 60  # timeout for `hermes` subprocess calls (kanban, etc.)
 _GH_PR_VIEW_FIELDS = "number,state,headRefOid,baseRefName,headRefName,statusCheckRollup"
 
 
@@ -250,7 +252,15 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
 
         new_sha = _run_git(["rev-parse", "HEAD"], cwd=project_dir)
     finally:
-        _run_git(["checkout", orig_branch], cwd=project_dir)
+        # Best-effort cleanup: a failed restore must never mask the original
+        # exception (CI-red refusal, push/merge failure) from the try body.
+        try:
+            _run_git(["checkout", orig_branch], cwd=project_dir)
+        except ShipError as restore_err:
+            log.warning(
+                "bump_in_pr: failed to restore branch %s: %s",
+                orig_branch, restore_err,
+            )
     return new_version, new_sha
 
 
@@ -343,7 +353,7 @@ def complete_gate_task(task_id: str) -> None:
     """Complete the gate task in kanban so the tick can advance."""
     result = subprocess.run(
         ["hermes", "kanban", "complete", task_id],
-        capture_output=True, text=True, timeout=GH_TIMEOUT,
+        capture_output=True, text=True, timeout=HERMES_TIMEOUT,
     )
     if result.returncode != 0:
         raise ShipError(
@@ -449,8 +459,8 @@ def maybe_ship_ready(
             base_branch=view.get("baseRefName", "main"),
             work_branch=work_branch,
             phase_8_task_id=(
-                tasks["phase_8_finish_branch"].task_id
-                if "phase_8_finish_branch" in tasks else None
+                tasks[PHASE_8_KEY].task_id
+                if PHASE_8_KEY in tasks else None
             ),
             bump_version=None,
         )

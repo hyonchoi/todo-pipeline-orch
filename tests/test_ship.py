@@ -133,8 +133,13 @@ def test_bump_in_pr_writes_files_and_pushes(mocker, tmp_path):
 
     def fake_run(cmd, **kw):
         calls.append(cmd)
-        stdout = "newsha999\n" if cmd[:2] == ["git", "rev-parse"] else ""
-        return mocker.Mock(returncode=0, stdout=stdout, stderr="")
+        # Distinguish the two rev-parse calls: --abbrev-ref returns the branch
+        # name (orig_branch), plain rev-parse returns the new HEAD sha.
+        if cmd[:2] == ["git", "rev-parse"]:
+            if "--abbrev-ref" in cmd:
+                return mocker.Mock(returncode=0, stdout="main\n", stderr="")
+            return mocker.Mock(returncode=0, stdout="newsha999\n", stderr="")
+        return mocker.Mock(returncode=0, stdout="", stderr="")
 
     mocker.patch("hermes_pipeline.ship.subprocess.run", side_effect=fake_run)
 
@@ -152,6 +157,8 @@ def test_bump_in_pr_writes_files_and_pushes(mocker, tmp_path):
     assert any(c.startswith("git checkout todo-5-feat") for c in flat)
     assert any(c.startswith("git commit") for c in flat)
     assert any(c.startswith("git push origin todo-5-feat") for c in flat)
+    # Original branch is restored after the bump completes.
+    assert any(c.startswith("git checkout main") for c in flat)
 
 
 def test_bump_in_pr_restores_original_branch_on_failure(mocker, tmp_path):
