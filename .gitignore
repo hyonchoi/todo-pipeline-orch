@@ -1,4 +1,6 @@
 
+.superpowers/
+
 # ---- Hermes ----
 # Track prompt templates; ignore runtime state (decisions, outcomes, locks)
 .hermes/*
@@ -95,4 +97,3 @@ $RECYCLE.BIN/
 *.iml
 *.iws
 out/
-.gbrain-source
