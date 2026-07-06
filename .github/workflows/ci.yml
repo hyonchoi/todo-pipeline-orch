@@ -33,5 +33,14 @@ jobs:
       - name: Install dependencies
         run: uv sync --python ${{ matrix.python-version }}
 
+      - name: Check version file consistency
+        run: |
+          PYPROJ=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
+          VFILE=$(tr -d '[:space:]' < VERSION)
+          if [ "$PYPROJ" != "$VFILE" ]; then
+            echo "::error=VERSION ($VFILE) and pyproject.toml ($PYPROJ) differ"
+            exit 1
+          fi
+
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest --cov=hermes_pipeline --cov-report=term-missing
