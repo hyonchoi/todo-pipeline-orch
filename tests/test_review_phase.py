@@ -52,3 +52,30 @@ def test_capture_pre_review_state_empty_diff_when_no_changes_vs_main(repo: Path)
     _run(repo, "git", "checkout", "-q", "-b", "empty-feature")
     pre = rp.capture_pre_review_state(project_dir=repo, todo_id="TODO-9")
     assert pre.diff_is_empty is True
+
+
+def test_restore_worktree_reverts_tracked_and_removes_untracked(repo: Path):
+    head = _run(repo, "git", "rev-parse", "HEAD")
+    # Simulate a review that edited a tracked file and added a new one.
+    (repo / "feature.py").write_text("y = 2  # bad edit\n")
+    (repo / "junk.txt").write_text("scratch\n")
+    _run(repo, "git", "add", "feature.py")  # stage the bad edit
+    rp.restore_worktree(project_dir=repo, head_sha=head)
+    assert _run(repo, "git", "rev-parse", "HEAD") == head
+    assert (repo / "feature.py").read_text() == "y = 2\n"
+    assert not (repo / "junk.txt").exists()
+    porcelain = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=repo, capture_output=True, text=True
+    ).stdout.strip()
+    assert porcelain == "", porcelain
+
+
+def test_restore_worktree_moves_head_back_after_extra_commit(repo: Path):
+    head = _run(repo, "git", "rev-parse", "HEAD")
+    (repo / "feature.py").write_text("y = 3\n")
+    _run(repo, "git", "add", ".")
+    _run(repo, "git", "commit", "-q", "-m", "review fix")
+    assert _run(repo, "git", "rev-parse", "HEAD") != head
+    rp.restore_worktree(project_dir=repo, head_sha=head)
+    assert _run(repo, "git", "rev-parse", "HEAD") == head
+    assert (repo / "feature.py").read_text() == "y = 2\n"
