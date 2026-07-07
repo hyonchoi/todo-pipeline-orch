@@ -61,6 +61,11 @@ def restore_worktree(*, project_dir, head_sha: str) -> None:
     `reset --hard` reverts tracked changes and moves HEAD; `clean -fd` removes
     untracked files/dirs the review may have created. Plain `clean -fd` does
     NOT remove gitignored files (e.g. .hermes/), which is intentional.
+
+    The two git calls have a theoretical race window between them, but the
+    pipeline runs in an isolated worktree with no concurrent modifications.
+    The `head_sha` comes from `git rev-parse HEAD` (hex-only), so no shell
+    injection risk exists. This sequential approach avoids `shell=True`.
     """
     project_dir = Path(project_dir)
     _git(project_dir, "reset", "--hard", head_sha)
