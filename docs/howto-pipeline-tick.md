@@ -69,9 +69,11 @@ You should see the phases with statuses:
 
 The `--parent` chain means phases execute sequentially through the kanban
 board. When phase 2 completes, phase 4 transitions from `ready` to `running`
-automatically — the orchestrator doesn't need to manage the handoff.
+automatically — the orchestrator doesn't need to manage the handoff. When
+phase 4 completes, phase 5 (`phase_5_review`) transitions to `running`, and
+when phase 5 completes, phase 6.1 (CSO) transitions to `running`.
 
-### 4. Verify outcomes were written
+See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
 
 After a tick completes (or you run another tick that detects the prior tick
 is done), outcomes are written to `<project>/.hermes/outcomes/`:
@@ -84,11 +86,12 @@ You'll see JSONL entries like:
 ```json
 {"outcome": "phase_complete", "phase_key": "phase_2_autoplan"}
 {"outcome": "phase_complete", "phase_key": "phase_4_development"}
+{"outcome": "phase_complete", "phase_key": "phase_5_review"}
 {"outcome": "all_phases_complete"}
 ```
 
 See the [outcome types table](reference-kanban-as-scheduler.md#observe_outcomes)
-for all possible outcomes.
+for all possible outcomes, including the new review outcomes: `review_clean`, `review_reverted_test_failure`, `review_timeout`, and `review_skipped_no_diff`.
 
 ### 5. Check the circuit breaker state
 
