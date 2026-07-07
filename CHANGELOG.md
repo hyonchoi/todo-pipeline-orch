@@ -167,6 +167,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`hermes_pipeline/phases.py`** — Added `_invoke_review_phase()` and routing in `_invoke_hermes()` to dispatch `phase_5_review` through the code-owned lifecycle instead of the generic rc-check path.
 - **Phase order** — `configs/phases.yaml` now has 9 phases with `phase_5_review` inserted between development and CSO.
 
+### Fixed
+- **Path traversal in artifact filenames** — `todo_id` is now validated against a strict pattern before use in file paths, preventing directory escape.
+- **Secret leakage in review artifacts** — Hermes stdout embedded in committed findings is now redacted of API keys, tokens, and other sensitive patterns.
+- **Race condition in `restore_worktree`** — Documented the isolated-worktree assumption; sequential `reset --hard` + `clean -fd` is safe under that constraint.
+- **Missing git author config** — `commit_all()` now sets explicit `user.name`/`user.email` via `-c` flags, preventing failures when no global git config exists.
+
+### Added (docs)
+- **Architecture overview** — `docs/ARCHITECTURE.md` documents lane structure, phase execution flow, and data flow across the pipeline.
+
 ## [Unreleased]
 
 ### Planned
