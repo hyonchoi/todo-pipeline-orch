@@ -27,6 +27,21 @@ phases:
     tools: "Read,Write,Edit,Bash"
     turns: 60
     timeout: 3600
+  - phase_key: "phase_5_review"
+    name: "Phase 5: Code Review"
+    prompt: |
+      Use the gstack /review skill on the current branch.
+
+      AUTONOMOUS MODE — there is no human at the terminal. Apply the review's
+      fixes without asking for confirmation. Do NOT pause for user input.
+
+      Scope: {todo_id}. Focus on correctness bugs and simplification cleanups
+      in the changes on this branch. Apply fixes directly to the working tree.
+      Do NOT run tests, commit, revert, or reset — the pipeline does that after
+      you finish.
+    tools: "Read,Edit,Bash"
+    turns: 30
+    timeout: 2400
   - phase_key: "phase_6_1_cso"
     name: "Phase 6.1: CSO Security Review"
     prompt: "Use the gstack cso skill. Run a security review of the current branch. Save findings to docs/pipeline/ and commit."

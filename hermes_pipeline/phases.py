@@ -164,6 +164,40 @@ def _render_phase_prompt(template: str, *, todo_id: str, tick_id: str, project_s
         body = template
     return header + body
 
+def _invoke_review_phase(
+    *, phase, todo_id: str, tick_id: str, state_dir, project_slug: str, project_dir, on_pid,
+) -> dict:
+    """Code-owned lifecycle for phase_5_review (Approach C).
+
+    PRE (snapshot + pre-review diff) and POST (pytest + commit-or-restore +
+    verify) are owned here, NOT the prompt. The prompt only instructs /review.
+    """
+    from . import review_phase as rp
+
+    pre = rp.capture_pre_review_state(project_dir=project_dir, todo_id=todo_id)
+
+    # No-diff guard: nothing to review (e.g. docs-only TODO). Skip hermes.
+    if pre.diff_is_empty:
+        rp.write_review_artifacts(
+            project_dir=project_dir, todo_id=todo_id, outcome=rp.OUTCOME_NO_DIFF,
+            findings_text="No changes vs main; review skipped.", include_post_diff=False,
+        )
+        rp.commit_all(project_dir=project_dir, todo_id=todo_id,
+                      message=f"review: no changes to review for {todo_id}")
+        return {"status": "success", "phase_key": rp.REVIEW_PHASE_KEY, "outcome": rp.OUTCOME_NO_DIFF}
+
+    prompt = _render_phase_prompt(
+        phase.prompt, todo_id=todo_id, tick_id=tick_id, project_slug=project_slug,
+    )
+    result = _run_hermes_subprocess(
+        prompt=prompt, tools=phase.tools, turns=phase.turns, timeout=phase.timeout,
+        cwd=project_dir, on_pid=on_pid,
+    )
+    return rp.finalize_review(
+        project_dir=project_dir, todo_id=todo_id, pre_state=pre, hermes_result=result,
+    )
+
+
 def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
     """Execute a single phase via hermes subprocess and write ready_for_review on terminal success."""
     phases_cfg = {p.phase_key: p for p in load_phases()}
@@ -178,6 +212,14 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
 
     def _record_child_pid(pid: int) -> None:
         _update_marker_pid(sd, todo_id, pid)
+
+    from . import review_phase as _rp
+    if phase.phase_key == _rp.REVIEW_PHASE_KEY:
+        return _invoke_review_phase(
+            phase=phase, todo_id=todo_id, tick_id=tick_id, state_dir=sd,
+            project_slug=project_slug, project_dir=kw.get("project_dir"),
+            on_pid=_record_child_pid,
+        )
 
     prompt = _render_phase_prompt(
         phase.prompt, todo_id=todo_id, tick_id=tick_id, project_slug=project_slug,

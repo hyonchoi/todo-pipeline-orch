@@ -17,8 +17,8 @@ tick starts
     |
     v
 [register_todo_phases] -- creates kanban tasks:
-    phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_6_1_cso
-    (running)                  (ready)                  (ready)
+    phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_5_review  <--parent--  phase_6_1_cso
+    (running)                  (ready)                  (ready)                  (ready)
     |
     v  (phase_2 completes -> phase_4 transitions to running)
 [observe_outcomes] -- reads kanban status map, writes JSONL to .hermes/outcomes/

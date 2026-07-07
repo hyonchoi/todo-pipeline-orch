@@ -15,7 +15,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 - **Multi-project scan loop**: `tick` and `kill` without a project argument scan all active projects in one execution
 - **Logging flags**: `--verbose` and `--debug` global flags for detailed diagnostics (selection results, lock state, agent call summaries, circuit breaker transitions)
 - **Pending records table**: Display ready-for-review records with status and age
-- **Phase 9 merge orchestration**: Confirm, version bump, and git merge to main
+- **Phase 5 code review (v0.4)**: New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q`, with pre-review snapshot, post-review pytest run, deterministic commit-on-pass or restore-on-fail, and machine-verified outcomes (`review_clean`, `review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`)
 - **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
 
@@ -35,6 +35,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | Doc | Quadrant | When to read |
 |---|---|---|
 | [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `pipeline-watch` end-to-end |
+| [Architecture overview](docs/ARCHITECTURE.md) | Explanation | Understanding lane structure, data flow, phase execution |
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
@@ -190,6 +191,7 @@ The package is organized into lanes:
 - **Lane B**: State management (locks, checkpoints, ready-for-review records, atomic tmp+rename writes)
 - **Lane C**: Kanban integration (kanban-as-scheduler — phases as kanban tasks with `--parent` dependency chains; see [reference-kanban-as-scheduler.md](docs/reference-kanban-as-scheduler.md))
 - **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)
+- **Lane D.5**: Code review phase (`review_phase.py` — pre-review snapshot, hermes `/review` subprocess, post-review pytest + deterministic commit/restore, machine-verified outcomes)
 - **Lane E**: Merge orchestration (Phase 9)
 - **Lane F**: CLI, watcher, status, and installation (this lane; includes `project_config.py` for multi-project scanning and `state_migration.py` for per-project state)
 - **Lane G**: Hermes adapter (`hermes_adapter.py` — wraps `hermes chat -q` for all LLM calls, replaces direct Anthropic SDK usage)
