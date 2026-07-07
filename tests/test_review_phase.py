@@ -228,3 +228,55 @@ def test_verify_review_success_raises_on_dirty_tree(repo: Path):
     (repo / "dirty.txt").write_text("uncommitted\n")  # leave tree dirty
     with pytest.raises(RuntimeError, match="verify"):
         rp._verify_review_success(project_dir=repo, todo_id="TODO-7", expect_post_diff=False)
+
+
+# ── Security: todo_id validation + secret redaction ─────────────────
+
+def test_validate_todo_id_accepts_valid():
+    rp._validate_todo_id("TODO-7")
+    rp._validate_todo_id("TASK-42")
+    rp._validate_todo_id("PHASE-1")
+
+
+def test_validate_todo_id_rejects_path_traversal():
+    with pytest.raises(ValueError, match="invalid todo_id"):
+        rp._validate_todo_id("../../etc/malicious")
+    with pytest.raises(ValueError, match="invalid todo_id"):
+        rp._validate_todo_id("../evil")
+    with pytest.raises(ValueError, match="invalid todo_id"):
+        rp._validate_todo_id("TODO-7/extra")
+    with pytest.raises(ValueError, match="invalid todo_id"):
+        rp._validate_todo_id("todo-7")  # lowercase not allowed
+
+
+def test_validate_todo_id_called_by_capture(repo: Path):
+    """capture_pre_review_state rejects invalid todo_id."""
+    with pytest.raises(ValueError, match="invalid todo_id"):
+        rp.capture_pre_review_state(project_dir=repo, todo_id="../../bad")
+
+
+def test_validate_todo_id_called_by_write_artifacts(repo: Path):
+    """write_review_artifacts rejects invalid todo_id."""
+    with pytest.raises(ValueError, match="invalid todo_id"):
+        rp.write_review_artifacts(
+            project_dir=repo, todo_id="../bad", outcome="clean",
+            findings_text="test", include_post_diff=False,
+        )
+
+
+def test_validate_todo_id_called_by_commit_all(repo: Path):
+    """commit_all rejects invalid todo_id."""
+    with pytest.raises(ValueError, match="invalid todo_id"):
+        rp.commit_all(project_dir=repo, todo_id="../bad", message="test")
+
+
+def test_redact_secrets_removes_api_keys():
+    text = "Found key: sk-proj-abcDEF12345secret and Bearer abc123.def"
+    redacted = rp._redact_secrets(text)
+    assert "sk-proj-abcDEF12345secret" not in redacted
+    assert "[REDACTED]" in redacted
+
+
+def test_redact_secrets_preserves_normal_text():
+    text = "Review applied and tests pass."
+    assert rp._redact_secrets(text) == text

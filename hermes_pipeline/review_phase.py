@@ -9,11 +9,35 @@ inherits a clean, known worktree.
 from __future__ import annotations
 import json
 import logging
+import re
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
+
+# Valid todo_id pattern — prevents path traversal in artifact filenames.
+_TODO_ID_RE = re.compile(r"^[A-Z]+-\d+$")
+
+# Simple secret redaction patterns for stdout embedded in artifacts.
+_SECRET_PATTERNS = [
+    re.compile(r"sk-proj-[A-Za-z0-9]{10,}"),  # OpenAI API keys
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),       # Anthropic/other API keys
+    re.compile(r"Bearer\s+[A-Za-z0-9\-._~+/]+=*"),  # Bearer tokens
+]
+
+def _validate_todo_id(todo_id: str) -> None:
+    """Reject todo_id values that could cause path traversal."""
+    if not _TODO_ID_RE.match(todo_id):
+        raise ValueError(f"invalid todo_id: {todo_id!r}")
+
+
+def _redact_secrets(text: str) -> str:
+    """Strip obvious secret patterns from text before embedding in artifacts."""
+    for pattern in _SECRET_PATTERNS:
+        text = pattern.sub("[REDACTED]", text)
+    return text
+
 
 REVIEW_PHASE_KEY = "phase_5_review"
 
@@ -74,6 +98,7 @@ def restore_worktree(*, project_dir, head_sha: str) -> None:
 
 def capture_pre_review_state(*, project_dir, todo_id: str, base_ref: str = "main") -> PreReviewState:
     """Snapshot HEAD and save the pre-review diff. Called BEFORE hermes runs."""
+    _validate_todo_id(todo_id)
     project_dir = Path(project_dir)
     head_sha = _git(project_dir, "rev-parse", "HEAD").stdout.strip()
     base = _diff_base(project_dir, base_ref)
@@ -112,6 +137,7 @@ def write_review_artifacts(
     include_post_diff: bool,
 ) -> None:
     """Write the committed review artifacts CSO and the human PR read."""
+    _validate_todo_id(todo_id)
     project_dir = Path(project_dir)
     docs = _docs_dir(project_dir)
     (docs / f"{todo_id}-review-findings.md").write_text(findings_text)
@@ -126,6 +152,7 @@ def write_review_artifacts(
 
 def commit_all(*, project_dir, todo_id: str, message: str) -> None:
     """Stage everything and commit. Safe no-op if the tree is already clean."""
+    _validate_todo_id(todo_id)
     project_dir = Path(project_dir)
     _git(project_dir, "add", "-A")
     status = _git(project_dir, "status", "--porcelain").stdout.strip()
@@ -195,7 +222,7 @@ def finalize_review(
     if pyres.returncode == 0:
         write_review_artifacts(
             project_dir=project_dir, todo_id=todo_id, outcome=OUTCOME_CLEAN,
-            findings_text=f"Review applied and tests pass.\n\n{hermes_result.get('stdout', '')[:2000]}",
+            findings_text=f"Review applied and tests pass.\n\n{_redact_secrets(hermes_result.get('stdout', '')[:2000])}",
             base_ref=base_ref, include_post_diff=True,
         )
         commit_all(project_dir=project_dir, todo_id=todo_id,
