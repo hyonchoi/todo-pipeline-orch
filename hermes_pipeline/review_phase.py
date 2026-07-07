@@ -128,3 +128,82 @@ def commit_all(*, project_dir, todo_id: str, message: str) -> None:
         log.info("commit_all: nothing to commit for %s", todo_id)
         return
     _git(project_dir, "commit", "-m", message)
+
+
+def _verify_review_success(*, project_dir, todo_id: str, expect_post_diff: bool) -> None:
+    """Machine check that success is real: tree clean + artifacts present.
+
+    Success == these checks pass, NOT just that a subprocess exited 0.
+    """
+    project_dir = Path(project_dir)
+    porcelain = _git(project_dir, "status", "--porcelain").stdout.strip()
+    if porcelain:
+        raise RuntimeError(f"review verify failed: worktree not clean:\n{porcelain}")
+    docs = _docs_dir(project_dir)
+    required = [f"{todo_id}-review-outcome.json", f"{todo_id}-review-findings.md"]
+    if expect_post_diff:
+        required.append(f"{todo_id}-post-review.diff")
+    missing = [name for name in required if not (docs / name).exists()]
+    if missing:
+        raise RuntimeError(f"review verify failed: missing artifacts: {missing}")
+
+
+def finalize_review(
+    *,
+    project_dir,
+    todo_id: str,
+    pre_state: PreReviewState,
+    hermes_result: dict,
+    base_ref: str = "main",
+    pytest_runner=run_pytest,
+) -> dict:
+    """POST decision: commit fixes on pass, restore on fail/timeout, verify."""
+    project_dir = Path(project_dir)
+    timed_out = hermes_result.get("timed_out", False)
+    rc = hermes_result.get("returncode", 0)
+
+    # Path 1: hermes timed out or errored — restore, record, fail cleanly.
+    if timed_out or rc != 0:
+        restore_worktree(project_dir=project_dir, head_sha=pre_state.head_sha)
+        write_review_artifacts(
+            project_dir=project_dir, todo_id=todo_id, outcome=OUTCOME_TIMEOUT,
+            findings_text=(
+                f"Review phase failed (timed_out={timed_out}, rc={rc}); "
+                f"worktree restored to {pre_state.head_sha}."
+            ),
+            include_post_diff=False,
+        )
+        commit_all(project_dir=project_dir, todo_id=todo_id,
+                   message=f"review: rollback (timeout/error) for {todo_id}")
+        _verify_review_success(project_dir=project_dir, todo_id=todo_id, expect_post_diff=False)
+        raise RuntimeError(
+            f"phase_5_review failed: timed_out={timed_out}, rc={rc}; worktree restored."
+        )
+
+    # hermes succeeded — run tests to decide keep vs revert.
+    pyres = pytest_runner(project_dir=project_dir)
+    if pyres.returncode == 0:
+        write_review_artifacts(
+            project_dir=project_dir, todo_id=todo_id, outcome=OUTCOME_CLEAN,
+            findings_text=f"Review applied and tests pass.\n\n{hermes_result.get('stdout', '')[:2000]}",
+            base_ref=base_ref, include_post_diff=True,
+        )
+        commit_all(project_dir=project_dir, todo_id=todo_id,
+                   message=f"review: address findings for {todo_id}")
+        _verify_review_success(project_dir=project_dir, todo_id=todo_id, expect_post_diff=True)
+        return {"status": "success", "phase_key": REVIEW_PHASE_KEY, "outcome": OUTCOME_CLEAN}
+
+    # Tests failed — revert, record, but complete the phase.
+    restore_worktree(project_dir=project_dir, head_sha=pre_state.head_sha)
+    write_review_artifacts(
+        project_dir=project_dir, todo_id=todo_id, outcome=OUTCOME_REVERTED,
+        findings_text=(
+            f"Review fixes reverted: tests failed after applying them.\n\n"
+            f"pytest rc={pyres.returncode}\n{pyres.stdout[-2000:]}"
+        ),
+        include_post_diff=False,
+    )
+    commit_all(project_dir=project_dir, todo_id=todo_id,
+               message=f"review: rollback test failure for {todo_id}")
+    _verify_review_success(project_dir=project_dir, todo_id=todo_id, expect_post_diff=False)
+    return {"status": "success", "phase_key": REVIEW_PHASE_KEY, "outcome": OUTCOME_REVERTED}

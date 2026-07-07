@@ -134,3 +134,82 @@ def test_commit_all_creates_commit(repo: Path):
     after = _run(repo, "git", "rev-parse", "HEAD")
     assert before != after
     assert "review: address findings for TODO-7" in _run(repo, "git", "log", "-1", "--pretty=%s")
+
+
+def _apply_review_edit(repo: Path):
+    """Simulate what /review does: edit a tracked file in the working tree."""
+    (repo / "feature.py").write_text("y = 2\nz = 3  # review-added\n")
+
+
+def test_finalize_clean_commits_and_returns_clean(repo: Path):
+    pre = rp.capture_pre_review_state(project_dir=repo, todo_id="TODO-7")
+    _apply_review_edit(repo)
+    out = rp.finalize_review(
+        project_dir=repo, todo_id="TODO-7", pre_state=pre,
+        hermes_result={"returncode": 0, "stdout": "ok", "stderr": "", "timed_out": False},
+        pytest_runner=lambda **kw: rp.PytestResult(0, "1 passed", ""),
+    )
+    assert out["outcome"] == rp.OUTCOME_CLEAN
+    assert out["status"] == "success"
+    # Fix is committed and tree is clean.
+    assert _run(repo, "git", "status", "--porcelain") == ""
+    assert "review-added" in (repo / "feature.py").read_text()
+    docs = repo / "docs" / "pipeline"
+    assert (docs / "TODO-7-post-review.diff").exists()
+    assert json.loads((docs / "TODO-7-review-outcome.json").read_text())["outcome"] == rp.OUTCOME_CLEAN
+
+
+def test_finalize_test_failure_reverts_but_completes(repo: Path):
+    head = _run(repo, "git", "rev-parse", "HEAD")
+    pre = rp.capture_pre_review_state(project_dir=repo, todo_id="TODO-7")
+    _apply_review_edit(repo)
+    out = rp.finalize_review(
+        project_dir=repo, todo_id="TODO-7", pre_state=pre,
+        hermes_result={"returncode": 0, "stdout": "ok", "stderr": "", "timed_out": False},
+        pytest_runner=lambda **kw: rp.PytestResult(1, "1 failed", "assert"),
+    )
+    assert out["outcome"] == rp.OUTCOME_REVERTED
+    assert out["status"] == "success"  # phase COMPLETES
+    # The review edit is gone; tree is clean; a rollback note commit exists on top of pre-HEAD.
+    assert "review-added" not in (repo / "feature.py").read_text()
+    assert _run(repo, "git", "status", "--porcelain") == ""
+    assert head in _run(repo, "git", "rev-list", "HEAD")  # pre-HEAD is an ancestor
+    assert not (repo / "docs" / "pipeline" / "TODO-7-post-review.diff").exists()
+
+
+def test_finalize_timeout_reverts_and_raises(repo: Path):
+    pre = rp.capture_pre_review_state(project_dir=repo, todo_id="TODO-7")
+    _apply_review_edit(repo)
+    with pytest.raises(RuntimeError, match="phase_5_review"):
+        rp.finalize_review(
+            project_dir=repo, todo_id="TODO-7", pre_state=pre,
+            hermes_result={"returncode": -1, "stdout": "", "stderr": "[killed]", "timed_out": True},
+            pytest_runner=lambda **kw: rp.PytestResult(0, "", ""),  # must NOT be called
+        )
+    assert "review-added" not in (repo / "feature.py").read_text()
+    assert _run(repo, "git", "status", "--porcelain") == ""
+    assert json.loads(
+        (repo / "docs" / "pipeline" / "TODO-7-review-outcome.json").read_text()
+    )["outcome"] == rp.OUTCOME_TIMEOUT
+
+
+def test_finalize_nonzero_rc_reverts_and_raises(repo: Path):
+    pre = rp.capture_pre_review_state(project_dir=repo, todo_id="TODO-7")
+    _apply_review_edit(repo)
+    with pytest.raises(RuntimeError, match="phase_5_review"):
+        rp.finalize_review(
+            project_dir=repo, todo_id="TODO-7", pre_state=pre,
+            hermes_result={"returncode": 2, "stdout": "", "stderr": "boom", "timed_out": False},
+            pytest_runner=lambda **kw: rp.PytestResult(0, "", ""),
+        )
+    assert _run(repo, "git", "status", "--porcelain") == ""
+
+
+def test_verify_review_success_raises_on_dirty_tree(repo: Path):
+    rp.write_review_artifacts(
+        project_dir=repo, todo_id="TODO-7", outcome=rp.OUTCOME_CLEAN,
+        findings_text="x", include_post_diff=False,
+    )
+    (repo / "dirty.txt").write_text("uncommitted\n")  # leave tree dirty
+    with pytest.raises(RuntimeError, match="verify"):
+        rp._verify_review_success(project_dir=repo, todo_id="TODO-7", expect_post_diff=False)
