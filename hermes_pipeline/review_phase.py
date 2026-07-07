@@ -66,18 +66,6 @@ def restore_worktree(*, project_dir, head_sha: str) -> None:
     _git(project_dir, "clean", "-fd")
 
 
-def restore_worktree(*, project_dir, head_sha: str) -> None:
-    """Deterministically restore the tree to head_sha.
-
-    `reset --hard` reverts tracked changes and moves HEAD; `clean -fd` removes
-    untracked files/dirs the review may have created. Plain `clean -fd` does
-    NOT remove gitignored files (e.g. .hermes/), which is intentional.
-    """
-    project_dir = Path(project_dir)
-    _git(project_dir, "reset", "--hard", head_sha)
-    _git(project_dir, "clean", "-fd")
-
-
 def capture_pre_review_state(*, project_dir, todo_id: str, base_ref: str = "main") -> PreReviewState:
     """Snapshot HEAD and save the pre-review diff. Called BEFORE hermes runs."""
     project_dir = Path(project_dir)
