@@ -266,3 +266,56 @@ def test_run_sidecar_fileexists_error_suppressed(state_dir, monkeypatch):
             phase_key="phase_2_autoplan",
             project_slug="demo",
         )
+
+
+def test_invoke_routes_review_phase_through_review_lifecycle(state_dir, monkeypatch, tmp_path):
+    """phase_5_review must go through capture -> hermes -> finalize, not the
+    generic rc-check path."""
+    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+        _fake_phase(phase_key="phase_5_review", terminal=False,
+                    prompt="run /review", turns=30, timeout=2400),
+    ])
+    calls = {}
+
+    from hermes_pipeline import review_phase as rp
+
+    monkeypatch.setattr(rp, "capture_pre_review_state",
+                        lambda **kw: rp.PreReviewState(head_sha="abc123", diff_is_empty=False))
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess",
+                        lambda **kw: {"returncode": 0, "stdout": "reviewed", "stderr": "", "timed_out": False})
+
+    def _fake_finalize(**kw):
+        calls["finalize"] = kw
+        return {"status": "success", "phase_key": "phase_5_review", "outcome": rp.OUTCOME_CLEAN}
+
+    monkeypatch.setattr(rp, "finalize_review", _fake_finalize)
+
+    out = phases_mod._invoke_hermes(
+        todo_id="TODO-7", phase_key="phase_5_review", tick_id="01JT",
+        state_dir=state_dir, project_slug="demo", project_dir=str(tmp_path),
+    )
+    assert out["outcome"] == rp.OUTCOME_CLEAN
+    assert calls["finalize"]["hermes_result"]["stdout"] == "reviewed"
+    assert calls["finalize"]["pre_state"].head_sha == "abc123"
+
+
+def test_invoke_review_phase_short_circuits_on_no_diff(state_dir, monkeypatch, tmp_path):
+    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+        _fake_phase(phase_key="phase_5_review", terminal=False, prompt="run /review"),
+    ])
+    from hermes_pipeline import review_phase as rp
+    monkeypatch.setattr(rp, "capture_pre_review_state",
+                        lambda **kw: rp.PreReviewState(head_sha="abc", diff_is_empty=True))
+    monkeypatch.setattr(rp, "write_review_artifacts", lambda **kw: None)
+    monkeypatch.setattr(rp, "commit_all", lambda **kw: None)
+
+    def _boom(**kw):
+        raise AssertionError("hermes must not run on a no-diff branch")
+
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _boom)
+
+    out = phases_mod._invoke_hermes(
+        todo_id="TODO-9", phase_key="phase_5_review", tick_id="01JT",
+        state_dir=state_dir, project_slug="demo", project_dir=str(tmp_path),
+    )
+    assert out["outcome"] == rp.OUTCOME_NO_DIFF
