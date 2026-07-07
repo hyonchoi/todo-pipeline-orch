@@ -127,7 +127,12 @@ def commit_all(*, project_dir, todo_id: str, message: str) -> None:
     if not status:
         log.info("commit_all: nothing to commit for %s", todo_id)
         return
-    _git(project_dir, "commit", "-m", message)
+    _git(
+        project_dir,
+        "-c", "user.name=Pipeline Review",
+        "-c", "user.email=review@pipeline.local",
+        "commit", "-m", message,
+    )
 
 
 def _verify_review_success(*, project_dir, todo_id: str, expect_post_diff: bool) -> None:

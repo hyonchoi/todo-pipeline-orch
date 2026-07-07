@@ -136,6 +136,19 @@ def test_commit_all_creates_commit(repo: Path):
     assert "review: address findings for TODO-7" in _run(repo, "git", "log", "-1", "--pretty=%s")
 
 
+def test_commit_all_works_without_repo_user_config(repo: Path):
+    """commit_all must set its own author so it works in unattended repos."""
+    (repo / "docs").mkdir(exist_ok=True)
+    (repo / "docs" / "note.txt").write_text("hi\n")
+    _run(repo, "git", "add", ".")
+    # Unset user config to simulate an unattended repo
+    subprocess.run(["git", "config", "--unset", "user.email"], cwd=repo, check=False)
+    subprocess.run(["git", "config", "--unset", "user.name"], cwd=repo, check=False)
+    rp.commit_all(project_dir=repo, todo_id="TODO-7", message="review: unattended commit")
+    assert _run(repo, "git", "rev-parse", "HEAD")  # commit exists
+    assert _run(repo, "git", "log", "-1", "--pretty=%an") == "Pipeline Review"
+
+
 def _apply_review_edit(repo: Path):
     """Simulate what /review does: edit a tracked file in the working tree."""
     (repo / "feature.py").write_text("y = 2\nz = 3  # review-added\n")
@@ -184,7 +197,9 @@ def test_finalize_timeout_reverts_and_raises(repo: Path):
         rp.finalize_review(
             project_dir=repo, todo_id="TODO-7", pre_state=pre,
             hermes_result={"returncode": -1, "stdout": "", "stderr": "[killed]", "timed_out": True},
-            pytest_runner=lambda **kw: rp.PytestResult(0, "", ""),  # must NOT be called
+            pytest_runner=lambda **kw: (_ for _ in ()).throw(
+                AssertionError("pytest_runner must not be called on timeout")
+            ),
         )
     assert "review-added" not in (repo / "feature.py").read_text()
     assert _run(repo, "git", "status", "--porcelain") == ""
