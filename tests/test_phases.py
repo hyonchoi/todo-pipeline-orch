@@ -62,3 +62,40 @@ def test_real_phases_yaml_ends_with_blocked_gate():
     # ready-for-review handoff.
     phase_8 = next(p for p in phases if p.phase_key == "phase_8_finish_branch")
     assert phase_8.terminal is False
+
+
+def test_real_phases_yaml_has_review_phase_between_dev_and_cso():
+    phases = load_phases()  # default: configs/phases.yaml
+    keys = [p.phase_key for p in phases]
+    assert "phase_5_review" in keys, keys
+    dev_i = keys.index("phase_4_development")
+    rev_i = keys.index("phase_5_review")
+    cso_i = keys.index("phase_6_1_cso")
+    assert dev_i < rev_i < cso_i, keys
+
+
+def test_real_phases_yaml_review_phase_fields():
+    phases = {p.phase_key: p for p in load_phases()}
+    rev = phases["phase_5_review"]
+    assert rev.tools == "Read,Edit,Bash"
+    assert rev.turns == 30
+    assert rev.timeout == 2400
+    assert rev.terminal is False
+    assert rev.gate is False
+    # Prompt is instruction-only: it must NOT carry rollback/test control flow.
+    assert "reset --hard" not in rev.prompt
+    assert "pytest" not in rev.prompt.lower()
+
+
+def test_real_phases_yaml_order_unchanged_for_existing_phases():
+    keys = [p.phase_key for p in load_phases()]
+    assert keys == [
+        "phase_2_autoplan",
+        "phase_3_writing_plan",
+        "phase_4_development",
+        "phase_5_review",
+        "phase_6_1_cso",
+        "phase_7_document_release",
+        "phase_8_finish_branch",
+        "phase_9_ship",
+    ]
