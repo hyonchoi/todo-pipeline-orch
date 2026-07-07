@@ -5,7 +5,6 @@ for this in the suite) so that git reset/clean/merge-base behave honestly.
 The hermes subprocess and pytest run are injected, never real.
 """
 from __future__ import annotations
-import json
 import subprocess
 from pathlib import Path
 import pytest

@@ -7,7 +7,6 @@ fail/timeout, and machine-verifying the outcome. CSO (phase_6_1) always
 inherits a clean, known worktree.
 """
 from __future__ import annotations
-import json
 import logging
 import subprocess
 from dataclasses import dataclass
