@@ -337,6 +337,140 @@ class TestDecisionSheet:
         with pytest.raises(AttributeError):
             sheet.todo_id = 99  # type: ignore
 
+    def test_rejection_non_integer_todo_id(self):
+        """todo_id that is a string should raise PlanGateError, not TypeError."""
+        with pytest.raises(PlanGateError, match="todo_id must be int"):
+            DecisionSheet(
+                schema_version="1.0",
+                todo_id="5",  # type: ignore[arg-type]
+                tick_id="abc",
+                questions=[
+                    DecisionQuestion(
+                        question_id="q1",
+                        classification="taste",
+                        prompt="Q?",
+                        options=[_Option("A", "A"), _Option("B", "B")],
+                        recommendation="A",
+                        rationale="r",
+                    )
+                ],
+            )
+
+    def test_rejection_zero_todo_id(self):
+        with pytest.raises(PlanGateError, match="todo_id"):
+            DecisionSheet(
+                schema_version="1.0",
+                todo_id=0,
+                tick_id="abc",
+                questions=[
+                    DecisionQuestion(
+                        question_id="q1",
+                        classification="taste",
+                        prompt="Q?",
+                        options=[_Option("A", "A"), _Option("B", "B")],
+                        recommendation="A",
+                        rationale="r",
+                    )
+                ],
+            )
+
+
+# ---------------------------------------------------------------------------
+# validate_decision_sheet missing-key tests
+# ---------------------------------------------------------------------------
+
+class TestValidateDecisionSheetMissingKeys:
+    def test_missing_schema_version_raises_plangateerror(self):
+        data = {
+            "todo_id": 5,
+            "tick_id": "abc",
+            "questions": [],
+        }
+        with pytest.raises(PlanGateError, match="schema_version"):
+            validate_decision_sheet(data)
+
+    def test_missing_todo_id_raises_plangateerror(self):
+        data = {
+            "schema_version": "1.0",
+            "tick_id": "abc",
+            "questions": [],
+        }
+        with pytest.raises(PlanGateError, match="todo_id"):
+            validate_decision_sheet(data)
+
+    def test_missing_tick_id_raises_plangateerror(self):
+        data = {
+            "schema_version": "1.0",
+            "todo_id": 5,
+            "questions": [],
+        }
+        with pytest.raises(PlanGateError, match="tick_id"):
+            validate_decision_sheet(data)
+
+    def test_missing_question_question_id_raises_plangateerror(self):
+        data = {
+            "schema_version": "1.0",
+            "todo_id": 1,
+            "tick_id": "t1",
+            "questions": [
+                {
+                    "classification": "taste",
+                    "prompt": "Q?",
+                    "options": [
+                        {"label": "A", "description": "A"},
+                        {"label": "B", "description": "B"},
+                    ],
+                    "recommendation": "A",
+                    "rationale": "r",
+                }
+            ],
+        }
+        with pytest.raises(PlanGateError, match="question_id"):
+            validate_decision_sheet(data)
+
+    def test_missing_option_label_raises_plangateerror(self):
+        data = {
+            "schema_version": "1.0",
+            "todo_id": 1,
+            "tick_id": "t1",
+            "questions": [
+                {
+                    "question_id": "q1",
+                    "classification": "taste",
+                    "prompt": "Q?",
+                    "options": [
+                        {"description": "A"},  # missing "label"
+                        {"label": "B", "description": "B"},
+                    ],
+                    "recommendation": "A",
+                    "rationale": "r",
+                }
+            ],
+        }
+        with pytest.raises(PlanGateError, match="label"):
+            validate_decision_sheet(data)
+
+    def test_missing_question_classification_raises_plangateerror(self):
+        data = {
+            "schema_version": "1.0",
+            "todo_id": 1,
+            "tick_id": "t1",
+            "questions": [
+                {
+                    "question_id": "q1",
+                    "prompt": "Q?",
+                    "options": [
+                        {"label": "A", "description": "A"},
+                        {"label": "B", "description": "B"},
+                    ],
+                    "recommendation": "A",
+                    "rationale": "r",
+                }
+            ],
+        }
+        with pytest.raises(PlanGateError, match="classification"):
+            validate_decision_sheet(data)
+
 
 # ---------------------------------------------------------------------------
 # PlanGateError tests

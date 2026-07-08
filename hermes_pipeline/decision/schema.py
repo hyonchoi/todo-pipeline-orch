@@ -91,11 +91,6 @@ class DecisionQuestion:
         # Validate classification
         valid_classifications = ("taste", "premise", "user-challenge", "mechanical")
         if self.classification not in valid_classifications:
-            object.__setattr__(
-                self,
-                "classification",
-                f"invalid classification {self.classification!r}; must be one of {valid_classifications}",
-            )
             raise PlanGateError(
                 f"question {self.question_id!r}: invalid classification {self.classification!r}"
             )
@@ -133,6 +128,10 @@ class DecisionSheet:
     def __post_init__(self):
         if self.schema_version != "1.0":
             raise PlanGateError(f"unsupported schema_version {self.schema_version!r}")
+        if not isinstance(self.todo_id, int):
+            raise PlanGateError(
+                f"todo_id must be int, got {type(self.todo_id).__name__}"
+            )
         if self.todo_id <= 0:
             raise PlanGateError(f"todo_id must be positive, got {self.todo_id}")
         if len(self.questions) < 1:
@@ -176,26 +175,43 @@ def validate_decision_sheet(data: dict) -> DecisionSheet:
 
     Raises PlanGateError on any validation failure.
     """
+    # Validate required top-level keys
+    schema_version = data.get("schema_version")
+    if schema_version is None:
+        raise PlanGateError("missing required field 'schema_version'")
+    todo_id = data.get("todo_id")
+    if todo_id is None:
+        raise PlanGateError("missing required field 'todo_id'")
+    tick_id = data.get("tick_id")
+    if tick_id is None:
+        raise PlanGateError("missing required field 'tick_id'")
+
+    # Parse questions
     questions: list[DecisionQuestion] = []
     for qd in data.get("questions", []):
-        opts = [
-            _Option(label=o["label"], description=o["description"])
-            for o in qd["options"]
-        ]
-        questions.append(
-            DecisionQuestion(
-                question_id=qd["question_id"],
-                classification=qd["classification"],
-                prompt=qd["prompt"],
-                options=opts,
-                recommendation=qd["recommendation"],
-                rationale=qd["rationale"],
-                answer=qd.get("answer"),
+        try:
+            opts = [
+                _Option(label=o["label"], description=o["description"])
+                for o in qd["options"]
+            ]
+            questions.append(
+                DecisionQuestion(
+                    question_id=qd["question_id"],
+                    classification=qd["classification"],
+                    prompt=qd["prompt"],
+                    options=opts,
+                    recommendation=qd["recommendation"],
+                    rationale=qd["rationale"],
+                    answer=qd.get("answer"),
+                )
             )
-        )
+        except KeyError as e:
+            raise PlanGateError(
+                f"missing required question field: {e.args[0]!r}"
+            ) from e
     return DecisionSheet(
-        schema_version=data["schema_version"],
-        todo_id=data["todo_id"],
-        tick_id=data["tick_id"],
+        schema_version=schema_version,
+        todo_id=todo_id,
+        tick_id=tick_id,
         questions=questions,
     )
