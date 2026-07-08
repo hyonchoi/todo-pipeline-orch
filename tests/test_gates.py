@@ -1,6 +1,7 @@
 """Tests for plan gate I/O helpers and stub decision sheet generator."""
 import pytest
 from pathlib import Path
+import shutil
 
 from hermes_pipeline.gates import (
     stub_generate_decision_sheet,
@@ -265,3 +266,41 @@ class TestRejectionSidecar:
         result = read_rejection_sidecar(state_dir=state, tick_id="T-reject")
         assert result["tick_id"] == "T-reject"
         assert "timestamp" in result
+
+    def test_uses_shutil_move_not_os_rename(self, tmp_path, mocker):
+        """Write paths use shutil.move, not os.rename (cross-device safety)."""
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        mock_shutil_move = mocker.patch.object(shutil, "move", return_value=True)
+        write_rejection_sidecar(
+            state_dir=state, tick_id="T-shutil", reason="test", rejection_count=1
+        )
+        mock_shutil_move.assert_called_once()
+
+    def test_sanitizes_control_characters_in_reason(self, tmp_path):
+        """Control characters are stripped from the reason field."""
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        reason_with_controls = "bad\x00scope\x1f\x7f extra"
+        write_rejection_sidecar(
+            state_dir=state, tick_id="T-sanitize", reason=reason_with_controls, rejection_count=1
+        )
+        result = read_rejection_sidecar(state_dir=state, tick_id="T-sanitize")
+        assert result is not None
+        # Control chars \x00, \x1f, \x7f should be stripped by the regex
+        assert "\x00" not in result["reason"]
+        assert "\x1f" not in result["reason"]
+        assert "\x7f" not in result["reason"]
+        assert result["reason"] == "badscope extra"
+
+    def test_caps_reason_length_at_500(self, tmp_path):
+        """Reason longer than 500 chars is truncated."""
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        long_reason = "x" * 600
+        write_rejection_sidecar(
+            state_dir=state, tick_id="T-cap", reason=long_reason, rejection_count=1
+        )
+        result = read_rejection_sidecar(state_dir=state, tick_id="T-cap")
+        assert result is not None
+        assert len(result["reason"]) == 500

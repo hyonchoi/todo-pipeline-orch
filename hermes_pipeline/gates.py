@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,7 +40,7 @@ def write_decision_sheet(sheet: DecisionSheet, *, state_dir: Path | str) -> Path
     target = d / f"{sheet.tick_id}-plan.json"
     tmp = target.with_suffix(target.suffix + "." + uuid.uuid4().hex + ".tmp")
     tmp.write_text(sheet.to_json())
-    os.rename(tmp, target)
+    shutil.move(str(tmp), str(target))
     return target
 
 
@@ -78,6 +79,10 @@ def write_rejection_sidecar(
 ) -> Path:
     """Write a rejection sidecar atomically."""
     target = _rejection_path(state_dir, tick_id)
+    # Sanitize reason: strip control chars, length-cap
+    reason = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]', '', reason).strip()
+    if len(reason) > 500:
+        reason = reason[:500]
     payload = json.dumps(
         {
             "tick_id": tick_id,
@@ -89,7 +94,7 @@ def write_rejection_sidecar(
     )
     tmp = target.with_suffix(target.suffix + "." + uuid.uuid4().hex + ".tmp")
     tmp.write_text(payload)
-    os.rename(tmp, target)
+    shutil.move(str(tmp), str(target))
     return target
 
 
