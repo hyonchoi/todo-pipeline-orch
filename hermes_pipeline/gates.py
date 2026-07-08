@@ -6,6 +6,7 @@ Ship gate (`ship.py`) keeps `approve_ship` ship-specific (T4 resolution).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -20,6 +21,10 @@ from .decision.schema import (
     _Option,
     validate_decision_sheet,
 )
+from .kanban_tasks import get_todo_kanban_status, COMPLETION_STATUSES, BLOCKED
+from . import slack
+
+log = logging.getLogger(__name__)
 
 
 def _decisions_dir(state_dir: Path | str) -> Path:
@@ -304,3 +309,60 @@ def _sanitize_override(value: str) -> str:
             "override value contains disallowed characters or patterns"
         )
     return sanitized
+
+
+# ---------------------------------------------------------------------------
+# Dispatcher pre-check: maybe_plan_gate_ready
+# ---------------------------------------------------------------------------
+
+
+def maybe_plan_gate_ready(
+    *,
+    project_dir: Path | str,
+    project_slug: str,
+    prior_tick_id: str,
+    state_dir: Path | str,
+    slack_channel: str,
+) -> None:
+    """Detect a plan-gate-ready TODO, and alert once.
+
+    Best-effort: any failure is logged and swallowed so the tick continues.
+    Must be called before _tick_project's all_phases_complete early-return,
+    because a blocked gate makes all_phases_complete return False.
+
+    Checks:
+    1. Decision sheet exists for this tick.
+    2. Plan-gate task is 'blocked'.
+    3. All phases before the gate are in completion statuses.
+    """
+    try:
+        sheet = read_decision_sheet(state_dir=state_dir, tick_id=prior_tick_id)
+        if sheet is None:
+            return  # No decision sheet yet — autoplan may not have finished
+
+        status_map = get_todo_kanban_status(project_slug, prior_tick_id)
+        gate_status = status_map.get(PLAN_GATE_PHASE_KEY)
+
+        if gate_status is None:
+            return  # No gate task registered yet
+        if gate_status != BLOCKED:
+            return  # Gate already resolved
+
+        # Check all non-gate phases are in completion statuses
+        non_gate = {k: v for k, v in status_map.items() if k != PLAN_GATE_PHASE_KEY}
+        if not non_gate:
+            return  # No phases at all
+        if any(s not in COMPLETION_STATUSES for s in non_gate.values()):
+            return  # Real work still in flight before gate
+
+        # Gate is ready for human review
+        todo_num = sheet.todo_id
+        slack.notify(
+            slack_channel,
+            f":mag: {project_slug} TODO-{todo_num} plan needs review — "
+            f"{len(sheet.questions)} decision(s) to approve. "
+            f"Run: pipeline-watch approve-plan {project_slug} --todo TODO-{todo_num}",
+        )
+    except Exception as e:
+        log.warning("maybe_plan_gate_ready failed for %s tick %s: %s",
+                     project_slug, prior_tick_id, e)

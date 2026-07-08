@@ -373,3 +373,118 @@ class TestSanitizeOverride:
     def test_rejects_brace_patterns(self):
         with pytest.raises(PlanGateError):
             _sanitize_override("{0} {1}")
+
+
+class TestMaybePlanGateReady:
+    def test_noop_when_no_decision_sheet(self, tmp_path, mocker):
+        # Import inside test so it fails before implementation
+        from hermes_pipeline.gates import maybe_plan_gate_ready  # noqa: F401
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        # No decision sheet written — should not raise
+        maybe_plan_gate_ready(
+            project_dir=tmp_path, project_slug="test-project",
+            prior_tick_id="TICK1", state_dir=state, slack_channel="#test"
+        )
+
+    def test_noop_when_gate_already_done(self, tmp_path, mocker):
+        from hermes_pipeline.gates import maybe_plan_gate_ready, write_decision_sheet
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        sheet = DecisionSheet(schema_version="1.0", todo_id=5, tick_id="TICK1",
+                              questions=[DecisionQuestion(question_id="q1", classification="taste",
+                               prompt="Q?", options=[_Option("A","A"), _Option("B","B")],
+                               recommendation="A", rationale="r")])
+        write_decision_sheet(sheet, state_dir=state)
+        mocker.patch("hermes_pipeline.gates.get_todo_kanban_status",
+                     return_value={"phase_2_autoplan": "done", "phase_2b_plan_gate": "done"})
+        notify_mock = mocker.patch("hermes_pipeline.gates.slack.notify")
+        maybe_plan_gate_ready(
+            project_dir=tmp_path, project_slug="test-project",
+            prior_tick_id="TICK1", state_dir=state, slack_channel="#test"
+        )
+        notify_mock.assert_not_called()
+
+    def test_noop_when_gate_not_blocked(self, tmp_path, mocker):
+        from hermes_pipeline.gates import maybe_plan_gate_ready, write_decision_sheet
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        sheet = DecisionSheet(schema_version="1.0", todo_id=5, tick_id="TICK1",
+                              questions=[DecisionQuestion(question_id="q1", classification="taste",
+                               prompt="Q?", options=[_Option("A","A"), _Option("B","B")],
+                               recommendation="A", rationale="r")])
+        write_decision_sheet(sheet, state_dir=state)
+        mocker.patch("hermes_pipeline.gates.get_todo_kanban_status",
+                     return_value={"phase_2_autoplan": "done", "phase_2b_plan_gate": "running"})
+        notify_mock = mocker.patch("hermes_pipeline.gates.slack.notify")
+        maybe_plan_gate_ready(
+            project_dir=tmp_path, project_slug="test-project",
+            prior_tick_id="TICK1", state_dir=state, slack_channel="#test"
+        )
+        notify_mock.assert_not_called()
+
+    def test_noop_when_phases_in_flight(self, tmp_path, mocker):
+        from hermes_pipeline.gates import maybe_plan_gate_ready, write_decision_sheet
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        sheet = DecisionSheet(schema_version="1.0", todo_id=5, tick_id="TICK1",
+                              questions=[DecisionQuestion(question_id="q1", classification="taste",
+                               prompt="Q?", options=[_Option("A","A"), _Option("B","B")],
+                               recommendation="A", rationale="r")])
+        write_decision_sheet(sheet, state_dir=state)
+        mocker.patch("hermes_pipeline.gates.get_todo_kanban_status",
+                     return_value={"phase_2_autoplan": "running", "phase_2b_plan_gate": "blocked"})
+        notify_mock = mocker.patch("hermes_pipeline.gates.slack.notify")
+        maybe_plan_gate_ready(
+            project_dir=tmp_path, project_slug="test-project",
+            prior_tick_id="TICK1", state_dir=state, slack_channel="#test"
+        )
+        notify_mock.assert_not_called()
+
+    def test_sends_alert_when_gate_blocked_and_work_done(self, tmp_path, mocker):
+        from hermes_pipeline.gates import maybe_plan_gate_ready, write_decision_sheet
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        sheet = DecisionSheet(schema_version="1.0", todo_id=5, tick_id="TICK1",
+                              questions=[DecisionQuestion(question_id="q1", classification="taste",
+                               prompt="Q?", options=[_Option("A","A"), _Option("B","B")],
+                               recommendation="A", rationale="r")])
+        write_decision_sheet(sheet, state_dir=state)
+        mocker.patch("hermes_pipeline.gates.get_todo_kanban_status",
+                     return_value={"phase_2_autoplan": "done", "phase_2b_plan_gate": "blocked"})
+        notify_mock = mocker.patch("hermes_pipeline.gates.slack.notify")
+        maybe_plan_gate_ready(
+            project_dir=tmp_path, project_slug="test-project",
+            prior_tick_id="TICK1", state_dir=state, slack_channel="#test"
+        )
+        notify_mock.assert_called_once()
+        assert "approve-plan" in notify_mock.call_args[0][1]
+
+    def test_noop_when_no_gate_task_registered(self, tmp_path, mocker):
+        """Gate task not yet in kanban — no alert."""
+        from hermes_pipeline.gates import maybe_plan_gate_ready, write_decision_sheet
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        sheet = DecisionSheet(schema_version="1.0", todo_id=5, tick_id="TICK1",
+                              questions=[DecisionQuestion(question_id="q1", classification="taste",
+                               prompt="Q?", options=[_Option("A","A"), _Option("B","B")],
+                               recommendation="A", rationale="r")])
+        write_decision_sheet(sheet, state_dir=state)
+        mocker.patch("hermes_pipeline.gates.get_todo_kanban_status",
+                     return_value={"phase_2_autoplan": "done"})
+        notify_mock = mocker.patch("hermes_pipeline.gates.slack.notify")
+        maybe_plan_gate_ready(
+            project_dir=tmp_path, project_slug="test-project",
+            prior_tick_id="TICK1", state_dir=state, slack_channel="#test"
+        )
+        notify_mock.assert_not_called()
+
+    def test_swallows_exceptions(self, tmp_path, mocker):
+        """Exceptions are caught and logged, not raised."""
+        from hermes_pipeline.gates import maybe_plan_gate_ready
+        mocker.patch("hermes_pipeline.gates.read_decision_sheet", side_effect=RuntimeError("boom"))
+        # Should not raise
+        maybe_plan_gate_ready(
+            project_dir=tmp_path, project_slug="test-project",
+            prior_tick_id="TICK1", state_dir=tmp_path / ".hermes", slack_channel="#test"
+        )
