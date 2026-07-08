@@ -1,0 +1,214 @@
+"""Plan gate — gate primitives and stub decision sheet generator.
+
+This module extracts only narrow primitives needed for the plan gate.
+Ship gate (`ship.py`) keeps `approve_ship` ship-specific (T4 resolution).
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .decision.schema import (
+    DecisionQuestion,
+    DecisionSheet,
+    PlanGateError,
+    _Option,
+    validate_decision_sheet,
+)
+
+
+def _decisions_dir(state_dir: Path | str) -> Path:
+    """Return the decisions directory, creating it if needed."""
+    p = Path(state_dir) / "decisions"
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Decision sheet I/O
+# ---------------------------------------------------------------------------
+
+
+def write_decision_sheet(sheet: DecisionSheet, *, state_dir: Path | str) -> Path:
+    """Atomically write a decision sheet to disk."""
+    d = _decisions_dir(state_dir)
+    target = d / f"{sheet.tick_id}-plan.json"
+    tmp = target.with_suffix(target.suffix + "." + uuid.uuid4().hex + ".tmp")
+    tmp.write_text(sheet.to_json())
+    os.rename(tmp, target)
+    return target
+
+
+def read_decision_sheet(
+    *, state_dir: Path | str, tick_id: str
+) -> DecisionSheet | None:
+    """Read and validate a decision sheet. Returns None if not found."""
+    path = _decisions_dir(state_dir) / f"{tick_id}-plan.json"
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text())
+        return validate_decision_sheet(data)
+    except (json.JSONDecodeError, PlanGateError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Rejection sidecar I/O
+# ---------------------------------------------------------------------------
+
+
+REJECTION_SUFFIX = "-rejected.json"
+
+
+def _rejection_path(state_dir: Path | str, tick_id: str) -> Path:
+    return _decisions_dir(state_dir) / f"{tick_id}{REJECTION_SUFFIX}"
+
+
+def write_rejection_sidecar(
+    *,
+    state_dir: Path | str,
+    tick_id: str,
+    reason: str,
+    rejection_count: int,
+) -> Path:
+    """Write a rejection sidecar atomically."""
+    target = _rejection_path(state_dir, tick_id)
+    payload = json.dumps(
+        {
+            "tick_id": tick_id,
+            "reason": reason,
+            "rejection_count": rejection_count,
+            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        },
+        sort_keys=True,
+    )
+    tmp = target.with_suffix(target.suffix + "." + uuid.uuid4().hex + ".tmp")
+    tmp.write_text(payload)
+    os.rename(tmp, target)
+    return target
+
+
+def read_rejection_sidecar(
+    *, state_dir: Path | str, tick_id: str
+) -> dict | None:
+    """Read rejection sidecar. Returns None if not found."""
+    path = _rejection_path(state_dir, tick_id)
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text())
+    except json.JSONDecodeError:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Stub decision sheet generator
+# ---------------------------------------------------------------------------
+
+
+def stub_generate_decision_sheet(
+    *,
+    plan_md_path: Path | str,
+    todo_id: int,
+    tick_id: str,
+    state_dir: Path | str,
+) -> DecisionSheet:
+    """Parse a '## Decisions' section from an Autoplan markdown file into a DecisionSheet.
+
+    This is throwaway development infrastructure — it will be replaced when
+    Autoplan (gstack skill) is modified to emit JSON directly.
+
+    Expects format:
+        ## Decisions
+
+        ### Q1: Question text
+        **Classification:** taste
+        **Options:** A) desc | B) desc
+        **Recommendation:** A
+        **Rationale:** why
+
+    Raises PlanGateError if no decisions found or parsing fails.
+    """
+    plan_md_path = Path(plan_md_path)
+    text = plan_md_path.read_text()
+
+    # Find ## Decisions section
+    m = re.search(r"^##\s+Decisions\s*\n(.*)", text, re.MULTILINE | re.DOTALL)
+    if not m:
+        raise PlanGateError(
+            f"no '## Decisions' section found in {plan_md_path}"
+        )
+
+    decisions_text = m.group(1)
+
+    # Parse individual decision blocks
+    blocks = re.split(r"^###\s+", decisions_text, flags=re.MULTILINE)
+    questions: list[DecisionQuestion] = []
+    q_counter = 0
+
+    for block in blocks:
+        block = block.strip()
+        if not block:
+            continue
+
+        # Extract question text from first line
+        first_line = block.split("\n")[0].strip()
+        if not first_line:
+            continue
+
+        # Extract fields
+        classification_m = re.search(r"\*\*Classification:\*\*\s*(\S+)", block)
+        options_m = re.search(r"\*\*Options:\*\*\s*(.+)", block)
+        rec_m = re.search(r"\*\*Recommendation:\*\*\s*(\S+)", block)
+        rat_m = re.search(r"\*\*Rationale:\*\*\s*(.+)", block)
+
+        if not all([classification_m, options_m, rec_m]):
+            continue  # Skip blocks missing required fields
+
+        q_counter += 1
+        question_id = f"q{q_counter}"
+
+        # Parse options: "A) desc | B) desc"
+        opts_text = options_m.group(1)
+        opt_parts = re.split(r"\s*\|\s*", opts_text)
+        options: list[_Option] = []
+        for part in opt_parts:
+            om = re.match(r"([A-Za-z])\)\s*(.+)", part.strip())
+            if om:
+                options.append(
+                    _Option(label=om.group(1), description=om.group(2).strip())
+                )
+
+        if len(options) < 2:
+            continue  # Skip if we couldn't parse >= 2 options
+
+        questions.append(
+            DecisionQuestion(
+                question_id=question_id,
+                classification=classification_m.group(1),
+                prompt=first_line,
+                options=options,
+                recommendation=rec_m.group(1),
+                rationale=rat_m.group(1).strip() if rat_m else "",
+                answer=None,
+            )
+        )
+
+    if not questions:
+        raise PlanGateError(f"no valid decisions parsed from {plan_md_path}")
+
+    sheet = DecisionSheet(
+        schema_version="1.0",
+        todo_id=todo_id,
+        tick_id=tick_id,
+        questions=questions,
+    )
+
+    # Write to disk
+    write_decision_sheet(sheet, state_dir=state_dir)
+    return sheet
