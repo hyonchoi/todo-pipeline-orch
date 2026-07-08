@@ -22,7 +22,7 @@ md files under `docs/gstack/**` and `docs/superpowers/**` must commit on finaliz
 Commit the md files when:
 
 - Changed to APPROVED in /office-hours gstack skill
-- Finalized after plan-eng-review gstack skill
+- Finalized after plan-eng-review or autoplan gstack skill
 - Finalized after writing-plan superpowers skill
 
 ## gstack project folder reference
