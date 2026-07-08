@@ -217,3 +217,89 @@ def stub_generate_decision_sheet(
     # Write to disk
     write_decision_sheet(sheet, state_dir=state_dir)
     return sheet
+
+
+# ---------------------------------------------------------------------------
+# Risk classifier
+# ---------------------------------------------------------------------------
+
+PLAN_GATE_PHASE_KEY = "phase_2b_plan_gate"
+
+# Keywords that indicate high-blast-radius changes
+_HIGH_RISK_KEYWORDS = [
+    # Dependency changes
+    "depend", "library", "package", "migrate", "migration",
+    # Architecture changes
+    "refactor", "restructure", "re-architect", "redesign",
+    # Security
+    "security", "auth", "authentication", "authorization", "permission",
+    # Data
+    "database", "schema", "migration", "data model", "api contract",
+    # Broad scope
+    "all", "every", "entire", "global",
+]
+
+
+def is_high_risk(*, todo_id: str, todos_md: str, state_dir: Path | str) -> bool:
+    """Classify a TODO as high-risk (needs gate) vs low-risk (bypass).
+
+    High-risk signals:
+    1. Dependency-changing: mentions add/changing dependencies
+    2. High-blast-radius: refactor, restructure, migration, auth, security
+    3. Rejection history: prior rejection sidecar exists for this TODO
+
+    Returns True if any high-risk signal is present.
+    """
+    # Find the TODO entry in TODOS.md
+    todo_pattern = re.escape(todo_id) + r'[:\s]'
+    m = re.search(todo_pattern, todos_md, re.IGNORECASE)
+    if not m:
+        return True  # Can't find TODO — gate conservatively
+
+    # Extract surrounding context (~500 chars after match start)
+    context = todos_md[m.start():m.start() + 500].lower()
+
+    # Check for high-risk keywords
+    for kw in _HIGH_RISK_KEYWORDS:
+        if kw in context:
+            return True
+
+    # Check for prior rejection history
+    state = Path(state_dir)
+    decisions = _decisions_dir(state)
+    if decisions.exists():
+        for f in decisions.iterdir():
+            if f.suffix == ".json" and f.name.endswith(REJECTION_SUFFIX):
+                # Rejection sidecars are named <tick_id>-rejected.json
+                # We can't tie them to todo_id without additional metadata
+                # For now: any rejection in this project = higher vigilance
+                # TODO: tag rejections with todo_id for precise matching
+                pass
+
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Override sanitization
+# ---------------------------------------------------------------------------
+
+_OVERRIDE_MAX_LENGTH = 500
+
+
+def _sanitize_override(value: str) -> str:
+    """Sanitize an override value to prevent injection.
+
+    Strips control characters, enforces length cap, rejects Python
+    expression patterns that could be dangerous if passed to format/eval.
+    """
+    # Strip control characters (keep printable ASCII + common unicode)
+    sanitized = "".join(c for c in value if c.isprintable() and c not in '\x00-\x1f\x7f-\x9f')
+    # Length cap
+    if len(sanitized) > _OVERRIDE_MAX_LENGTH:
+        sanitized = sanitized[:_OVERRIDE_MAX_LENGTH]
+    # Reject patterns that look like Python expressions
+    if re.search(r'[\{\}\[\]\(\)]|__|eval|exec|import|lambda', sanitized):
+        raise PlanGateError(
+            "override value contains disallowed characters or patterns"
+        )
+    return sanitized

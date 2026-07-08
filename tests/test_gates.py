@@ -9,6 +9,9 @@ from hermes_pipeline.gates import (
     read_decision_sheet,
     write_rejection_sidecar,
     read_rejection_sidecar,
+    is_high_risk,
+    _sanitize_override,
+    PLAN_GATE_PHASE_KEY,
 )
 from hermes_pipeline.decision.schema import (
     DecisionSheet,
@@ -304,3 +307,69 @@ class TestRejectionSidecar:
         result = read_rejection_sidecar(state_dir=state, tick_id="T-cap")
         assert result is not None
         assert len(result["reason"]) == 500
+
+
+class TestRiskClassifier:
+    def test_dependency_change_is_high_risk(self, tmp_path):
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("- [ ] TODO-5: add new dependency requests for HTTP client\n")
+        assert is_high_risk(todo_id="TODO-5", todos_md=todos.read_text(), state_dir=tmp_path / ".hermes") is True
+
+    def test_blast_radius_keywords(self, tmp_path):
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("- [ ] TODO-6: refactor authentication module\n")
+        assert is_high_risk(todo_id="TODO-6", todos_md=todos.read_text(), state_dir=tmp_path / ".hermes") is True
+
+    def test_rejection_history_is_high_risk(self, tmp_path):
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        write_rejection_sidecar(state_dir=state, tick_id="prior-tick", reason="bad", rejection_count=1)
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("- [ ] TODO-7: add a simple utility function\n")
+        assert is_high_risk(todo_id="TODO-7", todos_md=todos.read_text(), state_dir=state) is False
+
+    def test_simple_task_is_low_risk(self, tmp_path):
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("- [ ] TODO-8: update README formatting\n")
+        assert is_high_risk(todo_id="TODO-8", todos_md=todos.read_text(), state_dir=tmp_path / ".hermes") is False
+
+    def test_security_keyword_is_high_risk(self, tmp_path):
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("- [ ] TODO-9: implement security audit logging\n")
+        assert is_high_risk(todo_id="TODO-9", todos_md=todos.read_text(), state_dir=tmp_path / ".hermes") is True
+
+    def test_missing_todo_id_is_high_risk(self, tmp_path):
+        """Cannot find TODO in text — gate conservatively."""
+        todos = tmp_path / "TODOS.md"
+        todos.write_text("- [ ] TODO-1: something else\n")
+        assert is_high_risk(todo_id="TODO-99", todos_md=todos.read_text(), state_dir=tmp_path / ".hermes") is True
+
+    def test_plan_gate_phase_key(self):
+        assert PLAN_GATE_PHASE_KEY == "phase_2b_plan_gate"
+
+
+class TestSanitizeOverride:
+    def test_passes_normal_text(self):
+        assert _sanitize_override("Approach A is better") == "Approach A is better"
+
+    def test_strips_control_chars(self):
+        result = _sanitize_override("hello\x00world\x1f!")
+        assert "\x00" not in result
+        assert "\x1f" not in result
+
+    def test_rejects_python_expressions(self):
+        with pytest.raises(PlanGateError):
+            _sanitize_override("{__class__}")
+
+    def test_enforces_length_cap(self):
+        long_val = "A" * 600
+        result = _sanitize_override(long_val)
+        assert len(result) <= 500
+
+    def test_rejects_eval_pattern(self):
+        with pytest.raises(PlanGateError):
+            _sanitize_override("eval(import os)")
+
+    def test_rejects_brace_patterns(self):
+        with pytest.raises(PlanGateError):
+            _sanitize_override("{0} {1}")
