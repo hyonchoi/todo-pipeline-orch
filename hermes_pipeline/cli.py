@@ -921,6 +921,16 @@ def _tick_project(
             slack_channel=slack_channel,
         )
 
+        # Plan-gate: detect blocked plan-gate before all_phases_complete check.
+        from . import gates
+        gates.maybe_plan_gate_ready(
+            project_dir=project_dir,
+            project_slug=project_slug,
+            prior_tick_id=prior_tick_id,
+            state_dir=project_state,
+            slack_channel=slack_channel,
+        )
+
         if not all_phases_complete(project_slug, prior_tick_id, state_dir=project_state):
             log.info("project %s: prior tick %s still in-flight, skipping",
                      project_slug, prior_tick_id)
