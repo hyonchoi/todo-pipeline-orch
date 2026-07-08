@@ -91,6 +91,7 @@ def test_real_phases_yaml_order_unchanged_for_existing_phases():
     keys = [p.phase_key for p in load_phases()]
     assert keys == [
         "phase_2_autoplan",
+        "phase_2b_plan_gate",
         "phase_3_writing_plan",
         "phase_4_development",
         "phase_5_review",
@@ -99,3 +100,17 @@ def test_real_phases_yaml_order_unchanged_for_existing_phases():
         "phase_8_finish_branch",
         "phase_9_ship",
     ]
+
+
+def test_real_phases_yaml_plan_gate_is_nonterminal_gate():
+    """phase_2b_plan_gate is a gate (blocked marker) but not terminal —
+    the pipeline continues into writing-plan once the gate is approved,
+    unlike phase_9_ship which terminates the run."""
+    phases = {p.phase_key: p for p in load_phases()}
+    gate = phases["phase_2b_plan_gate"]
+    assert gate.gate is True
+    assert gate.terminal is False
+    # Gate is a pure marker: no LLM dispatch fields.
+    assert gate.prompt == ""
+    assert gate.tools == ""
+    assert gate.turns == 0
