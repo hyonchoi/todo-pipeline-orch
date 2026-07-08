@@ -326,7 +326,7 @@ class TestRiskClassifier:
         write_rejection_sidecar(state_dir=state, tick_id="prior-tick", reason="bad", rejection_count=1)
         todos = tmp_path / "TODOS.md"
         todos.write_text("- [ ] TODO-7: add a simple utility function\n")
-        assert is_high_risk(todo_id="TODO-7", todos_md=todos.read_text(), state_dir=state) is False
+        assert is_high_risk(todo_id="TODO-7", todos_md=todos.read_text(), state_dir=state) is True
 
     def test_simple_task_is_low_risk(self, tmp_path):
         todos = tmp_path / "TODOS.md"

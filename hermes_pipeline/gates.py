@@ -246,7 +246,7 @@ def is_high_risk(*, todo_id: str, todos_md: str, state_dir: Path | str) -> bool:
     High-risk signals:
     1. Dependency-changing: mentions add/changing dependencies
     2. High-blast-radius: refactor, restructure, migration, auth, security
-    3. Rejection history: prior rejection sidecar exists for this TODO
+    3. Rejection history: any rejection in this project (rejection_count > 0)
 
     Returns True if any high-risk signal is present.
     """
@@ -270,11 +270,10 @@ def is_high_risk(*, todo_id: str, todos_md: str, state_dir: Path | str) -> bool:
     if decisions.exists():
         for f in decisions.iterdir():
             if f.suffix == ".json" and f.name.endswith(REJECTION_SUFFIX):
-                # Rejection sidecars are named <tick_id>-rejected.json
-                # We can't tie them to todo_id without additional metadata
-                # For now: any rejection in this project = higher vigilance
-                # TODO: tag rejections with todo_id for precise matching
-                pass
+                tick_id = f.name[: -len(REJECTION_SUFFIX)]
+                sidecar = read_rejection_sidecar(state_dir=state, tick_id=tick_id)
+                if sidecar and sidecar.get("rejection_count", 0) > 0:
+                    return True
 
     return False
 
@@ -297,8 +296,10 @@ def _sanitize_override(value: str) -> str:
     # Length cap
     if len(sanitized) > _OVERRIDE_MAX_LENGTH:
         sanitized = sanitized[:_OVERRIDE_MAX_LENGTH]
-    # Reject patterns that look like Python expressions
-    if re.search(r'[\{\}\[\]\(\)]|__|eval|exec|import|lambda', sanitized):
+    # Reject patterns that look like Python expressions (format-string braces,
+    # dunder patterns, dangerous keywords). Standalone parentheses/brackets
+    # are allowed (e.g. "Approach (B)", "item [1]").
+    if re.search(r'\{[^}]*\}|__|eval|exec|import|lambda', sanitized):
         raise PlanGateError(
             "override value contains disallowed characters or patterns"
         )
