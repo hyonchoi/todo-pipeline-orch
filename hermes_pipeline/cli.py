@@ -508,6 +508,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.set_defaults(func=_cmd_init)
 
+    # doctor: Verify the pipeline execution contract
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Verify a project's pipeline execution contract against phases.yaml",
+    )
+    doctor_parser.add_argument("project", help="Project name")
+    doctor_parser.set_defaults(func=_cmd_doctor)
+
     return parser
 
 
@@ -1227,6 +1235,55 @@ def _cmd_init(args, config: Config) -> int:
         print(f"Wrote pipeline execution contract: {path}")
     else:
         print(f"Pipeline execution contract already exists: {path} (use --force to regenerate)")
+    return 0
+
+
+
+def _cmd_doctor(args, config: Config) -> int:
+    """Handle 'doctor' subcommand — verify the pipeline execution contract.
+
+    Exit codes: 0 clean, 1 drift (capability mismatch), 2 missing/invalid
+    contract or unknown project.
+    """
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+
+    from .state_migration import _get_project_state_dir
+    from .contract import (
+        ContractMissingError,
+        ContractSchemaError,
+        ContractVersionMismatchError,
+        contract_path,
+        load_contract,
+        missing_capabilities,
+    )
+
+    project_state = _get_project_state_dir(project_dir)
+
+    try:
+        contract = load_contract(project_state)
+    except ContractMissingError as e:
+        print(f"MISSING: {e}")
+        return 2
+    except (ContractSchemaError, ContractVersionMismatchError) as e:
+        print(f"INVALID: {e}")
+        return 2
+
+    phases = load_phases()
+    missing = missing_capabilities(contract, phases)
+    if missing:
+        print(
+            f"DRIFT: contract capabilities {sorted(contract.capabilities)} at "
+            f"{contract_path(project_state)} are missing {sorted(missing)} "
+            f"required by configs/phases.yaml — edit the contract to add them"
+        )
+        return 1
+
+    print(
+        f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
+        f"capabilities={sorted(contract.capabilities)}"
+    )
     return 0
 
 

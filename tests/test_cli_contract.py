@@ -93,3 +93,93 @@ class TestCmdInit:
         assert result == 0
         assert 'assignee = "custom"' not in contract.read_text()
         assert "schema_version = 1" in contract.read_text()
+
+
+from hermes_pipeline.cli import _cmd_doctor
+from hermes_pipeline.phases import Phase
+
+
+class TestBuildParserDoctor:
+    def test_doctor_help(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["doctor", "--help"])
+
+    def test_doctor_parses_project(self):
+        parser = build_parser()
+        args = parser.parse_args(["doctor", "demo"])
+        assert args.command == "doctor"
+        assert args.project == "demo"
+
+
+class TestCmdDoctor:
+    def test_doctor_unknown_project_returns_2(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        config = Config(projects_dir=projects_dir)
+        result = _cmd_doctor(FakeArgs(project="nope"), config)
+        assert result == 2
+
+    def test_doctor_missing_contract_returns_2(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        assert "pipeline-watch init" in capsys.readouterr().out
+
+    def test_doctor_invalid_contract_returns_2(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text("schema_version = 99\n")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        assert "INVALID" in capsys.readouterr().out
+
+    def test_doctor_clean_returns_0(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 1\ncapabilities = ["Read", "Write"]\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write")],
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        assert "OK" in capsys.readouterr().out
+
+    def test_doctor_drift_returns_1(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 1\ncapabilities = ["Read"]\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write,Bash")],
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 1
+        out = capsys.readouterr().out
+        assert "DRIFT" in out
+        assert "Write" in out and "Bash" in out
