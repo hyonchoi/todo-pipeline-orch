@@ -30,6 +30,9 @@ install_to() {
     return 0
   fi
 
+  # Create per-skill directory if missing
+  mkdir -p "$target_dir/todos-manager"
+
   # Remove existing file or symlink
   if [[ -e "$target_link" || -L "$target_link" ]]; then
     echo "  Updating existing link: $target_link"
