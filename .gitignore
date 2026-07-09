@@ -1,5 +1,6 @@
 
 .superpowers/
+.claude/worktrees/
 
 # ---- Hermes ----
 # Track prompt templates; ignore runtime state (decisions, outcomes, locks)
