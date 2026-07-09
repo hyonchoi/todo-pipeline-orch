@@ -146,4 +146,4 @@ rejection and wants human eyes on the next plan too.
 
 - [Architecture overview](ARCHITECTURE.md) — Phase flow diagram showing the plan gate position
 - [Pipeline state machine](hermes-state-machine.md) — Gate state transitions
-- [Decision sheet schema](hermes_pipeline/decision/schema.md) — `DecisionSheet` / `DecisionQuestion` dataclasses
+- [Decision sheet schema](hermes_pipeline/decision/schema.py) — `DecisionSheet` / `DecisionQuestion` frozen dataclasses (source reference)
