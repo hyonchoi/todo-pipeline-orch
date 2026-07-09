@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import shutil
 import uuid
@@ -304,7 +303,7 @@ def _sanitize_override(value: str) -> str:
     expression patterns that could be dangerous if passed to format/eval.
     """
     # Strip control characters (keep printable ASCII + common unicode)
-    sanitized = "".join(c for c in value if c.isprintable() and c not in '\x00-\x1f\x7f-\x9f')
+    sanitized = "".join(c for c in value if c.isprintable())
     # Length cap
     if len(sanitized) > _OVERRIDE_MAX_LENGTH:
         sanitized = sanitized[:_OVERRIDE_MAX_LENGTH]
@@ -422,4 +421,9 @@ def check_gate_status(
     try:
         return GateStatus(gate.status)
     except ValueError:
+        # Kanban uses "done" for completed tasks, but our enum has "running"
+        # (the approved status). Map "done" → RUNNING so approved gates
+        # don't stall. Any other unknown status → UNKNOWN.
+        if gate.status == "done":
+            return GateStatus.RUNNING
         return GateStatus.UNKNOWN
