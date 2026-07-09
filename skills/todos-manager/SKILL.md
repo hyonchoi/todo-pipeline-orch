@@ -1,7 +1,7 @@
 ---
 name: todos-manager
 description: "TODOS.md 항목 추가 및 관리 — gstack 형식 기반, TODO-<n> 안정 ID 자동 부여, 핵심 결정 사항 사전 정의"
-version: 2.0.0
+version: 2.1.0
 author: hyonchoi
 license: MIT
 metadata:
@@ -34,45 +34,54 @@ The **todos-manager** skill automates the addition and management of TODOS.md en
 
 ### File location and format
 
-TODOS.md is stored at the repo root. Each entry occupies a single markdown list item (`- [ ] ...`), with metadata in YAML frontmatter blocks or inline comments.
+TODOS.md is stored at the repo root. Each entry occupies a single markdown list item (`- [ ] ...`), with fields as sub-bullets using bold labels.
 
-### Entry structure
+### Entry header line
 
 ```markdown
-- [ ] TODO-<n>: <Title>
-  - **Assigned To:** <name or @handle>
-  - **Estimate:** <Xh or Xd>
-  - **Rationale:** <One-line why this task matters>
-  - **Status:** `active` | `blocked` | `done` | `deferred`
-  - **Depends on:** [TODO-<m>, TODO-<k>]
-  - **Notes:** <Optional multi-line context>
+- [ ] **TODO-<n>: <Title>** — <One-line summary>
 ```
 
-### Entry template
+### Status markers
 
-When prompting the user to add an entry, use this YAML template:
+| Marker | Meaning |
+|--------|---------|
+| `[ ]` | Pending |
+| `[→]` | In progress |
+| `[x]` | Done |
+| `[~]` | On hold |
 
-```yaml
-# New TODOS.md Entry Template
-title: ""
-assigned_to: ""
-estimate: "1h"
-rationale: ""
-status: "active"
-depends_on: []
-notes: ""
-```
+### Required fields
+
+| Field | Description | Format |
+|-------|-------------|--------|
+| **What:** | What needs to be done | Free text |
+| **Why:** | Why this task matters | Free text |
+| **Decisions:** | Key decisions | Backtick-delimited values: `Priority \`P1\`, Effort \`M\`, Phase \`4 (Development)\`, Branch \`feature/...\`, Test Coverage \`필요/불필요\`, Security Review \`필요/불필요\`` |
+
+### Optional fields
+
+| Field | Description |
+|-------|-------------|
+| **Pros:** | Benefits |
+| **Cons:** | Risks/drawbacks |
+| **Context:** | References, design doc pointers, file locations |
+| **Depends on:** | Other TODO-<n> references |
+| **Assumptions:** | Preconditions |
+| **Completed:** | Version + date (set when done) |
+| **Resolved design:** | Design decisions (zero or more) |
 
 ### Example: complete entry
 
 ```markdown
-- [ ] TODO-42: Refactor pipeline-watcher.py into uv modules
-  - **Assigned To:** @hyonchoi
-  - **Estimate:** 3d
-  - **Rationale:** Unblock downstream tasks (modularization, testing, CI/CD integration)
-  - **Status:** active
-  - **Depends on:** TODO-40 (design review finalized)
-  - **Notes:** Target modules: `orchestrator`, `state`, `rpc`. See design doc in PRD.
+- [ ] TODO-42: refactor pipeline-watcher.py into uv modules
+  - **What:** Split `pipeline-watcher.py` into modular Python packages under `hermes_pipeline/`.
+  - **Why:** Single-file monolith is hard to test and extend. Modularization unblocks CI integration.
+  - **Pros:** Testable modules, shared utilities, clear boundaries
+  - **Cons:** Migration effort, import path updates across test suite
+  - **Context:** Design lives in [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
+  - **Depends on:** `TODO-40` (design review finalized)
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/modularize-watcher`, Test Coverage `필요`, Security Review `불필요`
 ```
 
 ---
@@ -83,38 +92,23 @@ notes: ""
 
 - IDs are assigned sequentially in **insertion order**, starting from 1.
 - Once a TODO-<n> is committed, its ID is **immutable** (even if the entry is moved, deferred, or deleted).
-- The next new entry receives `max(existing_ids) + 1`.
+- The next new entry receives `max(all IDs in TODOS.md + TODOS-archive.md) + 1`.
+- Archived entries count toward ID computation — do not skip archived IDs.
 
 ### Bootstrap algorithm
 
-On first run, the skill scans TODOS.md for existing IDs:
+On each invocation, scan **both** TODOS.md and TODOS-archive.md for existing IDs:
 
 1. **Parse all entries** in TODOS.md using regex `/TODO-(\d+)/g`.
-2. **Collect used IDs** into a set (e.g., `{1, 2, 3, 5, 8}`).
-3. **Compute next ID** as `max(used_ids) + 1` (e.g., `9` if `{1..8}` are used).
-4. **If TODOS.md is empty:** Start at `TODO-1`.
-5. **If IDs are non-contiguous** (e.g., `{1, 2, 5}`), still use `6` for the next entry. Do not attempt to fill gaps.
+2. **Parse all entries** in TODOS-archive.md (if it exists) using same regex.
+3. **Collect used IDs** from both files into a single set.
+4. **Compute next ID** as `max(used_ids) + 1`.
+5. **If both files are empty:** Start at `TODO-1`.
+6. **If IDs are non-contiguous** (e.g., `{1, 2, 5}`), still use `6` for the next entry. Do not attempt to fill gaps.
 
-### First-run bootstrap
+### Counter cache
 
-When the user invokes todos-manager for the first time on a project with no TODOS.md:
-
-1. **Check if TODOS.md exists** at repo root.
-   - If absent, create a minimal TODOS.md with a gstack header:
-     ```markdown
-     # TODOS.md
-
-     > Generated by [todos-manager skill](/.claude/skills/todos-manager)
-     > Last updated: <ISO-8601 timestamp>
-
-     ## In Progress
-
-     ## Blocked
-
-     ## Done
-     ```
-2. **Assign TODO-1** to the first entry.
-3. **Proceed to workflow** (see ## Workflow).
+`.hermes/todo_id_counter` is a performance cache — not authoritative. On write, update the counter to match the computed value. If the counter exists but diverges from the scan, trust the scan and correct the cache.
 
 ---
 
