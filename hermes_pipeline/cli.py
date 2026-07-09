@@ -1001,6 +1001,37 @@ def _tick_project(
     Note:
         The caller holds this project's TickLock for the duration of this call.
     """
+    from .contract import (
+        CapabilityMismatchError,
+        ContractMissingError,
+        ContractSchemaError,
+        ContractVersionMismatchError,
+        contract_path,
+        default_contract,
+        load_contract,
+        missing_capabilities,
+    )
+
+    try:
+        contract = load_contract(project_state)
+    except ContractMissingError:
+        contract = default_contract()
+    except (ContractSchemaError, ContractVersionMismatchError) as e:
+        log.error(
+            "project %s: pipeline contract invalid: %s — run `pipeline-watch doctor %s` for details",
+            project_slug, e, project_slug,
+        )
+        raise
+
+    missing = missing_capabilities(contract, load_phases())
+    if missing:
+        log.error(
+            "project %s: pipeline contract at %s is missing capabilities %s required by "
+            "phases.yaml — edit the contract to add them, or run `pipeline-watch doctor %s` for details",
+            project_slug, contract_path(project_state), sorted(missing), project_slug,
+        )
+        raise CapabilityMismatchError(f"contract missing capabilities: {sorted(missing)}")
+
     from .project_config import _resolve_slack_channel
 
     # Resolve per-project Slack channel
@@ -1165,6 +1196,7 @@ def _tick_project(
             tick_id=tick_id,
             board_slug=project_slug,
             project_dir=project_dir,
+            assignee=contract.assignee,
         )
         log.info("project %s: registered %d kanban tasks for %s: %s",
                  project_slug, len(task_ids), picked, task_ids)
