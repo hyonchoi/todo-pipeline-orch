@@ -25,11 +25,12 @@ from .gates import (
 )
 from .kanban_tasks import BLOCKED, KanbanTaskInfo, get_todo_kanban_tasks
 from .outcomes import CURRENT_TICK_ID_FILE
-from .ship import ApproveRefused, approve_lock, complete_gate_task
+from .ship import ApproveRefused, HERMES_TIMEOUT, approve_lock, complete_gate_task
 
 log = logging.getLogger(__name__)
 
-HERMES_TIMEOUT = 60  # timeout for `hermes kanban` subprocess calls
+
+# Reuse HERMES_TIMEOUT from ship.py — avoid duplicating the timeout constant.
 
 
 # ---------------------------------------------------------------------------
@@ -198,7 +199,12 @@ def _validate_overrides(*, sheet: DecisionSheet, overrides: dict[str, str]) -> N
             )
         # Defense-in-depth: reject injection patterns before the value is
         # written into the sheet (decision content later flows to prompts).
-        _sanitize_override(label)
+        # _sanitize_override raises PlanGateError on bad input; wrap in
+        # ApproveRefused so all guard refusals flow through one type.
+        try:
+            _sanitize_override(label)
+        except PlanGateError as e:
+            raise ApproveRefused(f"override {q_id}={label!r}: {e}") from e
 
 
 # ---------------------------------------------------------------------------

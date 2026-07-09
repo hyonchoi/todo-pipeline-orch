@@ -410,21 +410,16 @@ def all_phases_complete(
                     # as a completion (failed) status so the tick advances.
                     # Import here to avoid circular dep (gates ↔ kanban_tasks).
                     if key == "phase_2b_plan_gate":
-                        from .gates import (
-                            REJECTION_SUFFIX as _rej_suffix,
-                            read_rejection_sidecar as _rej_read,
-                        )
-                        rej_dir = state_dir_path / "decisions"
-                        rej_file = rej_dir / f"{tick_id}{_rej_suffix}"
-                        if rej_file.exists():
-                            sc = _rej_read(state_dir=state_dir_path, tick_id=tick_id)
-                            if sc is not None:
-                                log.info(
-                                    "plan-gate %s rejected (rejection #%d) — "
-                                    "skipping missing-phase check for tick %s",
-                                    key, sc.get("rejection_count", 0), tick_id,
-                                )
-                                continue
+                        from .gates import read_rejection_sidecar as _rej_read
+
+                        sc = _rej_read(state_dir=state_dir_path, tick_id=tick_id)
+                        if sc is not None:
+                            log.info(
+                                "plan-gate %s rejected (rejection #%d) — "
+                                "skipping missing-phase check for tick %s",
+                                key, sc.get("rejection_count", 0), tick_id,
+                            )
+                            continue
                     log.warning(
                         "expected phase %s not found in status map for tick %s "
                         "(partial registration suspected)",

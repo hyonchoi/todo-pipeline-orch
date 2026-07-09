@@ -111,17 +111,16 @@ class TestValidateOverrides:
         with pytest.raises(ApproveRefused, match="must be one of"):
             ap._validate_overrides(sheet=_make_sheet(), overrides={"q1": "Z"})
 
-    def test_injection_value_rejected(self):
-        # A label that also matches an injection pattern must be refused by
-        # _sanitize_override even if it were a valid label — here the label
-        # is not a real option, so the label check fires first. Use a value
-        # that passes the label gate but trips sanitization is impossible
-        # (labels are single letters); assert sanitization is wired by
-        # confirming a format-brace label is rejected.
-        with pytest.raises(ApproveRefused):
-            ap._validate_overrides(
-                sheet=_make_sheet(), overrides={"q1": "{__class__}"}
-            )
+    def test_injection_value_rejected(self, mocker):
+        """Sanitization is wired: even if a label somehow passed the option
+        gate, _sanitize_override would reject format-brace patterns."""
+        # Label validation rejects `{__class__}` before sanitization, but
+        # patch _sanitize_override to confirm it is called for valid labels.
+        with mocker.patch.object(
+            ap, "_sanitize_override", side_effect=ap.PlanGateError("injection")
+        ):
+            with pytest.raises(ApproveRefused, match="injection"):
+                ap._validate_overrides(sheet=_make_sheet(), overrides={"q1": "A"})
 
 
 # ---------------------------------------------------------------------------

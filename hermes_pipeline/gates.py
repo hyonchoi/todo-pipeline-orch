@@ -12,6 +12,7 @@ import re
 import shutil
 import uuid
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 
 from .decision.schema import (
@@ -377,7 +378,6 @@ def maybe_plan_gate_ready(
 # ---------------------------------------------------------------------------
 # Gate status enum and pure check (CP2)
 # ---------------------------------------------------------------------------
-from enum import Enum
 
 
 class GateStatus(Enum):
@@ -419,4 +419,7 @@ def check_gate_status(
     if gate is None:
         return GateStatus.UNKNOWN
 
-    return GateStatus(gate.status)
+    try:
+        return GateStatus(gate.status)
+    except ValueError:
+        return GateStatus.UNKNOWN
