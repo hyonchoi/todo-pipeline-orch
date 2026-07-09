@@ -221,6 +221,28 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
             on_pid=_record_child_pid,
         )
 
+    # Gate phases have turns=0, no tools, no prompt — they are pure markers
+    # resolved by `approve-plan` CLI. The runner never dispatches them to
+    # hermes; instead it checks the gate status:
+    #   RUNNING (approved)  → short-circuit success, child phases may start
+    #   FAILED (rejected)   → raise RuntimeError so the runner records failure
+    #   BLOCKED / READY / UNKNOWN → raise RuntimeError (tick holds)
+    if phase.gate:
+        from .gates import GateStatus, check_gate_status
+
+        status = check_gate_status(
+            state_dir=sd, project_slug=project_slug, tick_id=tick_id,
+            gate_key=phase.phase_key,
+        )
+        if status == GateStatus.RUNNING:
+            log.info("gate %s approved (RUNNING) for %s tick %s — skipping",
+                      phase.phase_key, todo_id, tick_id)
+            return {"status": "success", "phase_key": phase_key, "tick_id": tick_id}
+        raise RuntimeError(
+            f"gate {phase.phase_key} for {todo_id} tick {tick_id} "
+            f"is {status.value}, cannot proceed"
+        )
+
     prompt = _render_phase_prompt(
         phase.prompt, todo_id=todo_id, tick_id=tick_id, project_slug=project_slug,
     )
