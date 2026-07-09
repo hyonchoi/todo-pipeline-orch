@@ -170,7 +170,7 @@ The skill supports five subcommands. Each has its own workflow below.
 8. **Preview gate:** Show assembled entry exactly as it will appear:
    ```
    ======== PREVIEW ========
-   - [ ] TODO-<n>: <Title> — <Summary>
+   - [ ] **TODO-<n>: <Title>** — <Summary>
      - **What:** ...
      - **Why:** ...
      [all fields]
@@ -213,7 +213,7 @@ The skill supports five subcommands. Each has its own workflow below.
 
 ### `--archive`: Move completed TODOs to archive
 
-1. **Scan TODOS.md** for `[x]` entries (header line + all sub-bullets until next `- [ ]).
+1. **Scan TODOS.md** for `[x]` entries (header line + all sub-bullets until next `- [ ]` or `- [→]` or `- [x]` or `- [~]`).
 2. **If no `[x]` entries found:** Print "No completed TODOs to archive." and exit.
 3. **If TODOS-archive.md does not exist:** Create it with minimal header:
    ```markdown
