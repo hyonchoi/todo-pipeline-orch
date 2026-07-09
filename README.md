@@ -97,11 +97,11 @@ uv run pipeline-watch kill --all
 Approve or reject a plan-gate decision sheet (unblocks the pipeline at the plan gate):
 ```bash
 # Approve the plan for a TODO
-uv run pipeline-watch approve-plan <project> <todo_id> --approve
+uv run pipeline-watch approve-plan <project> --todo TODO-N --approve
 # Reject with a reason
-uv run pipeline-watch approve-plan <project> <todo_id> --reject --reason "..."
+uv run pipeline-watch approve-plan <project> --todo TODO-N --reject --reason "..."
 # Override individual decisions without re-running Autoplan
-uv run pipeline-watch approve-plan <project> <todo_id> --approve --override q_id=LABEL
+uv run pipeline-watch approve-plan <project> --todo TODO-N --approve --override q_id=LABEL
 ```
 
 Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful when bootstrapping a project with hand-written TODOs but no counter file):

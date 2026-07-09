@@ -131,7 +131,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ```
 
 ### Decision Immutability
-`.hermes/decisions/<tick_id>.json` is written exactly once. Outcomes attach via sidecars; the decision file is never edited.
+`.hermes/decisions/<tick_id>.json` is written exactly once. Outcomes attach via sidecars; the decision file is never edited. Plan-gate decision sheets (`.hermes/decisions/<tick_id>-plan.json`) are an exception — they are rewritten with answers when `approve-plan` approves the plan. Rejection sidecars (`.hermes/decisions/<tick_id>-rejected.json`) are written only on rejection.
 
 ### Outcome Types
 | Status | Outcome Written |
