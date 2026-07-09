@@ -178,6 +178,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Plan Gate (phase_2b_plan_gate)** — Human review checkpoint between Autoplan and Writing Plan. Autoplan produces a decision sheet (`## Decisions` section) that is parsed into a structured JSON artifact. The gate blocks the pipeline until a human approves or rejects the plan via `pipeline-watch approve-plan`.
+- **`pipeline-watch approve-plan` subcommand** — Approve (`--approve`) or reject (`--reject --reason ...`) plan-gate decision sheets. Supports `--override q_id=LABEL` to correct individual recommendations without re-running Autoplan. Override injection protection via sanitization.
+- **Decision sheet schema** — `DecisionSheet` / `DecisionQuestion` / `_Option` frozen dataclasses with full validation (unique question IDs, label matching, answer ∈ options, positive todo_id, schema versioning).
+- **Risk classifier** — Keyword-based high-risk TODO classification (dependency, architecture, security, data, broad scope). Projects with rejection history are classified as high-risk.
+- **Gate status check** — `check_gate_status()` pure read of gate state from kanban + rejection sidecar. Returns `GateStatus` enum (BLOCKED, READY, RUNNING, FAILED, UNKNOWN).
+
+### Changed
+- **Phase list** — New `phase_2b_plan_gate` gate phase between `phase_2_autoplan` and `phase_3_writing_plan`. Gate phases are registered as blocked kanban tasks (never dispatched to an agent).
+- **Dispatcher** — `maybe_plan_gate_ready` alert fires when plan-gate is blocked but pre-gate phases are complete, notifying via Slack.
+- **Runner** — `_invoke_hermes` short-circuits gate phases (approved → skip, blocked/rejected → raise).
+- **`all_phases_complete`** — Rejected plan-gate (archived) no longer stalls the tick; rejection sidecar on disk is the authoritative signal.
+
 ### Planned
 - Dashboard UI for pipeline status
 - Slack/Discord notifications for merge events
