@@ -38,7 +38,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `pipeline-watch` end-to-end |
 | [Architecture overview](docs/ARCHITECTURE.md) | Explanation | Understanding lane structure, data flow, phase execution |
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
-| [Plan Gate](docs/ARCHITECTURE.md) | Reference | Understanding `phase_2b_plan_gate`, decision sheets, `approve-plan` |
+| [Approve or reject a plan gate](docs/howto-approve-plan-gate.md) | How-to | Responding to plan-gate alerts, reviewing decisions, overriding recommendations |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
 | [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `pipeline-watch tick` uses kanban for phase state and ordering |
