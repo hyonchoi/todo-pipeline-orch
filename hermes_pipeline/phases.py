@@ -343,3 +343,44 @@ def run(
         raise
     _delete_marker(sd, todo_id, tick_id=tick_id)
     return result
+
+
+# ---------------------------------------------------------------------------
+# Post-phase hook: stub decision sheet generation after autoplan
+# ---------------------------------------------------------------------------
+
+
+def _generate_decision_sheet_post_autoplan(
+    *,
+    todo_id: str,
+    tick_id: str,
+    state_dir: Path,
+    project_dir: str | None,
+) -> None:
+    """After phase_2_autoplan succeeds, generate a decision sheet for the plan gate.
+
+    Best-effort: exceptions are swallowed so a parsing failure doesn't block
+    the pipeline. The gate will simply skip if no sheet exists.
+    """
+    try:
+        from .gates import stub_generate_decision_sheet
+
+        if project_dir is None:
+            return
+
+        plan_path = Path(project_dir) / "docs" / "pipeline" / f"TODO-{todo_id}-plan.md"
+        if not plan_path.exists():
+            # Try alternate naming convention
+            plan_path = Path(project_dir) / "docs" / "pipeline" / f"{todo_id}-plan.md"
+        if not plan_path.exists():
+            return
+
+        todo_num = int(todo_id.removeprefix("TODO-"))
+        stub_generate_decision_sheet(
+            plan_md_path=plan_path,
+            todo_id=todo_num,
+            tick_id=tick_id,
+            state_dir=state_dir,
+        )
+    except Exception as e:
+        log.warning("stub decision sheet generation failed for %s: %s", todo_id, e)
