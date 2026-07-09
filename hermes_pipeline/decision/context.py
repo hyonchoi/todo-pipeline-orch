@@ -197,6 +197,31 @@ def _recent_decisions(state_dir: Path, n: int) -> list[dict]:
     """Delegated to store.load_recent."""
     return _store.load_recent(state_dir, n=n)
 
+def _read_rejection_counts(state_dir: Path) -> dict[str, int]:
+    """Read rejection sidecars and return a mapping of tick_id → rejection_count.
+
+    Used by the risk classifier to check if a project has rejection history.
+    Returns an empty dict if the decisions directory doesn't exist.
+    """
+    from ..gates import REJECTION_SUFFIX
+
+    d = state_dir / "decisions"
+    if not d.exists():
+        return {}
+    counts = {}
+    for p in d.iterdir():
+        if p.suffix != ".json" or not p.name.endswith(REJECTION_SUFFIX):
+            continue
+        try:
+            data = json.loads(p.read_text())
+            tick = data.get("tick_id", "")
+            if tick:
+                counts[tick] = data.get("rejection_count", 0)
+        except (json.JSONDecodeError, OSError):
+            pass
+    return counts
+
+
 def build_context(
     *,
     tick_id: str,

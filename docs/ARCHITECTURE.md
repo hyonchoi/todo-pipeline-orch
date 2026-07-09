@@ -14,7 +14,7 @@ Tick Loop (Hermes cron or manual)
 [Kanban Registration] -- Create phases as kanban tasks with --parent chains
     |
     v
-Phase 2: Autoplan --> Phase 3: Writing Plan --> Phase 4: Development
+Phase 2: Autoplan --> Phase 2b: Plan Gate --> Phase 3: Writing Plan --> Phase 4: Development
     |
     v
 Phase 5: Code Review (gstack /review, v0.4+)
@@ -45,7 +45,9 @@ hermes_pipeline/
 ├── project_config.py         # Multi-project discovery & per-project config
 ├── review_phase.py           # Phase 5 code review lifecycle (v0.4+)
 ├── runner.py                 # Pipeline runner (phase progression)
+├── gates.py                  # Plan gate primitives (decision sheet I/O, risk classifier, gate status)
 ├── ship.py                   # Phase 9 ship gate (approve, CI-green, squash merge)
+├── approve_plan.py           # approve-plan CLI domain logic (approve/reject plan gates)
 ├── slack.py                  # Slack notification helpers
 ├── state.py                  # State management (locks, checkpoints, atomic writes)
 ├── state_migration.py        # Global-to-per-project state migration
@@ -129,7 +131,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ```
 
 ### Decision Immutability
-`.hermes/decisions/<tick_id>.json` is written exactly once. Outcomes attach via sidecars; the decision file is never edited.
+`.hermes/decisions/<tick_id>.json` is written exactly once. Outcomes attach via sidecars; the decision file is never edited. Plan-gate decision sheets (`.hermes/decisions/<tick_id>-plan.json`) are an exception — they are rewritten with answers when `approve-plan` approves the plan. Rejection sidecars (`.hermes/decisions/<tick_id>-rejected.json`) are written only on rejection.
 
 ### Outcome Types
 | Status | Outcome Written |
