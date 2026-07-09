@@ -112,97 +112,143 @@ On each invocation, scan **both** TODOS.md and TODOS-archive.md for existing IDs
 
 ---
 
+## First-run Bootstrap (`--init`)
+
+When the user invokes `todos-manager --init` on a project with no TODOS.md:
+
+1. **Check if TODOS.md exists** at repo root.
+   - If absent, create TODOS.md with preamble blockquote (see ## Preamble Template below).
+2. **Create TODOS-archive.md** at repo root with minimal header:
+   ```markdown
+   # TODOS Archive
+
+   Completed TODOs, archived via `todos-manager --archive`.
+   ```
+3. **Initialize `.hermes/todo_id_counter`** to 0 (if `.hermes/` directory exists).
+4. **Print:** "✓ TODOS.md initialized. Use `todos-manager --add` to add entries."
+
+## Preamble Template
+
+When creating or converting TODOS.md, use this blockquote as the file header:
+
+```markdown
+# TODOS
+
+> **Format rules (enforced by `todos-manager` skill):**
+> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
+> - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
+> - Required fields: **What:**, **Why:**, **Decisions:**
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
+> - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
+> - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
+```
+
 ## Workflow
 
-The skill follows a 9-step workflow, with a **preview/confirm gate at step 7.5**.
+The skill supports five subcommands. Each has its own workflow below.
 
-### Step 1: Validate context
+### `--add`: Add new entry with schema enforcement
 
-- **Check:** Does TODOS.md exist? (if not, bootstrap as per ## First-run bootstrap)
-- **Check:** Is `.claude/gstack/` directory writable?
-- **Action:** If validation fails, jump to ## Error Messages.
+1. **Validate context:** Does TODOS.md exist? If not, prompt to run `--init` first.
+2. **Compute next TODO-<n>:** Scan TODOS.md + TODOS-archive.md (see ## Stable TODO-<n> ID Assignment).
+   - **Output to user:** "Next ID will be `TODO-<n>`."
+3. **Prompt for title:** "Enter the TODO title (required):"
+   - Validation: 10–200 characters, non-empty.
+4. **Prompt for summary:** "One-line summary after the em dash (required):"
+   - Validation: Non-empty, 10–100 characters.
+5. **Prompt for required fields:**
+   - **What:** "What needs to be done? (required):" — Free text, non-empty.
+   - **Why:** "Why does this task matter? (required):" — Free text, 10–200 characters.
+   - **Decisions:** Prompt for key decisions — guide user through: Priority (`P0`-`P3`), Effort (`S`/`M`/`L`), Phase, Branch name, Test Coverage (`필요`/`불필요`), Security Review (`필요`/`불필요`).
+6. **Prompt for optional fields:**
+   - **Pros:** Benefits (optional, free text)
+   - **Cons:** Risks/drawbacks (optional, free text)
+   - **Context:** References, file pointers (optional, free text)
+   - **Depends on:** Comma-separated TODO-<n> references (optional; validate each exists in TODOS.md or TODOS-archive.md)
+   - **Assumptions:** Preconditions (optional, free text)
+7. **Assemble entry in memory** — Format per ## TODOS.md Schema example. Do **not** write to disk yet.
+8. **Preview gate:** Show assembled entry exactly as it will appear:
+   ```
+   ======== PREVIEW ========
+   - [ ] TODO-<n>: <Title> — <Summary>
+     - **What:** ...
+     - **Why:** ...
+     [all fields]
+   ======== END PREVIEW ========
 
-### Step 2: Compute next TODO-<n>
+   Proceed? [y / edit / cancel]
+   ```
+   - **`y`** → Proceed to step 9.
+   - **`edit`** → Jump back to step 5 (no ID burned, no files written).
+   - **`cancel`** → Abort. Print: "Entry discarded."
+9. **Write to TODOS.md:** Insert formatted entry at end of file (before blank lines, after last entry).
+10. **Update counter cache:** Write next_id to `.hermes/todo_id_counter` if `.hermes/` exists.
+11. **Confirm:** "✓ Entry added as TODO-<n>."
 
-- **Action:** Run the bootstrap algorithm (see ## Stable TODO-<n> ID Assignment).
-- **Output to user:** "Next ID will be `TODO-<n>`."
+### `--convert`: Convert existing TODOS.md to enforced format
 
-### Step 3: Prompt for entry title
+1. **Read TODOS.md.** If absent, print "TODOS.md not found. Run `todos-manager --init` first." and exit.
+2. **Check for preamble:** If blockquote format rules are absent, insert preamble (see ## Preamble Template) after `# TODOS` header.
+3. **Validate each entry:** Scan for TODO-<n> entries. For each entry, check:
+   - Required fields present: **What:**, **Why:**, **Decisions:**
+   - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
+   - ID matches `TODO-<digits>` pattern
+4. **Report findings:** Output structured report (see ## Audit Report Format).
+5. **Do not auto-fix.** Leave entry bodies as-is. Report only.
 
-- **Prompt:** "Enter the TODO title (required):"
-- **Validation:** Title must be 10–200 characters and non-empty.
-- **On fail:** Re-prompt with error message from ## Error Messages.
+### `--audit`: Audit TODOS.md for format compliance
 
-### Step 4: Prompt for metadata
+1. **Scan TODOS.md** for all TODO-<n> entries.
+2. **Scan TODOS-archive.md** (if exists) for archived TODO-<n> entries.
+3. **Per-entry checks:**
+   - Required fields: **What:**, **Why:**, **Decisions:** present?
+   - Status marker valid?
+   - ID format correct?
+   - Dependency references (if any) exist in TODOS.md or TODOS-archive.md?
+4. **Cross-entry checks:**
+   - ID sequence contiguous? (gaps OK, just report)
+   - Counter cache (`.hermes/todo_id_counter`) matches max scanned ID?
+5. **Output report** per ## Audit Report Format below.
+   Report only — no automatic fixes.
 
-Iterate through the template fields (see ## TODOS.md Schema):
+### `--archive`: Move completed TODOs to archive
 
-- **Title:** Already captured in step 3.
-- **Assigned To:** Prompt: "Who should own this task? (name or @handle, required):"
-  - Validation: Non-empty, recommended format is `@handle` or full name.
-- **Estimate:** Prompt: "Time estimate (e.g., `1h`, `2d`, `1w`):"
-  - Validation: Must match regex `/^\d+[hd w]$/` (no default; re-prompt if invalid).
-- **Rationale:** Prompt: "Why is this task important? (one-line, required):"
-  - Validation: Non-empty, 10–150 characters.
-- **Status:** Prompt: "Status? (`active`, `blocked`, `done`, `deferred`, default: `active`):"
-  - Validation: Must be one of the 4 enum values.
-- **Depends on:** Prompt: "Depends on which TODOs? (comma-separated IDs, e.g., `TODO-1, TODO-3`, optional):"
-  - Validation: Each ID must exist in TODOS.md. On fail, list valid IDs.
-- **Notes:** Prompt: "Additional notes (optional, multi-line, `END` to finish):"
-  - Validation: None; free text.
+1. **Scan TODOS.md** for `[x]` entries (header line + all sub-bullets until next `- [ ]).
+2. **If no `[x]` entries found:** Print "No completed TODOs to archive." and exit.
+3. **If TODOS-archive.md does not exist:** Create it with minimal header:
+   ```markdown
+   # TODOS Archive
 
-### Step 5: Assemble entry in memory
+   Completed TODOs, archived via `todos-manager --archive`.
 
-Format the captured data as a markdown list item (see ## TODOS.md Schema, Example section).
+   Archived: <ISO-8601 timestamp>
+   ```
+4. **For each `[x]` entry (newest first by ID):**
+   - Extract entry (header line + sub-bullets)
+   - Append to end of TODOS-archive.md
+5. **Remove archived entries from TODOS.md.**
+6. **Confirm:** "✓ Archived N entries to TODOS-archive.md."
 
-Do **not** write to disk yet.
+---
 
-### Step 6: Locate insertion point
+## Audit Report Format
 
-- **Action:** Scan TODOS.md for section headers (`## In Progress`, `## Blocked`, `## Done`).
-- **Prompt:** "Which section should this entry go in? (`in-progress`, `blocked`, `done`, default: `in-progress`):"
-- **Action:** Identify the line number where the new entry will be inserted (after the section header).
+```markdown
+## TODOS.md Audit Report
 
-### Step 7: Apply entry format rules
+Schema version: 2.0
+Scanned: TODOS.md (N entries), TODOS-archive.md (M entries)
+ID range: 1-max_id
 
-- **Ensure:** Entry is formatted exactly as per ## TODOS.md Schema.
-- **Ensure:** ID is set to the computed `TODO-<n>` from step 2.
-- **Ensure:** Status field matches the user's selection from step 4 (do not hardcode `active`; use what they picked).
+Issues found: K
+- TODO-X: Missing required field **Decisions:**
+- TODO-Y: Invalid dependency reference `TODO-Z` (not found)
+- TODO-W: Status marker `[->]` — expected `[→]`
 
-### Step 7.5: Preview gate (T10)
-
-**Show the assembled entry exactly as it will be written:**
-
+ID gap check: OK (max=23, counter=23)
 ```
-======== PREVIEW ========
-- [ ] TODO-<n>: <Title>
-  - **Assigned To:** <name>
-  - **Estimate:** <estimate>
-  - **Rationale:** <rationale>
-  - **Status:** <status>
-  - **Depends on:** <depends_on_list or "None">
-  - **Notes:** <notes or "(None)">
-======== END PREVIEW ========
 
-Proceed? [y / edit / cancel]
-```
-
-**Branches:**
-- **`y`** → Proceed to step 8.
-- **`edit`** → Jump back to step 4 (no ID burned, no files written).
-- **`cancel`** → Abort entirely (no ID burned, no Slack notify). Print: "Entry discarded."
-
-### Step 8: Write to TODOS.md
-
-- **Action:** Insert the formatted entry at the computed insertion point.
-- **Action:** Update the `Last updated` timestamp in the TODOS.md header.
-- **Verify:** File is valid markdown (no syntax errors).
-
-### Step 9: Confirm and notify
-
-- **Print:** "✓ Entry added as TODO-<n>."
-- **(Optional future):** Post to Slack (requires gstack Slack integration).
-- **Return control** to the user.
+Report only — no automatic fixes.
 
 ---
 
