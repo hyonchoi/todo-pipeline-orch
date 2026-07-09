@@ -12,21 +12,21 @@ metadata:
 
 ## Purpose
 
-The **todos-manager** skill automates the addition and management of TODOS.md entries in gstack-format projects. It enforces stable TODO-<n> ID assignment, captures key decisions upfront (Assigned To, Estimate, Rationale), and provides a workflow with a preview/confirm gate before writing to disk.
+The **todos-manager** skill automates the addition and management of TODOS.md entries in gstack-format projects. It enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment, and provides a preview/confirm gate before writing to disk. Completed TODOs can be archived to keep TODOS.md clean.
 
 ### When to use
 
-- Adding a new entry to an existing TODOS.md file
-- Batch-importing entries from a plan document or PR
-- Ensuring consistent TODO-<n> ID sequencing across team checkpoints
-- Capturing pre-defined decisions (assignee, estimate, rationale) before workflow execution
-- (Future) Syncing TODOS.md with gstack project metadata (PRD, design doc, eng-review)
+- Adding a new entry to an existing TODOS.md file (`--add`)
+- Initializing TODOS.md in a new project (`--init`)
+- Converting an existing TODOS.md to enforced format (`--convert`)
+- Auditing TODOS.md for format compliance (`--audit`)
+- Archiving completed TODOs to TODOS-archive.md (`--archive`)
 
 ### Prerequisite state
 
-- Project has a canonical `TODOS.md` file at the repo root (or `docs/gstack/TODOS.md`)
+- Project has a canonical `TODOS.md` file at the repo root (or create one with `--init`)
 - TODOS.md follows the gstack schema (see ## TODOS.md Schema)
-- User has write access to TODOS.md and `.claude/gstack/` metadata
+- User has write access to TODOS.md
 
 ---
 
@@ -259,38 +259,39 @@ Report only — no automatic fixes.
 Each error message **names the absolute file path** and a one-line action verb. Examples:
 
 ```
-Error: /Users/hyonchoi/Personal/todo-pipeline-orchestrator/TODOS.md does not exist.
+Error: /path/to/TODOS.md does not exist.
 Remediation: Create the file or run `todos-manager --init`.
-
-Error: /Users/hyonchoi/Personal/todo-pipeline-orchestrator/.claude/gstack is not writable.
-Remediation: Check directory permissions or create the directory.
 
 Error: Title must be 10–200 characters.
 Remediation: Edit your input and re-enter the title.
 
-Error: Estimate "5" does not match expected format (e.g., "2h", "1d").
-Remediation: Set estimate to one of: 1h, 2h, 1d, 2d, 1w, etc.
+Error: **What:** field is empty.
+Remediation: Describe what needs to be done (required).
 
-Error: Dependency TODO-99 does not exist in TODOS.md.
+Error: **Why:** field must be 10–200 characters.
+Remediation: Provide a rationale for why this task matters.
+
+Error: **Decisions:** field is missing.
+Remediation: Set key decisions: Priority, Effort, Phase, Branch, Test Coverage, Security Review.
+
+Error: Dependency TODO-99 does not exist in TODOS.md or TODOS-archive.md.
 Remediation: Check the list of valid IDs or remove TODO-99 from the depends_on list.
 
-Error: Status "in_progress" is not recognized.
-Remediation: Set status to one of: active, blocked, done, deferred.
+Error: Status marker "[->]" is not recognized.
+Remediation: Use one of: [ ] pending, [→] in progress, [x] done, [~] on hold.
 ```
 
 ### Error & Rescue Map
 
 | Error | Root Cause | Remediation |
 |-------|-----------|-------------|
-| TODOS.md not found | First-run on new project | Run `todos-manager --init` or create TODOS.md at repo root |
-| `.claude/gstack/` not writable | Permission issue | Check directory permissions with `ls -ld` |
+| TODOS.md not found | First-run on new project | Run `todos-manager --init` |
 | Title is empty or too short | Invalid input | Re-enter title (10–200 characters) |
-| Assigned To is empty | Invalid input | Re-enter assignee (@handle or name) |
-| Estimate does not match `/^\d+[hd w]$/` | Invalid format | Re-enter estimate (e.g., "2h", "1d", "1w") |
-| Rationale is too short or too long | Invalid input | Re-enter rationale (10–150 characters) |
-| Status is not in `[active, blocked, done, deferred]` | Invalid enum | Re-enter status from allowed list |
-| Dependency TODO-<n> does not exist | Invalid reference | Verify TODO-<n> is in TODOS.md; remove or correct |
-| Entry preview differs from disk | Data corruption | Inspect TODOS.md and re-run step 8 |
+| **What:** is empty | Missing required field | Re-enter What description |
+| **Why:** is too short or too long | Invalid input | Re-enter Why (10–200 characters) |
+| **Decisions:** is missing | Missing required field | Provide key decisions with backtick-delimited values |
+| Dependency TODO-<n> does not exist | Invalid reference | Verify TODO-<n> exists in TODOS.md or archive |
+| Invalid status marker | Typo in marker | Use one of: [ ], [→], [x], [~] |
 
 ### Observability
 
@@ -315,151 +316,101 @@ The skill logs the following to `.claude/gstack/todos-manager.log`:
 
 ## Acceptance Scenarios
 
-### Scenario A1: Happy path — new entry with all fields
+### Scenario A1: Happy path — `--add` with all fields
 
 **Setup:**
 - TODOS.md exists with entries TODO-1 through TODO-5.
-- `.claude/gstack/` is writable.
+- TODOS-archive.md does not exist yet.
 - No uncommitted changes in the repo.
 
 **Walkthrough:**
-1. User invokes todos-manager skill.
-2. Bootstrap computes next ID: `TODO-6`.
+1. User invokes `todos-manager --add`.
+2. Skill computes next ID: `TODO-6`.
 3. Skill prompts for title; user enters "Implement rate-limiting in API server".
-4. Skill prompts for assignee; user enters "@bob".
-5. Skill prompts for estimate; user enters "3d".
-6. Skill prompts for rationale; user enters "Critical for production stability".
-7. Skill prompts for status; user accepts default "active".
-8. Skill prompts for dependencies; user enters "TODO-2, TODO-4".
-9. Skill prompts for notes; user enters "Coordinate with DevOps team" then types `END`.
-10. **Skill shows preview gate; user types `y`.**
-11. Skill inserts entry into the "In Progress" section of TODOS.md.
-12. Skill prints "✓ Entry added as TODO-6."
+4. Skill prompts for summary; user enters "Prevent API overload under load".
+5. Skill prompts for **What:** — user enters description.
+6. Skill prompts for **Why:** — user enters "Critical for production stability".
+7. Skill guides through Decisions: P1, M, Phase 4, Branch, Test 필요, Security 불필요.
+8. Skill prompts for optional fields (Pros, Cons, Context, Depends on, Assumptions).
+9. **Skill shows preview gate; user types `y`.**
+10. Skill inserts entry at end of TODOS.md.
+11. Skill prints "✓ Entry added as TODO-6."
 
 **Expected outcome:**
-- TODOS.md contains the new entry at line N (after section header).
-- Entry is formatted exactly as specified in ## TODOS.md Schema.
-- Last-updated timestamp is current.
-- Log entry in `.claude/gstack/todos-manager.log` records the full flow.
+- TODOS.md contains the new entry formatted per schema.
+- Entry uses new field names (What, Why, Decisions, etc.).
 
 ---
 
-### Scenario A2: Edit on preview gate
+### Scenario A2: `--init` on new project
 
 **Setup:**
-- Same as A1.
+- No TODOS.md or TODOS-archive.md exists.
 
 **Walkthrough:**
-1. Steps 1–10 proceed as in A1.
-2. **At preview gate, user types `edit`.**
-3. **Skill jumps back to step 4 (metadata prompts).**
-4. Skill re-prompts for Assigned To; user changes "@bob" to "@carol".
-5. Skill re-prompts for remaining fields; user accepts all defaults.
-6. **Skill shows preview gate again (retry 2); user types `y`.**
-7. Entry is inserted with "@carol" as assignee.
+1. User invokes `todos-manager --init`.
+2. Skill creates TODOS.md with preamble blockquote.
+3. Skill creates TODOS-archive.md with minimal header.
+4. Skill initializes `.hermes/todo_id_counter` to 0 (if `.hermes/` exists).
+5. Skill prints "✓ TODOS.md initialized."
 
 **Expected outcome:**
-- TODOS.md is unchanged until the final `y` at the second preview gate.
-- Assigned To field shows "@carol" (not "@bob").
-- Log contains two preview-gate attempts.
+- TODOS.md exists with preamble blockquote at repo root.
+- TODOS-archive.md exists with minimal header.
 
 ---
 
-### Scenario A3: Cancel on preview gate
+### Scenario A3: `--convert` on existing TODOS.md without preamble
 
 **Setup:**
-- Same as A1.
+- TODOS.md exists with entries but no preamble blockquote.
 
 **Walkthrough:**
-1. Steps 1–10 proceed as in A1.
-2. **At preview gate, user types `cancel`.**
-3. **Skill aborts and prints "Entry discarded."**
-4. No ID is reserved; next entry will still be TODO-6.
-5. No files are modified.
-6. No Slack notification is sent.
+1. User invokes `todos-manager --convert`.
+2. Skill detects missing preamble, inserts it after `# TODOS` header.
+3. Skill validates each entry against schema.
+4. Skill outputs audit report listing any missing required fields.
+5. Skill does not rewrite entry bodies.
 
 **Expected outcome:**
-- TODOS.md is unchanged.
-- Log contains a `user_action - confirm="cancel"` entry.
-- If user re-invokes the skill immediately, next ID is still TODO-6.
+- TODOS.md now has preamble blockquote.
+- Entry bodies unchanged.
+- Report surfaces any schema violations.
 
 ---
 
-### Scenario A4: Invalid dependency — error + recovery
+### Scenario A4: `--archive` completed TODOs
 
 **Setup:**
-- TODOS.md has entries TODO-1 through TODO-5.
+- TODOS.md has 15 entries, 10 marked `[x]`.
+- TODOS-archive.md does not exist.
 
 **Walkthrough:**
-1. Steps 1–7 proceed; user enters "TODO-1, TODO-99" in the depends_on field.
-2. **Skill detects TODO-99 does not exist in TODOS.md.**
-3. **Skill prints error message** (following T8 convention):
-   ```
-   Error: Dependency TODO-99 does not exist in TODOS.md.
-   Remediation: Check the list of valid IDs or remove TODO-99 from the depends_on list.
-   Valid IDs in this project: TODO-1, TODO-2, TODO-3, TODO-4, TODO-5
-   ```
-4. **Skill re-prompts for Depends on field.**
-5. User enters "TODO-1" (corrected).
-6. Workflow continues; preview gate is shown with corrected depends_on.
+1. User invokes `todos-manager --archive`.
+2. Skill scans for `[x]` entries — finds 10.
+3. Skill creates TODOS-archive.md with header.
+4. Skill moves all 10 entries to TODOS-archive.md (newest first by ID).
+5. Skill removes 10 entries from TODOS.md.
+6. Skill prints "✓ Archived 10 entries to TODOS-archive.md."
 
 **Expected outcome:**
-- Invalid ID is detected before preview gate.
-- Valid ID list is provided for user reference.
-- Corrected entry proceeds to preview gate and is committed.
+- TODOS.md has 5 entries (non-completed).
+- TODOS-archive.md has 10 entries + header.
+- ID computation still considers archived IDs.
 
 ---
 
-### Scenario A5: Estimate validation — retry with correct format
+### Scenario A5: `--audit` with issues found
 
 **Setup:**
-- Same as A1.
+- TODOS.md has entries with missing fields and invalid dependencies.
 
 **Walkthrough:**
-1. Steps 1–5 proceed; skill prompts for estimate.
-2. User enters "5" (invalid format; expected `/^\d+[hd w]$/`).
-3. **Skill prints error message:**
-   ```
-   Error: Estimate "5" does not match expected format (e.g., "2h", "1d").
-   Remediation: Set estimate to one of: 1h, 2h, 1d, 2d, 1w, etc.
-   ```
-4. **Skill re-prompts for estimate.**
-5. User enters "5d" (valid).
-6. Workflow continues.
+1. User invokes `todos-manager --audit`.
+2. Skill scans all entries, checks required fields, validates dependencies.
+3. Skill outputs structured report listing issues.
+4. Skill does not modify any files.
 
 **Expected outcome:**
-- Invalid input is caught immediately.
-- User is re-prompted for the same field.
-- Next iteration proceeds with valid input.
-
----
-
-### Scenario A6: Empty TODOS.md on first run
-
-**Setup:**
-- TODOS.md does not exist.
-- User is running todos-manager for the first time.
-
-**Walkthrough:**
-1. **Skill detects TODOS.md is missing.**
-2. **Skill initializes TODOS.md** with gstack header:
-   ```markdown
-   # TODOS.md
-
-   > Generated by [todos-manager skill](/.claude/skills/todos-manager)
-   > Last updated: 2026-06-11T10:30:45Z
-
-   ## In Progress
-
-   ## Blocked
-
-   ## Done
-   ```
-3. **Skill assigns TODO-1** to the first entry.
-4. Skill prompts for entry title, proceeding as in A1.
-5. Entry is inserted under "In Progress" section.
-
-**Expected outcome:**
-- TODOS.md is created at repo root with proper structure.
-- First entry is TODO-1.
-- All subsequent prompts and validation proceed normally.
+- Report lists all issues (missing fields, invalid deps, marker issues).
+- No files modified.
