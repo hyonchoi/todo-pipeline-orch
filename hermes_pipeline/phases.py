@@ -265,6 +265,13 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
             f"stderr={result['stderr'][:200]}"
         )
 
+    # Post-phase hook: after autoplan succeeds, generate decision sheet for plan gate
+    if phase_key == "phase_2_autoplan" and result["returncode"] == 0:
+        _generate_decision_sheet_post_autoplan(
+            todo_id=todo_id, tick_id=tick_id, state_dir=sd,
+            project_dir=kw.get("project_dir"),
+        )
+
     if phase.terminal:
         todo_num = int(todo_id.removeprefix("TODO-"))
         from .state import ReadyForReview, State
