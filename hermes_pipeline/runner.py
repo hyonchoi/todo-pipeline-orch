@@ -136,6 +136,7 @@ class PipelineRunner:
     state: State
     kanban: KanbanClient
     run_phase_fn: Callable[[Phase], int]
+    tick_id: str = ""
     pr_url_resolver: Callable[[], str] = lambda: ""
 
     def run(self) -> bool:
