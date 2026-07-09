@@ -496,6 +496,18 @@ def build_parser() -> argparse.ArgumentParser:
     rc_parser.add_argument("project", help="Project name/slug")
     rc_parser.set_defaults(func=_cmd_recover_counter)
 
+    # init: Write the default pipeline execution contract
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Write the default pipeline execution contract for a project",
+    )
+    init_parser.add_argument("project", help="Project name")
+    init_parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing contract with the current default",
+    )
+    init_parser.set_defaults(func=_cmd_init)
+
     return parser
 
 
@@ -1188,6 +1200,33 @@ def _cmd_recover_counter(args, config: Config) -> int:
 
     log.info("recover-counter: set counter to %d for project %s", result, project)
     print(f"Counter set to {result} for project {project}")
+    return 0
+
+
+def _cmd_init(args, config: Config) -> int:
+    """Handle 'init' subcommand — write the default pipeline execution contract."""
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+
+    from .state_migration import _get_project_state_dir
+    from .contract import contract_path, write_default_contract
+
+    project_state = _get_project_state_dir(project_dir)
+    path = contract_path(project_state)
+
+    try:
+        if args.force and path.exists():
+            path.unlink()
+        written = write_default_contract(project_state)
+    except OSError as e:
+        log.error("failed to write pipeline contract at %s: %s", path, e)
+        return 1
+
+    if written:
+        print(f"Wrote pipeline execution contract: {path}")
+    else:
+        print(f"Pipeline execution contract already exists: {path} (use --force to regenerate)")
     return 0
 
 
