@@ -69,7 +69,7 @@ def _resolve_tick_for_todo(
     # Step 2: scan the decisions directory for a sheet with this todo_id.
     decisions_dir = state_dir / "decisions"
     if decisions_dir.exists():
-        for path in sorted(decisions_dir.glob("*-plan.json")):
+        for path in reversed(sorted(decisions_dir.glob("*-plan.json"))):
             try:
                 data = json.loads(path.read_text())
             except (json.JSONDecodeError, OSError):
