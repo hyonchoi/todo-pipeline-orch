@@ -1322,7 +1322,7 @@ def _cmd_doctor(args, config: Config) -> int:
     """Handle 'doctor' subcommand — verify the pipeline execution contract.
 
     Exit codes: 0 clean, 1 drift (capability mismatch), 2 missing/invalid
-    contract or unknown project.
+    contract, unknown project, or missing profile.
     """
     project_dir = _resolve_project_dir(config, args.project)
     if project_dir is None:
@@ -1358,6 +1358,27 @@ def _cmd_doctor(args, config: Config) -> int:
             f"required by configs/phases.yaml — edit the contract to add them"
         )
         return 1
+
+    # Verify the assigned profile is actually installed (non-default assignee only)
+    if contract.assignee != "default":
+        verify_result = _cli_sp.run(
+            ["hermes", "profile", "show", contract.assignee],
+            text=True, capture_output=True,
+        )
+        if verify_result.returncode != 0:
+            print(
+                f"MISSING: Hermes profile '{contract.assignee}' is not installed, "
+                f"but contract assignee is set to '{contract.assignee}'"
+            )
+            print(
+                "Cause: The profile was never installed, or it was removed after install."
+            )
+            print(
+                f"Fix: Install the bundled profile with `pipeline-watch install-profile`, "
+                f"or create a custom profile named '{contract.assignee}' "
+                f"with `hermes profile create {contract.assignee}`."
+            )
+            return 2
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "

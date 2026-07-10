@@ -232,3 +232,62 @@ class TestCmdDoctor:
         out = capsys.readouterr().out
         assert "DRIFT" in out
         assert "Write" in out and "Bash" in out
+
+
+from unittest.mock import MagicMock
+import subprocess as _test_sp
+
+
+class TestDoctorMissingProfile:
+    def test_doctor_checks_profile_for_non_default_assignee(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write,Bash")],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=1, stderr="profile not found", stdout=""),
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        out = capsys.readouterr().out
+        assert "pipeline" in out.lower() or "profile" in out.lower()
+
+    def test_doctor_skips_profile_check_for_default_assignee(self, tmp_path, mocker, capsys):
+        """When assignee is 'default', doctor should NOT check Hermes profile."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 1\ncapabilities = ["Read", "Write", "Bash"]\n'
+        )
+        call_count = {"n": 0}
+        original_run = _test_sp.run
+        def tracking_run(*a, **kw):
+            call_count["n"] += 1
+            cmd = a[0] if a else kw.get("args", [])
+            if "profile" in cmd:
+                return MagicMock(returncode=1, stderr="profile not found", stdout="")
+            return original_run(*a, **kw)
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=tracking_run)
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write,Bash")],
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        assert call_count["n"] == 0
