@@ -307,3 +307,44 @@ Mode: DX POLISH. Product type: CLI dev tool for a solo operator. Dual voices: Co
 **Blocking-before-done (Theme A, non-negotiable):** Routing Contract section + `doctor` fail-closed on a missing non-default profile. These are the correctness spine of the iteration — implement and test before marking TODO-15 done.
 
 Review pipeline: CEO + Eng + DX, dual voices (Codex gpt-5.5 + Claude subagent) each. Design phase skipped (no UI scope).
+
+---
+
+## Amendment A1 — `install-profile` command + distribution resolution (2026-07-10, post-approval)
+
+Post-autoplan amendment (solo mode). Adds a first-party command so the operator never runs raw `hermes profile install` or hand-types the distribution path. Supersedes the manual-install step in the Distribution Plan and resolves Open Question 1.
+
+### New command: `pipeline-watch install-profile [--force]`
+- **Does:** resolves the bundled distribution dir, shells `hermes profile install <dir>` (adds `--force` on reinstall), then **verifies** with `hermes profile show pipeline` and prints the next step (`set assignee=pipeline` / confirm `doctor`).
+- **Reinstall loop:** `install-profile --force` re-pulls after SOUL.md edits (mirrors `init --force`). This is the home for the SOUL.md iteration loop the CEO 6-month-regret finding predicted.
+- **Routing verify (ENG-1) lives here:** the post-install `hermes profile show` proves the installed profile name matches the assignee at the moment of install; `doctor` remains the ongoing fail-closed check (ENG-2). Two layers, no overlap of duty.
+
+### Distribution resolution — in-package data (REVISED 2026-07-10 per operator requirement)
+> **Reversal note:** an earlier draft of this amendment kept `profiles/` at repo root and resolved it via `Path(__file__).resolve().parent.parent / "profiles"` (mirroring today's `load_phases()`). The operator requirement below overrides that: **the tool must install as a package and run from *any* project root, so out-of-package data access is prohibited.** The repo-root-sibling pattern is a latent bug for that use case — once the wheel is installed, `parent.parent` is `site-packages/`, not a checkout with sibling data dirs.
+
+- **Requirement:** `pipeline-watch` is a first-class installed tool (`uv tool install` / `pipx`) invoked from arbitrary project roots. It must never depend on a repo-checkout layout or the caller's CWD to find its own data.
+- **Bundled data:** `profiles/pipeline/` **and** `configs/phases.yaml` move *inside* the package (e.g. `hermes_pipeline/data/profiles/pipeline/`, `hermes_pipeline/data/phases.yaml`) and ship in the wheel. hatchling includes them as package data (`[tool.hatch.build.targets.wheel] include` / force-include, or `importlib.resources`-visible package files).
+- **Resolution:** all data is resolved **package-relative** — `importlib.resources.files("hermes_pipeline") / "data" / ...` (preferred), or at minimum `Path(__file__).resolve().parent / "data" / ...` (points *inside* the package, never above it). The `parent.parent`/repo-root escape is **prohibited**.
+- **`load_phases()` migrates too (now required, not deferred):** the existing `Path(__file__).parent.parent / "configs" / "phases.yaml"` resolution has the same latent bug and must be moved to in-package resolution in the same change. One coherent mechanism for *both* data dirs (autoplan P4 DRY, P5 explicit) — this is the "wheel-standalone migration" the prior draft deferred, now pulled in because the operator requirement makes it load-bearing.
+- **Consequence for `install-profile`:** it resolves the bundled profile dir via the same in-package path, then shells `hermes profile install <that-dir>`. The dir is guaranteed present next to the installed package regardless of CWD.
+
+### Updated onboarding flow (two explicit verbs, zero raw hermes, zero hand-edit)
+```
+pipeline-watch init <project> --assignee pipeline   # declare intent (T1 flag)
+pipeline-watch install-profile                       # install + verify the profile
+# cron ticks route --assignee pipeline to the installed profile
+```
+This delivers the "shows up like a professional" onboarding from *What Makes This Cool* without Approach C's init-magic — it's Approach B plus two thin, discoverable verbs.
+
+### Open Question 1 — RESOLVED
+Not "init auto-installs everything" (rejected C) and not "hand-edit the TOML" (original B). Instead: **two explicit commands** — `init --assignee` declares intent, `install-profile` makes it real. Clean separation; each verb does one thing.
+
+### Success-criteria deltas
+- (new) `pipeline-watch install-profile` installs the bundled distribution from any CWD and verifies the profile exists.
+- (new) `pipeline-watch install-profile --force` reinstalls after a SOUL.md change.
+- (amended #3) hardened per ENG-3: the "no interactive prompts" claim is validated by the transcript-scan eval, not asserted.
+
+### Next-steps deltas
+- (new) Implement `install-profile` command: resolve the bundled dir **package-relative** (`importlib.resources` / in-package `__file__`), shell `hermes profile install [--force]`, post-install `hermes profile show` verify, print next step. TDD.
+- (amended #2) Move `profiles/pipeline/` **and** `configs/phases.yaml` into the package as bundled data; configure hatchling to ship them in the wheel; migrate `load_phases()` off the `parent.parent` repo-root resolution in the same change. pyproject **does** change this iteration.
+- (amended #4) regenerate (not sync) the impl plan to include `install-profile` + the resolution decision.
