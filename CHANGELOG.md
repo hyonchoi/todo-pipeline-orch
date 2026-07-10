@@ -176,7 +176,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (docs)
 - **Architecture overview** — `docs/ARCHITECTURE.md` documents lane structure, phase execution flow, and data flow across the pipeline.
 
-## [Unreleased]
+## [0.4.3] - 2026-07-10
 
 ### Added
 - **`pipeline-watch init` subcommand** — Writes the default pipeline execution contract (`.hermes/pipeline.toml`) for a project, declaring assignee and tool capabilities. Idempotent — use `--force` to regenerate after editing `configs/phases.yaml`. Capabilities are computed from phase definitions, not hardcoded.
