@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
+import subprocess as _test_sp
 
-from hermes_pipeline.cli import build_parser, _cmd_init
+from hermes_pipeline.cli import build_parser, _cmd_init, _cmd_doctor
 from hermes_pipeline.config import Config
+from hermes_pipeline.phases import Phase
 
 
 class FakeArgs:
@@ -131,10 +134,6 @@ class TestInitAssignee:
         assert 'assignee = "default"' in contract.read_text()
 
 
-from hermes_pipeline.cli import _cmd_doctor
-from hermes_pipeline.phases import Phase
-
-
 class TestInstallProfileParser:
     def test_install_profile_parses_force(self):
         parser = build_parser()
@@ -232,10 +231,6 @@ class TestCmdDoctor:
         out = capsys.readouterr().out
         assert "DRIFT" in out
         assert "Write" in out and "Bash" in out
-
-
-from unittest.mock import MagicMock
-import subprocess as _test_sp
 
 
 class TestDoctorMissingProfile:

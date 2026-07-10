@@ -1355,7 +1355,7 @@ def _cmd_doctor(args, config: Config) -> int:
         print(
             f"DRIFT: contract capabilities {sorted(contract.capabilities)} at "
             f"{contract_path(project_state)} are missing {sorted(missing)} "
-            f"required by configs/phases.yaml — edit the contract to add them"
+            f"required by phases.yaml — edit the contract to add them"
         )
         return 1
 
@@ -1409,7 +1409,13 @@ def _cmd_install_profile(args, config: Config) -> int:
         cmd.append("--force")
 
     print(f"Installing pipeline profile from {profile_dir}...")
-    result = _cli_sp.run(cmd, text=True)
+    try:
+        result = _cli_sp.run(cmd, text=True, capture_output=True)
+    except FileNotFoundError:
+        print("Problem: `hermes` command not found.")
+        print("Cause: Hermes is not installed or not on PATH.")
+        print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
+        return 2
     if result.returncode != 0:
         print(f"Problem: `hermes profile install` failed (exit {result.returncode})")
         print(f"Cause: Hermes may not be installed, or the profile source is invalid.")

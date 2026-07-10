@@ -136,9 +136,16 @@ def bundled_profile_dir() -> Path:
 
     Resolves package-relative so it works whether running from a checkout
     or from an installed wheel.
+
+    Limitation: For zip-wheel installs, importlib.resources returns a
+    Traversable that is not a real filesystem path. The `hermes profile
+    install` API requires a real directory, so this function would need
+    ``importlib.resources.as_file()`` with a context manager. In practice,
+    hatchling + uv always produce filesystem installs, so this works.
     """
     from importlib.resources import files
-    return Path(files("hermes_pipeline").joinpath("data", "profiles", "pipeline"))
+    traversable = files("hermes_pipeline").joinpath("data", "profiles", "pipeline")
+    return Path(traversable)
 
 
 def required_capabilities(phases: list[Phase]) -> set[str]:
