@@ -143,3 +143,167 @@ The pipeline agent has a specific job, reflected in the personality:
 
 - You pushed back on autoplan's reframing. The plan shifted your original intent (Hermes profile with SOUL.md) toward a safer abstraction (execution contract). You said "I meant to have a hermes folder with a SOUL.md" — you defended the original vision instead of accepting the refactor. That's conviction, not compliance.
 - You answered D3 with B (SOUL.md + distribution) without hesitation — you know what's useful versus what's over-engineered. The pipeline agent needs a personality AND a way to deploy it. C (full automation) was a trap; you saw it.
+
+---
+
+<!-- /autoplan review report — appended by autoplan pipeline 2026-07-10 -->
+## GSTACK REVIEW REPORT
+
+### Phase 1 — CEO Review (Strategy & Scope)
+
+Mode: SELECTIVE EXPANSION. Dual voices: Codex (gpt-5.5) + Claude subagent, both ran.
+
+**Premise gate (user-confirmed):** Premise 1 ("default profile misbehaves unattended") is ACCEPTED — grounded in the operator's lived experience running the pipeline, not asserted. Both review voices had flagged it as evidence-free; the operator confirmed direct observation, which is the context the models lacked. Premises 2–4 accepted (consistent with the code's own TODO-16 note that the Hermes profile API can't enforce tools/safe-mode, so SOUL.md is indeed the only profile-level behavior surface).
+
+**CEO consensus table:**
+
+| Dimension | Claude | Codex | Consensus |
+|---|---|---|---|
+| 1. Premises valid? | reject P1 | reject P1 | Resolved at gate → P1 accepted (operator evidence) |
+| 2. Right problem? | contract=yes, SOUL=unproven | same | CONFIRMED (contract solid; SOUL now operator-grounded) |
+| 3. Scope calibration? | distribution over-scoped | over-scoped | CONFIRMED → User Challenge at gate |
+| 4. Alternatives explored? | A dismissed too fast | same | CONFIRMED |
+| 5. Competitive risk? | N/A solo | N/A solo | N/A |
+| 6. 6-month trajectory? | SOUL.md staleness risk | stale mythology risk | CONFIRMED |
+
+**Key findings (auto-decided or escalated):**
+- **CEO-1 (CRITICAL, both voices):** The doc designs a personality in the abstract — it never writes what SOUL.md actually SAYS. Concrete guardrails (max narration length, ambiguous-prompt handling, when to refuse a phase, timeout behavior) are absent. → Auto-decide: the impl must include the verbatim SOUL.md, drafted before packaging. Logged as task.
+- **CEO-2 (HIGH, both voices):** Success criterion 3 ("executes phases without interactive prompts") is unfalsifiable as written. → Auto-decide (P1 completeness): harden into a validation — run one full unattended pipeline with the profile, assert zero interactive halts. Confirmed by operator at premise gate.
+- **CEO-3 (MEDIUM→User Challenge):** Both voices recommend deferring the distribution packaging (write/test SOUL.md standalone first, bundle later). This contradicts the operator's stated Approach B. → USER CHALLENGE, surfaced at final gate. Operator's direction is the default.
+- **CEO-4 (MEDIUM, both voices):** SOUL.md risks hard-coding phase names / gstack skill names → stale mythology when phases.yaml evolves. Ties to the doc's own Open Question 2. → Auto-decide (P5 explicit): SOUL.md stays skill-agnostic; the phase prompt carries the skill invocation (phases.yaml already does this).
+- **CEO-5 (MEDIUM, Claude):** "one command wires up the pipeline" (What Makes This Cool) is false this iteration — install + assignee edit are manual. → Auto-decide: soften the doc's framing; the aspirational one-command flow is a future enhancement, not this iteration's deliverable.
+
+**NOT in scope (deferred):** full init automation (`init` auto-installs profile + sets assignee) → deferred to a follow-up per the doc's own Open Question 1; enforcement of tool permissions via profile → blocked by Hermes API (TODO-16), out of scope.
+
+**What already exists:** contract.py (loader/validator/error hierarchy, 30 tests), `init`/`doctor` CLI, tick-flow integration passing `contract.assignee` → `register_todo_phases` → `--assignee`. The remaining work is genuinely just the profile half.
+
+### Phase 3 — Eng Review (Architecture & Tests)
+
+Mode: FULL REVIEW. Dual voices: Codex + Claude subagent, both ran. Test plan artifact written to `~/.gstack/projects/todo-pipeline-orchestrator/hyonchoi-main-test-plan-20260710-121926.md`.
+
+**Architecture (new vs existing):**
+```
+EXISTING (shipped, 30 tests)                     NEW (this iteration)
+configs/phases.yaml ──tools──► contract.py
+                               (required_capabilities, PipelineContract)
+                                     │ contract.assignee
+cli.py tick ──► register_todo_phases(assignee=) ── --assignee <name> ──►
+       [Hermes kanban dispatcher (external)]
+                 │   ▲
+                 │   └──ROUTING by name AND/OR description──► profile "pipeline"
+                 ▼                                             ├─ distribution.yaml  ◄─ NEW (name, description, min-ver?)
+   Claude Code agent runs phase (SOUL.md in context) ◄────────┴─ SOUL.md            ◄─ NEW (soft personality)
+```
+The load-bearing coupling: `contract.assignee == "pipeline"` must equal the installed profile's routing identity (name + description). **No code path currently verifies this coupling** — this is the source of the two CRITICAL findings.
+
+**Eng consensus table:**
+
+| Dimension | Claude | Codex | Consensus |
+|---|---|---|---|
+| 1. Architecture sound? | routing under-spec | routing under-spec | CONFIRMED gap |
+| 2. Test coverage sufficient? | profile half untested | not testable as-is | CONFIRMED gap |
+| 3. Performance risks? | none | none | CONFIRMED none |
+| 4. Security threats? | profile can't enforce (TODO-16) | advisory only | CONFIRMED (contract is the enforcement surface) |
+| 5. Error paths handled? | profile-not-installed unhandled | silent queue starvation | CONFIRMED CRITICAL |
+| 6. Deployment risk? | stale impl plan trap | regenerate not patch | CONFIRMED |
+
+**Findings (auto-decided):**
+- **ENG-1 (CRITICAL, both):** The assignee→profile routing contract is unspecified. distribution.yaml must declare the profile name exactly `pipeline` AND a description matching the kanban routing role (the decomposer routes by role/description, not name alone). → Auto-decide (P1): add a "Routing Contract" section to the design + a post-install verification step proving `--assignee pipeline` resolves to the profile.
+- **ENG-2 (CRITICAL, both):** Failure mode undefined — if `assignee="pipeline"` but the profile isn't installed, kanban tasks may sit unclaimed (silent queue starvation), and tick already creates tasks with `--assignee pipeline`. → Auto-decide (P1/P2): `pipeline-watch doctor` must fail closed — when `assignee != "default"`, verify the profile is installed/dispatchable (`hermes profile show <assignee>`), exit 2 with a fix hint. This is in blast radius (doctor already exists) and < 1 day.
+- **ENG-3 (HIGH, both):** Success criterion 3 is not testable as written. → Auto-decide (P1): convert to an eval — run a representative unattended phase under timeout, scan transcript, fail on interactive-prompt patterns / blocked stdin / "should I?" / missing final artifact. (Reinforces CEO-2; a deterministic fake-executor companion asserts the wiring cheaply per the repo's dual-mode lab pattern.)
+- **ENG-4 (HIGH, both):** distribution packaging is NOT mechanical — routing correctness depends on manifest name/description semantics, so it's part of the correctness boundary. → Auto-decide (P3 pragmatic): build the smallest possible distribution first, test dispatcher pickup, THEN polish docs. (This nuances the CEO User Challenge — the distribution is load-bearing, not polish.)
+- **ENG-5 (MEDIUM, both):** The stale impl plan should be regenerated, not patched — a sync edit risks preserving obsolete assumptions (tools→capabilities, global→per-project, model_policy/safe_mode fields that never shipped). → Auto-decide (P5): regenerate the impl plan from current code + this design, mark the old one superseded. Upgrades Next Step 4 from "sync" to "regenerate + supersede".
+
+**Failure modes registry:**
+
+| Failure | Trigger | Current handling | Gap | Fix |
+|---|---|---|---|---|
+| Silent queue starvation | assignee set, profile absent | none | CRITICAL | doctor fail-closed (ENG-2) |
+| Routing miss | profile name/desc ≠ assignee | none | CRITICAL | Routing Contract + verify (ENG-1) |
+| SOUL.md ignored by model | model non-compliance | none (advisory) | accepted (TODO-16) | eval detects it (ENG-3) |
+| Contract/phases drift | phases.yaml adds a tool | doctor detects | covered | — |
+
+### Phase 3.5 — DX Review (Developer Experience)
+
+Mode: DX POLISH. Product type: CLI dev tool for a solo operator. Dual voices: Codex + Claude subagent, both ran.
+
+**Developer journey (operator setting up the pipeline profile):**
+
+| Stage | Action | Friction | Fix |
+|---|---|---|---|
+| 1 Discover | reads "one command wires it all up" | sets false expectation | soften doc / add flag |
+| 2 Init | `pipeline-watch init <project>` | writes assignee="default" — profile not wired | — |
+| 3 Install | `hermes profile install profiles/pipeline/` (manual) | must know to do this | init prints next command |
+| 4 Wire | hand-edit `.hermes/pipeline.toml` → assignee="pipeline" | undiscoverable, typo-prone | `init --assignee pipeline` |
+| 5 Verify | `pipeline-watch doctor` | doesn't check the profile exists | doctor fail-closed |
+| 6 Run | cron tick | if misconfigured → silent queue starvation | doctor catches it first |
+| 7 Debug | task stuck, no error | reads as "tool is broken" | problem+cause+fix diagnostics |
+| 8 Customize | own SOUL.md / profile name | undocumented | escape-hatch recipe |
+| 9 Upgrade | new phases.yaml tool | doctor detects drift (covered) | — |
+
+**DX consensus table:**
+
+| Dimension | Claude | Codex | Consensus |
+|---|---|---|---|
+| 1. Getting started < 5 min? | ~5m, footgun | 10-20m, footgun | CONFIRMED poor (fixable) |
+| 2. CLI naming guessable? | assignee opaque | hand-edit undiscoverable | CONFIRMED gap |
+| 3. Error messages actionable? | silent starvation | missing-profile unhandled | CONFIRMED CRITICAL |
+| 4. Docs findable & complete? | walkthrough missing | walkthrough missing | CONFIRMED gap |
+| 5. Upgrade path safe? | min-ver unresolved | env exit codes | CONFIRMED minor |
+| 6. Dev env friction-free? | 3 manual steps | 4 steps + footgun | CONFIRMED |
+
+**DX scorecard (plan as written, pre-fix → post-fix):** TTHW 3/10→8/10 · CLI naming 4/10→7/10 · Error UX 4/10→8/10 · Docs 2/10→8/10 · Upgrade 5/10→6/10 · Env friction 4/10→8/10 · Escape hatches 5/10→8/10 · Defaults 6/10 (default assignee is a safe fallback). **Overall: 4.1/10 → 7.6/10** with the auto-decided fixes.
+
+**Findings (auto-decided):**
+- **DX-1 (CRITICAL, both):** "One command" claim is dishonest — real flow is 3-4 manual steps and the hand-edit changes routing (not optional). → Auto-decide: add `pipeline-watch init --assignee <name>` (writes the assignee field, avoids hand-editing TOML — a flag, NOT the rejected Approach-C auto-install), AND soften the doc's framing. See Taste Decision T1.
+- **DX-2 (CRITICAL, both):** Missing-profile fails silently → reads as "tool is broken." → Auto-decide: same fix as ENG-2 (doctor fail-closed with problem+cause+fix). Cross-phase reinforced.
+- **DX-3 (HIGH, both):** Routing under-specified → same as ENG-1 (Routing Contract section + post-install verify). Cross-phase reinforced.
+- **DX-4 (HIGH, both):** Hand-editing TOML undiscoverable. → Auto-decide: `init` prints the exact next commands + file path; `--assignee` flag removes the hand-edit entirely.
+- **DX-5 (MEDIUM, both):** Normalize diagnostics to Problem/Cause/Fix/Command; exit 2 for env/setup, 1 for invalid contract. → Auto-decide (P1).
+- **DX-6 (MEDIUM, both):** Docs walkthrough is the real onboarding lever — upgrade Next Step 6 from "update docs" to "write the wiring walkthrough (init → install → assignee → doctor → first tick, with success/failure output)." → Auto-decide (P1).
+- **DX-7 (MEDIUM, both):** Document escape hatches — custom SOUL.md / profile name via `hermes profile create <name>` + `assignee="<name>"`, and state clearly SOUL.md is advisory not enforcement. → Auto-decide.
+
+**TTHW:** current 10-20 min (high footgun) → 3-5 min with docs+doctor → under 2 min with `init --assignee`.
+
+---
+
+## Cross-Phase Themes (independent signal across phases)
+
+- **THEME A — Routing contract + silent starvation (CEO ∅ / ENG-1,2 / DX-2,3):** The single highest-confidence signal. Both models, in BOTH the Eng and DX phases, independently flagged that `assignee→profile` routing is unspecified and that a missing profile fails silently. This is the load-bearing correctness risk of the whole iteration. Non-negotiable fixes: Routing Contract section + `doctor` fail-closed.
+- **THEME B — "SOUL.md is advisory, not enforcement" (CEO / ENG-4 / DX-7):** Appeared in every phase. The profile can't enforce tools/safe-mode (TODO-16); the contract's capability check is the only hard surface. The design must state this plainly so nobody mistakes SOUL.md for a guardrail.
+- **THEME C — Validate criterion 3 with an eval (CEO-2 / ENG-3):** "No interactive prompts" must be observable, not asserted. Operator confirmed at the premise gate.
+- **THEME D — "One command" is not true this iteration (CEO-5 / DX-1):** Honesty gap between marketing and the real 3-4 step flow.
+
+## Decision Audit Trail
+
+| # | Phase | Decision | Class | Principle | Rationale | Rejected |
+|---|---|---|---|---|---|---|
+| 1 | CEO | Accept Premise 1 | GATE | user judgment | operator confirmed lived observation | defer-for-evidence |
+| 2 | CEO | SOUL.md must be written verbatim before packaging | Mechanical | P1 | can't review an abstract personality | ship-summary-only |
+| 3 | CEO | Harden success criterion 3 into a validation | Mechanical | P1 | unfalsifiable as written | leave-as-prose |
+| 4 | CEO | Keep SOUL.md skill-agnostic | Mechanical | P5 | avoid stale phase-name mythology | hardcode-skill-names |
+| 5 | CEO | Soften "one command" framing | Mechanical | P6 | false this iteration | keep-as-is |
+| 6 | ENG | Add Routing Contract section + verify | Mechanical | P1 | load-bearing, unspecified | leave-implicit |
+| 7 | ENG | doctor fail-closed on missing profile | Mechanical | P1/P2 | prevents silent starvation, in blast radius | leave-silent |
+| 8 | ENG | Criterion-3 eval (transcript scan) + fake-executor companion | Mechanical | P1 | deterministic + cheap | live-run-only |
+| 9 | ENG | Minimal distribution first, test routing, docs after | Mechanical | P3 | distribution is correctness boundary | docs-first |
+| 10 | ENG | Regenerate impl plan, supersede old | Mechanical | P5 | patch preserves obsolete assumptions | sync-edit |
+| 11 | DX | Normalize diagnostics Problem/Cause/Fix | Mechanical | P1 | actionable errors | terse-errors |
+| 12 | DX | Docs = wiring walkthrough (upgrade Next Step 6) | Mechanical | P1 | real onboarding lever | generic-doc-update |
+| 13 | DX | Document escape hatches | Mechanical | P1 | power-user path | leave-undocumented |
+| 14 | DX | `init --assignee <name>` flag | **Taste (T1) → ACCEPTED** | P2/P5 | operator approved at gate | hand-edit-only |
+| 15 | CEO→ENG | Keep Approach B distribution (User Challenge resolved toward user) | **User Challenge (UC1)** | — | eng/dx phases show distribution is load-bearing, not over-scoped | defer-distribution |
+
+---
+
+## /autoplan Final Gate — APPROVED (2026-07-10)
+
+**Approved as-is** with all 13 auto-decisions.
+
+- **T1 (taste) → ACCEPTED:** add `pipeline-watch init --assignee <name>` flag (removes the hand-edit footgun; not the rejected Approach-C auto-install). This upgrades Open Question 1's stance for this iteration: init gains an `--assignee` flag, but does NOT auto-install the profile.
+- **UC1 (user challenge) → resolved toward operator:** keep Approach B (distribution). Confirmed load-bearing by Eng/DX phases.
+- **Premise 1 → ACCEPTED** at gate on operator evidence.
+
+**Blocking-before-done (Theme A, non-negotiable):** Routing Contract section + `doctor` fail-closed on a missing non-default profile. These are the correctness spine of the iteration — implement and test before marking TODO-15 done.
+
+Review pipeline: CEO + Eng + DX, dual voices (Codex gpt-5.5 + Claude subagent) each. Design phase skipped (no UI scope).
