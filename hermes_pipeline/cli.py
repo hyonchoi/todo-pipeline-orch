@@ -496,6 +496,26 @@ def build_parser() -> argparse.ArgumentParser:
     rc_parser.add_argument("project", help="Project name/slug")
     rc_parser.set_defaults(func=_cmd_recover_counter)
 
+    # init: Write the default pipeline execution contract
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Write the default pipeline execution contract for a project",
+    )
+    init_parser.add_argument("project", help="Project name")
+    init_parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing contract with the current default",
+    )
+    init_parser.set_defaults(func=_cmd_init)
+
+    # doctor: Verify the pipeline execution contract
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="Verify a project's pipeline execution contract against phases.yaml",
+    )
+    doctor_parser.add_argument("project", help="Project name")
+    doctor_parser.set_defaults(func=_cmd_doctor)
+
     return parser
 
 
@@ -981,6 +1001,48 @@ def _tick_project(
     Note:
         The caller holds this project's TickLock for the duration of this call.
     """
+    from .contract import (
+        CapabilityMismatchError,
+        ContractMissingError,
+        ContractSchemaError,
+        ContractVersionMismatchError,
+        CONTRACT_SCHEMA_VERSION,
+        PipelineContract,
+        contract_path,
+        load_contract,
+        missing_capabilities,
+        required_capabilities,
+    )
+
+    phases = load_phases()
+
+    try:
+        contract = load_contract(project_state)
+    except ContractMissingError:
+        # Auto-compute capabilities from phases.yaml so a fresh project
+        # doesn't break when a future phase requires a tool not in the
+        # hardcoded DEFAULT_CAPABILITIES tuple.
+        contract = PipelineContract(
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            assignee="default",
+            capabilities=tuple(sorted(required_capabilities(phases))),
+        )
+    except (ContractSchemaError, ContractVersionMismatchError) as e:
+        log.error(
+            "project %s: pipeline contract invalid: %s — run `pipeline-watch doctor %s` for details",
+            project_slug, e, project_slug,
+        )
+        raise
+
+    missing = missing_capabilities(contract, phases)
+    if missing:
+        log.error(
+            "project %s: pipeline contract at %s is missing capabilities %s required by "
+            "phases.yaml — edit the contract to add them, or run `pipeline-watch doctor %s` for details",
+            project_slug, contract_path(project_state), sorted(missing), project_slug,
+        )
+        raise CapabilityMismatchError(f"contract missing capabilities: {sorted(missing)}")
+
     from .project_config import _resolve_slack_channel
 
     # Resolve per-project Slack channel
@@ -1145,6 +1207,7 @@ def _tick_project(
             tick_id=tick_id,
             board_slug=project_slug,
             project_dir=project_dir,
+            assignee=contract.assignee,
         )
         log.info("project %s: registered %d kanban tasks for %s: %s",
                  project_slug, len(task_ids), picked, task_ids)
@@ -1188,6 +1251,81 @@ def _cmd_recover_counter(args, config: Config) -> int:
 
     log.info("recover-counter: set counter to %d for project %s", result, project)
     print(f"Counter set to {result} for project {project}")
+    return 0
+
+
+def _cmd_init(args, config: Config) -> int:
+    """Handle 'init' subcommand — write the default pipeline execution contract."""
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+
+    from .state_migration import _get_project_state_dir
+    from .contract import contract_path, write_default_contract
+
+    project_state = _get_project_state_dir(project_dir)
+    path = contract_path(project_state)
+
+    try:
+        if args.force and path.exists():
+            path.unlink()
+        written = write_default_contract(project_state)
+    except OSError as e:
+        log.error("failed to write pipeline contract at %s: %s", path, e)
+        return 1
+
+    if written:
+        print(f"Wrote pipeline execution contract: {path}")
+    else:
+        print(f"Pipeline execution contract already exists: {path} (use --force to regenerate)")
+    return 0
+
+
+def _cmd_doctor(args, config: Config) -> int:
+    """Handle 'doctor' subcommand — verify the pipeline execution contract.
+
+    Exit codes: 0 clean, 1 drift (capability mismatch), 2 missing/invalid
+    contract or unknown project.
+    """
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+
+    from .state_migration import _get_project_state_dir
+    from .contract import (
+        ContractMissingError,
+        ContractSchemaError,
+        ContractVersionMismatchError,
+        contract_path,
+        load_contract,
+        missing_capabilities,
+    )
+
+    project_state = _get_project_state_dir(project_dir)
+
+    try:
+        contract = load_contract(project_state)
+    except ContractMissingError as e:
+        print(f"MISSING: {e}")
+        return 2
+    except (ContractSchemaError, ContractVersionMismatchError) as e:
+        print(f"INVALID: {e}")
+        return 2
+
+    phases = load_phases()
+    missing = missing_capabilities(contract, phases)
+    if missing:
+        print(
+            f"DRIFT: contract capabilities {sorted(contract.capabilities)} at "
+            f"{contract_path(project_state)} are missing {sorted(missing)} "
+            f"required by configs/phases.yaml — edit the contract to add them"
+        )
+        return 1
+
+    print(
+        f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
+        f"capabilities={sorted(contract.capabilities)}"
+    )
     return 0
 
 

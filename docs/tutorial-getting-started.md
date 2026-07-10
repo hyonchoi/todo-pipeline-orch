@@ -26,7 +26,7 @@ uv run pipeline-watch --version
 
 Expected output:
 ```
-pipeline-watch 0.3.3
+pipeline-watch 0.4.1
 ```
 
 If you see "command not found," run:
@@ -100,6 +100,28 @@ No pending records
 ```
 
 This is correct — no TODOs are ready for review yet. The status command shows TODOs that are eligible to merge.
+
+Write the pipeline execution contract for this project — a small TOML file declaring which assignee and tool capabilities its phases require:
+
+```bash
+uv run pipeline-watch init demo-app
+```
+
+Expected output:
+```
+Wrote pipeline execution contract: /path/to/demo-app/.hermes/pipeline.toml
+```
+
+Verify it's consistent with `configs/phases.yaml`:
+
+```bash
+uv run pipeline-watch doctor demo-app
+```
+
+Expected output:
+```
+OK: schema_version=1 assignee=default capabilities=['Bash', 'Edit', 'Read', 'Write']
+```
 
 ---
 

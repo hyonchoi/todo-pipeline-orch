@@ -36,6 +36,7 @@ hermes_pipeline/
 ├── config.py                 # Configuration loading (env vars + TOML overlay)
 ├── circuit.py                # Circuit breaker (no-progress tracking, Slack alerts)
 ├── counter.py                # TODO ID counter management
+├── contract.py               # Pipeline execution contract (schema, load, validate, capabilities)
 ├── hermes_adapter.py         # Hermes CLI wrapper (replaces direct Anthropic SDK)
 ├── kanban.py                 # Kanban adapter (hermes kanban commands)
 ├── kanban_tasks.py           # Task registration with --parent chains
@@ -127,6 +128,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ├── todo_id_counter            # Monotonic TODO ID counter
 ├── config.toml                # Per-project config overlay
 ├── project.toml               # Project marker (enabled/slack_channel)
+├── pipeline.toml              # Pipeline execution contract (assignee, capabilities)
 └── circuit.json               # Circuit breaker state
 ```
 
