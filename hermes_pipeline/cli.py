@@ -1006,16 +1006,26 @@ def _tick_project(
         ContractMissingError,
         ContractSchemaError,
         ContractVersionMismatchError,
+        CONTRACT_SCHEMA_VERSION,
+        PipelineContract,
         contract_path,
-        default_contract,
         load_contract,
         missing_capabilities,
+        required_capabilities,
     )
 
     try:
         contract = load_contract(project_state)
     except ContractMissingError:
-        contract = default_contract()
+        # Auto-compute capabilities from phases.yaml so a fresh project
+        # doesn't break when a future phase requires a tool not in the
+        # hardcoded DEFAULT_CAPABILITIES tuple.
+        phases = load_phases()
+        contract = PipelineContract(
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            assignee="default",
+            capabilities=tuple(sorted(required_capabilities(phases))),
+        )
     except (ContractSchemaError, ContractVersionMismatchError) as e:
         log.error(
             "project %s: pipeline contract invalid: %s — run `pipeline-watch doctor %s` for details",

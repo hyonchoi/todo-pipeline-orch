@@ -10,7 +10,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .phases import Phase
+from .phases import Phase, load_phases
 
 CONTRACT_SCHEMA_VERSION = 1
 CONTRACT_FILENAME = "pipeline.toml"
@@ -58,13 +58,16 @@ def default_contract() -> PipelineContract:
 
 
 def _render_default_contract_toml() -> str:
-    caps = ", ".join(f'"{c}"' for c in DEFAULT_CAPABILITIES)
+    # Compute capabilities from phases.yaml so init writes a contract that
+    # matches the current phase definitions, not a stale hardcoded tuple.
+    caps = sorted(required_capabilities(load_phases()))
+    caps_toml = ", ".join(f'"{c}"' for c in caps)
     return (
         "# Pipeline execution contract — read at tick start.\n"
         "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
         f"schema_version = {CONTRACT_SCHEMA_VERSION}\n"
         'assignee = "default"\n'
-        f"capabilities = [{caps}]\n"
+        f"capabilities = [{caps_toml}]\n"
     )
 
 
