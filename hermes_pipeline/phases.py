@@ -22,7 +22,8 @@ class Phase:
 
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:
     if config_path is None:
-        config_path = Path(__file__).resolve().parent.parent / "configs" / "phases.yaml"
+        from importlib.resources import files
+        config_path = files("hermes_pipeline").joinpath("data", "phases.yaml")
     config_path = Path(config_path)
     with open(config_path) as f:
         data = yaml.safe_load(f)
