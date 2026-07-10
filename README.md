@@ -109,6 +109,17 @@ Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful 
 uv run pipeline-watch recover-counter <project>
 ```
 
+Write the default pipeline execution contract for a project (idempotent — run again with `--force` to regenerate after editing `configs/phases.yaml`):
+```bash
+uv run pipeline-watch init <project>
+uv run pipeline-watch init <project> --force
+```
+
+Verify a project's pipeline execution contract against `configs/phases.yaml` (exit 0 clean, 1 drift, 2 missing/invalid):
+```bash
+uv run pipeline-watch doctor <project>
+```
+
 Global flags available on all subcommands:
 ```bash
 uv run pipeline-watch --verbose tick   # increased log detail (selection results, lock state)
@@ -175,6 +186,30 @@ See [docs/hermes-state-machine.md](docs/hermes-state-machine.md) for the
 state transitions these settings gate, and the docstrings in
 `hermes_pipeline/config.py` for the authoritative field
 list.
+
+### Pipeline execution contract (`.hermes/pipeline.toml`)
+
+Each project declares the assignee and tool capabilities its phases require in
+a versioned contract at `.hermes/pipeline.toml`. Run `pipeline-watch init
+<project>` once to write the default:
+
+```toml
+schema_version = 1
+assignee = "default"
+capabilities = ["Read", "Write", "Edit", "Bash"]
+```
+
+- `schema_version` — bumped whenever the contract's field set changes. A tick
+  against a stale version fails closed with a remediation message instead of
+  silently running with mismatched settings.
+- `assignee` — passed as `--assignee` when registering each phase's kanban task.
+- `capabilities` — the tool set phases are allowed to use. `pipeline-watch
+  doctor <project>` cross-checks this against the `tools` each phase in
+  `configs/phases.yaml` declares and reports drift.
+
+Projects that have never run `init` tick with the defaults above — the
+contract is additive, not a migration requirement. A project's tick only
+blocks when a contract *exists* but is stale or under-declares capabilities.
 
 ## Troubleshooting
 

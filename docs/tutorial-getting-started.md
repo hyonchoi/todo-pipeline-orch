@@ -101,6 +101,28 @@ No pending records
 
 This is correct — no TODOs are ready for review yet. The status command shows TODOs that are eligible to merge.
 
+Write the pipeline execution contract for this project — a small TOML file declaring which assignee and tool capabilities its phases require:
+
+```bash
+uv run pipeline-watch init myproject
+```
+
+Expected output:
+```
+Wrote pipeline execution contract: /path/to/myproject/.hermes/pipeline.toml
+```
+
+Verify it's consistent with `configs/phases.yaml`:
+
+```bash
+uv run pipeline-watch doctor myproject
+```
+
+Expected output:
+```
+OK: schema_version=1 assignee=default capabilities=['Bash', 'Edit', 'Read', 'Write']
+```
+
 ---
 
 ## Step 4: Run a manual tick
