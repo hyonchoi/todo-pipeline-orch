@@ -2,6 +2,9 @@
 .superpowers/
 .claude/worktrees/
 
+# ---- Agent client install (local-only, not platform-neutral) ----
+.claude/
+
 # ---- Hermes ----
 # Track prompt templates; ignore runtime state (decisions, outcomes, locks)
 .hermes/*
