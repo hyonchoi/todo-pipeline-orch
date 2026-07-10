@@ -1,5 +1,6 @@
 
 .superpowers/
+.claude/worktrees/
 
 # ---- Agent client install (local-only, not platform-neutral) ----
 .claude/
