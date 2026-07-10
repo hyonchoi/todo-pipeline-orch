@@ -516,6 +516,17 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("project", help="Project name")
     doctor_parser.set_defaults(func=_cmd_doctor)
 
+    # install-profile: Install the bundled pipeline Hermes profile
+    install_profile_parser = subparsers.add_parser(
+        "install-profile",
+        help="Install the bundled pipeline Hermes profile",
+    )
+    install_profile_parser.add_argument(
+        "--force", action="store_true",
+        help="Force reinstall even if the profile already exists",
+    )
+    install_profile_parser.set_defaults(func=_cmd_install_profile)
+
     return parser
 
 
@@ -1326,6 +1337,57 @@ def _cmd_doctor(args, config: Config) -> int:
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
         f"capabilities={sorted(contract.capabilities)}"
     )
+    return 0
+
+
+def _cmd_install_profile(args, config: Config) -> int:
+    """Handle 'install-profile' subcommand — install the bundled pipeline profile.
+
+    Resolves the bundled distribution package-relative, shells
+    `hermes profile install [--force]`, then verifies with
+    `hermes profile show pipeline`.
+
+    Exit codes: 0 success, 1 hermes install/show failure, 2 hermes not found.
+    """
+    from .contract import bundled_profile_dir
+
+    profile_dir = bundled_profile_dir()
+
+    if not (profile_dir / "distribution.yaml").exists():
+        log.error("bundled profile distribution not found at %s", profile_dir)
+        return 1
+
+    cmd = ["hermes", "profile", "install", str(profile_dir)]
+    if args.force:
+        cmd.append("--force")
+
+    print(f"Installing pipeline profile from {profile_dir}...")
+    result = _cli_sp.run(cmd, text=True)
+    if result.returncode != 0:
+        print(f"Problem: `hermes profile install` failed (exit {result.returncode})")
+        print(f"Cause: Hermes may not be installed, or the profile source is invalid.")
+        if result.stderr:
+            print(f"Details: {result.stderr.strip()}")
+        print(f"Fix: Ensure Hermes is installed and accessible, then retry.")
+        return 2
+
+    # Post-install verification: prove the profile is resolvable
+    print("Verifying profile installation...")
+    verify = _cli_sp.run(
+        ["hermes", "profile", "show", "pipeline"], text=True, capture_output=True
+    )
+    if verify.returncode != 0:
+        print(f"Problem: Profile installed but `hermes profile show pipeline` failed.")
+        print(f"Cause: Profile name may not match 'pipeline', or Hermes caching issue.")
+        print(f"Fix: Run `hermes profile list` to check installed profiles.")
+        return 1
+
+    print("Pipeline profile installed successfully.")
+    print()
+    print("Next step: set the assignee in your project contract:")
+    print("  pipeline-watch init <project> --assignee pipeline")
+    print("Then verify with:")
+    print("  pipeline-watch doctor <project>")
     return 0
 
 

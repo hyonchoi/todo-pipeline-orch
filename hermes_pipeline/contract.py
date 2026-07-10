@@ -131,6 +131,16 @@ def load_contract(project_state: Path) -> PipelineContract:
     )
 
 
+def bundled_profile_dir() -> Path:
+    """Return the path to the bundled pipeline profile distribution.
+
+    Resolves package-relative so it works whether running from a checkout
+    or from an installed wheel.
+    """
+    from importlib.resources import files
+    return Path(files("hermes_pipeline").joinpath("data", "profiles", "pipeline"))
+
+
 def required_capabilities(phases: list[Phase]) -> set[str]:
     """Union of tool names declared across all non-gate phases in phases.yaml."""
     caps: set[str] = set()

@@ -99,6 +99,19 @@ from hermes_pipeline.cli import _cmd_doctor
 from hermes_pipeline.phases import Phase
 
 
+class TestInstallProfileParser:
+    def test_install_profile_parses_force(self):
+        parser = build_parser()
+        args = parser.parse_args(["install-profile", "--force"])
+        assert args.command == "install-profile"
+        assert args.force is True
+
+    def test_install_profile_force_defaults_false(self):
+        parser = build_parser()
+        args = parser.parse_args(["install-profile"])
+        assert args.force is False
+
+
 class TestBuildParserDoctor:
     def test_doctor_help(self):
         parser = build_parser()
