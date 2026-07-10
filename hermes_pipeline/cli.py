@@ -506,6 +506,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true",
         help="Overwrite an existing contract with the current default",
     )
+    init_parser.add_argument(
+        "--assignee", default=None,
+        help="Set the assignee field (e.g., --assignee pipeline)",
+    )
     init_parser.set_defaults(func=_cmd_init)
 
     # doctor: Verify the pipeline execution contract
@@ -1284,6 +1288,28 @@ def _cmd_init(args, config: Config) -> int:
     except OSError as e:
         log.error("failed to write pipeline contract at %s: %s", path, e)
         return 1
+
+    # If --assignee was provided, patch the assignee field in the written file
+    assignee = getattr(args, "assignee", None)
+    if assignee is not None and path.exists():
+        import tomllib
+        try:
+            data = tomllib.loads(path.read_text())
+            data["assignee"] = assignee
+            # Re-render as TOML
+            toml_lines = [
+                "# Pipeline execution contract — read at tick start.",
+                "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.",
+            ]
+            toml_lines.append(f'schema_version = {data["schema_version"]}')
+            toml_lines.append(f'assignee = "{data["assignee"]}"')
+            caps = data.get("capabilities", ["Read", "Write", "Edit", "Bash"])
+            caps_toml = ", ".join(f'"{c}"' for c in caps)
+            toml_lines.append(f"capabilities = [{caps_toml}]")
+            path.write_text("\n".join(toml_lines) + "\n")
+        except (tomllib.TOMLDecodeError, KeyError) as e:
+            log.error("failed to patch assignee in %s: %s", path, e)
+            return 1
 
     if written:
         print(f"Wrote pipeline execution contract: {path}")

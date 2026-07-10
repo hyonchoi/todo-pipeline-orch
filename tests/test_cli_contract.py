@@ -95,6 +95,42 @@ class TestCmdInit:
         assert "schema_version = 1" in contract.read_text()
 
 
+class TestInitAssignee:
+    def test_init_assignee_parser(self):
+        parser = build_parser()
+        args = parser.parse_args(["init", "demo", "--assignee", "pipeline"])
+        assert args.assignee == "pipeline"
+
+    def test_init_assignee_defaults_to_none(self):
+        parser = build_parser()
+        args = parser.parse_args(["init", "demo"])
+        assert args.assignee is None
+
+    def test_init_writes_assignee_flag_value(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(FakeArgs(project="demo", force=False, assignee="pipeline"), config)
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert 'assignee = "pipeline"' in contract.read_text()
+
+    def test_init_without_assignee_uses_default(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(FakeArgs(project="demo", force=False, assignee=None), config)
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert 'assignee = "default"' in contract.read_text()
+
+
 from hermes_pipeline.cli import _cmd_doctor
 from hermes_pipeline.phases import Phase
 
