@@ -196,7 +196,7 @@ a versioned contract at `.hermes/pipeline.toml`. Run `pipeline-watch init
 ```toml
 schema_version = 1
 assignee = "default"
-capabilities = ["Read", "Write", "Edit", "Bash"]
+capabilities = ["Bash", "Edit", "Read", "Write"]
 ```
 
 - `schema_version` — bumped whenever the contract's field set changes. A tick

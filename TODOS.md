@@ -154,16 +154,11 @@ gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the 
   - **Depends on:** none (can be designed now; the default for TODO-14 will point to this profile once it ships)
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Test Coverage `필요`, Security Review `필요`
 
-- [ ] **TODO-14: kanban assignee configuration** — Configurable profile for kanban task assignee
+- [x] **TODO-14: kanban assignee configuration** — Configurable profile for kanban task assignee
+  - **Completed:** vUnreleased (2026-07-09)
   - **What:** Add a config setting for the Hermes profile used as the `--assignee` when registering kanban tasks via `register_todo_phases`. Default: the profile created by TODO-15.
   - **Why:** Kanban tasks are created with `--assignee` so the dispatcher processes them. The hardcoded value should be configurable per-project so operators can route phases to different profiles (e.g., a dedicated pipeline profile).
-  - **How — config shape:**
-    ```toml
-    # <project>/.hermes/config.toml
-    [kanban]
-    assignee = "pipeline"  # Hermes profile name used as --assignee (default: TODO-15 profile)
-    ```
-  - **How — wiring:** Add `kanban.assignee` to `KanbanConfig` dataclass in `config.py`, loaded via the existing `load_toml_overlay` in `cli.py`, and passed to `register_todo_phases(assignee=...)`.
+  - **How — config shape:** Solved via `.hermes/pipeline.toml` contract (`assignee` field) instead of `config.toml`. `pipeline-watch init` writes the default; `pipeline-watch doctor` validates drift.
   - **Depends on:** none (the `--assignee` flag was added in the circuit breaker / dispatch fix on this branch)
   - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `필요`, Security Review `불필요`
 

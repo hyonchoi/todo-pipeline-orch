@@ -176,6 +176,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (docs)
 - **Architecture overview** — `docs/ARCHITECTURE.md` documents lane structure, phase execution flow, and data flow across the pipeline.
 
+## [Unreleased]
+
+### Added
+- **`pipeline-watch init` subcommand** — Writes the default pipeline execution contract (`.hermes/pipeline.toml`) for a project, declaring assignee and tool capabilities. Idempotent — use `--force` to regenerate after editing `configs/phases.yaml`. Capabilities are computed from phase definitions, not hardcoded.
+- **`pipeline-watch doctor` subcommand** — Verifies a project's pipeline execution contract against `configs/phases.yaml`. Exit codes: 0 (clean), 1 (capability drift), 2 (missing/invalid contract).
+- **Pipeline execution contract** — Versioned TOML manifest (`.hermes/pipeline.toml`) that declares per-project assignee and tool capabilities. Ticks validate the contract at start: missing contract falls back to computed defaults, stale version or capability mismatch fails the tick with a remediation message.
+
 ## [0.4.1] - 2026-07-08
 
 ### Added
