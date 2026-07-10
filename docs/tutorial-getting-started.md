@@ -104,18 +104,18 @@ This is correct — no TODOs are ready for review yet. The status command shows 
 Write the pipeline execution contract for this project — a small TOML file declaring which assignee and tool capabilities its phases require:
 
 ```bash
-uv run pipeline-watch init myproject
+uv run pipeline-watch init demo-app
 ```
 
 Expected output:
 ```
-Wrote pipeline execution contract: /path/to/myproject/.hermes/pipeline.toml
+Wrote pipeline execution contract: /path/to/demo-app/.hermes/pipeline.toml
 ```
 
 Verify it's consistent with `configs/phases.yaml`:
 
 ```bash
-uv run pipeline-watch doctor myproject
+uv run pipeline-watch doctor demo-app
 ```
 
 Expected output:
