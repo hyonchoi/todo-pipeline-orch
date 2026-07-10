@@ -145,7 +145,8 @@
   - **Depends on:** none (builds on existing tick infrastructure from TODO-11)
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/multi-project-tick`, Test Coverage `필요`, Security Review `불필요`
 
-- [ ] **TODO-15: design and register a dedicated Hermes profile for the pipeline orchestrator** — Purpose-built profile for kanban-as-scheduler
+- [x] **TODO-15: design and register a dedicated Hermes profile for the pipeline orchestrator** — Purpose-built profile for kanban-as-scheduler
+  - **Completed:** docs/superpowers/plans/2026-07-10-pipeline-profile.md (2026-07-10)
   - **What:** Design a Hermes profile specifically matched to this pipeline orchestrator's needs, and provide a way to register it via `init` or a dedicated subcommand (e.g., `pipeline-watch setup-profile` or `hermes profile install` from the project repo). The profile should configure the right model, tool permissions, skills, and behavior for driving kanban phases autonomously.
   - **Why:** The "default" Hermes profile is a general-purpose chat profile — not optimized for unattended, goal-driven kanban task execution. A purpose-built profile can lock in the right model (e.g., one with code and bash permissions), attach relevant skills (gstack autoplan, writing-plans, finishing-a-development-branch), and set safe-mode constraints appropriate for automated pipeline work. This avoids the risk of running the pipeline with a profile the operator customized for interactive use.
   - **Pros:** Predictable pipeline behavior independent of the operator's personal Hermes setup. The profile can be versioned with the project, making onboarding trivial. `hermes profile install` or `pipeline-watch init` sets it up once.
