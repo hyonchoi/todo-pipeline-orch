@@ -157,6 +157,21 @@ All pipeline state lives under `<project>/.hermes/`:
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.
 5. **Multi-project scan** — Single global lock, per-project selection under one tick execution.
 
+### TODOS Manager Skill (v2.1)
+
+The `todos-manager` skill enforces the canonical TODOS.md schema and provides five subcommands:
+- `--init`: Initialize TODOS.md with format preamble and create TODOS-archive.md
+- `--add`: Add new entry with schema enforcement and preview gate
+- `--convert`: Convert existing TODOS.md to enforced format (inserts preamble, validates entries)
+- `--audit`: Audit TODOS.md for format compliance (reports only, no auto-fix)
+- `--archive`: Move completed `[x]` entries to TODOS-archive.md (newest first)
+
+The skill source lives at `skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `scripts/install-todos-manager.sh`. The skill enforces:
+- Required fields: **What:**, **Why:**, **Decisions:**
+- Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
+- Stable TODO-<n> IDs: `max(all IDs in TODOS.md + TODOS-archive.md) + 1`, immutable once committed
+- Preamble blockquote at top of TODOS.md documenting the schema
+
 ## See Also
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state
 - [Pipeline State Machine](hermes-state-machine.md) — Full tick lifecycle transitions

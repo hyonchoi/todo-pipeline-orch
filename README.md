@@ -18,6 +18,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 - **Phase 5 code review (v0.4)**: New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q`, with pre-review snapshot, post-review pytest run, deterministic commit-on-pass or restore-on-fail, and machine-verified outcomes (`review_clean`, `review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`)
 - **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
+- **TODOS Manager skill (v2.1)**: Five subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`) for managing TODOS.md entries with schema enforcement, stable TODO-<n> IDs, and archiving to TODOS-archive.md. Install via `scripts/install-todos-manager.sh`.
 
 ## Requirements
 
@@ -52,6 +53,32 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` replaces Anthropic SDK calls |
 | [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
 | [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works and design rationale |
+| [TODOS Manager skill](skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 5 subcommands |
+| [Install TODOS Manager](scripts/install-todos-manager.sh) | How-to | Symlink skill to user-level skill directories |
+
+## TODOS Manager Skill (v2)
+
+The `todos-manager` skill provides schema-enforced TODOS.md management with five subcommands:
+
+| Subcommand | Purpose |
+|---|---|
+| `--init` | Initialize TODOS.md with preamble and create TODOS-archive.md |
+| `--add` | Add new entry with schema enforcement and preview gate |
+| `--convert` | Add preamble to existing TODOS.md and validate format |
+| `--audit` | Audit TODOS.md for format compliance (no auto-fix) |
+| `--archive` | Move all `[x]` completed entries to TODOS-archive.md |
+
+Install the skill from the project source to your user-level skill directories:
+
+```bash
+bash scripts/install-todos-manager.sh
+```
+
+This creates symlinks in `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/` pointing to `skills/todos-manager/SKILL.md`.
+
+The skill enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment (scanning both TODOS.md and TODOS-archive.md), and a preview/confirm gate before writing. See [skills/todos-manager/SKILL.md](skills/todos-manager/SKILL.md) for the full schema and workflows.
+
+---
 
 ## Getting Started
 
