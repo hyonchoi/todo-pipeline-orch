@@ -7,6 +7,12 @@
 
 set -euo pipefail
 
+# Source guard
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  echo "Error: This script must be executed, not sourced."
+  return 1 2>/dev/null || exit 1
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 SOURCE_SKILL="$PROJECT_ROOT/skills/todos-manager/SKILL.md"
@@ -33,15 +39,27 @@ install_to() {
   # Create per-skill directory if missing
   mkdir -p "$target_dir/todos-manager"
 
-  # Remove existing file or symlink
-  if [[ -e "$target_link" || -L "$target_link" ]]; then
+  # Remove existing file, symlink, or directory
+  if [[ -d "$target_link" ]]; then
+    echo "  Error: $target_link is a directory — skipping"
+    return 0
+  elif [[ -e "$target_link" || -L "$target_link" ]]; then
     echo "  Updating existing link: $target_link"
     rm -f "$target_link"
   fi
 
-  # Create symlink
-  ln -sf "$SOURCE_SKILL" "$target_link"
-  echo "  ✓ Linked: $target_link → $SOURCE_SKILL"
+  # Compute relative path from symlink location to source so the link works
+  # regardless of where the repo is cloned or which worktree it lives in.
+  local link_dir
+  link_dir="$(dirname "$target_link")"
+  local rel_path
+  rel_path="$(python3 -c "import os.path; print(os.path.relpath('$SOURCE_SKILL', '$link_dir'))" 2>/dev/null \
+    || perl -MFile::Spec -e "print File::Spec->abs2rel('$SOURCE_SKILL', '$link_dir')" 2>/dev/null \
+    || echo "$SOURCE_SKILL")"
+
+  # Create relative symlink
+  ln -sf "$rel_path" "$target_link"
+  echo "  ✓ Linked: $target_link → $rel_path"
   INSTALLED=$((INSTALLED + 1))
 }
 
