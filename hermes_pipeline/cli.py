@@ -1280,7 +1280,6 @@ def _cmd_init(args, config: Config) -> int:
     return 0
 
 
-
 def _cmd_doctor(args, config: Config) -> int:
     """Handle 'doctor' subcommand — verify the pipeline execution contract.
 
