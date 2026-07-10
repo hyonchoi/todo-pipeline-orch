@@ -1,0 +1,3 @@
+name: pipeline
+description: "Unattended kanban pipeline agent — autonomous, decisive, no interactive prompts"
+min_hermes_version: "1.0"
