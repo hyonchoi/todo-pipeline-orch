@@ -11,10 +11,11 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 ## Features
 
 - **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
-- **CLI subcommands**: `tick`, `merge`, `status`, `kill`, `recover-counter` for pipeline management
+- **CLI subcommands**: `tick`, `merge`, `status`, `kill`, `recover-counter`, `approve-plan` for pipeline management
 - **Multi-project scan loop**: `tick` and `kill` without a project argument scan all active projects in one execution
 - **Logging flags**: `--verbose` and `--debug` global flags for detailed diagnostics (selection results, lock state, agent call summaries, circuit breaker transitions)
 - **Pending records table**: Display ready-for-review records with status and age
+- **Plan Gate (phase_2b)** — Human review checkpoint between Autoplan and Writing Plan. Blocks the pipeline until a human approves or rejects the plan via `pipeline-watch approve-plan`. Includes risk classifier, decision sheet schema, and override sanitization.
 - **Phase 5 code review (v0.4)**: New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q`, with pre-review snapshot, post-review pytest run, deterministic commit-on-pass or restore-on-fail, and machine-verified outcomes (`review_clean`, `review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`)
 - **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
@@ -38,6 +39,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `pipeline-watch` end-to-end |
 | [Architecture overview](docs/ARCHITECTURE.md) | Explanation | Understanding lane structure, data flow, phase execution |
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
+| [Approve or reject a plan gate](docs/howto-approve-plan-gate.md) | How-to | Responding to plan-gate alerts, reviewing decisions, overriding recommendations |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
 | [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `pipeline-watch tick` uses kanban for phase state and ordering |
@@ -119,6 +121,16 @@ Kill in-flight phases (writes a `killed_by_operator` outcome sidecar and release
 uv run pipeline-watch kill --todo TODO-N
 # Kill every in-flight phase across all projects
 uv run pipeline-watch kill --all
+```
+
+Approve or reject a plan-gate decision sheet (unblocks the pipeline at the plan gate):
+```bash
+# Approve the plan for a TODO
+uv run pipeline-watch approve-plan <project> --todo TODO-N --approve
+# Reject with a reason
+uv run pipeline-watch approve-plan <project> --todo TODO-N --reject --reason "..."
+# Override individual decisions without re-running Autoplan
+uv run pipeline-watch approve-plan <project> --todo TODO-N --approve --override q_id=LABEL
 ```
 
 Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful when bootstrapping a project with hand-written TODOs but no counter file):
@@ -221,6 +233,7 @@ The package is organized into lanes:
 - **Lane C**: Kanban integration (kanban-as-scheduler — phases as kanban tasks with `--parent` dependency chains; see [reference-kanban-as-scheduler.md](docs/reference-kanban-as-scheduler.md))
 - **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)
 - **Lane D.5**: Code review phase (`review_phase.py` — pre-review snapshot, hermes `/review` subprocess, post-review pytest + deterministic commit/restore, machine-verified outcomes)
+- **Lane D.6**: Plan gate (`gates.py`, `approve_plan.py`, `decision/schema.py` — decision sheet I/O, risk classifier, gate status, approve/reject logic)
 - **Lane E**: Merge orchestration (Phase 9)
 - **Lane F**: CLI, watcher, status, and installation (this lane; includes `project_config.py` for multi-project scanning and `state_migration.py` for per-project state)
 - **Lane G**: Hermes adapter (`hermes_adapter.py` — wraps `hermes chat -q` for all LLM calls, replaces direct Anthropic SDK usage)

@@ -15,6 +15,9 @@ phases:
     tools: "Read,Write,Bash"
     turns: 20
     timeout: 1800
+  - phase_key: "phase_2b_plan_gate"
+    name: "Phase 2b: Plan Gate"
+    gate: true
   - phase_key: "phase_3_writing_plan"
     name: "Phase 3: Writing Plan"
     prompt: "Use the writing-plans skill in claude code. Read the plan from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the generated docs."

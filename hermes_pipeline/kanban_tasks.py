@@ -404,6 +404,22 @@ def all_phases_complete(
             expected_keys = json.loads(expected_file.read_text())
             for key in expected_keys:
                 if key not in status_map:
+                    # Plan-gate exception: when rejected, the gate task is
+                    # archived (no longer in the kanban list). A rejection
+                    # sidecar on disk is the authoritative signal — treat it
+                    # as a completion (failed) status so the tick advances.
+                    # Import here to avoid circular dep (gates ↔ kanban_tasks).
+                    if key == "phase_2b_plan_gate":
+                        from .gates import read_rejection_sidecar as _rej_read
+
+                        sc = _rej_read(state_dir=state_dir_path, tick_id=tick_id)
+                        if sc is not None:
+                            log.info(
+                                "plan-gate %s rejected (rejection #%d) — "
+                                "skipping missing-phase check for tick %s",
+                                key, sc.get("rejection_count", 0), tick_id,
+                            )
+                            continue
                     log.warning(
                         "expected phase %s not found in status map for tick %s "
                         "(partial registration suspected)",

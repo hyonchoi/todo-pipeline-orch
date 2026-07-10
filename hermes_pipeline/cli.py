@@ -434,6 +434,34 @@ def build_parser() -> argparse.ArgumentParser:
     )
     approve_parser.set_defaults(func=_cmd_approve)
 
+    # approve-plan: Phase 2b plan gate — approve/reject the decision sheet
+    approve_plan_parser = subparsers.add_parser(
+        "approve-plan",
+        help="Approve or reject a plan-gate decision sheet for a TODO",
+    )
+    approve_plan_parser.add_argument("project", help="Project name")
+    approve_plan_parser.add_argument(
+        "--todo", required=True, type=_parse_todo_id_flag,
+        help="TODO whose plan to approve/reject (e.g. TODO-5)",
+    )
+    ap_action = approve_plan_parser.add_mutually_exclusive_group(required=True)
+    ap_action.add_argument(
+        "--approve", action="store_true", help="Approve the plan",
+    )
+    ap_action.add_argument(
+        "--reject", action="store_true", help="Reject the plan (requires --reason)",
+    )
+    approve_plan_parser.add_argument(
+        "--override", action="append", metavar="Q_ID=LABEL", default=None,
+        help="Override a recommendation (repeatable), e.g. --override q1=B. "
+             "Only valid with --approve.",
+    )
+    approve_plan_parser.add_argument(
+        "--reason", default=None,
+        help="Rejection reason (required with --reject)",
+    )
+    approve_plan_parser.set_defaults(func=_cmd_approve_plan)
+
     # status: List pending records
     status_parser = subparsers.add_parser(
         "status",
@@ -499,6 +527,60 @@ def _cmd_approve(args, config: Config) -> int:
         return 3
     except Exception as e:
         log.error("approve command failed: %s", e, exc_info=True)
+        return 2
+
+
+def _cmd_approve_plan(args, config: Config) -> int:
+    """Handle 'approve-plan' subcommand: approve or reject a plan-gate sheet.
+
+    Exit codes: 0 success, 3 refused by a guard, 2 unexpected error.
+    """
+    from . import approve_plan as ap
+    from .state_migration import _get_project_state_dir
+
+    # Flag-combination guards — self-contained, no project dir needed.
+    if args.reject and not args.reason:
+        print(
+            "approve-plan refused: --reject requires --reason "
+            "(explain why the plan was rejected)",
+            file=sys.stderr,
+        )
+        return 3
+    if args.approve and args.reason:
+        print(
+            "approve-plan refused: --reason is only valid with --reject",
+            file=sys.stderr,
+        )
+        return 3
+    if args.reject and args.override:
+        print(
+            "approve-plan refused: --override is only valid with --approve",
+            file=sys.stderr,
+        )
+        return 3
+
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+
+    state_dir = _get_project_state_dir(project_dir)
+    try:
+        overrides = ap._parse_overrides(args.override) if args.approve else None
+        summary = ap.approve_plan(
+            project_dir=project_dir,
+            project_slug=args.project,
+            todo_id=args.todo,
+            state_dir=state_dir,
+            overrides=overrides,
+            reject_reason=args.reason if args.reject else None,
+        )
+        print(summary)
+        return 0
+    except ap.ApproveRefused as e:
+        print(f"approve-plan refused: {e}", file=sys.stderr)
+        return 3
+    except Exception as e:
+        log.error("approve-plan command failed: %s", e, exc_info=True)
         return 2
 
 
@@ -914,6 +996,16 @@ def _tick_project(
         # False, so detect/alert "ready to ship" BEFORE the early-return below.
         from . import ship
         ship.maybe_ship_ready(
+            project_dir=project_dir,
+            project_slug=project_slug,
+            prior_tick_id=prior_tick_id,
+            state_dir=project_state,
+            slack_channel=slack_channel,
+        )
+
+        # Plan-gate: detect blocked plan-gate before all_phases_complete check.
+        from . import gates
+        gates.maybe_plan_gate_ready(
             project_dir=project_dir,
             project_slug=project_slug,
             prior_tick_id=prior_tick_id,
