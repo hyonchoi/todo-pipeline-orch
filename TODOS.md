@@ -1,6 +1,12 @@
 # TODOS
 
-gstack-format work queue for `todo-pipeline-orchestrator`. Each entry keeps the required fields: What/Why/Pros/Cons/Context/Depends on/Decisions. Status markers: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold. See `docs/gstack/hyonchoi-main-design-20260610-195349.md` ("TODOS Manager Skill") for the full schema and `TODO-<n>` ID assignment rules.
+> **Format rules (enforced by `todos-manager` skill):**
+> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
+> - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
+> - Required fields: **What:**, **Why:**, **Decisions:**
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
+> - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
+> - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 
 - [x] **TODO-13: add `--verbose` / `--debug` logging flags** — Improve debugging experience
   - **Completed:** v0.3.2 (2026-06-19)

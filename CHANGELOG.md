@@ -200,6 +200,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Decision sheet schema** — `DecisionSheet` / `DecisionQuestion` / `_Option` frozen dataclasses with full validation (unique question IDs, label matching, answer ∈ options, positive todo_id, schema versioning).
 - **Gate status check** — `check_gate_status()` pure read of gate state from kanban + rejection sidecar. Returns `GateStatus` enum (BLOCKED, READY, RUNNING, FAILED, UNKNOWN).
 
+## [0.4.2] - 2026-07-09
+
+### Added
+- **TODOS Manager skill v2.1** — Rewrote `skills/todos-manager/SKILL.md` to enforce canonical TODOS.md schema with five subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`). Schema requires What/Why/Decisions fields, supports Pros/Cons/Context/Depends on/Assumptions/Completed/Resolved design. Stable TODO-<n> IDs computed by scanning both TODOS.md and TODOS-archive.md. Completed entries archive to `TODOS-archive.md`. Skill source lives at `skills/todos-manager/SKILL.md` (git-tracked); install via `scripts/install-todos-manager.sh` to symlink to `~/.claude/skills/` and `~/.agents/skills/`.
+
+### Changed
+- **TODOS.md preamble** — Added format rules blockquote documenting the enforced schema, status markers, required/optional fields, and ID assignment rules.
+- **`.claude/` gitignore** — Added `.claude/` to `.gitignore` so agent-client skill installs remain local-only (platform-neutral skill source at `skills/todos-manager/`).
+
+### Removed
+- **`.claude/skills/todos-manager/SKILL.md`** — Removed from git tracking; skill now lives at `skills/todos-manager/SKILL.md` (git-tracked) and installs via symlink.
+
 ### Planned
 - Dashboard UI for pipeline status
 - Slack/Discord notifications for merge events
