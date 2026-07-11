@@ -1420,7 +1420,7 @@ def _cmd_install_profile(args, config: Config) -> int:
         _dist = _yaml_mod.safe_load(_dist_f)
     profile_name = _dist.get("name", "pipeline")
 
-    cmd = ["hermes", "profile", "install", str(profile_dir)]
+    cmd = ["hermes", "profile", "install", "-y", str(profile_dir)]
     if args.force:
         cmd.append("--force")
 
