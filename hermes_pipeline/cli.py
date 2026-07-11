@@ -1434,7 +1434,12 @@ def _cmd_install_profile(args, config: Config) -> int:
             return 2
         if delete_result.returncode != 0:
             detail = delete_result.stderr.strip() if delete_result.stderr else f"exit {delete_result.returncode}"
-            print(f"Warning: `hermes profile delete` reported: {detail}")
+            print(f"Problem: `hermes profile delete` failed. Profile was removed but may not be recreated.")
+            print(f"Details: {detail}")
+            print(f"Cause: The delete succeeded in removing the old profile, but the delete command")
+            print(f"         itself reported an error — the profile may still exist, or it may be gone.")
+            print(f"Fix: Run `hermes profile list` to check the current state, then retry.")
+            return 2
 
     print(f"Creating '{profile_name}' profile cloned from the active profile...")
     cmd = ["hermes", "profile", "create", profile_name, "--clone"]
@@ -1489,7 +1494,9 @@ def _cmd_install_profile(args, config: Config) -> int:
 
     soul_dst = Path(profile_path) / "SOUL.md"
     try:
-        shutil.copyfile(soul_src, soul_dst)
+        tmp_dst = soul_dst.with_suffix(".tmp")
+        shutil.copyfile(soul_src, tmp_dst)
+        tmp_dst.rename(soul_dst)
     except OSError as exc:
         print(f"Problem: Failed to copy pipeline SOUL.md into {soul_dst}.")
         print(f"Details: {exc}")

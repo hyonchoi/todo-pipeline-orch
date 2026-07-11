@@ -423,22 +423,19 @@ class TestCmdInstallProfile:
         create_call = run_mock.call_args_list[1]
         assert create_call.args[0][:3] == ["hermes", "profile", "create"]
 
-    def test_install_profile_force_delete_fails_with_empty_stderr_warns(self, mocker, tmp_path, capsys):
-        show_out = f"Profile: pipeline\nPath:    {tmp_path}\n"
+    def test_install_profile_force_delete_fails_returns_2(self, mocker, capsys):
         mocker.patch(
             "hermes_pipeline.cli._cli_sp.run",
             side_effect=[
                 MagicMock(returncode=1, stderr="", stdout=""),  # delete fails, no stderr
-                MagicMock(returncode=0, stderr="", stdout=""),  # create
-                MagicMock(returncode=0, stderr="", stdout=show_out),  # show
             ],
         )
 
         result = _cmd_install_profile(FakeArgs(force=True), config=None)
 
-        assert result == 0
+        assert result == 2
         out = capsys.readouterr().out
-        assert "Warning: `hermes profile delete` reported: exit 1" in out
+        assert "Problem: `hermes profile delete` failed" in out
 
     def test_install_profile_soul_missing_returns_1(self, mocker, tmp_path, caplog):
         mocker.patch(
@@ -504,7 +501,7 @@ class TestCmdInstallProfile:
                 MagicMock(returncode=0, stderr="", stdout=show_out),  # show
             ],
         )
-        mocker.patch("shutil.copyfile", side_effect=OSError("disk full"))
+        mocker.patch("hermes_pipeline.cli.shutil.copyfile", side_effect=OSError("disk full"))
 
         result = _cmd_install_profile(FakeArgs(force=False), config=None)
 
