@@ -1443,11 +1443,11 @@ def _cmd_install_profile(args, config: Config) -> int:
     # Post-install verification: prove the profile is resolvable
     print("Verifying profile installation...")
     verify = _cli_sp.run(
-        ["hermes", "profile", "show", "pipeline"], text=True, capture_output=True
+        ["hermes", "profile", "show", profile_name], text=True, capture_output=True
     )
     if verify.returncode != 0:
-        print(f"Problem: Profile installed but `hermes profile show pipeline` failed.")
-        print(f"Cause: Profile name may not match 'pipeline', or Hermes caching issue.")
+        print(f"Problem: Profile installed but `hermes profile show {profile_name}` failed.")
+        print(f"Cause: Profile name '{profile_name}' may not match what Hermes expects, or caching issue.")
         print(f"Fix: Run `hermes profile list` to check installed profiles.")
         return 1
 
