@@ -53,3 +53,51 @@ def counter_matches_scan(project_dir: Path) -> bool:
     max_id = max(all_ids)
     cached = read_counter_cache(project_dir)
     return cached == max_id
+
+
+VALID_STATUSES = {"[ ]", "[→]", "[x]", "[~]"}
+
+ENTRY_HEADER_RE = re.compile(
+    r"^-\s+(\[[ →x~]\])\s+(?:\*\*)?TODO-(\d+):\s+([^*]+?)(?:\*\*)?(?:\s+—\s+(.+?))?$"
+)
+
+FIELD_RE = re.compile(
+    r"^\s+-\s+\*\*([^*:]+?)(?::)?\*\*\s*(.+?)(?:\s*)?$"
+)
+
+
+def parse_entries(text: str) -> list[dict]:
+    """Parse all TODO entries from TODOS.md markdown text.
+
+    Returns a list of dicts with keys: id, status, title, summary, fields.
+    """
+    lines = text.split("\n")
+    entries: list[dict] = []
+    current: Optional[dict] = None
+
+    for line in lines:
+        header_match = ENTRY_HEADER_RE.match(line)
+        if header_match:
+            if current:
+                entries.append(current)
+            status, id_str, title, summary = header_match.groups()
+            current = {
+                "id": int(id_str),
+                "status": status,
+                "title": title.strip(),
+                "summary": (summary.strip() if summary else ""),
+                "fields": {},
+            }
+            continue
+
+        if current is not None:
+            field_match = FIELD_RE.match(line)
+            if field_match:
+                field_name, field_value = field_match.groups()
+                current["fields"][field_name] = field_value.strip()
+
+    if current:
+        entries.append(current)
+
+    return entries
+
