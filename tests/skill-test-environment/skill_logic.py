@@ -101,3 +101,44 @@ def parse_entries(text: str) -> list[dict]:
 
     return entries
 
+
+REQUIRED_FIELDS = {"What", "Why", "Decisions"}
+
+
+def validate_entry(entry: dict) -> list[str]:
+    """Validate a single parsed entry against schema. Returns list of issues."""
+    issues: list[str] = []
+
+    if entry.get("status") not in VALID_STATUSES:
+        issues.append(f"TODO-{entry['id']}: Invalid status marker '{entry.get('status')}' — expected one of {VALID_STATUSES}")
+
+    for field in REQUIRED_FIELDS:
+        if field not in entry.get("fields", {}):
+            issues.append(f"TODO-{entry['id']}: Missing required field **{field}:**")
+
+    return issues
+
+
+def validate_all_entries(text: str) -> list[dict]:
+    """Validate all entries in TODOS.md text. Returns list of {id, issues} dicts."""
+    entries = parse_entries(text)
+    return [{"id": e["id"], "issues": validate_entry(e)} for e in entries]
+
+
+def validate_dependency_refs(text: str) -> list[str]:
+    """Find dependency references pointing to non-existent IDs."""
+    entries = parse_entries(text)
+    # Get all IDs from actual entry headers, not field content
+    all_ids = {e["id"] for e in entries}
+    broken: list[str] = []
+
+    for entry in entries:
+        deps = entry["fields"].get("Depends on", "")
+        if deps:
+            ref_ids = scan_ids(deps)
+            for ref_id in ref_ids:
+                if ref_id not in all_ids:
+                    broken.append(f"TODO-{entry['id']}: Dependency TODO-{ref_id} does not exist")
+
+    return broken
+
