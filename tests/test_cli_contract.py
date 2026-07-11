@@ -7,8 +7,13 @@ from unittest.mock import MagicMock
 import pytest
 import subprocess as _test_sp
 
-from hermes_pipeline.cli import build_parser, _cmd_init, _cmd_doctor
+from hermes_pipeline.cli import build_parser, _cmd_init, _cmd_doctor, _cmd_install_profile
 from hermes_pipeline.config import Config
+from hermes_pipeline.contract import (
+    PipelineContract,
+    _render_contract_toml,
+    bundled_profile_dir,
+)
 from hermes_pipeline.phases import Phase
 
 
@@ -286,3 +291,165 @@ class TestDoctorMissingProfile:
 
         assert result == 0
         assert call_count["n"] == 0
+
+    def test_doctor_profile_check_success_returns_0(self, tmp_path, mocker, capsys):
+        """Non-default assignee whose profile IS installed should pass clean."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write,Bash")],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        assert "OK" in capsys.readouterr().out
+
+    def test_doctor_hermes_not_on_path_returns_2(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write,Bash")],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=FileNotFoundError("hermes"),
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        assert "not on PATH" in capsys.readouterr().out
+
+
+class TestCmdInitPatchErrors:
+    def test_init_malformed_existing_toml_returns_1(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text("not valid = toml =")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(FakeArgs(project="demo", force=False, assignee="pipeline"), config)
+
+        assert result == 1
+
+    def test_init_missing_schema_version_returns_1(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text('assignee = "default"\n')
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(FakeArgs(project="demo", force=False, assignee="pipeline"), config)
+
+        assert result == 1
+
+
+class TestRenderContractToml:
+    def test_render_contract_toml_roundtrips(self):
+        import tomllib
+
+        contract = PipelineContract(
+            schema_version=1, assignee="pipeline", capabilities=("Read", "Write")
+        )
+        rendered = _render_contract_toml(contract)
+        parsed = tomllib.loads(rendered)
+
+        assert parsed["schema_version"] == 1
+        assert parsed["assignee"] == "pipeline"
+        assert parsed["capabilities"] == ["Read", "Write"]
+
+
+class TestBundledProfileDir:
+    def test_bundled_profile_dir_resolves_distribution_yaml(self):
+        profile_dir = bundled_profile_dir()
+        assert (profile_dir / "distribution.yaml").is_file()
+
+
+class TestCmdInstallProfile:
+    def test_install_profile_happy_path_returns_0(self, mocker, capsys):
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "installed successfully" in out
+
+    def test_install_profile_passes_force_flag(self, mocker):
+        run_mock = mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+        )
+
+        _cmd_install_profile(FakeArgs(force=True), config=None)
+
+        install_call = run_mock.call_args_list[0]
+        assert "--force" in install_call.args[0]
+
+    def test_install_profile_distribution_missing_returns_1(self, mocker, tmp_path, caplog):
+        mocker.patch(
+            "hermes_pipeline.contract.bundled_profile_dir", return_value=tmp_path / "nonexistent"
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 1
+
+    def test_install_profile_hermes_not_on_path_returns_2(self, mocker, capsys):
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=FileNotFoundError("hermes"),
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 2
+        assert "not found" in capsys.readouterr().out
+
+    def test_install_profile_install_command_fails_returns_2(self, mocker, capsys):
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=1, stderr="boom", stdout=""),
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 2
+        assert "failed" in capsys.readouterr().out
+
+    def test_install_profile_verify_fails_returns_1(self, mocker, capsys):
+        install_ok = MagicMock(returncode=0, stderr="", stdout="")
+        verify_fail = MagicMock(returncode=1, stderr="", stdout="")
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run", side_effect=[install_ok, verify_fail]
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 1
+        assert "installed but" in capsys.readouterr().out
