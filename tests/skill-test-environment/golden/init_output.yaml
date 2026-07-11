@@ -1,0 +1,14 @@
+# Golden assertions for --init
+# Scenario: Running --init on a project with no TODOS.md
+subcommand: init
+description: "Verify TODOS.md and TODOS-archive.md created with correct headers"
+preconditions:
+  - "No TODOS.md or TODOS-archive.md exists"
+assertions:
+  - file_exists: TODOS.md
+  - file_exists: TODOS-archive.md
+  - preamble_present: true
+  - regex_count:
+      pattern: "^- \\[.\\] \\*\\*TODO-\\d+:"
+      count: 0
+  - archive_header_present: true

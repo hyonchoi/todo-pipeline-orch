@@ -1,0 +1,16 @@
+# Golden assertions for --audit
+# Scenario: Running --audit on demo-project TODOS.md
+subcommand: audit
+description: "Verify audit report structure and issue detection"
+preconditions:
+  - "Uses demo-project TODOS.md (all entries valid)"
+assertions:
+  - total_entries: 6
+  - entries_in_archive: 1
+  - id_range:
+      min: 1
+      max: 7
+  - issues_count: 0
+  - all_required_fields_present: true
+  - all_valid_status_markers: true
+  - no_broken_dependency_refs: true
