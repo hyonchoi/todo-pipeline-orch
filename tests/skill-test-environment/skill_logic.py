@@ -202,11 +202,16 @@ def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
             remaining_blocks.append(block)
 
     # Reconstruct TODOS.md header + remaining entries
-    header_end = todos_text.find("- ")
-    if header_end == -1:
+    # Find the first actual entry (line starting with "- "), skipping blockquote lines
+    first_entry_pos = -1
+    for line in todos_text.split("\n"):
+        if ENTRY_HEADER_RE.match(line):
+            break
+        first_entry_pos += len(line) + 1  # +1 for the newline
+    if first_entry_pos == -1 or first_entry_pos >= len(todos_text):
         new_todos = todos_text
     else:
-        header = todos_text[:header_end]
+        header = todos_text[:first_entry_pos]
         new_todos = header + "\n".join(remaining_blocks)
 
     # Append to archive

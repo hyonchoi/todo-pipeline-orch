@@ -8,9 +8,9 @@ preconditions:
 assertions:
   - file_exists: TODOS.md
   - regex_count:
-      pattern: "^- \\[.\\] \\*\\*TODO-\\d+:"
+      pattern: "^- \\[.\\] TODO-\\d+:"
       count: 7
-  - regex_present: "^- \\[ \\*\\*TODO-8:"
+  - regex_present: "^- \\[ \\] TODO-8:"
   - preamble_present: true
   - max_id: 8
   - no_duplicate_ids: true

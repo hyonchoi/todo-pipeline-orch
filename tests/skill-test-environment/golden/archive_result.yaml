@@ -8,7 +8,7 @@ assertions:
   - file_exists: TODOS.md
   - file_exists: TODOS-archive.md
   - regex_count:
-      pattern: "^- \\[.\\] \\*\\*TODO-3:"
+      pattern: "^- \\[.\\] TODO-3:"
       count_in_todos: 0
       count_in_archive: 1
   - total_entries_in_todos_after: 5

@@ -9,6 +9,6 @@ assertions:
   - file_exists: TODOS-archive.md
   - preamble_present: true
   - regex_count:
-      pattern: "^- \\[.\\] \\*\\*TODO-\\d+:"
+      pattern: "^- \\[.\\] TODO-\\d+:"
       count: 0
   - archive_header_present: true
