@@ -65,7 +65,7 @@ register_todo_phases(
 | `tick_id` | `str` | — | ULID tick ID. Used as part of `--idempotency-key` for dedup. |
 | `board_slug` | `str` | — | Kanban board slug (project slug). Passed to `hermes kanban` commands. |
 | `project_dir` | `str \| Path` | — | Project directory. Passed as `--workspace` to `hermes kanban`. |
-| `phases_path` | `str \| Path \| None` | Repo default | Path to `phases.yaml`. Defaults to `phases.yaml` relative to the package. |
+| `phases_path` | `str \| Path \| None` | Bundled package data | Path to `phases.yaml`. Defaults to the in-package copy resolved via `importlib.resources` (`hermes_pipeline/data/phases.yaml`), so it works from an installed wheel. |
 
 **Returns:** List of created task IDs in phase order.
 

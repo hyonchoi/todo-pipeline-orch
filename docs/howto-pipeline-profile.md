@@ -89,13 +89,30 @@ hermes profile create my-custom-profile --description "My custom pipeline agent"
 pipeline-watch init myproject --assignee my-custom-profile
 ```
 
-**Important:** SOUL.md is advisory — it shapes agent behavior through instructions, not enforcement. The pipeline execution contract's `capabilities` field is the only hard boundary (enforced by `doctor` and the tick flow).
+**Important:** SOUL.md is advisory — it shapes agent behavior through instructions, not enforcement. The pipeline execution contract's `capabilities` field gates tool access at tick start; `doctor` also hard-fails (exit 2) if a non-default `assignee`'s Hermes profile isn't installed or Hermes itself isn't on PATH.
+
+## Exit Codes
+
+**`install-profile`:**
+| Exit | Meaning |
+|------|---------|
+| 0 | Installed and verified |
+| 1 | Bundled distribution not found, or `hermes profile install`/`show` failed |
+| 2 | Hermes CLI not found on PATH |
+
+**`doctor`:**
+| Exit | Meaning |
+|------|---------|
+| 0 | Contract clean, profile verified (if non-default assignee) |
+| 1 | Capability drift — contract missing tools phases.yaml requires |
+| 2 | Contract missing/invalid, or assigned profile not installed, or Hermes not on PATH |
 
 ## Troubleshooting
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
 | `doctor` reports MISSING profile | Profile not installed | `pipeline-watch install-profile` |
-| `doctor` reports DRIFT | phases.yaml added a tool | Edit `pipeline.toml` capabilities, or `pipeline-watch init --force` |
+| `doctor` reports MISSING (Hermes not on PATH) | Hermes CLI not installed | Install Hermes (https://hermos.dev) and ensure it's on PATH |
+| `doctor` reports DRIFT | phases.yaml added a tool | Edit `pipeline.toml` capabilities, or `pipeline-watch init <project> --force` |
 | Tasks not being picked up | Assignee doesn't match profile name | Ensure `assignee` in `pipeline.toml` matches `hermes profile list` name exactly |
 | Profile installed but agent doesn't behave correctly | SOUL.md is advisory; model may not follow all instructions | Edit SOUL.md and reinstall with `--force` |
