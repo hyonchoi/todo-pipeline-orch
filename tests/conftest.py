@@ -13,7 +13,6 @@ if _skill_test_dir.exists():
             pass  # symlink already exists
 
 import pytest
-from pathlib import Path
 
 @pytest.fixture
 def tmp_project(tmp_path):
