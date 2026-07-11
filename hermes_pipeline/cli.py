@@ -1421,7 +1421,7 @@ def _cmd_install_profile(args, config: Config) -> int:
     if args.force:
         print(f"Removing any existing '{profile_name}' profile...")
         try:
-            _cli_sp.run(
+            delete_result = _cli_sp.run(
                 ["hermes", "profile", "delete", profile_name, "-y"],
                 text=True,
                 capture_output=True,
@@ -1431,6 +1431,8 @@ def _cmd_install_profile(args, config: Config) -> int:
             print("Cause: Hermes is not installed or not on PATH.")
             print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
             return 2
+        if delete_result.returncode != 0 and delete_result.stderr:
+            print(f"Warning: `hermes profile delete` reported: {delete_result.stderr.strip()}")
 
     print(f"Creating '{profile_name}' profile cloned from the active profile...")
     cmd = ["hermes", "profile", "create", profile_name, "--clone"]
@@ -1455,11 +1457,19 @@ def _cmd_install_profile(args, config: Config) -> int:
 
     # Locate the newly-created profile directory so we can overlay SOUL.md.
     print("Locating profile directory...")
-    show = _cli_sp.run(
-        ["hermes", "profile", "show", profile_name], text=True, capture_output=True
-    )
+    try:
+        show = _cli_sp.run(
+            ["hermes", "profile", "show", profile_name], text=True, capture_output=True
+        )
+    except FileNotFoundError:
+        print("Problem: `hermes` command not found.")
+        print("Cause: Hermes is not installed or not on PATH.")
+        print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
+        return 2
     if show.returncode != 0:
         print(f"Problem: Profile created but `hermes profile show {profile_name}` failed.")
+        if show.stderr:
+            print(f"Details: {show.stderr.strip()}")
         print(f"Cause: Profile name '{profile_name}' may not match what Hermes expects, or caching issue.")
         print(f"Fix: Run `hermes profile list` to check installed profiles.")
         return 1
@@ -1469,7 +1479,7 @@ def _cmd_install_profile(args, config: Config) -> int:
         if line.strip().startswith("Path:"):
             profile_path = line.split(":", 1)[1].strip()
             break
-    if not profile_path:
+    if not profile_path or not Path(profile_path).is_dir():
         print(f"Problem: Could not determine the profile path from `hermes profile show {profile_name}` output.")
         print("Cause: Hermes CLI output format may have changed.")
         print("Fix: Run `hermes profile show pipeline` manually to inspect the profile.")

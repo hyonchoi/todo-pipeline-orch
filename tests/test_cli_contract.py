@@ -465,3 +465,42 @@ class TestCmdInstallProfile:
 
         assert result == 1
         assert "created but" in capsys.readouterr().out
+
+    def test_install_profile_path_missing_from_show_output_returns_1(self, mocker, capsys):
+        create_ok = MagicMock(returncode=0, stderr="", stdout="")
+        show_no_path = MagicMock(returncode=0, stderr="", stdout="Profile: pipeline\n")
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run", side_effect=[create_ok, show_no_path]
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 1
+        assert "Could not determine the profile path" in capsys.readouterr().out
+
+    def test_install_profile_soul_copy_failure_returns_1(self, mocker, tmp_path, capsys):
+        show_out = f"Profile: pipeline\nPath:    {tmp_path}\n"
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=[
+                MagicMock(returncode=0, stderr="", stdout=""),  # create
+                MagicMock(returncode=0, stderr="", stdout=show_out),  # show
+            ],
+        )
+        mocker.patch("shutil.copyfile", side_effect=OSError("disk full"))
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 1
+        assert "Failed to copy pipeline SOUL.md" in capsys.readouterr().out
+
+    def test_install_profile_force_delete_hermes_not_found_returns_2(self, mocker, capsys):
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=FileNotFoundError("hermes"),
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=True), config=None)
+
+        assert result == 2
+        assert "not found" in capsys.readouterr().out
