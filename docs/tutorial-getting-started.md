@@ -112,7 +112,7 @@ Expected output:
 Wrote pipeline execution contract: /path/to/demo-app/.hermes/pipeline.toml
 ```
 
-Verify it's consistent with `configs/phases.yaml`:
+Verify it's consistent with `phases.yaml`:
 
 ```bash
 uv run pipeline-watch doctor demo-app

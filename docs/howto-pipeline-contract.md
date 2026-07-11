@@ -12,7 +12,7 @@ Each project declares the assignee and tool capabilities its phases require in a
 
 ### 1. Write the default contract
 
-Run `init` once per project. It computes capabilities from `configs/phases.yaml` and writes `.hermes/pipeline.toml`:
+Run `init` once per project. It computes capabilities from `phases.yaml` and writes `.hermes/pipeline.toml`:
 
 ```bash
 uv run pipeline-watch init <project>
@@ -39,7 +39,7 @@ uv run pipeline-watch init <project> --force
 
 ### 2. Verify the contract is consistent
 
-Run `doctor` to check the contract against `configs/phases.yaml`:
+Run `doctor` to check the contract against `phases.yaml`:
 
 ```bash
 uv run pipeline-watch doctor <project>
@@ -66,7 +66,7 @@ capabilities = ["Bash", "Edit", "Read", "Write", "Agent"]
 
 - **`schema_version`** — Do not edit manually. Bump only when the contract field set changes. Regenerate with `init --force` instead.
 - **`assignee`** — Passed as `--assignee` when registering each phase's kanban task. Change this to route phases to a different Hermes profile.
-- **`capabilities`** — The tool set phases are allowed to use. If a phase in `configs/phases.yaml` requires a tool not in this list, the tick fails with a capability mismatch error.
+- **`capabilities`** — The tool set phases are allowed to use. If a phase in `phases.yaml` requires a tool not in this list, the tick fails with a capability mismatch error.
 
 ### 4. Fix Drift
 
