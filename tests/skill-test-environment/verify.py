@@ -12,7 +12,6 @@ import yaml
 
 from .skill_logic import (
     VALID_STATUSES,
-    find_completed_entries,
     parse_entries,
     scan_ids,
     validate_all_entries,
