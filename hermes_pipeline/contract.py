@@ -71,6 +71,23 @@ def _render_default_contract_toml() -> str:
     )
 
 
+def _render_contract_toml(contract: PipelineContract) -> str:
+    """Render a PipelineContract to TOML text.
+
+    Centralises TOML serialization so the output stays in sync with
+    schema evolution — cli.py's --assignee patch path calls this instead
+    of hand-rolling string templates.
+    """
+    caps_toml = ", ".join(f'"{c}"' for c in contract.capabilities)
+    return (
+        "# Pipeline execution contract — read at tick start.\n"
+        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        f"schema_version = {contract.schema_version}\n"
+        f'assignee = "{contract.assignee}"\n'
+        f"capabilities = [{caps_toml}]\n"
+    )
+
+
 def write_default_contract(project_state: Path) -> bool:
     """Write the default contract if one doesn't already exist.
 
