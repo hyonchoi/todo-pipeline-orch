@@ -13,6 +13,7 @@ import logging
 import os
 import signal
 import sys
+import tomllib
 from hermes_pipeline import __version__
 import time
 from pathlib import Path
@@ -506,6 +507,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--force", action="store_true",
         help="Overwrite an existing contract with the current default",
     )
+    init_parser.add_argument(
+        "--assignee", default=None,
+        help="Set the assignee field (e.g., --assignee pipeline)",
+    )
     init_parser.set_defaults(func=_cmd_init)
 
     # doctor: Verify the pipeline execution contract
@@ -515,6 +520,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument("project", help="Project name")
     doctor_parser.set_defaults(func=_cmd_doctor)
+
+    # install-profile: Install the bundled pipeline Hermes profile
+    install_profile_parser = subparsers.add_parser(
+        "install-profile",
+        help="Install the bundled pipeline Hermes profile",
+    )
+    install_profile_parser.add_argument(
+        "--force", action="store_true",
+        help="Force reinstall even if the profile already exists",
+    )
+    install_profile_parser.set_defaults(func=_cmd_install_profile)
 
     return parser
 
@@ -1274,6 +1290,25 @@ def _cmd_init(args, config: Config) -> int:
         log.error("failed to write pipeline contract at %s: %s", path, e)
         return 1
 
+    # If --assignee was provided, patch the assignee field in the written file
+    # by using the contract module's TOML renderer so future schema fields
+    # are preserved automatically.
+    assignee = getattr(args, "assignee", None)
+    if assignee is not None and path.exists():
+        try:
+            data = tomllib.loads(path.read_text())
+            from .contract import DEFAULT_CAPABILITIES, PipelineContract, _render_contract_toml
+
+            contract = PipelineContract(
+                schema_version=data["schema_version"],
+                assignee=assignee,
+                capabilities=tuple(data.get("capabilities", list(DEFAULT_CAPABILITIES))),
+            )
+            path.write_text(_render_contract_toml(contract))
+        except (tomllib.TOMLDecodeError, KeyError) as e:
+            log.error("failed to patch assignee in %s: %s", path, e)
+            return 1
+
     if written:
         print(f"Wrote pipeline execution contract: {path}")
     else:
@@ -1285,7 +1320,7 @@ def _cmd_doctor(args, config: Config) -> int:
     """Handle 'doctor' subcommand — verify the pipeline execution contract.
 
     Exit codes: 0 clean, 1 drift (capability mismatch), 2 missing/invalid
-    contract or unknown project.
+    contract, unknown project, or missing profile.
     """
     project_dir = _resolve_project_dir(config, args.project)
     if project_dir is None:
@@ -1318,14 +1353,110 @@ def _cmd_doctor(args, config: Config) -> int:
         print(
             f"DRIFT: contract capabilities {sorted(contract.capabilities)} at "
             f"{contract_path(project_state)} are missing {sorted(missing)} "
-            f"required by configs/phases.yaml — edit the contract to add them"
+            f"required by phases.yaml — edit the contract to add them"
         )
         return 1
+
+    # Verify the assigned profile is actually installed (non-default assignee only)
+    if contract.assignee != "default":
+        try:
+            verify_result = _cli_sp.run(
+                ["hermes", "profile", "show", contract.assignee],
+                text=True, capture_output=True,
+            )
+        except FileNotFoundError:
+            print(
+                f"MISSING: Hermes is not on PATH, but contract assignee is set to "
+                f"'{contract.assignee}'"
+            )
+            print(
+                "Cause: Hermes is not installed or not on PATH."
+            )
+            print(
+                "Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH."
+            )
+            return 2
+        if verify_result.returncode != 0:
+            print(
+                f"MISSING: Hermes profile '{contract.assignee}' is not installed, "
+                f"but contract assignee is set to '{contract.assignee}'"
+            )
+            print(
+                "Cause: The profile was never installed, or it was removed after install."
+            )
+            print(
+                f"Fix: Install the bundled profile with `pipeline-watch install-profile`, "
+                f"or create a custom profile named '{contract.assignee}' "
+                f"with `hermes profile create {contract.assignee}`."
+            )
+            return 2
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
         f"capabilities={sorted(contract.capabilities)}"
     )
+    return 0
+
+
+def _cmd_install_profile(args, config: Config) -> int:
+    """Handle 'install-profile' subcommand — install the bundled pipeline profile.
+
+    Resolves the bundled distribution package-relative, shells
+    `hermes profile install [--force]`, then verifies with
+    `hermes profile show pipeline`.
+
+    Exit codes: 0 success, 1 hermes install/show failure, 2 hermes not found.
+    """
+    from .contract import bundled_profile_dir
+
+    profile_dir = bundled_profile_dir()
+
+    if not (profile_dir / "distribution.yaml").exists():
+        log.error("bundled profile distribution not found at %s", profile_dir)
+        return 1
+
+    import yaml as _yaml_mod
+    with open(profile_dir / "distribution.yaml") as _dist_f:
+        _dist = _yaml_mod.safe_load(_dist_f)
+    profile_name = _dist.get("name", "pipeline")
+
+    cmd = ["hermes", "profile", "install", str(profile_dir)]
+    if args.force:
+        cmd.append("--force")
+
+    print(f"Installing pipeline profile from {profile_dir}...")
+    try:
+        result = _cli_sp.run(cmd, text=True, capture_output=True)
+    except FileNotFoundError:
+        print("Problem: `hermes` command not found.")
+        print("Cause: Hermes is not installed or not on PATH.")
+        print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
+        return 2
+    if result.returncode != 0:
+        print(f"Problem: `hermes profile install` failed (exit {result.returncode})")
+        print(f"Cause: Hermes may not be installed, or the profile source is invalid.")
+        if result.stderr:
+            print(f"Details: {result.stderr.strip()}")
+        print(f"Fix: Ensure Hermes is installed and accessible, then retry.")
+        return 2
+
+    # Post-install verification: prove the profile is resolvable
+    print("Verifying profile installation...")
+    verify = _cli_sp.run(
+        ["hermes", "profile", "show", profile_name], text=True, capture_output=True
+    )
+    if verify.returncode != 0:
+        print(f"Problem: Profile installed but `hermes profile show {profile_name}` failed.")
+        print(f"Cause: Profile name '{profile_name}' may not match what Hermes expects, or caching issue.")
+        print(f"Fix: Run `hermes profile list` to check installed profiles.")
+        return 1
+
+    print("Pipeline profile installed successfully.")
+    print()
+    print("Next step: set the assignee in your project contract:")
+    print("  pipeline-watch init <project> --assignee pipeline")
+    print("Then verify with:")
+    print("  pipeline-watch doctor <project>")
     return 0
 
 

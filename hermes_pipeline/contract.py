@@ -71,6 +71,23 @@ def _render_default_contract_toml() -> str:
     )
 
 
+def _render_contract_toml(contract: PipelineContract) -> str:
+    """Render a PipelineContract to TOML text.
+
+    Centralises TOML serialization so the output stays in sync with
+    schema evolution — cli.py's --assignee patch path calls this instead
+    of hand-rolling string templates.
+    """
+    caps_toml = ", ".join(f'"{c}"' for c in contract.capabilities)
+    return (
+        "# Pipeline execution contract — read at tick start.\n"
+        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        f"schema_version = {contract.schema_version}\n"
+        f'assignee = "{contract.assignee}"\n'
+        f"capabilities = [{caps_toml}]\n"
+    )
+
+
 def write_default_contract(project_state: Path) -> bool:
     """Write the default contract if one doesn't already exist.
 
@@ -129,6 +146,23 @@ def load_contract(project_state: Path) -> PipelineContract:
         assignee=assignee,
         capabilities=tuple(capabilities),
     )
+
+
+def bundled_profile_dir() -> Path:
+    """Return the path to the bundled pipeline profile distribution.
+
+    Resolves package-relative so it works whether running from a checkout
+    or from an installed wheel.
+
+    Limitation: For zip-wheel installs, importlib.resources returns a
+    Traversable that is not a real filesystem path. The `hermes profile
+    install` API requires a real directory, so this function would need
+    ``importlib.resources.as_file()`` with a context manager. In practice,
+    hatchling + uv always produce filesystem installs, so this works.
+    """
+    from importlib.resources import files
+    traversable = files("hermes_pipeline").joinpath("data", "profiles", "pipeline")
+    return Path(traversable)
 
 
 def required_capabilities(phases: list[Phase]) -> set[str]:

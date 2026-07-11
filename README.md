@@ -52,6 +52,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
 | [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
 | [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Why single global lock, state migration decisions, trade-offs |
+| [Set up the pipeline profile](docs/howto-pipeline-profile.md) | How-to | Installing the dedicated pipeline Hermes profile for unattended execution |
 | [Configure the pipeline contract](docs/howto-pipeline-contract.md) | How-to | Editing assignee, fixing capability drift, schema migration |
 | [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Design rationale: versioned contracts, drift detection, capability gates |
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` replaces Anthropic SDK calls |
@@ -142,13 +143,20 @@ Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful 
 uv run pipeline-watch recover-counter <project>
 ```
 
-Write the default pipeline execution contract for a project (idempotent — run again with `--force` to regenerate after editing `configs/phases.yaml`):
+Write the default pipeline execution contract for a project (idempotent — run again with `--force` to regenerate after editing `phases.yaml`). Use `--assignee` to set the Hermes profile for kanban tasks:
 ```bash
 uv run pipeline-watch init <project>
 uv run pipeline-watch init <project> --force
+uv run pipeline-watch init <project> --assignee pipeline
 ```
 
-Verify a project's pipeline execution contract against `configs/phases.yaml` (exit 0 clean, 1 drift, 2 missing/invalid):
+Install the bundled pipeline Hermes profile for unattended kanban execution:
+```bash
+uv run pipeline-watch install-profile
+uv run pipeline-watch install-profile --force  # reinstall after SOUL.md changes
+```
+
+Verify a project's pipeline execution contract against `phases.yaml` (exit 0 clean, 1 drift, 2 missing/invalid or missing profile):
 ```bash
 uv run pipeline-watch doctor <project>
 ```
@@ -238,7 +246,7 @@ capabilities = ["Bash", "Edit", "Read", "Write"]
 - `assignee` — passed as `--assignee` when registering each phase's kanban task.
 - `capabilities` — the tool set phases are allowed to use. `pipeline-watch
   doctor <project>` cross-checks this against the `tools` each phase in
-  `configs/phases.yaml` declares and reports drift.
+  `phases.yaml` declares and reports drift.
 
 Projects that have never run `init` tick with the defaults above — the
 contract is additive, not a migration requirement. A project's tick only

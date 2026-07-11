@@ -176,6 +176,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added (docs)
 - **Architecture overview** — `docs/ARCHITECTURE.md` documents lane structure, phase execution flow, and data flow across the pipeline.
 
+## [0.4.4] - 2026-07-10
+
+### Added
+- **`pipeline-watch install-profile`** — Installs the bundled pipeline Hermes profile for unattended kanban execution. Resolves package-relative, runs `hermes profile install`, verifies with `hermes profile show`. Use `--force` to reinstall after SOUL.md changes.
+- **`--assignee` flag on `init`** — Set the Hermes profile assignee when creating the project contract: `pipeline-watch init <project> --assignee pipeline`.
+- **Doctor profile verification** — `doctor` now checks that a non-default assignee profile exists in Hermes. Fails exit code 2 if the profile is missing, with cause/fix guidance.
+- **Bundled pipeline profile** — New in-package `data/profiles/pipeline/` with SOUL.md and distribution.yaml. Ships in the wheel.
+
+### Changed
+- **`phases.yaml` moved in-package** — Resolved via `importlib.resources` instead of repo-relative path. Works from installed wheel.
+- **Hatchling wheel config** — `pyproject.toml` configured to include `hermes_pipeline` package data in wheel.
+
 ## [0.4.3] - 2026-07-10
 
 ### Added

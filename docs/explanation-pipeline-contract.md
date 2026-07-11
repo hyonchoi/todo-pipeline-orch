@@ -6,7 +6,7 @@ The pipeline execution contract (`.hermes/pipeline.toml`) is a per-project TOML 
 
 Before the contract, the pipeline assumed every project could use the same tool set and assignee. Two failure modes emerged:
 
-1. **Silent capability gaps.** A phase defined in `configs/phases.yaml` required a tool (e.g., `Edit`) that a project's Hermes profile did not support. The phase would fail at execution time — after selection, kanban registration, and LLM invocation — with an error unrelated to the missing capability.
+1. **Silent capability gaps.** A phase defined in `phases.yaml` required a tool (e.g., `Edit`) that a project's Hermes profile did not support. The phase would fail at execution time — after selection, kanban registration, and LLM invocation — with an error unrelated to the missing capability.
 
 2. **Hardcoded assignee drift.** Kanban tasks were created with a hardcoded `--assignee` value. When operators changed their Hermes profile configuration, phases ran under the wrong profile with different model or tool permissions.
 
@@ -20,7 +20,7 @@ The contract is a declarative manifest — not a configuration file. It lives at
 - **`assignee`** — the Hermes profile that runs phases for this project
 - **`capabilities`** — the tools phases are allowed to use
 
-At tick start, `_tick_project` loads the contract, validates it against `configs/phases.yaml`, and either proceeds or fails with a remediation message. The validation has two paths:
+At tick start, `_tick_project` loads the contract, validates it against `phases.yaml`, and either proceeds or fails with a remediation message. The validation has two paths:
 
 1. **Contract exists.** Load it. Validate schema version and field types. Check that every tool required by phases.yaml is in the contract capabilities. If anything is wrong, the tick fails with a specific error and exit code.
 
@@ -50,7 +50,7 @@ _tick_project(project)
 
 **Fail-closed on capability mismatch.** If a project's contract declares fewer capabilities than phases.yaml requires, the tick fails. It could instead warn and proceed, but that risks the same late-stage failures the contract was designed to prevent. The operator sees the gap at tick time, with a message that names the missing capabilities and points to `pipeline-watch doctor` for details.
 
-**Computed defaults vs hardcoded defaults.** `pipeline-watch init` writes a contract whose capabilities are computed from `configs/phases.yaml`, not the hardcoded `DEFAULT_CAPABILITIES` tuple. This means the init output matches the current phase definitions. If a future phase adds a new tool, `init --force` regenerates the contract with the new capability.
+**Computed defaults vs hardcoded defaults.** `pipeline-watch init` writes a contract whose capabilities are computed from `phases.yaml`, not the hardcoded `DEFAULT_CAPABILITIES` tuple. This means the init output matches the current phase definitions. If a future phase adds a new tool, `init --force` regenerates the contract with the new capability.
 
 ## Alternatives Considered
 
