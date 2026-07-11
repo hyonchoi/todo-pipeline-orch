@@ -382,16 +382,20 @@ class TestRenderContractToml:
 
 
 class TestBundledProfileDir:
-    def test_bundled_profile_dir_resolves_distribution_yaml(self):
+    def test_bundled_profile_dir_resolves_soul_md(self):
         profile_dir = bundled_profile_dir()
-        assert (profile_dir / "distribution.yaml").is_file()
+        assert (profile_dir / "SOUL.md").is_file()
 
 
 class TestCmdInstallProfile:
-    def test_install_profile_happy_path_returns_0(self, mocker, capsys):
+    def test_install_profile_happy_path_returns_0(self, mocker, tmp_path, capsys):
+        show_out = f"Profile: pipeline\nPath:    {tmp_path}\n"
         mocker.patch(
             "hermes_pipeline.cli._cli_sp.run",
-            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+            side_effect=[
+                MagicMock(returncode=0, stderr="", stdout=""),  # create
+                MagicMock(returncode=0, stderr="", stdout=show_out),  # show
+            ],
         )
 
         result = _cmd_install_profile(FakeArgs(force=False), config=None)
@@ -399,19 +403,27 @@ class TestCmdInstallProfile:
         out = capsys.readouterr().out
         assert result == 0
         assert "installed successfully" in out
+        assert (tmp_path / "SOUL.md").is_file()
 
-    def test_install_profile_passes_force_flag(self, mocker):
+    def test_install_profile_force_deletes_existing_first(self, mocker, tmp_path):
+        show_out = f"Profile: pipeline\nPath:    {tmp_path}\n"
         run_mock = mocker.patch(
             "hermes_pipeline.cli._cli_sp.run",
-            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+            side_effect=[
+                MagicMock(returncode=0, stderr="", stdout=""),  # delete
+                MagicMock(returncode=0, stderr="", stdout=""),  # create
+                MagicMock(returncode=0, stderr="", stdout=show_out),  # show
+            ],
         )
 
         _cmd_install_profile(FakeArgs(force=True), config=None)
 
-        install_call = run_mock.call_args_list[0]
-        assert "--force" in install_call.args[0]
+        delete_call = run_mock.call_args_list[0]
+        assert delete_call.args[0][:3] == ["hermes", "profile", "delete"]
+        create_call = run_mock.call_args_list[1]
+        assert create_call.args[0][:3] == ["hermes", "profile", "create"]
 
-    def test_install_profile_distribution_missing_returns_1(self, mocker, tmp_path, caplog):
+    def test_install_profile_soul_missing_returns_1(self, mocker, tmp_path, caplog):
         mocker.patch(
             "hermes_pipeline.contract.bundled_profile_dir", return_value=tmp_path / "nonexistent"
         )
@@ -431,7 +443,7 @@ class TestCmdInstallProfile:
         assert result == 2
         assert "not found" in capsys.readouterr().out
 
-    def test_install_profile_install_command_fails_returns_2(self, mocker, capsys):
+    def test_install_profile_create_command_fails_returns_2(self, mocker, capsys):
         mocker.patch(
             "hermes_pipeline.cli._cli_sp.run",
             return_value=MagicMock(returncode=1, stderr="boom", stdout=""),
@@ -443,13 +455,13 @@ class TestCmdInstallProfile:
         assert "failed" in capsys.readouterr().out
 
     def test_install_profile_verify_fails_returns_1(self, mocker, capsys):
-        install_ok = MagicMock(returncode=0, stderr="", stdout="")
-        verify_fail = MagicMock(returncode=1, stderr="", stdout="")
+        create_ok = MagicMock(returncode=0, stderr="", stdout="")
+        show_fail = MagicMock(returncode=1, stderr="", stdout="")
         mocker.patch(
-            "hermes_pipeline.cli._cli_sp.run", side_effect=[install_ok, verify_fail]
+            "hermes_pipeline.cli._cli_sp.run", side_effect=[create_ok, show_fail]
         )
 
         result = _cmd_install_profile(FakeArgs(force=False), config=None)
 
         assert result == 1
-        assert "installed but" in capsys.readouterr().out
+        assert "created but" in capsys.readouterr().out

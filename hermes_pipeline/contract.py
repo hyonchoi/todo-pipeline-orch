@@ -149,16 +149,15 @@ def load_contract(project_state: Path) -> PipelineContract:
 
 
 def bundled_profile_dir() -> Path:
-    """Return the path to the bundled pipeline profile distribution.
+    """Return the path to the directory containing the bundled pipeline SOUL.md.
 
     Resolves package-relative so it works whether running from a checkout
     or from an installed wheel.
 
     Limitation: For zip-wheel installs, importlib.resources returns a
-    Traversable that is not a real filesystem path. The `hermes profile
-    install` API requires a real directory, so this function would need
-    ``importlib.resources.as_file()`` with a context manager. In practice,
-    hatchling + uv always produce filesystem installs, so this works.
+    Traversable that is not a real filesystem path, not a plain
+    ``shutil.copy``-able path. In practice, hatchling + uv always produce
+    filesystem installs, so this works.
     """
     from importlib.resources import files
     traversable = files("hermes_pipeline").joinpath("data", "profiles", "pipeline")

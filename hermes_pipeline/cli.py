@@ -1399,32 +1399,41 @@ def _cmd_doctor(args, config: Config) -> int:
 
 
 def _cmd_install_profile(args, config: Config) -> int:
-    """Handle 'install-profile' subcommand — install the bundled pipeline profile.
+    """Handle 'install-profile' subcommand — create the pipeline profile.
 
-    Resolves the bundled distribution package-relative, shells
-    `hermes profile install [--force]`, then verifies with
-    `hermes profile show pipeline`.
+    Clones the active Hermes profile (`hermes profile create pipeline --clone`)
+    to inherit a working config.yaml/.env/skills baseline, then overlays the
+    bundled pipeline-specific SOUL.md on top. With --force, an existing
+    `pipeline` profile is deleted first.
 
-    Exit codes: 0 success, 1 hermes install/show failure, 2 hermes not found.
+    Exit codes: 0 success, 1 SOUL.md missing / copy / show failure,
+    2 hermes not found or `create` failed.
     """
     from .contract import bundled_profile_dir
 
-    profile_dir = bundled_profile_dir()
+    profile_name = "pipeline"
+    soul_src = bundled_profile_dir() / "SOUL.md"
 
-    if not (profile_dir / "distribution.yaml").exists():
-        log.error("bundled profile distribution not found at %s", profile_dir)
+    if not soul_src.exists():
+        log.error("bundled pipeline SOUL.md not found at %s", soul_src)
         return 1
 
-    import yaml as _yaml_mod
-    with open(profile_dir / "distribution.yaml") as _dist_f:
-        _dist = _yaml_mod.safe_load(_dist_f)
-    profile_name = _dist.get("name", "pipeline")
-
-    cmd = ["hermes", "profile", "install", "-y", str(profile_dir)]
     if args.force:
-        cmd.append("--force")
+        print(f"Removing any existing '{profile_name}' profile...")
+        try:
+            _cli_sp.run(
+                ["hermes", "profile", "delete", profile_name, "-y"],
+                text=True,
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            print("Problem: `hermes` command not found.")
+            print("Cause: Hermes is not installed or not on PATH.")
+            print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
+            return 2
 
-    print(f"Installing pipeline profile from {profile_dir}...")
+    print(f"Creating '{profile_name}' profile cloned from the active profile...")
+    cmd = ["hermes", "profile", "create", profile_name, "--clone"]
     try:
         result = _cli_sp.run(cmd, text=True, capture_output=True)
     except FileNotFoundError:
@@ -1433,22 +1442,46 @@ def _cmd_install_profile(args, config: Config) -> int:
         print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
         return 2
     if result.returncode != 0:
-        print(f"Problem: `hermes profile install` failed (exit {result.returncode})")
-        print(f"Cause: Hermes may not be installed, or the profile source is invalid.")
+        print(f"Problem: `hermes profile create` failed (exit {result.returncode})")
         if result.stderr:
             print(f"Details: {result.stderr.strip()}")
-        print(f"Fix: Ensure Hermes is installed and accessible, then retry.")
+        print(
+            f"Cause: A '{profile_name}' profile may already exist, "
+            "or Hermes may not be installed."
+        )
+        print("Fix: Re-run with --force to replace the existing profile, or")
+        print(f"     run `hermes profile delete {profile_name}` manually.")
         return 2
 
-    # Post-install verification: prove the profile is resolvable
-    print("Verifying profile installation...")
-    verify = _cli_sp.run(
+    # Locate the newly-created profile directory so we can overlay SOUL.md.
+    print("Locating profile directory...")
+    show = _cli_sp.run(
         ["hermes", "profile", "show", profile_name], text=True, capture_output=True
     )
-    if verify.returncode != 0:
-        print(f"Problem: Profile installed but `hermes profile show {profile_name}` failed.")
+    if show.returncode != 0:
+        print(f"Problem: Profile created but `hermes profile show {profile_name}` failed.")
         print(f"Cause: Profile name '{profile_name}' may not match what Hermes expects, or caching issue.")
         print(f"Fix: Run `hermes profile list` to check installed profiles.")
+        return 1
+
+    profile_path = None
+    for line in show.stdout.splitlines():
+        if line.strip().startswith("Path:"):
+            profile_path = line.split(":", 1)[1].strip()
+            break
+    if not profile_path:
+        print(f"Problem: Could not determine the profile path from `hermes profile show {profile_name}` output.")
+        print("Cause: Hermes CLI output format may have changed.")
+        print("Fix: Run `hermes profile show pipeline` manually to inspect the profile.")
+        return 1
+
+    import shutil as _shutil_mod
+    soul_dst = Path(profile_path) / "SOUL.md"
+    try:
+        _shutil_mod.copyfile(soul_src, soul_dst)
+    except OSError as exc:
+        print(f"Problem: Failed to copy pipeline SOUL.md into {soul_dst}.")
+        print(f"Details: {exc}")
         return 1
 
     print("Pipeline profile installed successfully.")
