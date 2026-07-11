@@ -11,6 +11,7 @@ import errno
 import json
 import logging
 import os
+import shutil
 import signal
 import sys
 import tomllib
@@ -1431,8 +1432,9 @@ def _cmd_install_profile(args, config: Config) -> int:
             print("Cause: Hermes is not installed or not on PATH.")
             print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
             return 2
-        if delete_result.returncode != 0 and delete_result.stderr:
-            print(f"Warning: `hermes profile delete` reported: {delete_result.stderr.strip()}")
+        if delete_result.returncode != 0:
+            detail = delete_result.stderr.strip() if delete_result.stderr else f"exit {delete_result.returncode}"
+            print(f"Warning: `hermes profile delete` reported: {detail}")
 
     print(f"Creating '{profile_name}' profile cloned from the active profile...")
     cmd = ["hermes", "profile", "create", profile_name, "--clone"]
@@ -1485,10 +1487,9 @@ def _cmd_install_profile(args, config: Config) -> int:
         print("Fix: Run `hermes profile show pipeline` manually to inspect the profile.")
         return 1
 
-    import shutil as _shutil_mod
     soul_dst = Path(profile_path) / "SOUL.md"
     try:
-        _shutil_mod.copyfile(soul_src, soul_dst)
+        shutil.copyfile(soul_src, soul_dst)
     except OSError as exc:
         print(f"Problem: Failed to copy pipeline SOUL.md into {soul_dst}.")
         print(f"Details: {exc}")

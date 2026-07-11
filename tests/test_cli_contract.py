@@ -423,6 +423,23 @@ class TestCmdInstallProfile:
         create_call = run_mock.call_args_list[1]
         assert create_call.args[0][:3] == ["hermes", "profile", "create"]
 
+    def test_install_profile_force_delete_fails_with_empty_stderr_warns(self, mocker, tmp_path, capsys):
+        show_out = f"Profile: pipeline\nPath:    {tmp_path}\n"
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=[
+                MagicMock(returncode=1, stderr="", stdout=""),  # delete fails, no stderr
+                MagicMock(returncode=0, stderr="", stdout=""),  # create
+                MagicMock(returncode=0, stderr="", stdout=show_out),  # show
+            ],
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=True), config=None)
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Warning: `hermes profile delete` reported: exit 1" in out
+
     def test_install_profile_soul_missing_returns_1(self, mocker, tmp_path, caplog):
         mocker.patch(
             "hermes_pipeline.contract.bundled_profile_dir", return_value=tmp_path / "nonexistent"
