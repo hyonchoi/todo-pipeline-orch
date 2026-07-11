@@ -33,10 +33,14 @@ This creates a `pipeline.toml` with `assignee = "pipeline"` and capabilities der
 pipeline-watch install-profile
 ```
 
+This clones your currently-active Hermes profile (`hermes profile create pipeline --clone`)
+so the new `pipeline` profile inherits a working `config.yaml`, `.env`, and skills —
+then overlays the bundled pipeline-specific `SOUL.md` on top.
+
 Output:
 ```
-Installing pipeline profile from /path/to/data/profiles/pipeline/...
-Verifying profile installation...
+Creating 'pipeline' profile cloned from the active profile...
+Locating profile directory...
 Pipeline profile installed successfully.
 
 Next step: set the assignee in your project contract:
@@ -79,6 +83,10 @@ If you've edited the bundled SOUL.md and want to reinstall:
 pipeline-watch install-profile --force
 ```
 
+`--force` deletes the existing `pipeline` profile first, then re-clones from the
+active profile and re-overlays SOUL.md. Without `--force`, `install-profile`
+refuses to overwrite an existing `pipeline` profile.
+
 ## Custom Profiles (Escape Hatch)
 
 The bundled profile is a default. To create a custom profile:
@@ -96,9 +104,9 @@ pipeline-watch init myproject --assignee my-custom-profile
 **`install-profile`:**
 | Exit | Meaning |
 |------|---------|
-| 0 | Installed and verified |
-| 1 | Bundled distribution not found, or `hermes profile install`/`show` failed |
-| 2 | Hermes CLI not found on PATH |
+| 0 | Cloned, SOUL.md overlaid, and verified |
+| 1 | Bundled SOUL.md not found, `hermes profile show` failed, or SOUL.md copy failed |
+| 2 | Hermes CLI not found on PATH, or `hermes profile create` failed (e.g. profile already exists — rerun with `--force`) |
 
 **`doctor`:**
 | Exit | Meaning |

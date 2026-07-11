@@ -179,14 +179,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.4] - 2026-07-10
 
 ### Added
-- **`pipeline-watch install-profile`** — Installs the bundled pipeline Hermes profile for unattended kanban execution. Resolves package-relative, runs `hermes profile install`, verifies with `hermes profile show`. Use `--force` to reinstall after SOUL.md changes.
+- **`pipeline-watch install-profile`** — Installs the bundled pipeline Hermes profile for unattended kanban execution. Use `--force` to reinstall after SOUL.md changes. See 0.4.6 below for a follow-up fix to how the profile is created.
 - **`--assignee` flag on `init`** — Set the Hermes profile assignee when creating the project contract: `pipeline-watch init <project> --assignee pipeline`.
 - **Doctor profile verification** — `doctor` now checks that a non-default assignee profile exists in Hermes. Fails exit code 2 if the profile is missing, with cause/fix guidance.
-- **Bundled pipeline profile** — New in-package `data/profiles/pipeline/` with SOUL.md and distribution.yaml. Ships in the wheel.
+- **Bundled pipeline profile** — New in-package `data/profiles/pipeline/` with SOUL.md. Ships in the wheel.
 
 ### Changed
 - **`phases.yaml` moved in-package** — Resolved via `importlib.resources` instead of repo-relative path. Works from installed wheel.
 - **Hatchling wheel config** — `pyproject.toml` configured to include `hermes_pipeline` package data in wheel.
+
+## [0.4.6] - 2026-07-11
+
+### Changed
+- **`install-profile` clones the active profile instead of installing a bare distribution** — `hermes profile install` only copies files present in the source distribution, so the bundled `distribution.yaml` (SOUL.md only) produced a `pipeline` profile with no `config.yaml`/`.env`/skills, unusable without manual setup. `install-profile` now runs `hermes profile create pipeline --clone` to inherit a working baseline from the currently-active profile, then overlays the bundled pipeline-specific `SOUL.md` on top. `--force` deletes any existing `pipeline` profile first.
+- **`install-profile` error handling hardened** — `hermes profile delete`'s exit code is now checked instead of ignored; `hermes profile show` is wrapped in the same "Hermes not on PATH" handling as the other Hermes calls and surfaces its stderr on failure; the parsed profile path is validated as a real directory before `SOUL.md` is copied into it.
+
+### Removed
+- **`hermes_pipeline/data/profiles/pipeline/distribution.yaml`** — no longer used now that `install-profile` clones instead of installing a distribution.
 
 ## [0.4.3] - 2026-07-10
 
