@@ -142,3 +142,82 @@ def validate_dependency_refs(text: str) -> list[str]:
 
     return broken
 
+
+def find_completed_entries(text: str) -> list[dict]:
+    """Find all [x] (done) entries in TODOS.md text."""
+    entries = parse_entries(text)
+    return [e for e in entries if e["status"] == "[x]"]
+
+
+def extract_entry_blocks(text: str) -> list[str]:
+    """Extract raw markdown text blocks for each entry.
+
+    Returns a list of strings, each containing the header line and sub-bullets
+    for one entry.
+    """
+    lines = text.split("\n")
+    blocks: list[str] = []
+    current_block: list[str] = []
+
+    for line in lines:
+        if ENTRY_HEADER_RE.match(line):
+            if current_block:
+                blocks.append("\n".join(current_block))
+            current_block = [line]
+        elif current_block and (line.strip().startswith("- **") or (line.strip() and line[0] in (" ", "\t"))):
+            current_block.append(line)
+        elif current_block and line.strip() == "":
+            current_block.append(line)
+        elif current_block:
+            blocks.append("\n".join(current_block))
+            current_block = []
+
+    if current_block:
+        blocks.append("\n".join(current_block))
+
+    return blocks
+
+
+def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
+    """Simulate moving completed entries from TODOS.md to TODOS-archive.md.
+
+    Returns (new_todos_text, new_archive_text).
+    """
+    completed = find_completed_entries(todos_text)
+    if not completed:
+        return todos_text, archive_text
+
+    completed_ids = {e["id"] for e in completed}
+
+    # Build new TODOS.md by removing completed entries
+    blocks = extract_entry_blocks(todos_text)
+    remaining_blocks = []
+    archived_blocks = []
+
+    for block in blocks:
+        block_ids = scan_ids(block)
+        if block_ids & completed_ids:
+            archived_blocks.append(block)
+        else:
+            remaining_blocks.append(block)
+
+    # Reconstruct TODOS.md header + remaining entries
+    header_end = todos_text.find("- ")
+    if header_end == -1:
+        new_todos = todos_text
+    else:
+        header = todos_text[:header_end]
+        new_todos = header + "\n".join(remaining_blocks)
+
+    # Append to archive
+    if not archive_text.strip():
+        archive_header = "# TODOS Archive\n\nCompleted TODOs, archived via `todos-manager --archive`.\n\n"
+    else:
+        archive_header = archive_text
+
+    new_archive = archive_header
+    if archived_blocks:
+        new_archive += "\n".join(archived_blocks) + "\n"
+
+    return new_todos, new_archive
+
