@@ -122,3 +122,19 @@ No distribution — this is a skill file change. The skill is installed via `scr
 
 - You chose "small feature — fast-track to design" over the full startup diagnostic. You know what this project is and what this feature does. That's efficient.
 - You picked Approach A (inline skill) without hesitation. You prefer the smallest diff that ships value, which is how this project has evolved — incremental, low-effort additions to the todos-manager skill.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | — |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | — |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 1 issue, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | — |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | — |
+
+OUTSIDE VOICE (Claude subagent, Codex fallback): ran, 9 findings, 1 cross-model tension point resolved.
+
+VERDICT: ENG review has 1 open decision (title parsing robustness — user chose B: strip ** from extracted title).
+
+NO UNRESOLVED DECISIONS
