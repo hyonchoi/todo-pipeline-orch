@@ -25,3 +25,8 @@
   - **Context:** Builds on TODO-2/3 once `config.py` and `decision/agent.py` exist. Today's design fails loudly on 404 (acceptable for v1). Revisit when Anthropic announces opus-4-7 EOL.
   - **Depends on:** `TODO-2`, `TODO-3`
   - **Decisions:** Priority `P3`, Effort `S`, Phase `2 (Design)`, Branch `feature/selection-model-fallback`, Test Coverage `필요`, Security Review `불필요`
+
+- [ ] **TODO-17: Add `--list` subcommand to todos-manager** — List existing active todos, `--all` flag includes archived
+  - **What:** Add a `--list` subcommand to the todos-manager skill that displays all active TODO entries from TODOS.md in a formatted, readable summary showing ID, status, title, and summary for each entry. Support an optional `--all` flag that also includes entries from TODOS-archive.md.
+  - **Why:** Users frequently need to see what TODOs exist without running a full audit. A lightweight listing command provides quick visibility into project state and reduces context-switching overhead.
+  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `debug/todos-manager`, Test Coverage `불필요`, Security Review `불필요`
