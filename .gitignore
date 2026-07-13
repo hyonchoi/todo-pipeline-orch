@@ -29,6 +29,8 @@ docs/gstack/**/*-autoplan-restore-*.md
 !.env.example
 
 # ---- Python ----
+# Symlink for import resolution — created dynamically by conftest.py
+tests/skill_test_environment/
 __pycache__/
 *.py[cod]
 *$py.class

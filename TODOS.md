@@ -8,6 +8,14 @@
 > - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 
+- [x] **TODO-16: skill test environment Phase 1 for todos-manager** — Structural unit test suite with golden files
+  - **Completed:** v0.4.7 (2026-07-13)
+  - **What:** Build `tests/skill-test-environment/` — a demo-project TODOS.md/TODOS-archive.md fixture, golden YAML assertion files per subcommand (`--add`, `--init`, `--audit`, `--archive`), and pure-Python verification modules (`skill_logic.py`, `verify.py`) covering ID sequencing, entry parsing, format validation, and archive logic.
+  - **Why:** The `todos-manager` skill (markdown-based, prompt-driven) had no automated regression coverage. Structural unit tests catch schema/logic regressions at zero token cost, in under 5 seconds, before any agent-driven semantic testing is needed.
+  - **Context:** Design in [docs/gstack/hyonchoi-main-design-20260711-153841.md](docs/gstack/hyonchoi-main-design-20260711-153841.md). Plan in [docs/superpowers/plans/2026-07-11-skill-test-environment-phase1.md](docs/superpowers/plans/2026-07-11-skill-test-environment-phase1.md). Phase 2 (agent-driven, AI-judged semantic validation) is deferred — related to [[TODO-4]]'s broader integration harness but scoped narrower (structural only, no agent spawning).
+  - **Depends on:** none
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/skill-test-environment`, Test Coverage `필요`, Security Review `불필요`
+
 - [x] **TODO-13: add `--verbose` / `--debug` logging flags** — Improve debugging experience
   - **Completed:** v0.3.2 (2026-06-19)
   - **What:** Add `--verbose` and `--debug` CLI flags to `pipeline-watch` commands. `--verbose` increases log output to include informational details (tick_id, lock state, selection results). `--debug` enables full debug logging (agent call summaries, circuit breaker transitions, kanban registration). Flags should route through Python's logging module with appropriate levels (INFO vs DEBUG).

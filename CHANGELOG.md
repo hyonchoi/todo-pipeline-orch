@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.7] - 2026-07-13
+
+### Added
+- **Skill test environment (Phase 1)** — `tests/skill-test-environment/` provides a structural unit test suite for the `todos-manager` skill: a demo-project TODOS.md/TODOS-archive.md fixture, golden YAML assertion files for each subcommand (`--add`, `--init`, `--audit`, `--archive`), and pure-Python verification modules (`skill_logic.py`, `verify.py`) covering ID sequencing, entry parsing, format validation, and archive logic. Runs in under 5 seconds with zero token cost: `uv run pytest tests/skill-test-environment/unit/ -v`. Phase 2 (agent-driven, AI-judged semantic validation) is deferred.
+
 ## [0.3.2] - 2026-06-19
 
 ### Added

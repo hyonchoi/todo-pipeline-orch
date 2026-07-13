@@ -1,0 +1,16 @@
+# Golden assertions for --add happy path
+# Scenario: Adding "TODO-8: Add logging framework" to demo-project TODOS.md
+subcommand: add
+description: "Verify TODOS.md after adding one new entry via --add"
+preconditions:
+  - "Starts with demo-project TODOS.md (6 entries, max ID 7)"
+  - "TODOS-archive.md exists with TODO-5"
+assertions:
+  - file_exists: TODOS.md
+  - regex_count:
+      pattern: "^- \\[.\\] TODO-\\d+:"
+      count: 7
+  - regex_present: "^- \\[ \\] TODO-8:"
+  - preamble_present: true
+  - max_id: 8
+  - no_duplicate_ids: true

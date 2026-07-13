@@ -1,5 +1,17 @@
-import pytest
 from pathlib import Path
+
+# Map hyphenated directory to valid Python package name for imports.
+_skill_test_dir = Path(__file__).parent / "skill-test-environment"
+if _skill_test_dir.exists():
+    _alias = Path(__file__).parent / "skill_test_environment"
+    if not _alias.exists():
+        # Create a symlink so "import tests.skill_test_environment" works
+        try:
+            _alias.symlink_to("skill-test-environment")
+        except OSError:
+            pass  # symlink already exists or not permitted
+
+import pytest
 
 @pytest.fixture
 def tmp_project(tmp_path):
