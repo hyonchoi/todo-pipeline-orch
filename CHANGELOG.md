@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] - 2026-07-13
+
+### Added
+- **`todos-manager --list` subcommand** — report-only listing of active TODO entries as a markdown table (ID, status, title, summary). Pass `--all` to also show archived entries from `TODOS-archive.md` in a separate table. Modifies no files.
+
 ## [0.4.7] - 2026-07-13
 
 ### Added
