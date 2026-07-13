@@ -1,12 +1,13 @@
 # How to manage TODOS.md with the todos-manager skill
 
-This guide covers the five subcommands of the `todos-manager` skill for adding, converting, auditing, and archiving TODOS.md entries. Each section shows real commands and expected output.
+This guide covers the six subcommands of the `todos-manager` skill for adding, converting, auditing, listing, and archiving TODOS.md entries. Each section shows real commands and expected output.
 
 - **`--init`** — create TODOS.md with schema preamble and TODOS-archive.md
 - **`--add`** — add a new entry with field prompts and a preview gate
 - **`--convert`** — add the schema preamble to an existing TODOS.md
 - **`--audit`** — check format compliance without modifying files
 - **`--archive`** — move completed `[x]` entries to TODOS-archive.md
+- **`--list`** — display active TODO entries as a table (`--all` also shows archived)
 
 ## Prerequisites
 
@@ -166,6 +167,42 @@ todos-manager --archive
 No completed TODOs to archive.
 ```
 
+## List active TODOs
+
+Show active entries as a formatted table, without modifying any files:
+
+```bash
+todos-manager --list
+```
+
+**What it does:**
+1. Scans TODOS.md for entry header lines (`- [ ]`, `- [→]`, `- [x]`, `- [~]`)
+2. Extracts status, ID, title, and summary for each entry
+3. Displays a markdown table sorted by ID ascending
+
+**Example output:**
+```
+### Active TODOs
+
+| ID | Status | Title | Summary |
+|----|--------|-------|---------|
+| TODO-1 | Pending | Example title | One-line summary |
+
+Showing 1 active entries.
+```
+
+**Include archived entries** with `--all` — also scans TODOS-archive.md and prints a second "Archived TODOs" table below the active one:
+
+```bash
+todos-manager --list --all
+```
+
+```
+Showing 1 active entries. 3 archived entries.
+```
+
+If TODOS.md has no entries and `--all` was not passed, the skill prints "No active TODOs found." and exits. This is a report-only subcommand — it never modifies files.
+
 ## Verification
 
 After any subcommand, verify the result:
@@ -175,6 +212,7 @@ After any subcommand, verify the result:
 - **`--convert`:** TODOS.md has the preamble; entry bodies are unchanged
 - **`--audit`:** A structured report with zero or more issues
 - **`--archive`:** TODOS.md has fewer entries; TODOS-archive.md has the moved entries
+- **`--list`:** A markdown table matching the current entries in TODOS.md (and TODOS-archive.md if `--all`)
 
 ## Troubleshooting
 
