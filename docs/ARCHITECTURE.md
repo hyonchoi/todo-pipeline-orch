@@ -176,6 +176,8 @@ The skill source lives at `skills/todos-manager/SKILL.md` (platform-neutral, git
 - Stable TODO-<n> IDs: `max(all IDs in TODOS.md + TODOS-archive.md) + 1`, immutable once committed
 - Preamble blockquote at top of TODOS.md documenting the schema
 
+The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. See [tests/skill-test-environment/README.md](../tests/skill-test-environment/README.md).
+
 ## See Also
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state
 - [Pipeline State Machine](hermes-state-machine.md) — Full tick lifecycle transitions

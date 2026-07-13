@@ -20,6 +20,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 - **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
 - **TODOS Manager skill (v2.1)**: Five subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`) for managing TODOS.md entries with schema enforcement, stable TODO-<n> IDs, and archiving to TODOS-archive.md. Install via `scripts/install-todos-manager.sh`.
+- **Skill test environment (Phase 1)**: `tests/skill-test-environment/` — structural unit tests for the `todos-manager` skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic), backed by golden YAML assertions and a demo-project fixture. Zero token cost, runs in under 5 seconds.
 
 ## Requirements
 
@@ -64,6 +65,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step: init, add, archive a completed TODO |
 | [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using --init, --add, --convert, --audit, --archive |
 | [Install TODOS Manager](scripts/install-todos-manager.sh) | How-to | Symlink skill to user-level skill directories |
+| [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for the todos-manager skill |
 
 ## TODOS Manager Skill (v2)
 
