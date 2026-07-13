@@ -85,6 +85,28 @@ def test_parse_failure_returns_picked_none(tmp_path, monkeypatch):
     assert "parse" in r.parsed["rationale"].lower()
 
 
+def test_fenced_json_with_leading_warning_line_parses(tmp_path, monkeypatch):
+    """CLI backends may prepend stderr-style warnings before the fenced JSON."""
+    p = _write_prompt(tmp_path)
+    raw = (
+        "Warning: Unknown toolsets: messaging\n"
+        "```json\n"
+        + json.dumps({
+            "candidates_considered": ["TODO-1"],
+            "picked": "TODO-1",
+            "rationale": "only candidate",
+            "blocked_reasons": {},
+            "in_flight": [],
+        })
+        + "\n```"
+    )
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._api_call",
+        lambda *a, **kw: raw,
+    )
+    r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
+    assert r.parsed["picked"] == "TODO-1"
+
 def test_api_call_propagates_hermes_call_error(tmp_path, monkeypatch):
     """When _api_call raises HermesCallError, call_agent should propagate it."""
     from hermes_pipeline.hermes_adapter import HermesCallError

@@ -85,7 +85,9 @@ def _api_call(*, model: str, max_tokens: int, prompt: str, backend: str = "herme
 
 def _parse(raw: str) -> dict:
     body = raw.strip()
-    if body.startswith("```"):
+    fence_start = body.find("```")
+    if fence_start != -1:
+        body = body[fence_start:]
         body = body.split("```", 2)[1]
         if body.lstrip().lower().startswith("json"):
             body = body.split("\n", 1)[1]
