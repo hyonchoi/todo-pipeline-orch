@@ -21,6 +21,7 @@ The **todos-manager** skill automates the addition and management of TODOS.md en
 - Converting an existing TODOS.md to enforced format (`--convert`)
 - Auditing TODOS.md for format compliance (`--audit`)
 - Archiving completed TODOs to TODOS-archive.md (`--archive`)
+- Listing active TODO entries (`--list`)
 
 ### Prerequisite state
 
@@ -145,7 +146,7 @@ When creating or converting TODOS.md, use this blockquote as the file header:
 
 ## Workflow
 
-The skill supports five subcommands. Each has its own workflow below.
+The skill supports six subcommands. Each has its own workflow below.
 
 ### `--add`: Add new entry with schema enforcement
 
@@ -228,6 +229,37 @@ The skill supports five subcommands. Each has its own workflow below.
    - Append to end of TODOS-archive.md
 5. **Remove archived entries from TODOS.md.**
 6. **Confirm:** "✓ Archived N entries to TODOS-archive.md."
+
+### `--list`: List active TODO entries
+
+1. **Validate context:** Does TODOS.md exist? If not, print "TODOS.md not found. Run `todos-manager --init` first." and exit.
+2. **Scan TODOS.md** for all lines matching `- (\[[ →x~]\])` containing `TODO-(\d+)`.
+3. **If no entries found in TODOS.md:**
+   - If `--all` was passed: skip the active table (do not exit) and continue to step 6 to show archived entries.
+   - If `--all` was NOT passed: print "No active TODOs found." and exit.
+4. **For each match**, extract:
+   - Status marker: `[ ]` → Pending, `[→]` → In Progress, `[x]` → Done, `[~]` → On Hold
+   - ID: `TODO-<n>`
+   - Title: text between `TODO-<n>: ` and the closing `**` bold delimiter (strip `**` markup)
+   - Summary: text after ` — ` on the header line. If ` — ` is not present, display `[no summary]`.
+   - If any field cannot be extracted from a matching line, display `[not set]` in the corresponding column.
+5. **Display output** as a formatted markdown table (entries sorted by ID ascending):
+   ```
+   ### Active TODOs
+
+   | ID | Status | Title | Summary |
+   |----|--------|-------|---------|
+   | TODO-1 | Pending | Example title | One-line summary |
+   ```
+6. **If `--all` flag is present**, also scan TODOS-archive.md (if exists):
+   - Parse with the same rules (steps 2-4)
+   - Display as a separate table section labeled "Archived TODOs" below the active table
+   - If TODOS-archive.md does not exist or contains no entries, skip the archived section silently
+7. **Print summary line:**
+   - Without `--all`: "Showing N active entries."
+   - With `--all`: "Showing N active entries. M archived entries."
+
+Report only — no files modified.
 
 ---
 
