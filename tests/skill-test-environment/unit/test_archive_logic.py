@@ -1,6 +1,5 @@
 """Tests for archive logic — finding completed entries and simulating archive movement."""
 
-import pytest
 from tests.skill_test_environment.skill_logic import (
     find_completed_entries,
     extract_entry_blocks,

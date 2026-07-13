@@ -1,7 +1,6 @@
 """Tests for the golden file verification module."""
 
 import pytest
-from pathlib import Path
 from tests.skill_test_environment.verify import load_golden, run_structural, assert_golden
 from tests.skill_test_environment.skill_logic import (
     simulate_archive,

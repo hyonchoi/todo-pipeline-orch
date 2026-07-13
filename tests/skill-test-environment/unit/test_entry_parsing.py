@@ -1,6 +1,5 @@
 """Tests for entry parsing — extracting TODO entries from markdown text."""
 
-import pytest
 from tests.skill_test_environment.skill_logic import parse_entries, VALID_STATUSES
 
 

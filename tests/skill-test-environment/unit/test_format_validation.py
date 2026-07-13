@@ -1,6 +1,5 @@
 """Tests for format validation — schema compliance checks."""
 
-import pytest
 from tests.skill_test_environment.skill_logic import (
     validate_entry,
     validate_all_entries,
