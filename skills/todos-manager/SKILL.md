@@ -18,7 +18,7 @@ The **todos-manager** skill automates the addition and management of TODOS.md en
 
 - Adding a new entry to an existing TODOS.md file (`--add`)
 - Initializing TODOS.md in a new project (`--init`)
-- Converting an existing TODOS.md to enforced format (`--convert`)
+- Converting an existing TODOS.md to enforced format — including migrating `### Title` header-based entries (`--convert`)
 - Auditing TODOS.md for format compliance (`--audit`)
 - Archiving completed TODOs to TODOS-archive.md (`--archive`)
 - Listing active TODO entries (`--list`)
@@ -189,13 +189,125 @@ The skill supports six subcommands. Each has its own workflow below.
 ### `--convert`: Convert existing TODOS.md to enforced format
 
 1. **Read TODOS.md.** If absent, print "TODOS.md not found. Run `todos-manager --init` first." and exit.
-2. **Check for preamble:** If blockquote format rules are absent, insert preamble (see ## Preamble Template) after `# TODOS` header.
-3. **Validate each entry:** Scan for TODO-<n> entries. For each entry, check:
-   - Required fields present: **What:**, **Why:**, **Decisions:**
-   - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
-   - ID matches `TODO-<digits>` pattern
-4. **Report findings:** Output structured report (see ## Audit Report Format).
-5. **Do not auto-fix.** Leave entry bodies as-is. Report only.
+
+2. **Ensure preamble:** If blockquote format rules are absent, insert preamble (see ## Preamble Template) after `# TODOS` header.
+
+3. **Detect format mode.** Scan the file for two patterns:
+   - **Mode A (canonical):** Lines matching `- (\[[ →x~]\])` that contain `TODO-\d+`
+   - **Mode B (header-based):** Lines matching `### ` followed by a title, with `**Field:**` sub-lines
+   - Count entries for each mode. If both counts are zero, print "No recognizable entries found in TODOS.md" and exit.
+   - If Mode A count > 0, proceed with Mode A (canonical validation below).
+   - If Mode A count = 0 AND Mode B count > 0, proceed with Mode B (header-based conversion below).
+
+#### Mode A: Canonical format validation
+
+4a. **Validate each entry:** Scan for TODO-<n> entries. For each entry, check:
+    - Required fields present: **What:**, **Why:**, **Decisions:**
+    - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
+    - ID matches `TODO-<digits>` pattern
+5a. **Report findings:** Output structured report (see ## Audit Report Format). Report only — no automatic fixes.
+
+#### Mode B: Header-based format conversion
+
+4b. **Parse entries:**
+    - Split the file by `## ` section headers. Each section groups entries.
+    - Within each section, find all `### Title` lines. Each marks a new entry.
+    - For each entry, collect all `**FieldName:** value` lines until the next `###`, `##`, or EOF.
+    - Store: raw title, section name, and a map of field names to values.
+
+5b. **Derive status** for each entry (first matching rule wins):
+    - `**Completed:**` field present with non-empty value → `[x]`
+    - Title ends with ` — Completed` → `[x]` (strip the suffix from the title)
+    - Entry is in `## Completed` section → `[x]`
+    - Entry is in `## Open` section → `[ ]`
+    - Section name contains "WIP", "Blocked", or "In Progress" → `[→]`
+    - Section name contains "Hold", "Deferred", or "Parking" → `[~]`
+    - Unknown section → `[ ]` (flag for user review)
+
+6b. **Assign IDs:**
+    - Scan TODOS.md + TODOS-archive.md for ALL `TODO-(\d+)` references.
+    - Compute `base_id = max(all_ids) + 1`. If no IDs found, `base_id = 1`.
+    - Assign IDs sequentially to parsed entries in document order (top to bottom).
+
+7b. **Convertibility gate:** For each entry, check if it has enough content:
+    - **Convertible:** entry has both `**What:**` AND `**Why:**` fields
+    - **Not convertible:** missing `**What:**` OR `**Why:**` — insufficient context for a meaningful TODO
+    - Convertible entries proceed to transformation
+    - Non-convertible entries are collected for `TODOS-reference.md`
+
+8b. **Transform fields** for each convertible entry:
+    - `**Resolution:**` → `**Resolved design:**` (rename label, preserve value)
+    - `**Depends on / blocked by:**` → `**Depends on:**` (rename label, preserve value)
+    - All other known fields (**What:**, **Why:**, **Pros:**, **Cons:**, **Context:**, **Assumptions:**, **Completed:**) → direct copy
+    - Unknown `**Field:**` labels → preserve as-is
+    - If `**Decisions:**` is absent → insert: `- **Decisions:** <<USER-REVIEW>> Priority, Effort, Phase, Branch not yet determined`
+    - Build the header line: `- [STATUS] **TODO-<n>: <Title>** — <Summary>` where Summary is the first sentence of `**What:**` (text up to first `. ` or end of field). If `**What:**` is absent for summary, use the first sentence of `**Why:**`. If neither exists, use `No summary available`.
+
+9b. **Backup:** Copy current TODOS.md to `TODOS.md.backup.<YYYY-MM-DD>` (e.g., `TODOS.md.backup.2026-07-13`). If today's backup already exists, skip.
+
+10b. **Preview gate:** Display a structured preview:
+    ```
+    ======== CONVERSION PREVIEW ========
+
+    File: TODOS.md
+    Format detected: Header-based (### entries)
+    Entries to convert: <count convertible>
+    Base ID: TODO-<base_id> (assigned <base_id> through <last_id>)
+
+    --- Entry mapping ---
+    ### Old Title  →  TODO-X: New Title  [status]
+    ...
+
+    --- Field transformations ---
+      - **Resolution:** → **Resolved design:** (N entries)
+      - **Depends on / blocked by:** → **Depends on:** (N entries)
+      - **Decisions:** added as default (N entries need user review)
+
+    --- Status derivation ---
+      [x] done:    N entries
+      [ ] pending: N entries
+      [→] WIP:     N entries
+      [~] on hold: N entries
+
+    --- Non-convertible entries → TODOS-reference.md ---
+      ### Entry Title (missing: What/Why)
+      ...
+
+    --- Converted output (first 3 entries shown, use --full for all) ---
+    [formatted canonical entries]
+
+    ======== END PREVIEW ========
+
+    Proceed? [y / edit / cancel / --full]
+      y      → Apply conversion to TODOS.md
+      edit   → Specify entries to skip or modify
+      cancel → Abort. No files modified.
+      --full → Show all N converted entries in preview
+    ```
+
+    - **`y`** → Proceed to step 11b.
+    - **`edit`** → Prompt which entries to skip/modify, re-show preview.
+    - **`cancel`** → Print "Conversion cancelled. No files modified." and exit.
+    - **`--full`** → Show all N entries, then re-prompt for y/edit/cancel.
+
+11b. **Apply conversion on confirm:**
+    - Remove `## Open`, `## Completed`, and other section headers used only for grouping.
+    - Remove all `### Title` header-based entries from TODOS.md.
+    - Preserve any existing canonical `- [ ] TODO-<n>` entries (if hybrid file).
+    - Insert all converted entries in canonical format at the end of the file.
+    - If there are non-convertible entries, write them to `TODOS-reference.md`:
+      ```markdown
+      # TODOS Reference
+
+      Entries that could not be auto-converted (missing required fields).
+      Use these as reference when adding entries via `todos-manager --add`.
+
+      Generated: <ISO-8601 timestamp> from TODOS.md conversion.
+
+      [original entry text for each non-convertible entry]
+      ```
+    - Count entries with `<<USER-REVIEW>>` markers.
+    - **Confirm:** "✓ Converted N entries to canonical format. M entries saved to TODOS-reference.md. Z entries need user review for <<USER-REVIEW>> markers."
 
 ### `--audit`: Audit TODOS.md for format compliance
 
@@ -392,14 +504,14 @@ The skill logs the following to `.claude/gstack/todos-manager.log`:
 
 ---
 
-### Scenario A3: `--convert` on existing TODOS.md without preamble
+### Scenario A3: `--convert` on existing TODOS.md without preamble (Mode A)
 
 **Setup:**
-- TODOS.md exists with entries but no preamble blockquote.
+- TODOS.md exists with canonical `- [ ] TODO-N` entries but no preamble blockquote.
 
 **Walkthrough:**
 1. User invokes `todos-manager --convert`.
-2. Skill detects missing preamble, inserts it after `# TODOS` header.
+2. Skill detects Mode A (canonical entries), inserts preamble after `# TODOS` header.
 3. Skill validates each entry against schema.
 4. Skill outputs audit report listing any missing required fields.
 5. Skill does not rewrite entry bodies.
@@ -408,6 +520,40 @@ The skill logs the following to `.claude/gstack/todos-manager.log`:
 - TODOS.md now has preamble blockquote.
 - Entry bodies unchanged.
 - Report surfaces any schema violations.
+
+---
+
+### Scenario A6: `--convert` on header-based TODOS.md (Mode B)
+
+**Setup:**
+- TODOS.md has `## Open` / `## Completed` sections with `### Title` entries.
+- No `- [ ] TODO-N` entries exist.
+- Some entries have `**Resolution:**` instead of `**Resolved design:**`.
+- Some entries lack `**Decisions:**`.
+- One entry lacks `**Why:**` (non-convertible).
+
+**Walkthrough:**
+1. User invokes `todos-manager --convert`.
+2. Skill detects Mode B (header-based format), parses all `### Title` entries.
+3. Skill derives status: entries in `## Completed` or with `**Completed:**` → `[x]`, entries in `## Open` → `[ ]`.
+4. Skill assigns IDs starting from TODO-1.
+5. Skill gates convertibility: entry missing `**Why:**` is flagged as non-convertible.
+6. Skill transforms fields for convertible entries: `**Resolution:**` → `**Resolved design:**`, inserts default `**Decisions:**` with `<<USER-REVIEW>>` marker.
+7. Skill creates `TODOS.md.backup.2026-07-13`.
+8. Skill shows preview gate with entry mapping, field transformations, status summary, and non-convertible list.
+9. User types `y`.
+10. Skill writes preamble + converted entries to TODOS.md, removes section headers.
+11. Skill writes non-convertible entry to `TODOS-reference.md`.
+12. Skill prints "✓ Converted N entries. 1 entry saved to TODOS-reference.md. Z entries need user review for <<USER-REVIEW>> markers."
+
+**Expected outcome:**
+- TODOS.md has preamble blockquote + all entries in canonical `- [ ] TODO-N:` format.
+- `## Open` / `## Completed` headers removed.
+- `**Resolution:**` renamed to `**Resolved design:**`.
+- `**Depends on / blocked by:**` renamed to `**Depends on:**`.
+- Missing `**Decisions:**` filled with `<<USER-REVIEW>>` marker.
+- Non-convertible entry preserved in `TODOS-reference.md`.
+- `TODOS.md.backup.<date>` exists as a safety copy.
 
 ---
 
