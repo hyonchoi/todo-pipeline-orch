@@ -119,10 +119,10 @@ def run_structural(golden: dict, todos_text: str, archive_text: Optional[str] = 
             result["detail"] = f"expected max {expected_max}, got {actual_max}"
 
         elif "no_duplicate_ids" in assertion:
-            all_ids_list = []
-            for match in re.finditer(r"TODO-(\d+)", todos_text):
-                all_ids_list.append(int(match.group(1)))
-            result["pass"] = len(all_ids_list) == len(set(all_ids_list))
+            all_ids = scan_ids(todos_text)
+            all_ids_from_archive = scan_ids(archive_text)
+            combined = list(all_ids) + list(all_ids_from_archive)
+            result["pass"] = len(combined) == len(set(combined))
             result["detail"] = "duplicates found" if not result["pass"] else "no duplicates"
 
         elif "total_entries" in assertion:
@@ -158,6 +158,9 @@ def run_structural(golden: dict, todos_text: str, archive_text: Optional[str] = 
             validation = validate_all_entries(todos_text)
             all_ok = all(len(v["issues"]) == 0 for v in validation)
             result["pass"] = all_ok
+            if not all_ok:
+                with_issues = sum(1 for v in validation if v["issues"])
+                result["detail"] = f"{len(validation)} entries, {with_issues} with missing fields"
 
         elif "all_valid_status_markers" in assertion:
             entries = parse_entries(todos_text)
