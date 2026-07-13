@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.8] - 2026-07-13
+
+### Added
+- **`todos-manager --list` subcommand** — report-only listing of active TODO entries as a markdown table (ID, status, title, summary). Pass `--all` to also show archived entries from `TODOS-archive.md` in a separate table. Modifies no files.
+- **`todos-manager --convert` header-based transformation (Mode B)** — converts header-based TODOS.md entries (freeform text, title-as-header, no schema fields) into the canonical enforced format. Creates dated backup files and a reference document. Idempotent — already-converted files are skipped.
+
+### Fixed
+- **Decision agent JSON parser crashes on CLI backend warnings** — `_parse()` no longer requires the response to start with a code fence. CLI backends that prepend stderr-style warning lines before the fenced JSON block now parse correctly. The parser also tolerates one-line fenced JSON, missing closing fences, and trailing prose after fenced blocks.
+
+### Changed
+- **TODOS Manager skill updated to six subcommands** — `--list` is now documented alongside `--init`, `--add`, `--convert`, `--audit`, and `--archive`. Updated ARCHITECTURE.md, CLAUDE.md, README.md, and how-to guide to match.
+
 ## [0.4.7] - 2026-07-13
 
 ### Added
