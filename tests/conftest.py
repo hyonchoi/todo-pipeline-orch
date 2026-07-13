@@ -1,4 +1,3 @@
-import sys
 from pathlib import Path
 
 # Map hyphenated directory to valid Python package name for imports.
@@ -9,8 +8,8 @@ if _skill_test_dir.exists():
         # Create a symlink so "import tests.skill_test_environment" works
         try:
             _alias.symlink_to("skill-test-environment")
-        except FileExistsError:
-            pass  # symlink already exists
+        except OSError:
+            pass  # symlink already exists or not permitted
 
 import pytest
 
