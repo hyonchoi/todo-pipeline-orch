@@ -21,7 +21,7 @@ from .skill_logic import (
 
 def load_golden(path: Path) -> dict:
     """Load and return a golden YAML assertion file."""
-    return yaml.safe_load(path.read_text())
+    return yaml.safe_load(path.read_text(encoding="utf-8"))
 
 
 def _check_preamble(text: str) -> bool:

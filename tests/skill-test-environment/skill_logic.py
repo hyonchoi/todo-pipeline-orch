@@ -17,9 +17,9 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
     """Compute next sequential ID from TODOS.md and TODOS-archive.md."""
     all_ids: set[int] = set()
     if todos_path.exists():
-        all_ids |= scan_ids(todos_path.read_text())
+        all_ids |= scan_ids(todos_path.read_text(encoding="utf-8"))
     if archive_path.exists():
-        all_ids |= scan_ids(archive_path.read_text())
+        all_ids |= scan_ids(archive_path.read_text(encoding="utf-8"))
     if not all_ids:
         return 1
     return max(all_ids) + 1
@@ -34,7 +34,7 @@ def read_counter_cache(project_dir: Path) -> Optional[int]:
     if not counter.exists():
         return None
     try:
-        return int(counter.read_text().strip())
+        return int(counter.read_text(encoding="utf-8").strip())
     except ValueError:
         return None
 
@@ -45,9 +45,9 @@ def counter_matches_scan(project_dir: Path) -> bool:
     archive = project_dir / "TODOS-archive.md"
     all_ids: set[int] = set()
     if todos.exists():
-        all_ids |= scan_ids(todos.read_text())
+        all_ids |= scan_ids(todos.read_text(encoding="utf-8"))
     if archive.exists():
-        all_ids |= scan_ids(archive.read_text())
+        all_ids |= scan_ids(archive.read_text(encoding="utf-8"))
     if not all_ids:
         return read_counter_cache(project_dir) in (None, 0)
     max_id = max(all_ids)

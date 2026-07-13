@@ -21,10 +21,10 @@ def skill_golden_dir() -> Path:
 @pytest.fixture
 def skill_demo_todos(skill_demo_dir) -> str:
     """Content of demo-project TODOS.md."""
-    return (skill_demo_dir / "TODOS.md").read_text()
+    return (skill_demo_dir / "TODOS.md").read_text(encoding="utf-8")
 
 
 @pytest.fixture
 def skill_demo_archive(skill_demo_dir) -> str:
     """Content of demo-project TODOS-archive.md."""
-    return (skill_demo_dir / "TODOS-archive.md").read_text()
+    return (skill_demo_dir / "TODOS-archive.md").read_text(encoding="utf-8")
