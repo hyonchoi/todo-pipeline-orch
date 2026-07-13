@@ -119,11 +119,11 @@ def run_structural(golden: dict, todos_text: str, archive_text: Optional[str] = 
             result["detail"] = f"expected max {expected_max}, got {actual_max}"
 
         elif "no_duplicate_ids" in assertion:
-            all_ids = scan_ids(todos_text)
-            all_ids_from_archive = scan_ids(archive_text)
-            combined = list(all_ids) + list(all_ids_from_archive)
-            result["pass"] = len(combined) == len(set(combined))
-            result["detail"] = "duplicates found" if not result["pass"] else "no duplicates"
+            todos_ids = scan_ids(todos_text)
+            archive_ids = scan_ids(archive_text)
+            overlap = todos_ids & archive_ids
+            result["pass"] = len(overlap) == 0
+            result["detail"] = f"duplicates in both files: {overlap}" if overlap else "no duplicates"
 
         elif "total_entries" in assertion:
             expected = assertion["total_entries"]
@@ -191,12 +191,20 @@ def run_structural(golden: dict, todos_text: str, archive_text: Optional[str] = 
             result["detail"] = f"expected {expected_ids}, got {actual_ids}"
 
         elif "entries_unchanged" in assertion:
-            result["pass"] = True
-            result["detail"] = "assumed — convert should not modify entries"
+            expected = assertion.get("expected_count")
+            if expected is not None:
+                entries = parse_entries(todos_text)
+                result["pass"] = len(entries) == expected
+                result["detail"] = f"expected {expected}, found {len(entries)}"
+            else:
+                result["pass"] = True
+                result["detail"] = "assumed — convert should not modify entries"
 
         elif "flags_missing_fields" in assertion:
-            result["pass"] = True
-            result["detail"] = "assumed — convert reports missing fields"
+            validation = validate_all_entries(todos_text)
+            has_issues = any(len(v["issues"]) > 0 for v in validation)
+            result["pass"] = has_issues
+            result["detail"] = "no missing-field issues found" if not has_issues else "missing fields detected"
 
         if result["pass"]:
             passed += 1
