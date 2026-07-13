@@ -85,30 +85,62 @@ def _api_call(*, model: str, max_tokens: int, prompt: str, backend: str = "herme
 
 def _parse(raw: str) -> dict:
     body = raw.strip()
+    # Try raw JSON first — avoids false fence matches inside string fields.
+    try:
+        d = json.loads(body)
+        if isinstance(d, dict):
+            return _format_result(d)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pass
+
+    # Fall back to fence extraction (CLI backends may prepend warnings).
     fence_start = body.find("```")
     if fence_start != -1:
         body = body[fence_start:]
-        body = body.split("```", 2)[1]
-        if body.lstrip().lower().startswith("json"):
-            body = body.split("\n", 1)[1]
-        body = body.rsplit("```", 1)[0]
+        parts = body.split("```", 2)
+        if len(parts) >= 2:
+            inner = parts[1]
+            if inner.lstrip().lower().startswith("json"):
+                stripped = inner.lstrip()
+                # Skip the "json" marker and trailing whitespace, preserving the
+                # rest of the line if there's no newline (one-line fenced block).
+                remainder = stripped.split("\n", 1)
+                if len(remainder) >= 2:
+                    inner = remainder[1]
+                else:
+                    # Same-line: strip "json" + whitespace from the start.
+                    inner = stripped[4:].lstrip()
+            if len(parts) == 3:
+                inner = inner.rsplit("```", 1)[0]
+            body = inner
+
+    error = None
     try:
         d = json.loads(body)
-        return {
-            "candidates_considered": list(d.get("candidates_considered", [])),
-            "picked": d.get("picked"),
-            "rationale": str(d.get("rationale", "")),
-            "blocked_reasons": dict(d.get("blocked_reasons", {})),
-            "in_flight": list(d.get("in_flight", [])),
-        }
-    except (json.JSONDecodeError, TypeError, ValueError) as e:
-        return {
-            "candidates_considered": [],
-            "picked": None,
-            "rationale": f"parse error: {e}; raw response (truncated): {raw[:300]}",
-            "blocked_reasons": {},
-            "in_flight": [],
-        }
+        if isinstance(d, dict):
+            return _format_result(d)
+        error = "response is not a JSON object"
+    except (json.JSONDecodeError, TypeError, ValueError, IndexError) as exc:
+        error = str(exc)
+
+    return {
+        "candidates_considered": [],
+        "picked": None,
+        "rationale": f"parse error: {error}; raw response (truncated): {raw[:300]}",
+        "blocked_reasons": {},
+        "in_flight": [],
+    }
+
+
+def _format_result(d: dict) -> dict:
+    """Extract and normalize fields from a parsed JSON object."""
+    return {
+        "candidates_considered": list(d.get("candidates_considered", [])),
+        "picked": d.get("picked"),
+        "rationale": str(d.get("rationale", "")),
+        "blocked_reasons": dict(d.get("blocked_reasons", {})),
+        "in_flight": list(d.get("in_flight", [])),
+    }
 
 def call_agent(
     *,

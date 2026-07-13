@@ -107,6 +107,34 @@ def test_fenced_json_with_leading_warning_line_parses(tmp_path, monkeypatch):
     r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
     assert r.parsed["picked"] == "TODO-1"
 
+def test_fenced_json_one_line_no_crash(tmp_path, monkeypatch):
+    """One-line fenced JSON should not raise IndexError (Codex P1)."""
+    p = _write_prompt(tmp_path)
+    raw = 'Warning: test\n```json {"candidates_considered":["TODO-1"],"picked":"TODO-1","rationale":"ok","blocked_reasons":{},"in_flight":[]} ```'
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._api_call",
+        lambda *a, **kw: raw,
+    )
+    r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
+    assert r.parsed["picked"] == "TODO-1"
+
+def test_raw_json_with_fence_in_field(tmp_path, monkeypatch):
+    """Raw JSON containing a fence inside a string field should still parse (Codex P2)."""
+    p = _write_prompt(tmp_path)
+    raw = json.dumps({
+        "candidates_considered": ["TODO-1"],
+        "picked": "TODO-1",
+        "rationale": "use ```json``` for clarity",
+        "blocked_reasons": {},
+        "in_flight": [],
+    })
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._api_call",
+        lambda *a, **kw: raw,
+    )
+    r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
+    assert r.parsed["picked"] == "TODO-1"
+
 def test_api_call_propagates_hermes_call_error(tmp_path, monkeypatch):
     """When _api_call raises HermesCallError, call_agent should propagate it."""
     from hermes_pipeline.hermes_adapter import HermesCallError
