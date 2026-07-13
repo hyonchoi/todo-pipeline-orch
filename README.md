@@ -67,6 +67,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Install TODOS Manager](scripts/install-todos-manager.sh) | How-to | Symlink skill to user-level skill directories |
 | [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for the todos-manager skill |
 
+| [Approve and ship a TODO](docs/howto-approve-and-ship.md) | How-to | Running `pipeline-watch approve` — full ship workflow |
+| [CLI reference](docs/reference-cli.md) | Reference | All subcommands, arguments, exit codes, environment variables |
+| [Circuit breaker](docs/explanation-circuit-breaker.md) | Explanation | How no-progress tracking works and why it alerts |
+| [Decision module API](docs/reference-decision-api.md) | Reference | Selection schemas, outcome sidecars, plan-gate types |
+| [Handle phase 5 review outcomes](docs/howto-review-outcomes.md) | How-to | Inspecting review artifacts, handling reverted or timed-out reviews |
+
 ## TODOS Manager Skill (v2)
 
 The `todos-manager` skill provides schema-enforced TODOS.md management with five subcommands:
