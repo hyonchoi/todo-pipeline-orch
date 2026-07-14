@@ -27,6 +27,7 @@ TODO-19 is a partial implementation of TODO-4: a formalized, repeatable mock int
 - **Open source / research context** — built for self-use and sharing with colleagues, not a commercial product.
 - **Single fixture first** — start with one formalized fixture that drives the happy path. Edge-case fixtures ("textures") come as extensions.
 - **Repeatable setup, not deterministic output** — the fixture bootstrap is idempotent and deterministic. The AI produces different content on each run, so the harness verifies structural properties (phase ordering, kanban transitions, state file writes) rather than AI-generated content.
+- **Config isolation** — override `HOME` and set test model (`claude-haiku-4-5`) in fixture `.hermes/config.toml` to prevent the harness from interacting with the user's real pipeline state.
 
 ## Premises
 
@@ -67,7 +68,7 @@ Start with Approach B because it validates the core risk — can we run the real
 
 1. **Setup script + mock project fixtures** — `create_mock_project(path, fixture_name)` factory function. Creates: `git init` + at least one initial commit on a named branch, preset `.hermes/config.toml`, TODOS.md with mock entries, minimal source files. The git state matches what `PipelineRunner` expects at startup (branch, commit history, no remote required).
 
-2. **Pipeline execution through mock project** — Invokes the real `PipelineRunner` with the mock project directory as target. Real Hermes + Kanban + Claude Code subprocess calls. Per-phase timeout inherited from `phases.yaml` config; overall run timeout of 30 minutes (configurable via `--timeout`). If a phase hangs past its timeout, the harness records `timeout` as the phase outcome and continues to the next phase rather than aborting the entire run.
+2. **Pipeline execution through mock project** — Invokes the real `PipelineRunner` with the mock project directory as target. Real Hermes + Kanban + Claude Code subprocess calls. Per-phase timeout inherited from `phases.yaml` config; overall run timeout of 60 minutes (configurable via `--timeout`). 9 phases × 1800s default = 54min; 60min provides margin. If a phase hangs past its timeout, the harness records `timeout` as the phase outcome and continues to the next phase rather than aborting the entire run.
 
 3. **Monitoring/verification of pipeline steps and kanban status** — Monitors via an optional `monitor` callback parameter added to `PipelineRunner.__init__`. When provided, `PipelineRunner` calls it on each phase transition (`phase_started`, `phase_completed`, `phase_failed`, `phase_timed_out`) and kanban sync (`set_active_task`, `update_phase`, `clear_active_task`). Callback is additive — existing `PipelineRunner` callers pass nothing and behavior is unchanged. The harness callback writes each event to a structured JSONL file: `{timestamp, event_type, phase_key, kanban_status, todo_id, duration_ms}`.
 
@@ -80,10 +81,10 @@ Start with Approach B because it validates the core risk — can we run the real
 
 **Timeout & failure recovery:**
 - Per-phase: inherits `timeout` from `phases.yaml` (default 1800s).
-- Overall run: 30-minute default, overridable via `--timeout`.
+- Overall run: 60-minute default, overridable via `--timeout` (9 phases × 1800s = 54min; 60min provides margin).
 - If Hermes CLI is not found at startup: fail fast with `HermesDependencyError`-style message before creating the fixture.
 - If a single phase times out: record as `timeout`, continue to next phase. The run is not aborted.
-- Circuit breaker: if 3+ consecutive phases fail with the same error class (e.g., `HermesCallError`), halt the run and report "circuit breaker: repeated failures, likely misconfiguration." Configurable via `--circuit-breaker-threshold` (default: 3) — enough to distinguish transient API blips from genuine misconfiguration.
+- Convergence detector: if 3+ consecutive phases fail with the same error class (e.g., `HermesCallError`), halt the run and report "convergence detector: repeated failures, likely misconfiguration." Configurable via `--convergence-threshold` (default: 3) — enough to distinguish transient API blips from genuine misconfiguration. Renamed from "circuit breaker" to avoid naming collision with existing `CircuitBreaker` in `circuit.py`.
 - Overall timeout interaction: if the overall `--timeout` fires mid-phase, the harness records the in-progress phase as `timeout`, generates a partial report from the JSONL event log collected so far, and exits.
 
 ## Success Criteria
@@ -107,16 +108,18 @@ Part of the `hermes_pipeline` package. New CLI subcommand registered in `cli.py`
 
 Each full pipeline run invokes real AI (Hermes + Claude Code) for every phase. The v1 fixture config pins `claude-haiku-4-5` in `.hermes/config.toml` for cost control; users may override to a more capable model for higher-fidelity testing. A single happy-path run: approximately 9 phases × Haiku API cost per phase — expect $1-3 per run. For `--loop` cycles, each iteration incurs the same cost. Measure actual cost after the first run and document in a follow-up edit.
 
-**Rate limiting:** Anthropic API 429 responses trigger the existing retry mechanism in `hermes_adapter.py` (HERMES_RETRY_ATTEMPTS=2, HERMES_RETRY_DELAY=1s). If retries are exhausted, the phase records `rate_limited` as the failure reason and the run continues. Repeated rate-limit exhaustion across multiple phases triggers the circuit breaker.
+**Rate limiting:** Anthropic API 429 responses trigger the existing retry mechanism in `hermes_adapter.py` (HERMES_RETRY_ATTEMPTS=2, HERMES_RETRY_DELAY=1s). If retries are exhausted, the phase records `rate_limited` as the failure reason and the run continues. Repeated rate-limit exhaustion across multiple phases triggers the convergence detector.
 
 ## Next Steps
 
-1. **Define fixture factory interface** — `create_mock_project(path, fixture_name)` with git init + initial commit, TODOS.md, config, minimal source.
+1. **Define fixture factory interface** — `create_mock_project(path, fixture_name)` with git init + initial commit, TODOS.md, config, minimal source. Override `HOME` and pin `claude-haiku-4-5` in fixture `.hermes/config.toml` for config isolation.
 2. **Add optional `monitor` callback to `PipelineRunner.__init__`** — additive parameter; existing callers unaffected.
-3. **Implement harness CLI subcommand** — `hermes-pipeline test --fixture <name>` with factory, runner invocation, JSONL event log.
-4. **Build findings report generator** — JSONL → report.json + report.md + stdout summary.
-5. **Add `--loop` support** — fresh fixture bootstrap, file-based report diff.
-6. **Create first edge-case fixture** — validate factory extensibility (e.g., malformed TODOS.md).
+3. **Add `continue_on_failure` to `PipelineRunner`** — default `False` preserves current behavior; harness sets `True`. Bypass slug resolution by passing temp dir directly.
+4. **Implement harness CLI subcommand** — `hermes-pipeline test --fixture <name>` with factory, runner invocation, JSONL event log.
+5. **Build findings report generator** — JSONL → report.json + report.md + stdout summary. Normalize `error_class` to buckets (`"phase_failure"`, `"timeout"`, `"hermes_error"`, `"kanban_error"`, `"dependency_error"`). Bucket durations (`<1m`, `1-5m`, `5-15m`, `>15m`).
+6. **Add `--loop` support** — fresh fixture bootstrap, file-based report diff.
+7. **Implement convergence detector** — tracks 3+ consecutive same-class failures within a single run. `--convergence-threshold` (default: 3). Dependency-aware skip: if a phase fails, skip dependent phases.
+8. **Create first edge-case fixture** — validate factory extensibility (e.g., malformed TODOS.md).
 
 ## Future Consideration
 
@@ -129,7 +132,7 @@ Branch: main
 
 ### Section 1: Architecture Review
 
-**Verdict: APPROVED with 6 decisions resolved.**
+**Verdict: APPROVED with 8 decisions resolved.**
 
 **Approach B (Harness CLI Tool) confirmed.** Standalone CLI command is the right first step — validates core risk (real pipeline on mock data + useful diagnostics) without designing a manifest schema upfront. Fixture format emerges from implementation.
 
@@ -143,7 +146,7 @@ Branch: main
 
 4. **Overall timeout** — Corrected from 30min to **60min**. Math: 9 phases × 1800s default = 54min. 30min default would fire on a healthy run. 60min provides margin. Design doc lines 70 and 83 should be updated from 30min → 60min.
 
-5. **Convergence detector** — Renamed from "circuit breaker" to avoid naming collision with existing `CircuitBreaker` in `circuit.py` (which tracks no-progress ticks across pipeline runs). Convergence detector tracks 3+ consecutive phases failing with the same error class _within a single run_. Configurable via `--circuit-breaker-threshold` (default: 3).
+5. **Convergence detector** — Renamed from "circuit breaker" to avoid naming collision with existing `CircuitBreaker` in `circuit.py` (which tracks no-progress ticks across pipeline runs). Convergence detector tracks 3+ consecutive phases failing with the same error class _within a single run_. Configurable via `--convergence-threshold` (default: 3).
 
 6. **Temp dir bypass** — Bypass slug resolution in `Config` by passing temp dir directly to `PipelineRunner`. No need to make temp dir look like a valid project under `projects_dir`.
 
@@ -179,7 +182,7 @@ Existing ~40 test files cover the _current_ pipeline modules (runner, phases, ka
 - JSONL event log is ~54 lines per run. Trivial.
 - `preflight()` runs 3 `which` subprocess calls. ~10ms. Not worth optimizing.
 
-**Note:** Design doc still says 30min timeout (lines 70, 83). Should be updated to 60min to match reviewed decision.
+**Note:** Design doc body has been updated to 60min timeout to match reviewed decision.
 
 ### Outside Voice
 
@@ -192,9 +195,28 @@ Codex review findings have been addressed: dependency-aware skip semantics, conf
 - Multi-fixture parallel execution — single fixture first
 - Deterministic AI output — verifies structural properties only
 - Mocking AI components — uses real Hermes + real Claude Code
-- Production circuit breaker — reuses existing `CircuitBreaker`, convergence detector is harness-local
+- Production circuit breaker — reuses existing `CircuitBreaker`; convergence detector is harness-local, renamed to avoid collision
 - Cross-platform support — assumes macOS/Linux with bash
 
 ### Implementation Estimate
 
-~7.5h across 16 tasks: entrypoint, CLI subcommand, harness.py (factory + preflight + convergence + monitor), runner.py modifications, test_report.py (report + diff), unit tests, 1 E2E integration test.
+~7.5h across 16 tasks (synthesized during review, not written to JSONL — gap):
+
+| # | Task | Effort | Files |
+|---|------|--------|-------|
+| 1 | Add hermes-pipeline entrypoint | 10m | pyproject.toml |
+| 2 | Add test CLI subcommand | 30m | cli.py |
+| 3 | harness.py — fixture factory | 1h | hermes_pipeline/harness.py |
+| 4 | harness.py — preflight | 20m | hermes_pipeline/harness.py |
+| 5 | harness.py — convergence detector | 30m | hermes_pipeline/harness.py |
+| 6 | harness.py — monitor callback | 30m | hermes_pipeline/harness.py |
+| 7 | Add continue_on_failure to PipelineRunner | 30m | runner.py |
+| 8 | Add optional monitor callback to PipelineRunner | 30m | runner.py |
+| 9 | test_report.py — JSONL→report | 45m | hermes_pipeline/test_report.py |
+| 10 | test_report.py — --loop diff | 30m | hermes_pipeline/test_report.py |
+| 11 | Add hermes-pipeline entrypoint to uv | 10m | pyproject.toml |
+| 12 | Unit tests — fixture factory | 30m | tests/test_harness.py |
+| 13 | Unit tests — report generator | 30m | tests/test_report.py |
+| 14 | Unit tests — convergence detector | 20m | tests/test_harness.py |
+| 15 | Unit tests — continue_on_failure | 20m | tests/test_runner.py |
+| 16 | Integration test — happy-path e2e | 20m | tests/test_harness_e2e.py |
