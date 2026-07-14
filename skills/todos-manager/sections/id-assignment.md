@@ -1,4 +1,3 @@
-
 ## Stable TODO-<n> ID Assignment
 
 ### ID sequencing rule
