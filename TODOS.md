@@ -39,4 +39,4 @@
   - **Cons:** Adds a subcommand to an already feature-rich skill. Edge case: revising archived entries may surprise users who expect archives to be append-only.
   - **Context:** Skill source: `skills/todos-manager/SKILL.md` (section-skeleton pattern). Related entries in this repo's TODOS-archive.md were flagged by the prior audit (TODO-9, TODO-11, TODO-12, TODO-13, TODO-14, TODO-15 missing What/Why/Branch).
   - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feat/todos-manager-revise`, Test Coverage `required`, Security Review `not-required`
-  - **Completed:** v0.4.9 (2026-07-14)
+  - **Completed:** v0.4.10 (2026-07-14)
