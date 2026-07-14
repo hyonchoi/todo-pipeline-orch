@@ -163,13 +163,14 @@ All pipeline state lives under `<project>/.hermes/`:
 
 ### TODOS Manager Skill (v2.1)
 
-The `todos-manager` skill enforces the canonical TODOS.md schema and provides six subcommands:
+The `todos-manager` skill enforces the canonical TODOS.md schema and provides seven subcommands:
 - `--init`: Initialize TODOS.md with format preamble and create TODOS-archive.md
 - `--add`: Add new entry with schema enforcement and preview gate
 - `--convert`: Convert existing TODOS.md to enforced format (inserts preamble, validates entries)
 - `--audit`: Audit TODOS.md for format compliance (reports only, no auto-fix)
 - `--archive`: Move completed `[x]` entries to TODOS-archive.md (newest first)
 - `--list`: List active TODO entries (optional `--all` flag shows archived entries)
+- `--revise`: Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions
 
 The skill source lives at `skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `scripts/install-todos-manager.sh`. The skill enforces:
 - Required fields: **What:**, **Why:**, **Decisions:**

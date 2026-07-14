@@ -242,7 +242,7 @@ todos-manager --revise
 3. Scans the entry for missing or weak fields (What, Why, Decisions, Pros, Cons, Context, Depends on, Assumptions)
 4. **Auto-research phase** — reads relevant files to pre-fill gaps, scoped only to missing or weak fields
 5. **Synthesis block** — shows all fields with `(unchanged)` for good fields and `[Confidence: high/medium/low]` for derived values
-6. **Confirm or edit** — accept all as-is or edit individual fields with `field: new value`
+6. **Confirm or edit** — reply `confirm` to accept all as-is, or edit individual fields with `field: new value`
 7. **Preview gate** — shows before/after diff of the full entry. Type `y` to confirm, `edit` to re-edit (no re-research), or `cancel` to abort
 
 **Example synthesis block:**

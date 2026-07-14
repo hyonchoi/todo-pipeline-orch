@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Entry boundary parsing spec** — shared algorithm for identifying TODO entry start/end positions in TODOS.md. Used by both `--archive` and `--revise` to extract entries without DRY violations.
 
 ### Changed
-- **`todos-manager --add` subcommand revised** — auto-researches the codebase to pre-fill TODO fields (title, summary, What, Why, Decisions) before the interactive prompts. Reduces manual typing for entries that correspond to existing code areas.
+- **`todos-manager --add` subcommand revised** — after you provide a title and summary, auto-researches the codebase to pre-fill TODO fields (What, Why, Decisions) before the interactive prompts. Reduces manual typing for entries that correspond to existing code areas.
 - **TODOS Manager skill updated to seven subcommands** — `--revise` is now documented alongside `--init`, `--add`, `--convert`, `--audit`, `--archive`, and `--list`.
 
 ## [0.4.8] - 2026-07-13
