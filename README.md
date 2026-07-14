@@ -62,7 +62,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
 | [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works and design rationale |
 | [TODOS Manager skill](skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 7 subcommands |
-| [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step: init, add, archive a completed TODO |
+| [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step: init, add, revise, archive a completed TODO |
 | [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using --init, --add, --convert, --audit, --archive, --list, --revise |
 | [Install TODOS Manager](scripts/install-todos-manager.sh) | How-to | Symlink skill to user-level skill directories |
 | [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for the todos-manager skill |
