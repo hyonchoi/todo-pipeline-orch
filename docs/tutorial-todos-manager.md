@@ -68,14 +68,10 @@ Invoke `todos-manager --add`. The skill guides you through the fields:
 
 1. **Title** — a concise name for the task (10–200 characters)
 2. **Summary** — a one-line description after the em dash
-3. **What** — what needs to be done
-4. **Why** — why the task matters (10–200 characters)
-5. **Decisions** — key choices: Priority, Effort, Phase, Branch, Test Coverage, Security Review
-6. **Optional fields** — Pros, Cons, Context, Depends on, Assumptions
-
-The skill computes the next ID automatically. Since this is the first entry, it will be `TODO-1`.
-
-**Preview gate** — before writing, you see the full assembled entry. This is your safety net. Type `y` to confirm, `edit` to go back (the ID isn't burned), or `cancel` to abort.
+3. **Auto-research** — the skill silently reads TODOS.md, git log, design docs, CLAUDE.md, and source files implied by the title. It derives `What`, `Why`, `Decisions`, and optional fields from what it finds. You'll see a synthesis block showing each field with a confidence tag (high/medium/low).
+4. **Gap questions** — if research couldn't resolve any field, the skill asks one question at a time. Since this is the first entry with no design doc matches, you'll be asked about `Why` and `What`.
+5. **Confirm or edit** — accept the pre-filled fields or adjust them.
+6. **Preview gate** — before writing, you see the full assembled entry. Type `y` to confirm, `edit` to go back (the ID isn't burned), or `cancel` to abort.
 
 ```
 ======== PREVIEW ========
