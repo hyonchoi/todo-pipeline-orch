@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.5.0.0] - 2026-07-14
+## [0.4.10] - 2026-07-14
 
 ### Added
 - **`todos-manager --revise` subcommand** — revise an existing TODO entry by filling missing or weak fields with AI-pre-filled suggestions. Selects an entry by TODO-ID, scans for gaps (What, Why, Decisions, optional fields), auto-researches the codebase scoped to gaps, presents a synthesis block with confidence tags, and writes the updated entry back to TODOS.md. Reuses the auto-research phase from `--add`. Only revises active entries — archived entries are never modified.
