@@ -501,6 +501,11 @@ End-to-end test after all tasks complete:
 4. Run `todos-manager --audit` → confirm schema.md is read and audit report is correct.
 5. Check `.claude/gstack/todos-manager.log` contains auto-research derivation entries.
 6. Confirm final TODOS.md entry is correctly formatted per `sections/schema.md`.
+7. **Schema sync check (T3):** Diff `sections/schema.md`'s Required/Optional field
+   tables against `tests/skill-test-environment/skill_logic.py`'s `REQUIRED_FIELDS`
+   / `OPTIONAL_FIELDS` constants (and any status-marker set). Confirm the two stay
+   in agreement — flag drift if `schema.md` lists a field the Python oracle
+   doesn't recognize, or vice versa.
 
 ---
 
