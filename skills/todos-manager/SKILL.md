@@ -44,6 +44,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 | `--convert` detects header-based format (Mode B: `## Open`/`## Completed` + `### Title` entries) | `sections/convert-mode-b.md` |
 | Executing `--list` | `sections/list.md` |
 | Running acceptance tests or verifying behavior | `sections/acceptance-scenarios.md` |
+| Audit report format, error messages, or observability | `sections/error-messages.md` |
 
 ---
 
@@ -130,7 +131,7 @@ The skill supports six subcommands. Each has its own workflow below.
     - Required fields present: **What:**, **Why:**, **Decisions:**
     - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
     - ID matches `TODO-<digits>` pattern
-5a. **Report findings:** Output structured report (see `## Audit Report Format` below). Report only — no automatic fixes.
+5a. **Report findings:** Output structured report (see `sections/error-messages.md`). Report only — no automatic fixes.
 
 ---
 
@@ -146,7 +147,7 @@ The skill supports six subcommands. Each has its own workflow below.
 4. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
    - Counter cache (`.hermes/todo_id_counter`) matches max scanned ID?
-5. **Output report** per `## Audit Report Format` below.
+5. **Output report** per `sections/error-messages.md`.
    Report only — no automatic fixes.
 
 ---
