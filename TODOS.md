@@ -26,3 +26,12 @@
   - **Depends on:** `TODO-2`, `TODO-3`
   - **Decisions:** Priority `P3`, Effort `S`, Phase `2 (Design)`, Branch `feature/selection-model-fallback`, Test Coverage `필요`, Security Review `불필요`
 
+- [ ] **TODO-19: partial impl of TODO-4, integration test data that is repeatable, verifiable mock data for whole pipeline from start to the end** — Repeatable mock integration test harness for pipeline end-to-end verification
+  - **What:** Five deliverables: (1) setup script + mock project fixtures (git, preset, TODOS.md) in temp dir, (2) pipeline execution through mock project, (3) monitoring/verification of pipeline steps and kanban status, (4) findings report generation, (5) loopable 1-4 for iterative fix cycles. Assumes local running Hermes configuration.
+  - **Why:** TODO-4 (end-to-end integration harness) is P1 with no implementation progress. This partial impl creates repeatable, verifiable mock data — a prerequisite for debugging cross-system bugs (Hermes + Kanban + Claude Code) without manual setup each time. Prior test infra (TODO-16) is structural-only; no integration-level fixtures exist.
+  - **Pros:** Deterministic reproduction for cross-system debugging, reusable fixtures for future integration tests, validates pipeline end-to-end without prod data
+  - **Cons:** Temp dir setup may not capture all edge cases of a real project. Hermes-local assumption limits portability. Report generator is a new artifact to maintain.
+  - **Context:** TODO-4 (parent), TODO-16 (skill-test-environment Phase 1, tests/skill-test-environment/). Pipeline modules: hermes_pipeline/decision/, hermes_pipeline/kanban.py, hermes_pipeline/runner.py, hermes_pipeline/phases.py
+  - **Depends on:** `TODO-4`, `TODO-2`, `TODO-3`
+  - **Decisions:** Priority `P1`, Effort `L`, Phase `4 (Development)`, Branch `feature/integration-test-harness`, Test Coverage `required`, Security Review `not-required`
+
