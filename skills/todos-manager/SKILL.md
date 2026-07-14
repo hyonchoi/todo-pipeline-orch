@@ -21,6 +21,7 @@ The **todos-manager** skill automates the addition and management of TODOS.md en
 - Converting an existing TODOS.md to enforced format — including migrating `### Title` header-based entries (`--convert`)
 - Auditing TODOS.md for format compliance (`--audit`)
 - Archiving completed TODOs to TODOS-archive.md (`--archive`)
+- Revising an existing TODO entry with AI-pre-filled suggestions (`--revise`)
 - Listing active TODO entries (`--list`)
 
 ### Prerequisite state
@@ -43,6 +44,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 | Executing `--add` step 4.5 (auto-research) | `sections/auto-research.md` |
 | `--convert` detects header-based format (Mode B: `## Open`/`## Completed` + `### Title` entries) | `sections/convert-mode-b.md` |
 | Executing `--list` | `sections/list.md` |
+| Executing `--revise` | `sections/revise.md` |
 | Running acceptance tests or verifying behavior | `sections/acceptance-scenarios.md` |
 | Audit report format, error messages, or observability | `sections/error-messages.md` |
 
@@ -67,7 +69,7 @@ When the user invokes `todos-manager --init` on a project with no TODOS.md:
 
 ## Workflow
 
-The skill supports six subcommands. Each has its own workflow below.
+The skill supports seven subcommands. Each has its own workflow below.
 
 ### `--add`: Add new entry with schema enforcement
 
@@ -169,6 +171,12 @@ The skill supports six subcommands. Each has its own workflow below.
    - Append to end of TODOS-archive.md
 5. **Remove archived entries from TODOS.md.**
 6. **Confirm:** "✓ Archived N entries to TODOS-archive.md."
+
+---
+
+### `--revise`: Revise an existing TODO entry with AI-pre-filled suggestions
+
+Read `sections/revise.md` and follow its steps in full.
 
 ---
 
