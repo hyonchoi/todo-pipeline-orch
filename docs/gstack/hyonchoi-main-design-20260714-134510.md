@@ -216,3 +216,73 @@ Create `skills/todos-manager/sections/revise.md` with the workflow spec in this 
 
 - You corrected a premise with precision: "convert is converting the todo, but it converts the format only." That tightened the problem statement — the gap isn't just audit; it's specifically post-convert content gaps.
 - You asked for subcommand-series examples, not just the feature spec. You're thinking about how users actually chain tools, not what one tool does in isolation.
+
+## GSTACK REVIEW REPORT
+
+### Findings
+
+| # | Severity | Confidence | Location | Finding | Decision |
+|---|----------|------------|----------|---------|----------|
+| D1 | P2 | 9/10 | Workflow Step 3 vs --audit SKILL.md | --audit and --revise use different validation heuristics (presence vs presence+quality). User sees contradicting reports. | **A:** Align — add weakness detection to --audit |
+| D2 | P1 | 9/10 | Next Steps / test plan | No automated structural test for in-place file write (Step 8). Most destructive operation has no safety net. | **A:** Add golden-file structural test |
+| D3 | P2 | 8/10 | Workflow Step 4 | Auto-research scoping layer undocumented in auto-research.md. Behavioral layering works but maintainers who only read auto-research.md won't know about partial mode. | **A:** Keep general — document layering contract in revise.md |
+| D4 | P2 | 8/10 | Workflow Step 5-6 | Status marker ([ ], [→], [~]) not exposed as editable field in synthesis block or confirm/edit gate. | **A:** Add Status to synthesis block |
+| D5 | P2 | 9/10 | Workflow Step 8 vs --archive SKILL.md | DRY violation: entry-boundary parsing defined in two places without shared definition. Risk of drift. | **A:** Extract to shared spec file |
+| D6 | P2 | 7/10 | Workflow Step 2 | Ambiguous lookup order when same TODO-ID exists in both TODOS.md and TODOS-archive.md. | **A:** Add explicit TODOS.md-first lookup order |
+| D7 | P3 | 8/10 | Workflow Step 5 | Synthesis block (unchanged) tag format has no concrete visual example. Implementer variance. | **A:** Clarify with concrete example |
+
+### Test Coverage Diagram
+
+```
+CODE PATHS
+[+] sections/revise.md
+  ├── Step 1-2: Validation + ID lookup
+  │   ├── [GAP] Invalid pattern rejection
+  │   ├── [GAP] Non-existent ID rejection
+  │   ├── [GAP] Archived ID rejection (golden test needed)
+  │   └── [GAP] Completed [x] rejection
+  ├── Step 3: Gap scanning
+  │   ├── [GAP] All fields present → "nothing to revise"
+  │   ├── [GAP] Weak field detection
+  │   └── [GAP] Missing field detection
+  ├── Step 4: Auto-research
+  │   ├── [GAP] Fills all gaps
+  │   ├── [GAP] Partial fill + manual questions
+  │   └── [GAP] Zero fill → all manual
+  ├── Step 6-7: Gates
+  │   ├── [GAP] confirm → proceed
+  │   ├── [GAP] edit → re-prompt
+  │   └── [GAP] cancel → exit
+  └── Step 8: Write
+      ├── [GAP] In-place replace (golden test CRITICAL)
+      ├── [GAP] Entry grows → shift entries down
+      └── [GAP] Write fails → no partial write
+
+COVERAGE: 0/15 tested (0%) | GAPS: 15 (2 golden-file critical)
+```
+
+**Required tests (minimum):**
+1. Golden file: in-place write on middle entry → assert boundaries, order, markdown validity
+2. Golden file: archived-only ID → assert rejection
+3. Golden file: completed [x] entry → assert rejection
+4. Golden file: all-fields-present → assert "nothing to revise"
+5. Golden file: entry grows in line count → assert subsequent entries shift down
+
+### Outside Voice
+
+**What's strong:** The design correctly identifies the audit-to-fix gap and reuses auto-research instead of reimplementing. The before/after preview gate is the right safety mechanism for destructive writes. The edge case table is comprehensive.
+
+**What to watch:** The behavioral layering on auto-research is the most fragile part of the design — it's a thin abstraction but undocumented where the base pipeline lives. Write revise.md so the layering contract (what revise.md passes to auto-research.md and how it filters the synthesis) is explicit. That's the difference between "reuses" and "accidentally diverges."
+
+### VERDICT
+
+**APPROVED WITH CONDITIONS** — 7 findings, all addressed interactively. Zero blockers. Conditions:
+1. Add weakness detection to --audit (D1) so both subcommands share a heuristic.
+2. Include golden-file structural tests for in-place write (D2) in the Next Steps.
+3. Extract entry-boundary parsing to shared spec (D5) and update --archive + --revise to reference it.
+4. Add Status field to synthesis block (D4).
+5. Clarify (unchanged) tag format with concrete example (D7).
+6. Specify explicit lookup order for ID resolution (D6).
+7. Document the auto-research scoping layering contract in revise.md (D3).
+
+NO UNRESOLVED DECISIONS
