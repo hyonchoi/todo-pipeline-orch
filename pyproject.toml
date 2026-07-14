@@ -10,6 +10,7 @@ dependencies = [
 
 [project.scripts]
 pipeline-watch = "hermes_pipeline.cli:main"
+hermes-pipeline = "hermes_pipeline.cli:main"
 
 [project.optional-dependencies]
 dev = [
