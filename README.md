@@ -19,7 +19,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 - **Phase 5 code review (v0.4)**: New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q`, with pre-review snapshot, post-review pytest run, deterministic commit-on-pass or restore-on-fail, and machine-verified outcomes (`review_clean`, `review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`)
 - **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
-- **TODOS Manager skill (v2.1)**: Six subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`, `--list`) for managing TODOS.md entries with schema enforcement, stable TODO-<n> IDs, and archiving to TODOS-archive.md. Install via `scripts/install-todos-manager.sh`.
+- **TODOS Manager skill (v2.1)**: Six subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`, `--list`) for managing TODOS.md entries with schema enforcement, auto-research field pre-fills, stable TODO-<n> IDs, and archiving to TODOS-archive.md. Install via `scripts/install-todos-manager.sh`.
 - **Skill test environment (Phase 1)**: `tests/skill-test-environment/` — structural unit tests for the `todos-manager` skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic), backed by golden YAML assertions and a demo-project fixture. Zero token cost, runs in under 5 seconds.
 
 ## Requirements

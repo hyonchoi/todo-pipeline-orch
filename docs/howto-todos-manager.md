@@ -44,7 +44,7 @@ The file should start with the `# TODOS` header followed by a blockquote with fo
 
 ## Add a new TODO entry
 
-The `--add` subcommand walks you through creating a schema-compliant entry with a preview gate before writing to disk.
+The `--add` subcommand creates schema-compliant entries with auto-research to pre-fill fields before you type them. After you provide a title and summary, it silently scans the codebase to derive `What`, `Why`, `Decisions`, and optional fields. Only unresolved gaps become prompts.
 
 ```bash
 todos-manager --add
@@ -53,9 +53,32 @@ todos-manager --add
 **Interactive workflow:**
 
 1. The skill computes the next `TODO-<n>` ID by scanning both TODOS.md and TODOS-archive.md
-2. Prompts for title, summary, and required fields (`What`, `Why`, `Decisions`)
-3. Guides through optional fields (Pros, Cons, Context, Depends on, Assumptions)
-4. Shows a preview of the assembled entry
+2. Prompts for **title** and **summary**
+3. **Auto-research phase** — silently reads TODOS.md, TODOS-archive.md, git log, design docs under `docs/gstack/`, CLAUDE.md, and source files implied by the title. Derives `What`, `Why`, `Pros`, `Cons`, `Context`, `Priority`, `Effort`, `Phase`, `Branch`, `Test Coverage`, `Security Review`, and `Depends on` from what it finds. Budget capped at 20 file reads and 10 searches.
+4. **Gap questions** — for any field research couldn't resolve, asks one question at a time (`Why` first, then `What`, `Priority`, `Effort`, `Depends on`)
+5. **Synthesis block** — shows all derived and user-answered fields with confidence tags (high/medium/low):
+
+```
+======== AUTO-RESEARCH SYNTHESIS ========
+Why:             Prevent API overload under concurrent load    [Confidence: high]
+What:            Add rate-limiting middleware to the API server [Confidence: high]
+Pros:            Production stability, graceful degradation
+Cons:            Migration effort, import path updates
+Context:         docs/gstack/api-rate-limiting.md
+Priority:        P1                                           [Confidence: high]
+Effort:          M                                            [Confidence: medium]
+Phase:           4 (Development)                              [Confidence: high]
+Branch:          feature/rate-limit                           [Confidence: medium]
+Test Coverage:   required                                     [Confidence: high]
+Security Review: not-required                                 [Confidence: high]
+Depends on:      TODO-6                                       [Confidence: high]
+======== END SYNTHESIS ========
+
+These are pre-fills — confirm or edit each in the next step.
+```
+
+6. You confirm the synthesis or edit individual fields
+7. Shows a preview of the assembled entry (see below)
 
 **Preview gate — before writing, you see the full entry:**
 ```
