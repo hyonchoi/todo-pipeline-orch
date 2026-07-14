@@ -15,7 +15,9 @@ An entry starts with a markdown list item containing a status marker followed by
 - [~] **TODO-<n>: <Title>** — <Summary>
 ```
 
-Matching regex: `^(- \[[ ]|→|x|~\] \*\*TODO-\d+:\S)`.
+Matching regex: `^(- \[( |→|x|~)\] \*\*TODO-\d+:)`.
+
+The shared prefix `- \[` consumes the opening bracket. The alternation `( |→|x|~)` matches the status marker. The literal `\]` consumes the closing bracket. This ensures all four markers (`[ ]`, `[→]`, `[x]`, `[~]`) are matched before `**TODO-`.
 
 ## Entry Body
 

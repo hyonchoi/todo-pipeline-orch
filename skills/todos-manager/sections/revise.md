@@ -82,6 +82,7 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
    Depends on:      TODO-10                               [Confidence: high]
    ======== END SYNTHESIS ========
 
+   Confidence: high = derived from strong codebase signal, medium = inferred from context, low = best guess.
    These are pre-fills — confirm or edit each in the next step.
    ```
 
