@@ -40,7 +40,8 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
 
    A field is "weak" if present but below minimums (e.g., Why < 10 chars). `--audit` only checks presence; `--revise` applies stricter heuristics because it fills gaps, not just reports them.
 
-   - If **no gaps** (all required fields present and non-weak, and all optional fields present): print "TODO-N has no missing or weak fields. Nothing to revise." and exit.
+   - If **no gaps** (all required fields present and non-weak): print "TODO-N has no missing or weak fields. Nothing to revise." and exit.
+   - If only optional fields are missing (required fields are present and non-weak): skip auto-research for required fields; present a summary of the entry and ask whether to fill optional gaps. If the user declines, exit without changes.
    - Collect the list of missing or weak fields as `gap_fields`.
 
 4. **Auto-research scoped to gaps:** Read `sections/auto-research.md` and execute the research phase.
