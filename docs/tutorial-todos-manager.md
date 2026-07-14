@@ -1,8 +1,8 @@
 # Getting started with the todos-manager skill
 
-In this tutorial, you'll install the todos-manager skill, initialize TODOS.md for a new project, add entries with schema enforcement, and archive a completed task. You'll see the preview gate, the ID computation, and the enforced format in action.
+In this tutorial, you'll install the todos-manager skill, initialize TODOS.md for a new project, add entries with schema enforcement, archive a completed task, and revise an entry with missing fields. You'll see the preview gate, the ID computation, the enforced format, and the AI-pre-filled revision workflow in action.
 
-**Time: ~10 minutes**
+**Time: ~15 minutes**
 
 ## What you'll need
 
@@ -11,7 +11,7 @@ In this tutorial, you'll install the todos-manager skill, initialize TODOS.md fo
 
 ## What you'll build
 
-A working TODOS.md with three entries: one added, one completed, and one archived. By the end, you'll understand the full lifecycle of a TODO entry — from creation to archive.
+A working TODOS.md with four entries: one added with full fields, one added with a dependency, one completed and archived, and one revised with AI-pre-filled gaps. By the end, you'll understand the full lifecycle of a TODO entry — from creation through revision to archive.
 
 ---
 
@@ -111,7 +111,77 @@ Now TODOS.md has two entries. You can see the enforced format in action — both
 
 ---
 
-## Step 5: Archive a completed TODO
+## Step 5: Add a third TODO with incomplete fields
+
+Add an entry intentionally leaving some fields blank. This simulates a real-world scenario where you create a TODO quickly without enough context to fill in all details:
+
+```bash
+todos-manager --add
+```
+
+When prompted, provide a title and summary but accept minimal values for optional fields — or skip optional fields like `Pros`, `Cons`, and `Context` entirely. The skill writes the entry with whatever you confirmed.
+
+**Output:**
+```
+✓ Entry added as TODO-3.
+```
+
+Now TODOS.md has three entries. TODO-3 has required fields but is missing optional context — exactly the situation `--revise` is designed for.
+
+---
+
+## Step 6: Revise TODO-3 to fill missing fields
+
+Invoke `todos-manager --revise` to fill gaps in TODO-3 using AI-pre-filled suggestions:
+
+```bash
+todos-manager --revise
+```
+
+When prompted for the TODO ID, enter `TODO-3`. The skill scans the entry for missing or weak fields, then silently researches the codebase to pre-fill gaps. You'll see a **revision synthesis block** that shows every field:
+
+- Fields that were already good show with `(unchanged)`
+- New fields derived by auto-research show with `[Confidence: high/medium/low]`
+
+```
+======== REVISION SYNTHESIS ========
+Status:          [ ] pending                        (unchanged)
+What:            Implement rate-limiting middleware  (unchanged)
+Why:             Prevent API overload under load     (unchanged)
+Priority:        P1                                    [Confidence: high]
+Effort:          M                                     [Confidence: medium]
+Phase:           4 (Development)                       [Confidence: medium]
+Branch:          feature/rate-limit                    [Confidence: high]
+Test Coverage:   required                              [Confidence: high]
+Security Review: not-required                          [Confidence: high]
+Pros:            Production stability, graceful degradation [Confidence: medium]
+Cons:            Migration effort, import path updates [Confidence: medium]
+Context:         docs/gstack/api-rate-limiting.md      [Confidence: high]
+======== END SYNTHESIS ========
+
+Confidence: high = derived from strong codebase signal, medium = inferred from context, low = best guess.
+These are pre-fills — confirm or edit each in the next step.
+```
+
+**Confirm or edit** — reply `confirm` to accept all as-is, or list edits like `Effort: L` to change individual fields.
+
+**Preview gate** — you'll see the before and after of the full entry. Type `y` to confirm.
+
+**Output:**
+```
+✓ TODO-3 revised. Updated fields: Priority, Effort, Phase, Branch, Test Coverage, Security Review, Pros, Cons, Context.
+```
+
+Verify the result:
+```bash
+tail -10 TODOS.md
+```
+
+TODO-3 now has the enriched fields. The revision synthesis used codebase signals — like existing design docs and git history — to pre-fill values you didn't have to type. This is the `--audit` + `--revise` loop in action: audit to find gaps, revise to fill them.
+
+---
+
+## Step 7: Archive a completed TODO
 
 Mark TODO-1 as done by changing its status marker to `[x]` in TODOS.md, then run:
 
@@ -142,7 +212,7 @@ TODO-1 is now in the archive. The next `todos-manager --add` will still compute 
 
 A working TODOS.md with:
 - A schema-enforced preamble that documents the entry format
-- Two entries (TODO-1 archived, TODO-2 pending)
+- Three entries (TODO-1 archived, TODO-2 pending, TODO-3 revised with AI-pre-filled fields)
 - An archive file with completed work
 - Stable IDs computed across both TODOS.md and TODOS-archive.md
 
@@ -158,5 +228,6 @@ A working TODOS.md with:
 **Convert an existing TODOS.md:**
 - Run `todos-manager --convert` to add the preamble and validate entries against the enforced schema.
 
-**Audit for compliance:**
+**Audit and revise entries:**
 - Run `todos-manager --audit` to check all entries for missing required fields, invalid status markers, and broken dependency references.
+- Run `todos-manager --revise` to fill missing or weak fields in any entry using AI-pre-filled suggestions.

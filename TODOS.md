@@ -32,10 +32,11 @@
   - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `debug/todos-manager`, Test Coverage `불필요`, Security Review `불필요`
   - **Completed:** v0.4.8 (2026-07-13)
 
-- [ ] **TODO-18: add `--revise` subcommand for fixing existing TODOs** — Fill missing fields or refine decisions after audit/convert
+- [x] **TODO-18: add `--revise` subcommand for fixing existing TODOs** — Fill missing fields or refine decisions after audit/convert
   - **What:** Add a `--revise` subcommand to the todos-manager skill: select an existing TODO-<n> from TODOS.md, scan for missing or weak fields (What, Why, Decisions, Branch, etc.), auto-research the codebase to pre-fill gaps, present a confirm/edit gate, and write the updated entry back to disk. Reuses the auto-research phase from `--add`.
   - **Why:** `--audit` and `--convert` are report-only with no path to fixing discovered issues. After an audit surfaces missing What/Why/Decisions or incomplete fields, users have no skill-driven workflow to fill the gaps — they must manually edit TODOS.md.
   - **Pros:** Closes the audit→fix loop without manual markdown editing. Reuses auto-research from `--add` for gap filling. Keeps entries schema-compliant after `--convert` migration.
   - **Cons:** Adds a subcommand to an already feature-rich skill. Edge case: revising archived entries may surprise users who expect archives to be append-only.
   - **Context:** Skill source: `skills/todos-manager/SKILL.md` (section-skeleton pattern). Related entries in this repo's TODOS-archive.md were flagged by the prior audit (TODO-9, TODO-11, TODO-12, TODO-13, TODO-14, TODO-15 missing What/Why/Branch).
   - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feat/todos-manager-revise`, Test Coverage `required`, Security Review `not-required`
+  - **Completed:** v0.4.10 (2026-07-14)
