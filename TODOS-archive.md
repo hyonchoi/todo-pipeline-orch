@@ -16,7 +16,7 @@ Archived: 2026-07-14T00:00:00Z
 - [x] **TODO-17: Add `--list` subcommand to todos-manager** — List existing active todos, `--all` flag includes archived
   - **What:** Add a `--list` subcommand to the todos-manager skill that displays all active TODO entries from TODOS.md in a formatted, readable summary showing ID, status, title, and summary for each entry. Support an optional `--all` flag that also includes entries from TODOS-archive.md.
   - **Why:** Users frequently need to see what TODOs exist without running a full audit. A lightweight listing command provides quick visibility into project state and reduces context-switching overhead.
-  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `debug/todos-manager`, Test Coverage `불필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `debug/todos-manager`, Test Coverage `not-required`, Security Review `not-required`
   - **Completed:** v0.4.8 (2026-07-13)
 
 - [x] **TODO-16: skill test environment Phase 1 for todos-manager** — Structural unit test suite with golden files
@@ -25,7 +25,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Why:** The `todos-manager` skill (markdown-based, prompt-driven) had no automated regression coverage. Structural unit tests catch schema/logic regressions at zero token cost, in under 5 seconds, before any agent-driven semantic testing is needed.
   - **Context:** Design in [docs/gstack/hyonchoi-main-design-20260711-153841.md](docs/gstack/hyonchoi-main-design-20260711-153841.md). Plan in [docs/superpowers/plans/2026-07-11-skill-test-environment-phase1.md](docs/superpowers/plans/2026-07-11-skill-test-environment-phase1.md). Phase 2 (agent-driven, AI-judged semantic validation) is deferred — related to [[TODO-4]]'s broader integration harness but scoped narrower (structural only, no agent spawning).
   - **Depends on:** none
-  - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/skill-test-environment`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/skill-test-environment`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-15: design and register a dedicated Hermes profile for the pipeline orchestrator** — Purpose-built profile for kanban-as-scheduler
   - **Completed:** docs/superpowers/plans/2026-07-10-pipeline-profile.md (2026-07-10)
@@ -41,7 +41,7 @@ Archived: 2026-07-14T00:00:00Z
     - Safe-mode: enabled to prevent interactive prompts (no `input()`, no user-facing UI).
   - **How — registration:** Provide a `pipeline-watch init` or `pipeline-watch setup-profile` subcommand that calls `hermes profile create <name> --model ... --tools ... --skills ...` or `hermes profile install <dist-url>`. The subcommand should detect whether the profile already exists and skip if so. Run once during onboarding.
   - **Depends on:** none (can be designed now; the default for TODO-14 will point to this profile once it ships)
-  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Test Coverage `필요`, Security Review `필요`
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Test Coverage `required`, Security Review `required`
 
 - [x] **TODO-14: kanban assignee configuration** — Configurable profile for kanban task assignee
   - **Completed:** vUnreleased (2026-07-09)
@@ -49,14 +49,14 @@ Archived: 2026-07-14T00:00:00Z
   - **Why:** Kanban tasks are created with `--assignee` so the dispatcher processes them. The hardcoded value should be configurable per-project so operators can route phases to different profiles (e.g., a dedicated pipeline profile).
   - **How — config shape:** Solved via `.hermes/pipeline.toml` contract (`assignee` field) instead of `config.toml`. `pipeline-watch init` writes the default; `pipeline-watch doctor` validates drift.
   - **Depends on:** none (the `--assignee` flag was added in the circuit breaker / dispatch fix on this branch)
-  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-13: add `--verbose` / `--debug` logging flags** — Improve debugging experience
   - **Completed:** v0.3.2 (2026-06-19)
   - **What:** Add `--verbose` and `--debug` CLI flags to `pipeline-watch` commands. `--verbose` increases log output to include informational details (tick_id, lock state, selection results). `--debug` enables full debug logging (agent call summaries, circuit breaker transitions, kanban registration). Flags should route through Python's logging module with appropriate levels (INFO vs DEBUG).
   - **Why:** Debugging pipeline issues currently requires digging through `.hermes/` state files manually. A `--debug` flag would surface internal state inline — what the selection agent received, what it returned, why a TODO was or wasn't selected, lock acquisition details, etc.
   - **Depends on:** none
-  - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Test Coverage `불필요`, Security Review `불필요`
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Test Coverage `not-required`, Security Review `not-required`
 
 - [x] **TODO-12: enable multi-project tick scanning with project-level config** — Scan-and-per-project-selection tick
   - **Completed:** this branch (2026-06-23)
@@ -76,7 +76,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Cons:** Need to coordinate multiple `register_todo_phases` calls under one lock. The `current_tick_id.txt` becomes shared across projects — need per-project `picked_none` sentinel in outcomes. `build_context` and `run_selection` are project-scoped — the tick loop becomes the orchestrator of multiple contexts.
   - **Context:** The `tick` subcommand currently requires a `project` argument (`cli.py:287`). `collect_pending` in `status.py:67` already demonstrates the scan pattern. `Config.projects_dir` is wired up via `PIPELINE_PROJECTS_DIR`. Slack channel is currently global via `PIPELINE_SLACK_CHANNEL` in `config.py:40`.
   - **Depends on:** none (builds on existing tick infrastructure from TODO-11)
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/multi-project-tick`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/multi-project-tick`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-11: rewrite getting-started tutorial to use manual trigger, not cron** — Testing/debugging without waiting
   - **Completed:** v0.3.1 (2026-06-16)
@@ -86,7 +86,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Cons:** Need to ensure `pipeline-watch tick` shares the same lock semantics and decision pipeline as the cron `pipeline-tick` path — two entry points must behave identically.
   - **Context:** The getting-started tutorial (Step 4) says "The first tick may take up to 5 minutes to fire. While you wait, move on to the next steps." — that's the UX gap. After TODO-10 lands, `pipeline-watch tick` replaces that wait. Check if Hermes cron supports `hermes cron run pipeline-tick` (one-shot fire) — if so, the tutorial could use that instead of adding a new CLI subcommand.
   - **Depends on:** `TODO-10` (needs pipeline-tick to exist before there's something to trigger manually)
-  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `불필요`, Security Review `불필요`
+  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Test Coverage `not-required`, Security Review `not-required`
 
 - [x] **TODO-10: implement `pipeline-tick` Hermes command** — The cron-driven selection loop
   - **Completed:** v0.3.1 (2026-06-16)
@@ -94,14 +94,14 @@ Archived: 2026-07-14T00:00:00Z
   - **Why:** The tutorial (`docs/tutorial-getting-started.md`), README, CHANGELOG, and superpowers plan all assume `pipeline-tick` exists as a Hermes command — but the Python code has no handler for it. The tutorial is ahead of the code; the cron fires a command that isn't registered, so the pipeline never actually drives itself.
   - **Context:** Design lives in [docs/superpowers/plans/2026-06-13-hermes-centric-selection.md](docs/superpowers/plans/2026-06-13-hermes-centric-selection.md) (lines 7, 468, 2119, 2577). State machine in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). Circuit breaker backoff in [hermes_pipeline/circuit.py:21](hermes_pipeline/circuit.py:21) already passes `["hermes", "cron", "set", "pipeline-tick", ...]` but the command itself doesn't exist.
   - **Depends on:** `TODO-2`, `TODO-3`, `TODO-6` (needs hermes decision agent, hermes process routing, hermes LLM routing)
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-9: fix pre-existing eval test failure — missing `.hermes/prompts/selection.md`** — Eval infrastructure repair
   - **What:** The eval test suite (`tests/eval/runner.py::test_selection_fixture`) fails on both `main` and feature branches because `.hermes/prompts/selection.md` does not exist. Create the prompt file or provision it from Hermes.
   - **Why:** Eval tests are the regression gate for selection-agent behavior. Without them, changes to `decision/agent.py` and prompt handling can silently regress.
   - **Context:** Noticed by gstack /ship on 2026-06-15 on branch `worktree-todo-6-hermes-adapter`. Error: `FileNotFoundError: [Errno 2] No such file or directory: '.hermes/prompts/selection.md'` at `hermes_pipeline/decision/agent.py:23` in `compute_prompt_sha()`. Test requires `ANTHROPIC_API_KEY` env var and a working Hermes install with the selection prompt.
   - **Depends on:** none
-  - **Decisions:** Priority `P0`, Effort `S`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P0`, Effort `S`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-8: replace `phase_8_finish_branch` with gstack `ship` — Kanban-gated merge to main, skip PR** — Ship straight to main via Kanban approval
   - **Completed:** v0.3.4 (2026-06-29)
@@ -116,7 +116,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Resolved design — Kanban status reuse:** Reuse the existing `running` status for post-approval execution; **do not** introduce an `approved` status. `PhaseStatus = Literal["running", "done", "failed", "ready_for_review"]` at [kanban.py:21](hermes_pipeline/kanban.py:21) is already wired through `update_phase`, comment formatting, op-log replay, and all adapters — adding a new value means touching every site, every test, and every external board mapping. Semantically `running` is honest: `ready_for_review` is the pause, `running` is execution; there is no third thing to name.
   - **Resolved design — disambiguating "approval" vs "normal running":** Use a runner-side `awaiting_approval` flag in the existing `ready_for_review` state record (do not rely on Kanban status alone — it's external, human-editable, and lossy). Flow: (1) Phase 7 completes → runner writes `ready_for_review` record with `awaiting_approval: true`; Kanban → `ready_for_review`. (2) Watcher poll loop, for each TODO with `awaiting_approval == true`, reads Kanban status; if status is now `running` (operator moved the card), watcher transitions the record to `awaiting_approval: false, approved_at: <ISO-8601>` and dispatches Phase 8. (3) Phase 8 runs `/ship`; runner does not need to re-set Kanban to `running` (operator's move already did so — make it an idempotent no-op write if anything). (4) On success: Kanban → `done`. On failure: Kanban → `failed`, `awaiting_approval` stays `false`, lock held for retry. Watcher check is a one-liner: `if rec.awaiting_approval and kanban.get_status(todo) == "running": resume()`. Gate becomes testable without touching Kanban — flip the flag in a fixture and assert Phase 8 fires.
   - **Depends on:** `TODO-6`, `TODO-7`
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/ship-replaces-finish-branch`, Test Coverage `필요`, Security Review `필요`, Kanban Status Reuse `running (no new approved column)`, Approval Signal `runner-side awaiting_approval flag + Kanban running transition`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/ship-replaces-finish-branch`, Test Coverage `required`, Security Review `required`, Kanban Status Reuse `running (no new approved column)`, Approval Signal `runner-side awaiting_approval flag + Kanban running transition`
 
 - [x] **TODO-7: insert gstack `review` phase before `cso`** — Code-review pass with codex voice
   - **Completed:** v0.4.0 (2026-07-07)
@@ -127,7 +127,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Context:** New phase key suggestion: `phase_5_review`. Prompt: "Run gstack `/code-review --codex` (or `--voice codex`); apply findings with `--fix`; run tests; commit with message `chore: address review findings`." Existing phases live in `configs/phases.yaml`. Routes through Hermes per [[TODO-6]] (`hermes chat -q "use code-review skill ..." -Q`).
   - **Assumptions:** gstack `code-review` skill is installed (see CLAUDE.md skills index — `/code-review` is listed); codex voice is supported by the current `/code-review` invocation; tests are runnable via `uv run pytest` from the repo root.
   - **Depends on:** `TODO-6`
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/phase-5-review`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/phase-5-review`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-6: route LLM queries through `hermes` instead of direct Claude calls** — Hermes as the only LLM surface
   - **Completed:** v0.3.0 (2026-06-15)
@@ -138,7 +138,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Context:** Narrows TODO-3 specifically to LLM query paths (decision agent, selection agent, any ad-hoc Claude calls). Coordinates with TODO-5's model-lifecycle policy. Hermes CLI surfaces: primary path is `hermes chat -q "<prompt>" -Q -m <model> --source tool` (quiet, non-interactive; `--ignore-user-config`/`--ignore-rules`/`--safe-mode` for isolated CI/eval runs). Lower-effort migration path for existing Anthropic-SDK call sites is `hermes proxy start` (local OpenAI-compatible proxy) — just redirect `base_url`. `hermes model` sets default model+provider so `decision/agent.py` no longer hardcodes one. `hermes fallback` already implements the fallback ladder TODO-5 specifies — TODO-5 can collapse into "configure `hermes fallback`" rather than reinventing in `.hermes/config.toml`.
   - **Assumptions:** Hermes is correctly configured with a working model on the target machine, including external Claude invocation (auth via `hermes login` / `hermes auth`, model selectable via `hermes model`, end-to-end query via `hermes chat -q` returns a valid response). The orchestrator does not own Hermes provisioning — broken Hermes config is out of scope and surfaces as a `hermes chat` non-zero exit / stderr, not as logic this task must handle.
   - **Depends on:** `TODO-3`
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-llm-routing`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-llm-routing`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-3: route non-Hermes process spawning through Hermes commands** — Hermes as the only process control surface
   - **What:** Require all process-spawning paths, except direct execution of `hermes ...` itself, to route through Hermes commands instead of invoking tools directly.
@@ -147,7 +147,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Cons:** Increases coupling to Hermes command/skill coverage and may require refactors where code shells out to system tools.
   - **Context:** Examples include using `hermes cron ...` instead of `crontab`, and routing Claude Code invocation through Hermes-managed skill paths.
   - **Depends on:** none
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-process-routing`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-process-routing`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-2: use Hermes agent for TODO parsing and selection** — Agent-first parsing for irregular TODO files
   - **What:** Make TODO parsing and task selection rely on the Hermes agent with an explicit instruction layer instead of assuming a fully strict file schema.
@@ -156,7 +156,7 @@ Archived: 2026-07-14T00:00:00Z
   - **Cons:** Adds prompt-design and evaluation work beyond regex parsing. May require stricter validation for deterministic selection.
   - **Context:** Applies to TODO ingestion and selection behavior across the Hermes pipeline where TODO structure can be mixed or inconsistent.
   - **Depends on:** none
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-todo-selection`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `2 (Design)`, Branch `feature/hermes-todo-selection`, Test Coverage `required`, Security Review `not-required`
 
 - [x] **TODO-1: todos-manager counter recovery mode** — Add `pipeline-watch recover-counter`
   - **Completed:** v0.3.2 (2026-06-19)
@@ -166,4 +166,4 @@ Archived: 2026-07-14T00:00:00Z
   - **Cons:** Not needed until a project has pre-existing `TODO-<n>` entries without a counter file, so it does not block current work.
   - **Context:** See `docs/gstack/hyonchoi-main-design-20260610-195349.md` section "TODOS Manager Skill (`todos-manager`)" and the "NOT in scope" / Test Plan note.
   - **Depends on:** none
-  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Branch `feature/todos-manager-counter-recovery`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P3`, Effort `S`, Phase `4 (Development)`, Branch `feature/todos-manager-counter-recovery`, Test Coverage `required`, Security Review `not-required`
