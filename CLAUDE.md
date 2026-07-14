@@ -18,7 +18,7 @@ for the full plan.
 - Use the `todos-manager` skill for all TODOS.md mutations (add, convert, audit, archive).
 - TODOS.md format is enforced — see preamble blockquote in TODOS.md for schema rules.
 - Skill source: `skills/todos-manager/SKILL.md`. Install via `scripts/install-todos-manager.sh` to symlink to `~/.claude/skills/todos-manager/` and/or `~/.agents/skills/todos-manager/`.
-- Subcommands: `--add` (new entry), `--init` (new project), `--convert` (add preamble + validate), `--audit` (format check), `--archive` (move `[x]` to TODOS-archive.md), `--list` (show active entries, `--all` includes archived).
+- Subcommands: `--add` (new entry), `--init` (new project), `--convert` (add preamble + validate), `--audit` (format check), `--archive` (move `[x]` to TODOS-archive.md), `--list` (show active entries, `--all` includes archived), `--revise` (fill missing or weak fields with AI-pre-filled suggestions).
 
 ## Document management for gstack and superpowers
 

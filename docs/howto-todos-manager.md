@@ -1,6 +1,6 @@
 # How to manage TODOS.md with the todos-manager skill
 
-This guide covers the six subcommands of the `todos-manager` skill for adding, converting, auditing, listing, and archiving TODOS.md entries. Each section shows real commands and expected output.
+This guide covers the seven subcommands of the `todos-manager` skill for adding, converting, auditing, listing, archiving, and revising TODOS.md entries. Each section shows real commands and expected output.
 
 - **`--init`** — create TODOS.md with schema preamble and TODOS-archive.md
 - **`--add`** — add a new entry with field prompts and a preview gate
@@ -8,6 +8,7 @@ This guide covers the six subcommands of the `todos-manager` skill for adding, c
 - **`--audit`** — check format compliance without modifying files
 - **`--archive`** — move completed `[x]` entries to TODOS-archive.md
 - **`--list`** — display active TODO entries as a table (`--all` also shows archived)
+- **`--revise`** — fill missing or weak fields in an existing entry with AI-pre-filled suggestions
 
 ## Prerequisites
 
@@ -226,6 +227,56 @@ Showing 1 active entries. 3 archived entries.
 
 If TODOS.md has no entries and `--all` was not passed, the skill prints "No active TODOs found." and exits. This is a report-only subcommand — it never modifies files.
 
+## Revise an existing TODO entry
+
+After `--audit` surfaces entries with missing or weak fields, `--revise` closes the loop by filling gaps with AI-pre-filled values derived from codebase signals. Reuses the auto-research phase from `--add`.
+
+```bash
+todos-manager --revise
+```
+
+**Interactive workflow:**
+
+1. Prompts for the TODO ID to revise (e.g. `TODO-5`)
+2. Validates the ID exists in TODOS.md and is not archived or completed
+3. Scans the entry for missing or weak fields (What, Why, Decisions, Pros, Cons, Context, Depends on, Assumptions)
+4. **Auto-research phase** — reads relevant files to pre-fill gaps, scoped only to missing or weak fields
+5. **Synthesis block** — shows all fields with `(unchanged)` for good fields and `[Confidence: high/medium/low]` for derived values
+6. **Confirm or edit** — accept all as-is or edit individual fields with `field: new value`
+7. **Preview gate** — shows before/after diff of the full entry. Type `y` to confirm, `edit` to re-edit (no re-research), or `cancel` to abort
+
+**Example synthesis block:**
+```
+======== REVISION SYNTHESIS ========
+Status:          [ ] pending                        (unchanged)
+What:            Split pipeline_watcher.py into modules per design doc (unchanged)
+Why:             Single-file monolith is hard to test and extend.      (unchanged)
+Priority:        P1                                    [Confidence: high]
+Effort:          M                                     [Confidence: medium]
+Phase:           4 (Development)                       [Confidence: medium]
+Branch:          feature/modularize-watcher            [Confidence: high]
+Test Coverage:   required                              [Confidence: high]
+Security Review: not-required                          [Confidence: high]
+Pros:            Testable modules, clear boundaries    [Confidence: medium]
+Cons:            Migration effort, import path updates [Confidence: medium]
+Context:         docs/pipeline-modularization-plan.md  [Confidence: high]
+Depends on:      TODO-10                               [Confidence: high]
+======== END SYNTHESIS ========
+
+Confidence: high = derived from strong codebase signal, medium = inferred from context, low = best guess.
+These are pre-fills — confirm or edit each in the next step.
+```
+
+**Constraints:**
+- Only revises active entries in TODOS.md — archived entries in TODOS-archive.md are never modified
+- One entry at a time — user selects by TODO-ID
+- If all required fields are present and non-weak, prints "TODO-N has no missing or weak fields. Nothing to revise." and exits
+
+**Output on success:**
+```
+✓ TODO-5 revised. Updated fields: Priority, Effort, Phase, Branch, Test Coverage, Security Review, Pros, Cons, Context, Depends on.
+```
+
 ## Verification
 
 After any subcommand, verify the result:
@@ -236,6 +287,7 @@ After any subcommand, verify the result:
 - **`--audit`:** A structured report with zero or more issues
 - **`--archive`:** TODOS.md has fewer entries; TODOS-archive.md has the moved entries
 - **`--list`:** A markdown table matching the current entries in TODOS.md (and TODOS-archive.md if `--all`)
+- **`--revise`:** The targeted entry in TODOS.md has updated fields; entry order and other entries unchanged
 
 ## Troubleshooting
 

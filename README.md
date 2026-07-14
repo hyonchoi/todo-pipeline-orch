@@ -19,7 +19,7 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 - **Phase 5 code review (v0.4)**: New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q`, with pre-review snapshot, post-review pytest run, deterministic commit-on-pass or restore-on-fail, and machine-verified outcomes (`review_clean`, `review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`)
 - **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
-- **TODOS Manager skill (v2.1)**: Six subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`, `--list`) for managing TODOS.md entries with schema enforcement, auto-research field pre-fills, stable TODO-<n> IDs, and archiving to TODOS-archive.md. Install via `scripts/install-todos-manager.sh`.
+- **TODOS Manager skill (v2.1)**: Seven subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`, `--list`, `--revise`) for managing TODOS.md entries with schema enforcement, auto-research field pre-fills, stable TODO-<n> IDs, archiving to TODOS-archive.md, and AI-assisted revision of existing entries. Install via `scripts/install-todos-manager.sh`.
 - **Skill test environment (Phase 1)**: `tests/skill-test-environment/` — structural unit tests for the `todos-manager` skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic), backed by golden YAML assertions and a demo-project fixture. Zero token cost, runs in under 5 seconds.
 
 ## Requirements
@@ -61,7 +61,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Why versioned contracts, drift detection, capability gates |
 | [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
 | [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works and design rationale |
-| [TODOS Manager skill](skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 6 subcommands |
+| [TODOS Manager skill](skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 7 subcommands |
 | [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step: init, add, archive a completed TODO |
 | [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using --init, --add, --convert, --audit, --archive, --list |
 | [Install TODOS Manager](scripts/install-todos-manager.sh) | How-to | Symlink skill to user-level skill directories |
@@ -75,7 +75,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 ## TODOS Manager Skill (v2)
 
-The `todos-manager` skill provides schema-enforced TODOS.md management with six subcommands:
+The `todos-manager` skill provides schema-enforced TODOS.md management with seven subcommands:
 
 | Subcommand | Purpose |
 |---|---|
@@ -85,6 +85,7 @@ The `todos-manager` skill provides schema-enforced TODOS.md management with six 
 | `--audit` | Audit TODOS.md for format compliance (no auto-fix) |
 | `--archive` | Move all `[x]` completed entries to TODOS-archive.md |
 | `--list` | List active TODO entries as a table (`--all` also shows archived) |
+| `--revise` | Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions |
 
 Install the skill from the project source to your user-level skill directories:
 
