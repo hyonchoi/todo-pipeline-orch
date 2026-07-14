@@ -396,11 +396,8 @@ def _strip_global_flags(argv: Optional[list[str]]) -> tuple[bool, bool, list[str
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
-    # Derive prog from the actual invocation name so both `pipeline-watch`
-    # and `hermes-pipeline` entrypoints report the correct name.
-    _prog = sys.argv[0].split("/")[-1].replace(".py", "") or "pipeline-watch"
     parser = argparse.ArgumentParser(
-        prog=_prog,
+        prog="pipeline-watch",
         description="Hermes pipeline orchestrator: merge, approve, status, and kill commands.",
     )
     parser.add_argument(
