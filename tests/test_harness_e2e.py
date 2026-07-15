@@ -22,9 +22,7 @@ def _skip_preflight(monkeypatch):
     monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
 
 
-def test_happy_path_e2e_runs_all_phases_and_generates_report(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
-
+def test_happy_path_e2e_runs_all_phases_and_generates_report(tmp_path):
     with patch("hermes_pipeline.phases.run") as mock_run:
         mock_run.return_value = {"status": "success"}
 
@@ -54,10 +52,9 @@ def test_happy_path_e2e_runs_all_phases_and_generates_report(tmp_path, monkeypat
     assert "passed" in result.summary
 
 
-def test_happy_path_e2e_single_phase_execution(tmp_path, monkeypatch):
+def test_happy_path_e2e_single_phase_execution(tmp_path):
     from hermes_pipeline.phases import load_phases
 
-    monkeypatch.setenv("HOME", str(tmp_path))
     single_phase_key = load_phases()[0].phase_key
 
     with patch("hermes_pipeline.phases.run") as mock_run:
@@ -81,11 +78,10 @@ def test_happy_path_e2e_single_phase_execution(tmp_path, monkeypatch):
     assert report["phases"][0]["phase_key"] == single_phase_key
 
 
-def test_happy_path_e2e_phase_failure_recorded_and_run_continues(tmp_path, monkeypatch):
+def test_happy_path_e2e_phase_failure_recorded_and_run_continues(tmp_path):
     from hermes_pipeline.hermes_adapter import HermesCallError
     from hermes_pipeline.phases import load_phases
 
-    monkeypatch.setenv("HOME", str(tmp_path))
     all_phases = load_phases()
     dispatched_phase_keys = [p.phase_key for p in all_phases if not p.gate]
     failing_phase = dispatched_phase_keys[0]
