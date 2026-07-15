@@ -255,7 +255,6 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
         timeout=phase.timeout,
         cwd=kw.get("project_dir"),
         on_pid=_record_child_pid,
-        env=kw.get("env"),
     )
 
     if result["returncode"] != 0:

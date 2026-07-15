@@ -276,7 +276,7 @@ class PipelineRunner:
         if had_failures:
             log.warning("Pipeline completed with phase failures (continue_on_failure)")
             try:
-                self.kanban.clear_active_task(project=self.project)
+                self.kanban.clear_active_task(project=self.project, outcome="failed")
             except Exception as e:
                 log.warning("kanban.clear_active_task failed: %s", e)
             return False
