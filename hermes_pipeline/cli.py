@@ -533,6 +533,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_profile_parser.set_defaults(func=_cmd_install_profile)
 
+    # test: Mock integration test harness
+    test_parser = subparsers.add_parser(
+        "test",
+        help="Run mock integration test harness against mock project data",
+    )
+    test_parser.add_argument(
+        "--fixture", required=True,
+        help="Fixture name to use (e.g., happy-path)",
+    )
+    test_parser.add_argument(
+        "--loop", action="store_true",
+        help="Re-run from scratch and diff report against previous run",
+    )
+    test_parser.add_argument(
+        "--phase", default=None,
+        help="Run only a single phase by key (e.g., phase_2_autoplan)",
+    )
+    test_parser.add_argument(
+        "--keep", action="store_true",
+        help="Keep temp directory after run for inspection",
+    )
+    test_parser.add_argument(
+        "--timeout", type=int, default=3600,
+        help="Overall run timeout in seconds (default: 3600 = 60min)",
+    )
+    test_parser.add_argument(
+        "--convergence-threshold", type=int, default=3,
+        help="Consecutive same-class failures to halt run (default: 3)",
+    )
+    test_parser.set_defaults(func=_cmd_test)
+
     return parser
 
 
@@ -1509,6 +1540,27 @@ def _cmd_install_profile(args, config: Config) -> int:
     print("Then verify with:")
     print("  pipeline-watch doctor <project>")
     return 0
+
+
+def _cmd_test(args, config: Config) -> int:
+    """Handle 'test' subcommand — mock integration test harness."""
+    from .harness import run_harness
+    try:
+        result = run_harness(
+            fixture_name=args.fixture,
+            loop=args.loop,
+            phase_only=args.phase,
+            keep_dir=args.keep,
+            timeout=args.timeout,
+            convergence_threshold=args.convergence_threshold,
+            config=config,
+        )
+        if result.exit_code != 0:
+            return result.exit_code
+        return 0
+    except Exception as e:
+        log.error("test harness failed: %s", e, exc_info=True)
+        return 2
 
 
 def main(argv: Optional[list[str]] = None) -> int:
