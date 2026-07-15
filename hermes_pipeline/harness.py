@@ -22,9 +22,11 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     """Create a mock project in *path* for integration testing."""
     path.mkdir(parents=True, exist_ok=True)
 
-    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.email", "test@localhost"], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True, capture_output=True)
+    _env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+
+    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True, env=_env)
+    subprocess.run(["git", "config", "user.email", "test@localhost"], cwd=path, check=True, capture_output=True, env=_env)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True, capture_output=True, env=_env)
 
     todos_content = _get_todos_for_fixture(fixture_name)
     (path / "TODOS.md").write_text(todos_content)
@@ -150,7 +152,6 @@ def _classify_error_class(exc: Exception) -> str:
         HermesCallError,
         HermesDependencyError,
     )
-    from .gates import GateStatus  # noqa: F401  (imported for symmetry with gate errors below)
 
     if isinstance(exc, (HermesDependencyError, ClaudeDependencyError)):
         return "dependency_error"
@@ -257,19 +258,24 @@ def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
 
 @contextmanager
 def isolate_config(*, state_dir: Path, lock_dir: Path):
-    """Context manager that sets PIPELINE_* env vars for config isolation."""
+    """Context manager that sets PIPELINE_* env vars for config isolation.
+
+    Also overrides HOME to a temp dir so Hermes/Claude CLI cannot read
+    user-level config (~/.hermes/, ~/.claude/) with real API keys or state.
+    """
     saved = {}
-    for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR"):
+    for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR", "HOME"):
         if key in os.environ:
             saved[key] = os.environ[key]
 
     os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
     os.environ["PIPELINE_LOCK_DIR"] = str(lock_dir)
+    os.environ["HOME"] = str(lock_dir.parent)  # points to temp_dir/.hermes parent
 
     try:
         yield
     finally:
-        for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR"):
+        for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR", "HOME"):
             if key in saved:
                 os.environ[key] = saved[key]
             else:
@@ -302,6 +308,18 @@ def _kill_hung_phase_subprocess(*, state_dir: Path, todo_id: int) -> None:
     if pid is None:
         return
     try:
+        # Verify the PID is still alive before attempting to kill the session group.
+        # os.kill(pid, 0) raises ProcessLookupError if the process already exited,
+        # which prevents SIGKILL from hitting an unrelated process that reused the PID.
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return
+    except PermissionError:
+        # Process exists but we can't signal it; skip killpg to avoid collateral damage.
+        return
+    try:
+        # phases.py spawns subprocesses with start_new_session=True, so pid is a
+        # session leader and killpg(pgid=pid) targets only that process's group.
         os.killpg(pid, _signal.SIGKILL)
     except (ProcessLookupError, PermissionError, OSError) as e:
         log.warning("failed to kill hung phase subprocess pid=%s: %s", pid, e)
