@@ -260,22 +260,21 @@ def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
 def isolate_config(*, state_dir: Path, lock_dir: Path):
     """Context manager that sets PIPELINE_* env vars for config isolation.
 
-    Also overrides HOME to a temp dir so Hermes/Claude CLI cannot read
-    user-level config (~/.hermes/, ~/.claude/) with real API keys or state.
+    HOME is left untouched — the harness invokes real hermes/claude CLI
+    subprocesses, which need the real $HOME to read auth credentials.
     """
     saved = {}
-    for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR", "HOME"):
+    for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR"):
         if key in os.environ:
             saved[key] = os.environ[key]
 
     os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
     os.environ["PIPELINE_LOCK_DIR"] = str(lock_dir)
-    os.environ["HOME"] = str(lock_dir.parent)  # points to temp_dir/.hermes parent
 
     try:
         yield
     finally:
-        for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR", "HOME"):
+        for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR"):
             if key in saved:
                 os.environ[key] = saved[key]
             else:
