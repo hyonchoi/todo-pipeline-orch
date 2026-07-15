@@ -312,3 +312,202 @@ def test_runner_kanban_ready_for_review_status(tmp_path):
         if "ready_for_review" in str(c)
     ]
     assert len(ready_for_review_calls) > 0
+
+
+# ============================================================================
+# TE.continue_on_failure: Runner with continue_on_failure + monitor
+# ============================================================================
+
+
+def test_runner_continue_on_failure(tmp_path):
+    """Runner continues to next phase when continue_on_failure=True."""
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = None
+    kanban.update_phase.return_value = None
+    state = MagicMock(spec=State)
+
+    phases = [
+        Phase(phase_key="phase_2", name="Phase 2", prompt="p2", tools="", turns=0),
+        Phase(phase_key="phase_3", name="Phase 3", prompt="p3", tools="", turns=0),
+        Phase(phase_key="phase_4", name="Phase 4", prompt="p4", tools="", turns=0),
+    ]
+
+    call_order = []
+
+    def run_phase_fn(phase: Phase) -> int:
+        call_order.append(phase.phase_key)
+        return 1 if phase.phase_key == "phase_3" else 0
+
+    runner = PipelineRunner(
+        project="test", project_dir=tmp_path, branch="feat/test",
+        todo_id=1, title="Test", phases=phases, state=state,
+        kanban=kanban, run_phase_fn=run_phase_fn,
+        continue_on_failure=True,
+    )
+    result = runner.run()
+
+    assert "phase_2" in call_order
+    assert "phase_3" in call_order
+    assert "phase_4" in call_order
+    assert result is False
+
+
+def test_runner_auto_approve_gates_when_continue_on_failure(tmp_path):
+    """Gate phases short-circuit to success when continue_on_failure=True."""
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = None
+    kanban.update_phase.return_value = None
+    state = MagicMock(spec=State)
+
+    phases = [
+        Phase(phase_key="phase_2", name="Phase 2", prompt="p2", tools="", turns=0),
+        Phase(phase_key="phase_2b_plan_gate", name="Phase 2b: Plan Gate", prompt="", tools="", turns=0, gate=True),
+        Phase(phase_key="phase_3", name="Phase 3", prompt="p3", tools="", turns=0),
+    ]
+
+    call_order = []
+
+    def run_phase_fn(phase: Phase) -> int:
+        call_order.append(phase.phase_key)
+        return 0
+
+    runner = PipelineRunner(
+        project="test", project_dir=tmp_path, branch="feat/test",
+        todo_id=1, title="Test", phases=phases, state=state,
+        kanban=kanban, run_phase_fn=run_phase_fn,
+        continue_on_failure=True,
+    )
+    runner.run()
+
+    assert "phase_2b_plan_gate" not in call_order
+
+
+def test_runner_monitor_callback_on_phase_transitions(tmp_path):
+    """Runner calls monitor callback on each phase transition."""
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = None
+    kanban.update_phase.return_value = None
+    state = MagicMock(spec=State)
+
+    phases = [
+        Phase(phase_key="phase_2", name="Phase 2", prompt="p2", tools="", turns=0),
+        Phase(phase_key="phase_3", name="Phase 3", prompt="p3", tools="", turns=0),
+    ]
+
+    events = []
+
+    def monitor(event_type, data=None):
+        events.append((event_type, data))
+
+    def run_phase_fn(phase: Phase) -> int:
+        return 0
+
+    runner = PipelineRunner(
+        project="test", project_dir=tmp_path, branch="feat/test",
+        todo_id=1, title="Test", phases=phases, state=state,
+        kanban=kanban, run_phase_fn=run_phase_fn,
+        monitor=monitor,
+    )
+    runner.run()
+
+    started = [e for e in events if e[0] == "phase_started"]
+    assert len(started) == 2
+    assert started[0][1]["phase_key"] == "phase_2"
+
+    completed = [e for e in events if e[0] == "phase_completed"]
+    assert len(completed) == 2
+    assert "duration_ms" in completed[0][1]
+
+
+def test_runner_monitor_callback_on_phase_failure(tmp_path):
+    """Runner calls monitor with phase_failed when a phase fails."""
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = None
+    kanban.update_phase.return_value = None
+    state = MagicMock(spec=State)
+
+    phases = [
+        Phase(phase_key="phase_2", name="Phase 2", prompt="p2", tools="", turns=0),
+    ]
+
+    events = []
+
+    def monitor(event_type, data=None):
+        events.append((event_type, data))
+
+    def run_phase_fn(phase: Phase) -> int:
+        return 1
+
+    runner = PipelineRunner(
+        project="test", project_dir=tmp_path, branch="feat/test",
+        todo_id=1, title="Test", phases=phases, state=state,
+        kanban=kanban, run_phase_fn=run_phase_fn,
+        monitor=monitor,
+    )
+    runner.run()
+
+    failed = [e for e in events if e[0] == "phase_failed"]
+    assert len(failed) == 1
+    assert failed[0][1]["phase_key"] == "phase_2"
+
+
+def test_runner_continue_on_failure_with_monitor(tmp_path):
+    """Monitor receives correct events when continue_on_failure is active."""
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = None
+    kanban.update_phase.return_value = None
+    kanban.clear_active_task.return_value = None
+    state = MagicMock(spec=State)
+
+    phases = [
+        Phase(phase_key="phase_2", name="Phase 2", prompt="p2", tools="", turns=0),
+        Phase(phase_key="phase_2b_plan_gate", name="Phase 2b: Gate", prompt="", tools="", turns=0, gate=True),
+        Phase(phase_key="phase_3", name="Phase 3", prompt="p3", tools="", turns=0),
+    ]
+
+    events = []
+
+    def monitor(event_type, data=None):
+        events.append((event_type, data))
+
+    def run_phase_fn(phase: Phase) -> int:
+        return 1 if phase.phase_key == "phase_3" else 0
+
+    runner = PipelineRunner(
+        project="test", project_dir=tmp_path, branch="feat/test",
+        todo_id=1, title="Test", phases=phases, state=state,
+        kanban=kanban, run_phase_fn=run_phase_fn,
+        continue_on_failure=True,
+        monitor=monitor,
+    )
+    result = runner.run()
+
+    assert result is False
+    gate_failed = [e for e in events if e[0] == "phase_failed" and e[1]["phase_key"] == "phase_2b_plan_gate"]
+    assert len(gate_failed) == 0
+    phase3_failed = [e for e in events if e[0] == "phase_failed" and e[1]["phase_key"] == "phase_3"]
+    assert len(phase3_failed) == 1
+
+
+def test_runner_no_monitor_when_not_provided(tmp_path):
+    """Runner works correctly when monitor=None."""
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = None
+    kanban.update_phase.return_value = None
+    state = MagicMock(spec=State)
+
+    phases = [
+        Phase(phase_key="phase_2", name="Phase 2", prompt="p2", tools="", turns=0),
+    ]
+
+    def run_phase_fn(phase: Phase) -> int:
+        return 0
+
+    runner = PipelineRunner(
+        project="test", project_dir=tmp_path, branch="feat/test",
+        todo_id=1, title="Test", phases=phases, state=state,
+        kanban=kanban, run_phase_fn=run_phase_fn,
+    )
+    result = runner.run()
+
+    assert result is True
