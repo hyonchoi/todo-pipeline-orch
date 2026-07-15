@@ -13,7 +13,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 log = logging.getLogger(__name__)
 
@@ -75,17 +75,21 @@ def _get_todo_id_for_fixture(fixture_name: str) -> int:
 
 def preflight_check() -> None:
     """Verify required CLI tools are available."""
-    required = [
-        ("git", "Git is not installed or not on PATH. "
-                 "Install: https://git-scm.com"),
-        ("hermes", "Hermes CLI is not installed or not on PATH. "
-                    "Install: https://hermos.dev"),
-        ("claude", "Claude Code CLI is not installed or not on PATH. "
-                    "Install: https://claude.ai/code"),
-    ]
-    for cmd, msg in required:
-        if shutil.which(cmd) is None:
-            raise RuntimeError(f"Missing dependency: {cmd} — {msg}")
+    from .hermes_adapter import ClaudeDependencyError, HermesDependencyError
+
+    if shutil.which("git") is None:
+        raise RuntimeError(
+            "Missing dependency: git — Git is not installed or not on PATH. "
+            "Install: https://git-scm.com"
+        )
+    if shutil.which("hermes") is None:
+        raise HermesDependencyError(
+            "Hermes CLI is not installed or not on PATH. Install: https://hermos.dev"
+        )
+    if shutil.which("claude") is None:
+        raise ClaudeDependencyError(
+            "Claude Code CLI is not installed or not on PATH. Install: https://claude.ai/code"
+        )
 
 
 @dataclass
@@ -132,6 +136,112 @@ class HarnessMonitor:
 
 
 from .phases import Phase
+
+
+class ConvergenceHaltError(Exception):
+    """Raised when the convergence detector halts a run mid-phase-loop."""
+
+
+def _classify_error_class(exc: Exception) -> str:
+    """Bucket an exception into a coarse error class for convergence tracking / reports."""
+    from .hermes_adapter import (
+        ClaudeCallError,
+        ClaudeDependencyError,
+        HermesCallError,
+        HermesDependencyError,
+    )
+    from .gates import GateStatus  # noqa: F401  (imported for symmetry with gate errors below)
+
+    if isinstance(exc, (HermesDependencyError, ClaudeDependencyError)):
+        return "dependency_error"
+    if isinstance(exc, HermesCallError):
+        return "hermes_error"
+    if isinstance(exc, ClaudeCallError):
+        return "claude_error"
+    if isinstance(exc, TimeoutError):
+        return "timeout"
+    return "phase_failure"
+
+
+def _dispatch_phase(
+    phase: Phase,
+    *,
+    state_dir: Path,
+    todo_id: int,
+    tick_id: str,
+    project_slug: str,
+    project_dir: Path,
+    error_holder: dict[str, Any],
+) -> int:
+    """Run a single phase through the real pipeline entrypoint (`phases.run`).
+
+    This dispatches actual Hermes / Claude Code subprocess calls — the same
+    code path production pipeline ticks use — rather than a stub. Returns
+    0 on success, 1 on failure (classified error stashed in error_holder for
+    the monitor wrapper to attach to the phase_failed event).
+    """
+    from .phases import run as phases_run
+
+    try:
+        phases_run(
+            state_dir=state_dir,
+            todo_id=f"TODO-{todo_id}" if isinstance(todo_id, int) else todo_id,
+            tick_id=tick_id,
+            phase_key=phase.phase_key,
+            project_slug=project_slug,
+            project_dir=project_dir,
+        )
+        return 0
+    except Exception as e:  # noqa: BLE001 - classify and report, don't crash the harness
+        error_holder["error_class"] = _classify_error_class(e)
+        error_holder["error_message"] = str(e)[:500]
+        log.warning("phase %s failed: %s", phase.phase_key, e)
+        return 1
+
+
+class _ConvergenceMonitor:
+    """Wraps a monitor callback: forwards events, feeds the convergence detector,
+    and tracks the currently in-flight phase for partial-report generation on
+    overall-timeout. Raises ConvergenceHaltError if the detector trips.
+    """
+
+    def __init__(
+        self,
+        inner: Callable[[str, dict[str, Any] | None], None],
+        detector: "ConvergenceDetector",
+        error_holder: dict[str, Any],
+    ) -> None:
+        self._inner = inner
+        self._detector = detector
+        self._holder = error_holder
+        self.current_phase_key: str | None = None
+
+    def __call__(self, event_type: str, data: dict[str, Any] | None = None) -> None:
+        data = dict(data or {})
+
+        if event_type == "phase_started":
+            self.current_phase_key = data.get("phase_key")
+            self._inner(event_type, data)
+            return
+
+        if event_type == "phase_failed":
+            error_class = self._holder.pop("error_class", "phase_failure")
+            data["error_class"] = error_class
+            self._inner(event_type, data)
+            self._detector.record(data.get("phase_key", ""), error_class)
+            if self._detector.should_halt():
+                raise ConvergenceHaltError(
+                    f"convergence detector: {self._detector.threshold}+ consecutive "
+                    f"{error_class} failures, halting run"
+                )
+            return
+
+        if event_type == "phase_completed":
+            self._inner(event_type, data)
+            self._detector.record(data.get("phase_key", ""), None)
+            return
+
+        self._inner(event_type, data)
 
 
 def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
@@ -186,11 +296,14 @@ def run_harness(
     config: Any,
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
+    import threading
+
     from .runner import PipelineRunner
     from .phases import load_phases
     from .test_report import generate_report, summarize_report, diff_reports, summarize_diff
     from .state import State
     from .kanban import NullKanbanAdapter
+    from .logging_setup import new_tick_id
 
     preflight_check()
 
@@ -203,7 +316,10 @@ def run_harness(
         lock_dir.mkdir(parents=True, exist_ok=True)
 
         events_log = temp_dir / "events.jsonl"
-        monitor = HarnessMonitor(events_log)
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=convergence_threshold)
+        error_holder: dict[str, Any] = {}
+        monitor = _ConvergenceMonitor(base_monitor, detector, error_holder)
 
         all_phases = load_phases()
         phases = all_phases
@@ -223,6 +339,8 @@ def run_harness(
             ready_dir=ready_dir,
         )
 
+        tick_id = new_tick_id()
+
         runner = PipelineRunner(
             project=fixture["project_slug"],
             project_dir=temp_dir,
@@ -232,18 +350,57 @@ def run_harness(
             phases=phases,
             state=state,
             kanban=kanban,
-            run_phase_fn=lambda phase: 0,
+            run_phase_fn=lambda phase: _dispatch_phase(
+                phase,
+                state_dir=state_dir,
+                todo_id=fixture["todo_id"],
+                tick_id=tick_id,
+                project_slug=fixture["project_slug"],
+                project_dir=temp_dir,
+                error_holder=error_holder,
+            ),
             continue_on_failure=True,
             monitor=monitor,
         )
 
+        timed_out = False
         with isolate_config(state_dir=state_dir, lock_dir=lock_dir):
-            success = runner.run()
+            result_box: dict[str, Any] = {}
+
+            def _run_and_capture() -> None:
+                try:
+                    result_box["success"] = runner.run()
+                except ConvergenceHaltError as e:
+                    result_box["convergence_error"] = e
+                except Exception as e:  # noqa: BLE001 - surfaced via result_box
+                    result_box["exception"] = e
+
+            worker = threading.Thread(target=_run_and_capture, daemon=True)
+            worker.start()
+            worker.join(timeout=timeout)
+
+            if worker.is_alive():
+                timed_out = True
+                success = False
+            elif "convergence_error" in result_box:
+                log.warning(str(result_box["convergence_error"]))
+                success = False
+            elif "exception" in result_box:
+                raise result_box["exception"]
+            else:
+                success = result_box["success"]
+
+        if timed_out and monitor.current_phase_key:
+            # Overall timeout fired mid-phase: record it so the report reflects
+            # a timeout rather than silently truncating the event log.
+            base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
 
         output_dir = temp_dir / "reports"
         report = generate_report(events_log, output_dir)
         report_json = output_dir / "report.json"
         summary = summarize_report(report_json)
+        if timed_out:
+            summary = f"[overall timeout after {timeout}s] " + summary
 
         if loop:
             prev_reports = sorted(output_dir.parent.glob(f"{fixture_name}-report.*.json"))
@@ -259,7 +416,7 @@ def run_harness(
             next_report = output_dir.parent / f"{fixture_name}-report.{next_n}.json"
             next_report.write_text(report_json.read_text())
 
-        exit_code = 0 if success else 1
+        exit_code = 0 if (success and not timed_out) else 1
 
         return HarnessResult(
             exit_code=exit_code,
