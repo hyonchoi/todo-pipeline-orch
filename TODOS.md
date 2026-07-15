@@ -34,5 +34,5 @@
   - **Context:** TODO-4 (parent), TODO-16 (skill-test-environment Phase 1, tests/skill-test-environment/). Pipeline modules: hermes_pipeline/decision/, hermes_pipeline/kanban.py, hermes_pipeline/runner.py, hermes_pipeline/phases.py
   - **Depends on:** `TODO-4`, `TODO-2`, `TODO-3`
   - **Decisions:** Priority `P1`, Effort `L`, Phase `4 (Development)`, Branch `feature/integration-test-harness`, Test Coverage `required`, Security Review `not-required`
-  - **Completed:** v0.4.11.0 (2026-07-15)
+  - **Completed:** v0.4.11 (2026-07-15)
 

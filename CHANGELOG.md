@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.11.0] - 2026-07-15
+## [0.4.11] - 2026-07-15
 
 ### Added
 - **Mock integration test harness** — Repeatable, verifiable end-to-end pipeline testing. Creates mock projects with preset TODOs, runs the full pipeline through isolated temp directories, monitors phase transitions, generates JSONL event logs and structured findings reports. Supports iterative fix cycles with `--loop` to diff reports across runs.

@@ -23,12 +23,11 @@ in a drifted state every time unless you fix it manually.
 Whenever VERSION is bumped (by `/ship`, or manually), ALL FOUR of these must be updated
 **in the same commit**:
 
-1. **`VERSION`** — 4-digit `MAJOR.MINOR.PATCH.MICRO` (e.g. `0.4.11.0`)
-2. **`pyproject.toml`** — `version = "MAJOR.MINOR.PATCH"` (3-digit only — this field has
-   never tracked the MICRO digit; strip it, e.g. VERSION `0.4.11.0` → pyproject `0.4.11`)
+1. **`VERSION`** — 3-digit `MAJOR.MINOR.PATCH` (e.g. `0.4.11`)
+2. **`pyproject.toml`** — `version = "MAJOR.MINOR.PATCH"` (must match VERSION exactly)
 3. **`uv.lock`** — run `uv sync` after editing pyproject.toml to regenerate the
    `hermes-pipeline` package entry's version; do NOT hand-edit uv.lock
-4. **`CHANGELOG.md`** — new `## [X.Y.Z.W] - YYYY-MM-DD` entry
+4. **`CHANGELOG.md`** — new `## [X.Y.Z] - YYYY-MM-DD` entry
 
 **After any version bump, before committing, verify sync:**
 
@@ -39,10 +38,10 @@ grep -A1 'name = "hermes-pipeline"' uv.lock
 head -10 CHANGELOG.md
 ```
 
-The three version numbers must agree (VERSION's first 3 segments == pyproject.toml ==
-uv.lock's hermes-pipeline entry), and CHANGELOG.md must have an entry for the exact
-VERSION being shipped. If `/ship` or any version-bump tool only touched VERSION, treat
-that as incomplete — always finish the sync manually before pushing.
+VERSION, pyproject.toml, and uv.lock's hermes-pipeline entry must all be the same 3-digit
+number, and CHANGELOG.md must have an entry for the exact VERSION being shipped. If `/ship`
+or any version-bump tool only touched VERSION, treat that as incomplete — always finish the
+sync manually before pushing.
 
 ## TODOS.md management
 
