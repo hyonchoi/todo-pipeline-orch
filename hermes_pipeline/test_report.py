@@ -59,7 +59,9 @@ def generate_report(jsonl_path: Path, output_dir: Path) -> dict[str, Any]:
             phase["status"] = "failed"
             if "duration_ms" in event:
                 phase["duration_ms"] = event["duration_ms"]
-            if "return_code" in event:
+            if "error_class" in event:
+                phase["error_message"] = event["error_class"]
+            elif "return_code" in event:
                 phase["error_message"] = f"return_code={event['return_code']}"
         elif event["event_type"] == "phase_timed_out":
             phase["status"] = "timeout"

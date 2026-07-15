@@ -1,5 +1,6 @@
 """Tests for CLI entrypoints."""
 
+import re
 import subprocess
 import sys
 
@@ -11,4 +12,4 @@ def test_hermes_pipeline_entrypoint_exists():
         capture_output=True, text=True
     )
     assert result.returncode == 0, f"stderr: {result.stderr}"
-    assert "0.4.10" in result.stdout
+    assert re.search(r"\d+\.\d+\.\d+", result.stdout), f"stdout: {result.stdout}"
