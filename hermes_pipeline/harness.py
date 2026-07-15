@@ -285,6 +285,28 @@ class HarnessResult:
     summary: str
 
 
+def _kill_hung_phase_subprocess(*, state_dir: Path, todo_id: int) -> None:
+    """Kill a hermes/claude subprocess left running after overall --timeout fires.
+
+    The phase-level timeout (hermes_adapter.py:255) eventually cleans it up,
+    but --loop iterations shouldn't accumulate live subprocesses in the meantime.
+    """
+    import signal as _signal
+
+    marker_path = Path(state_dir) / "phase_started" / f"TODO-{todo_id}.json"
+    try:
+        marker = _json.loads(marker_path.read_text())
+    except (FileNotFoundError, _json.JSONDecodeError):
+        return
+    pid = marker.get("child_pid")
+    if pid is None:
+        return
+    try:
+        os.killpg(pid, _signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError) as e:
+        log.warning("failed to kill hung phase subprocess pid=%s: %s", pid, e)
+
+
 def run_harness(
     *,
     fixture_name: str,
@@ -394,6 +416,7 @@ def run_harness(
             # Overall timeout fired mid-phase: record it so the report reflects
             # a timeout rather than silently truncating the event log.
             base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
+            _kill_hung_phase_subprocess(state_dir=state_dir, todo_id=fixture["todo_id"])
 
         output_dir = temp_dir / "reports"
         report = generate_report(events_log, output_dir)
