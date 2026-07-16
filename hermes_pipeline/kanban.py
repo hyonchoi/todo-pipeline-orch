@@ -356,15 +356,18 @@ class HermesKanbanAdapter:
 
         if not ok:
             # Queue for retry
+            params: dict[str, str | int] = {
+                "todo_id": todo_id,
+                "title": title,
+                "phase": phase,
+            }
+            if metadata:
+                params["metadata"] = json.dumps(metadata)
             entry = OutboxEntry(
                 project=project,
                 operation="set_active_task",
                 has_task_id=False,
-                params={
-                    "todo_id": todo_id,
-                    "title": title,
-                    "phase": phase,
-                },
+                params=params,
             )
             self.outbox.enqueue(entry, has_task_id=False)
             return SyncResult(ok=False, error=output)
@@ -470,11 +473,13 @@ def drain_outbox(adapter: KanbanClient, outbox: KanbanOutbox) -> None:
     """Retry all queued outbox operations. Dequeues on success, leaves on failure."""
     for entry in outbox.all():
         if entry.operation == "set_active_task":
+            raw_metadata = entry.params.get("metadata")
             r = adapter.set_active_task(
                 entry.project,
                 todo_id=entry.params["todo_id"],
                 title=entry.params["title"],
                 phase=entry.params["phase"],
+                metadata=json.loads(raw_metadata) if raw_metadata else None,
             )
         elif entry.operation == "update_phase":
             r = adapter.update_phase(
