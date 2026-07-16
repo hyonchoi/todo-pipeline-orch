@@ -1,8 +1,11 @@
-# pipeline-watch CLI Reference
+# CLI Reference
 
-Complete reference for all `pipeline-watch` subcommands. Run every command via `uv run pipeline-watch <command> [args]`.
+Complete reference for `pipeline-watch` and `hermes-pipeline` subcommands.
 
-## Global Flags
+- `uv run pipeline-watch <command> [args]` — Production pipeline orchestration (tick, merge, approve, ...)
+- `uv run hermes-pipeline test [args]` — Mock integration test harness
+
+## pipeline-watch Global Flags
 
 | Flag | Description |
 |------|-------------|
@@ -217,6 +220,52 @@ uv run pipeline-watch install-profile --force
 Creates a `pipeline` profile cloned from the active Hermes profile, then overlays the bundled `SOUL.md`. With `--force`, deletes an existing `pipeline` profile first.
 
 After install, set the assignee: `uv run pipeline-watch init myproject --assignee pipeline`.
+
+---
+
+## hermes-pipeline test
+
+Run the mock integration test harness: bootstraps a temporary git project, executes
+pipeline phases, and generates a structured findings report.
+
+```bash
+uv run hermes-pipeline test --fixture happy-path
+uv run hermes-pipeline test --fixture happy-path --kanban hermes
+uv run hermes-pipeline test --fixture happy-path --phase phase_2_autoplan
+uv run hermes-pipeline test --fixture happy-path --convergence-threshold 2
+```
+
+**Arguments:**
+| Arg | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `--fixture` | Yes | — | Fixture name. Only `happy-path` is implemented. |
+| `--kanban` | No | `null` | Kanban adapter: `null` (no network calls) or `hermes` (real `HermesKanbanAdapter` against `mock-project` tenant). Requires `hermes login` and tenant access when `hermes`. |
+| `--phase` | No | — | Run only the named phase in isolation (e.g. `phase_2_autoplan`). |
+| `--timeout` | No | — | Overall run timeout in seconds. Kills in-flight phase via `killpg` if exceeded. |
+| `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before circuit breaker halts the run. |
+| `--keep` | No | — | Preserve the temporary directory after the run for inspection. |
+| `--loop` | No | — | Persist numbered report files and diff them across runs. Requires `--keep`. |
+
+**Exit codes:**
+| Code | Meaning |
+|------|---------|
+| 0 | All phases passed |
+| 1 | Phase failure, convergence halt, or timeout |
+| 2 | Preflight or setup error (missing dependency, `--kanban hermes` tenant unreachable) |
+
+**`--kanban hermes` behavior:**
+- Runs a preflight check (`hermes kanban list --tenant mock-project`) before phase execution. Timeouts after 15 s.
+- Creates a kanban card in the fixture's `mock-project` tenant (never suffixed with tick ID).
+- Card body includes `tick_id`, `fixture_name`, and `state_dir` metadata for debug tracing.
+- On convergence halt, clears the active task with `outcome="abandoned"`.
+- Prints a `[kanban]` summary line after report generation:
+  ```
+  [kanban] tenant=<tenant> tick_id=<id> task_id=<id or none> report=<path> keep=<yes|no>
+  ```
+
+**`KanbanPreflightError`** — `RuntimeError` subclass raised when `--kanban hermes` preflight fails. Two triggers:
+- `subprocess.TimeoutExpired` after 15 s → actionable timeout message
+- Non-zero exit from `hermes kanban list --tenant <tenant>` → authentication/tenant access failure
 
 ---
 

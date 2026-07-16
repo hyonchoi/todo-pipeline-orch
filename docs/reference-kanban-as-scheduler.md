@@ -7,6 +7,129 @@ dependency chains. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
+## Types
+
+### `PhaseStatus`
+
+```python
+PhaseStatus = Literal["running", "done", "failed", "ready_for_review"]
+```
+
+Status values for kanban task state transitions during phase execution.
+
+### `KanbanOutcome`
+
+```python
+KanbanOutcome = Literal["merged", "rejected", "abandoned"]
+```
+
+Terminal outcomes passed to `clear_active_task`. Each maps to a specific kanban CLI action:
+
+| Outcome | Kanban action | When used |
+|---------|---------------|-----------|
+| `merged` | `hermes kanban complete <task_id>` | TODO shipped successfully (Phase 9 merge) |
+| `rejected` | `hermes kanban archive <task_id>` | TODO explicitly rejected by operator |
+| `abandoned` | `hermes kanban archive <task_id>` | Pipeline failed mid-execution (phase failure, convergence halt, timeout) |
+
+Both `rejected` and `abandoned` archive the card — they differ in semantics: `rejected` is an operator decision, `abandoned` is a pipeline failure signal.
+
+## KanbanClient Protocol
+
+The `KanbanClient` protocol defines the interface for kanban sync operations. All methods are non-blocking and return `SyncResult`.
+
+### `SyncResult`
+
+```python
+@dataclass(frozen=True)
+class SyncResult:
+    ok: bool
+    task_id: str | None = None
+    error: str | None = None
+```
+
+### `set_active_task(project, *, todo_id, title, phase, metadata=None) -> SyncResult`
+
+Set the active task for a project. Called when a TODO moves into Phase 1 (Development).
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project` | `str` | — | Project slug (used as kanban tenant) |
+| `todo_id` | `int` | — | TODO ID number |
+| `title` | `str` | — | TODO title |
+| `phase` | `str` | — | First phase name |
+| `metadata` | `dict[str, str] \| None` | `None` | Optional key/value context appended to card body for debug tracing (e.g. `tick_id`, `fixture_name`, `state_dir`) |
+
+**Returns:** `SyncResult` — `ok=True` with `task_id` on success, `ok=False` with `error` on failure (operation queued to outbox).
+
+### `update_phase(project, *, phase, status) -> SyncResult`
+
+Update the phase status for the active task. Called as pipeline progresses.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project` | `str` | — | Project slug |
+| `phase` | `str` | — | Phase name |
+| `status` | `PhaseStatus` | — | New status |
+
+**Returns:** `SyncResult`
+
+### `clear_active_task(project, *, outcome) -> SyncResult`
+
+Clear the active task. Called after Phase 8/9 or on pipeline failure.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `project` | `str` | — | Project slug |
+| `outcome` | `KanbanOutcome` | — | Terminal outcome: `merged`, `rejected`, or `abandoned` |
+
+**Returns:** `SyncResult`
+
+## Implementations
+
+### `NullKanbanAdapter`
+
+No-op adapter. All operations return `SyncResult(ok=True)`. Used by default in the test harness.
+
+### `HermesKanbanAdapter`
+
+Real adapter using `hermes kanban` CLI commands. Requires `KanbanOutbox` and `ActiveTasksStore` for persistence.
+
+| Command | Operation |
+|---------|-----------|
+| `hermes kanban create --tenant <project> <title> --body <body> --json` | `set_active_task` — creates task card |
+| `hermes kanban comment <task_id> "<phase> — <status>"` | `update_phase` — posts phase status comment |
+| `hermes kanban complete <task_id>` | `clear_active_task` with `outcome="merged"` |
+| `hermes kanban archive <task_id>` | `clear_active_task` with `outcome="rejected"` or `"abandoned"` |
+
+On CLI failure, operations are queued to the `KanbanOutbox` for retry via `drain_outbox()`.
+
+## ActiveTasksStore
+
+Atomic JSON store mapping project → task_id. Uses tmp+rename pattern for writes.
+
+| Method | Description |
+|---|---|
+| `get(project)` | Returns task_id or `None` |
+| `set(project, task_id)` | Creates or updates atomically |
+| `drop(project)` | Removes project from store |
+
+File location: `state_dir/active_tasks.json` (path configurable via constructor).
+
+## KanbanOutbox
+
+JSONL-based outbox for queued kanban operations with create-preserving collapse.
+
+| Rule | Description |
+|---|---|
+| Create-preserving | If a non-create op is enqueued while a pending create exists for the same project, fold the new op's params into the create and keep only the create |
+| Replace | Otherwise, replace the existing entry for that project |
+| Cap | 500 entries maximum; drop oldest first on overflow |
+| File location | `state_dir/kanban_outbox.jsonl` (path configurable via constructor) |
+
+### `drain_outbox(adapter, outbox)`
+
+Retries all queued operations. Dequeues on success, leaves on failure so it can be retried again.
+
 ## Architecture
 
 ```
