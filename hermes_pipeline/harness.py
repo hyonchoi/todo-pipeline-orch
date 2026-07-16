@@ -144,12 +144,18 @@ def _kanban_preflight(*, tenant: str) -> None:
     actionable message on non-zero exit, rather than letting the failure surface later as a
     silent non-blocking warning deep in HermesKanbanAdapter.
     """
-    result = subprocess.run(
-        ["hermes", "kanban", "list", "--tenant", tenant],
-        capture_output=True,
-        text=True,
-        timeout=15,
-    )
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "list", "--tenant", tenant],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+    except subprocess.TimeoutExpired:
+        raise KanbanPreflightError(
+            f"Preflight check timed out after 15s: `hermes kanban list --tenant {tenant}` "
+            f"did not respond. Verify your --kanban tenant is correct and reachable."
+        )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise KanbanPreflightError(
@@ -456,11 +462,10 @@ def run_harness(
                 success = False
             elif "convergence_error" in result_box:
                 log.warning(str(result_box["convergence_error"]))
-                if kanban_mode == "hermes":
-                    try:
-                        kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
-                    except Exception as e:
-                        log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
+                try:
+                    kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
+                except Exception as e:
+                    log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
                 success = False
             elif "exception" in result_box:
                 raise result_box["exception"]

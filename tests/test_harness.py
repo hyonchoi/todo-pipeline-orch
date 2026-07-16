@@ -464,3 +464,34 @@ class TestKanbanModeHermes:
             if c[0][0][:3] == ["hermes", "kanban", "archive"]
         ]
         assert len(archive_calls) == 1
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_preflight_timeout_raises_actionable_error(self, mock_run, monkeypatch):
+        """_kanban_preflight should catch subprocess.TimeoutExpired and re-raise as KanbanPreflightError."""
+        from hermes_pipeline.harness import KanbanPreflightError
+        import subprocess
+
+        def _run_side_effect(*args, **kwargs):
+            """Only timeout on hermes preflight call, let git commands succeed."""
+            cmd = args[0]
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 3 and cmd[:3] == ["hermes", "kanban", "list"]:
+                raise subprocess.TimeoutExpired(cmd, 15)
+            # git init, config, add, commit — just succeed
+            from unittest.mock import MagicMock
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = _run_side_effect
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        with pytest.raises(KanbanPreflightError, match="timed out.*15s"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                kanban_mode="hermes",
+                config=None,
+            )
+
