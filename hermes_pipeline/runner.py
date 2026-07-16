@@ -185,9 +185,9 @@ class PipelineRunner:
             if result.ok:
                 self._kanban_task_id = result.task_id
             else:
-                log.warning("kanban.set_active_task failed (non-blocking): %s", result.error)
+                log.warning("kanban.set_active_task returned error (non-blocking): %s", result.error)
         except Exception as e:
-            log.warning("kanban.set_active_task failed (non-blocking): %s", e)
+            log.warning("kanban.set_active_task raised exception (non-blocking): %s", e)
 
         # Step 2: Loop through phases
         import time as _time

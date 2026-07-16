@@ -158,6 +158,18 @@ class KanbanPreflightError(RuntimeError):
 # Preflight timeout for hermes kanban list (seconds)
 _PREFLIGHT_TIMEOUT = 15
 
+# Timeout for individual kanban gate complete subprocess calls (seconds)
+_GATE_COMPLETE_TIMEOUT = 10
+
+# Maximum poll interval for kanban-as-scheduler phase polling (seconds)
+_KANBAN_POLL_MAX_INTERVAL = 30.0
+
+# Maximum characters in error messages captured by the harness
+_ERROR_MESSAGE_MAX = 500
+
+# Maximum characters of subprocess stderr shown in error messages
+_STDERR_TRUNCATE = 200
+
 
 def _kanban_preflight(*, tenant: str) -> None:
     """Fail fast if the kanban tenant isn't accessible before constructing the real adapter.
@@ -240,13 +252,13 @@ def _auto_complete_gate_tasks(
                 ["hermes", "kanban", "complete", info.task_id],
                 capture_output=True,
                 text=True,
-                timeout=10,
+                timeout=_GATE_COMPLETE_TIMEOUT,
             )
             if result.returncode != 0:
                 log.warning(
                     "failed to complete gate task %s (%s): rc=%d stderr=%s",
                     info.task_id, phase_key, result.returncode,
-                    result.stderr[:200],
+                    result.stderr[:_STDERR_TRUNCATE],
                 )
             else:
                 log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
@@ -265,7 +277,7 @@ def _poll_kanban_phases(
     monitor: _ConvergenceMonitor,
     detector: ConvergenceDetector,
     poll_interval: float = 5.0,
-    max_poll_interval: float = 30.0,
+    max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
     phases: list[Phase] | None = None,
 ) -> bool:
     """Poll kanban-as-scheduler phases to completion.
@@ -777,8 +789,6 @@ def run_harness(
         )
 
     except Exception as e:
-        if not keep_dir:
-            shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
     finally:
