@@ -235,13 +235,22 @@ def _poll_kanban_phases(
         register_todo_phases,
     )
 
-    log.info("registering kanban phases for %s tick %s", todo_id, tick_id)
+    from .contract import load_contract as _load_contract
+
+    # Resolve assignee from project contract (same path as pipeline-watch tick)
+    assignee = "default"
+    try:
+        assignee = _load_contract(state_dir).assignee
+    except Exception as e:
+        log.warning("failed to load pipeline contract, using assignee='default': %s", e)
+    log.info("registering kanban phases for %s tick %s (assignee=%s)", todo_id, tick_id, assignee)
     register_todo_phases(
         todo_id=todo_id,
         tick_id=tick_id,
         board_slug=project_slug,
         project_dir=project_dir,
         phases_path=phases_path,
+        assignee=assignee,
     )
 
     _auto_complete_gate_tasks(project_slug, tick_id)
