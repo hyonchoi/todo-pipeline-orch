@@ -32,7 +32,7 @@ Output:
 2026-07-15 18:40:43,782 INFO hermes_pipeline.runner All phases completed successfully; moving to ready_for_review
 ```
 
-Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the run timed out.
+Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the run timed out. Exit code 2 = preflight or setup error (missing dependency, `--kanban hermes` tenant unreachable).
 
 ### 2. Run a single phase
 
@@ -218,14 +218,14 @@ A live card after a run means "the run never got to clean up" (timeout/crash) or
 on review/merge" (success). An archived card means "it failed cleanly and the card body has the
 `tick_id`/fixture/state_dir context for why."
 
-**Output.** On both success and failure, a `--kanban hermes` run prints:
+**Output.** If the run reaches report generation (preflight succeeded), a `--kanban hermes` run prints:
 
 ```
 [kanban] tenant=mock-project tick_id=01ARZ3ND... task_id=abc123 report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
 ```
 
-Pass `--keep` to retain the temp directory (including `kanban_outbox.jsonl` and
-`active_tasks.json`) for post-run inspection.
+Pass `--keep` to retain the temp directory (which may include `kanban_outbox.jsonl` and
+`active_tasks.json` if a task was created or enqueued) for post-run inspection.
 
 **Known limitation:** the outbox retry path (`drain_outbox`) does not currently carry the
 `tick_id`/fixture metadata on a queued-and-later-retried card — only the initial synchronous
