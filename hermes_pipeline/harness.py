@@ -187,13 +187,28 @@ def _kanban_preflight(*, tenant: str) -> None:
         )
 
 
-def _auto_complete_gate_tasks(tenant: str, tick_id: str) -> None:
-    """Complete all blocked gate tasks for a tick, unblocking child phases.
+def _auto_complete_gate_tasks(
+    tenant: str,
+    tick_id: str,
+    *,
+    completed_phase_key: str,
+) -> None:
+    """Complete blocked gate tasks whose direct predecessor just finished.
 
-    Queries kanban for blocked tasks matching tick_id, runs `hermes kanban complete`
-    on each. Best-effort: exceptions are logged, not raised.
+    Gate tasks are created as blocked with --parent pointing to their
+    predecessor. In kanban-as-scheduler mode, the kanban board should
+    unblock them when the parent finishes. However, if the kanban board
+    doesn't propagate the unblock signal, we auto-complete the gate to
+    let child phases proceed.
+
+    Only completes gates whose predecessor matches completed_phase_key,
+    preventing gates from auto-completing at registration time before
+    their parent phase has run.
+
+    Best-effort: exceptions are logged, not raised.
     """
     from .kanban_tasks import BLOCKED, get_todo_kanban_tasks
+    from .phases import load_phases
 
     try:
         tasks = get_todo_kanban_tasks(tenant, tick_id)
@@ -201,8 +216,20 @@ def _auto_complete_gate_tasks(tenant: str, tick_id: str) -> None:
         log.warning("failed to query kanban tasks for gate auto-complete: %s", e)
         return
 
+    # Build predecessor map from phase registration order.
+    # In register_todo_phases, each phase N gets --parent = task_id of phase N-1.
+    phases = load_phases()
+    gate_predecessor = {}
+    for i, phase in enumerate(phases):
+        if getattr(phase, "gate", False) and i > 0:
+            gate_predecessor[phase.phase_key] = phases[i - 1].phase_key
+
     for phase_key, info in tasks.items():
         if info.status != BLOCKED:
+            continue
+        # Only auto-complete gates whose predecessor just finished.
+        pred = gate_predecessor.get(phase_key)
+        if pred is None or pred != completed_phase_key:
             continue
         try:
             result = subprocess.run(
@@ -218,7 +245,7 @@ def _auto_complete_gate_tasks(tenant: str, tick_id: str) -> None:
                     result.stderr[:200],
                 )
             else:
-                log.info("auto-completed gate task %s (%s)", info.task_id, phase_key)
+                log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
         except Exception as e:
             log.warning("auto-complete gate task %s (%s) failed: %s", info.task_id, phase_key, e)
 
@@ -271,7 +298,9 @@ def _poll_kanban_phases(
         assignee=assignee,
     )
 
-    _auto_complete_gate_tasks(project_slug, tick_id)
+    # Gate tasks will be auto-completed when their parent phase finishes,
+    # not at registration time — this ensures parent output exists before
+    # child phases can start.
 
     previous_status: dict[str, str] = {}
     all_terminal = False
@@ -301,6 +330,10 @@ def _poll_kanban_phases(
                 elif prev == "running" and status == "done":
                     monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                    # Auto-complete any gate task whose predecessor just finished
+                    _auto_complete_gate_tasks(
+                        project_slug, tick_id, completed_phase_key=phase_key
+                    )
 
                 elif prev == "running" and status == "failed":
                     monitor.current_phase_key = None
