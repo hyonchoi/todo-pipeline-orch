@@ -216,6 +216,7 @@ def _poll_kanban_phases(
     monitor: _ConvergenceMonitor,
     detector: ConvergenceDetector,
     poll_interval: float = 5.0,
+    max_poll_interval: float = 30.0,
 ) -> bool:
     """Poll kanban-as-scheduler phases to completion.
 
@@ -247,9 +248,11 @@ def _poll_kanban_phases(
 
     previous_status: dict[str, str] = {}
     all_terminal = False
+    current_interval = poll_interval
 
     while not all_terminal:
-        time.sleep(poll_interval)
+        time.sleep(current_interval)
+        current_interval = min(current_interval * 1.5, max_poll_interval)
 
         try:
             status_map = get_todo_kanban_status(project_slug, tick_id)
@@ -282,6 +285,10 @@ def _poll_kanban_phases(
 
                 elif prev == "blocked" and status == "done":
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+
+                elif prev in (None, "ready", "blocked") and status == "failed":
+                    monitor.current_phase_key = None
+                    monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
         except ConvergenceHaltError:
             log.warning(
                 "convergence detector: %d+ consecutive phase_failure, halting",
@@ -289,6 +296,8 @@ def _poll_kanban_phases(
             )
             all_terminal = True
 
+        if status_map != previous_status:
+            current_interval = poll_interval
         previous_status = dict(status_map)
 
         if not all_terminal:

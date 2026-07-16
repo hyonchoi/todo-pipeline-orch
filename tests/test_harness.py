@@ -704,3 +704,85 @@ class TestPollKanbanPhases:
 
         mock_auto.assert_called_once_with("demo", "01TICK")
 
+    def test_emits_phase_failed_when_ready_transitions_directly_to_failed(self, tmp_path, mocker):
+        """Regression: a phase can jump straight from ready/blocked to failed
+        without ever passing through running. Prior to this fix, such a
+        transition was silently absorbed by the terminal-status check without
+        emitting phase_failed or being seen by the convergence detector."""
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+        import json as _json
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                      return_value={"phase_2_autoplan": "failed"})
+
+        result = _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        assert result is False
+        lines = events_log.read_text().strip().splitlines()
+        events = [_json.loads(l) for l in lines if l.strip()]
+        failed = [e for e in events if e["event_type"] == "phase_failed"]
+        assert len(failed) == 1
+        assert failed[0]["phase_key"] == "phase_2_autoplan"
+
+    def test_poll_interval_backs_off_and_resets_on_change(self, tmp_path, mocker):
+        """Regression: fixed 5s poll interval added constant load for
+        long-running phases. Interval should grow while status is unchanged
+        and reset when a transition occurs."""
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        sleep_calls = []
+        mocker.patch("time.sleep", side_effect=lambda s: sleep_calls.append(s))
+
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                return {"phase_2_autoplan": "running"}
+            return {"phase_2_autoplan": "done"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
+
+        _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=1.0, max_poll_interval=10.0,
+        )
+
+        # Unchanged status ("running" repeated) should back off between polls 2-3.
+        assert sleep_calls[2] > sleep_calls[1]
+        # Transition to "done" grows the interval for that poll (backoff is only
+        # reset for the *next* sleep, after the transition is observed).
+        assert sleep_calls[3] > sleep_calls[2]
+        # First two sleeps stay at the base interval: poll 1 sees the initial
+        # empty->running "change" and resets before poll 2 fires.
+        assert sleep_calls[0] == sleep_calls[1] == 1.0
+
+
