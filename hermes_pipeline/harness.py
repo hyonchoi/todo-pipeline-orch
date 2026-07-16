@@ -260,33 +260,48 @@ def _poll_kanban_phases(
         if not status_map:
             continue
 
-        for phase_key, status in status_map.items():
-            prev = previous_status.get(phase_key)
+        try:
+            for phase_key, status in status_map.items():
+                prev = previous_status.get(phase_key)
 
-            if prev in (None, "ready", "blocked") and status == "running":
-                monitor.current_phase_key = phase_key
-                monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
+                if prev in (None, "ready", "blocked") and status == "running":
+                    monitor.current_phase_key = phase_key
+                    monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
 
-            elif prev == "running" and status == "done":
-                monitor.current_phase_key = None
-                monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                detector.record(phase_key, None)
+                elif prev == "running" and status == "done":
+                    monitor.current_phase_key = None
+                    monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                    detector.record(phase_key, None)
 
-            elif prev == "running" and status == "failed":
-                monitor.current_phase_key = None
-                monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                detector.record(phase_key, "phase_failure")
-                if detector.should_halt():
-                    log.warning(
-                        "convergence detector: %d+ consecutive phase_failure, halting",
-                        detector.threshold,
-                    )
-                    all_terminal = True
-                    break
+                elif prev == "running" and status == "failed":
+                    monitor.current_phase_key = None
+                    try:
+                        monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                    except ConvergenceHaltError:
+                        log.warning(
+                            "convergence detector: %d+ consecutive phase_failure, halting",
+                            detector.threshold,
+                        )
+                        all_terminal = True
+                        break
+                    detector.record(phase_key, "phase_failure")
+                    if detector.should_halt():
+                        log.warning(
+                            "convergence detector: %d+ consecutive phase_failure, halting",
+                            detector.threshold,
+                        )
+                        all_terminal = True
+                        break
 
-            elif prev == "blocked" and status == "done":
-                monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                detector.record(phase_key, None)
+                elif prev == "blocked" and status == "done":
+                    monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                    detector.record(phase_key, None)
+        except ConvergenceHaltError:
+            log.warning(
+                "convergence detector: %d+ consecutive phase_failure, halting",
+                detector.threshold,
+            )
+            all_terminal = True
 
         previous_status = dict(status_map)
 
