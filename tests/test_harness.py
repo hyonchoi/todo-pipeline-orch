@@ -311,6 +311,7 @@ class TestRunHarnessTimeout:
             keep_dir=True,
             timeout=1,
             convergence_threshold=3,
+            kanban_mode="null",
             config=None,
         )
 
@@ -318,3 +319,133 @@ class TestRunHarnessTimeout:
         assert "timeout" in result.summary.lower()
         report_data = json.loads(result.report_path.read_text())
         assert any(p["status"] == "timeout" for p in report_data["phases"])
+
+
+class TestKanbanModeHermes:
+    """Tests for --kanban hermes wiring in run_harness()."""
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_hermes_uses_unsuffixed_tenant(self, mock_run, tmp_path, monkeypatch):
+        """Regression test for the tenant-conflation bug: --tenant must be the fixture's
+        unsuffixed project_slug, never suffixed with tick_id."""
+        from unittest.mock import MagicMock
+
+        # preflight `hermes kanban list --tenant ...` succeeds
+        preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        # set_active_task's `hermes kanban create` call
+        create_result = MagicMock(returncode=0, stdout='{"id": "task-1"}', stderr="")
+        mock_run.side_effect = [preflight_result, create_result] + [MagicMock(returncode=0, stdout="", stderr="")] * 20
+
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        # Run only phase_2_autoplan to keep the run short
+        with patch("hermes_pipeline.phases.run") as mock_phases_run:
+            mock_phases_run.return_value = {"status": "success"}
+            result = run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only="phase_2_autoplan",
+                keep_dir=True,
+                timeout=60,
+                convergence_threshold=3,
+                kanban_mode="hermes",
+                config=None,
+            )
+
+        create_call = None
+        for call in mock_run.call_args_list:
+            argv = call[0][0]
+            if argv[:3] == ["hermes", "kanban", "create"]:
+                create_call = argv
+                break
+        assert create_call is not None, "expected a `hermes kanban create` subprocess call"
+        tenant_index = create_call.index("--tenant") + 1
+        assert create_call[tenant_index] == "mock-project"  # unsuffixed, regardless of tick_id
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_hermes_preflight_failure_raises_before_adapter_construction(self, mock_run, monkeypatch):
+        from hermes_pipeline.harness import KanbanPreflightError
+
+        preflight_fail = MagicMock(returncode=1, stdout="", stderr="not authenticated")
+        mock_run.return_value = preflight_fail
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        with pytest.raises(KanbanPreflightError, match="hermes login"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                kanban_mode="hermes",
+                config=None,
+            )
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_null_default_produces_no_kanban_subprocess_calls(self, mock_run, monkeypatch, tmp_path):
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        # Reuse whatever phase-stubbing pattern to keep the run short
+        with patch("hermes_pipeline.phases.run") as mock_phases_run:
+            mock_phases_run.return_value = {"status": "success"}
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only="phase_2_autoplan",
+                keep_dir=True,
+                timeout=60,
+                convergence_threshold=3,
+                kanban_mode="null",
+                config=None,
+            )
+        kanban_calls = [
+            c for c in mock_run.call_args_list
+            if c[0][0][:2] == ["hermes", "kanban"]
+        ]
+        assert kanban_calls == []
+
+    @patch("hermes_pipeline.kanban.subprocess.run")
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_convergence_halt_clears_kanban(self, mock_harness_sp, mock_kanban_sp, monkeypatch):
+        """A convergence-halt must call clear_active_task(outcome='abandoned') even though
+        ConvergenceHaltError bypasses PipelineRunner.run()'s own cleanup path."""
+        from unittest.mock import MagicMock
+
+        def _harness_run_side_effect(*args, **kwargs):
+            # Pass through or mock git commands during fixture setup
+            return MagicMock(returncode=0, stdout="[]", stderr="")
+
+        # Mock harness subprocess.run to handle both fixture setup and preflight
+        mock_harness_sp.side_effect = _harness_run_side_effect
+
+        # Mock kanban subprocess.run for kanban calls
+        def _kanban_run_side_effect(*args, **kwargs):
+            return MagicMock(returncode=0, stdout='{"id": "task-1"}', stderr="")
+
+        mock_kanban_sp.side_effect = _kanban_run_side_effect
+
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        # Force every phase dispatch to fail so ConvergenceDetector trips after convergence_threshold
+        from hermes_pipeline.hermes_adapter import HermesCallError
+
+        def _phase_runner_fails(*args, **kwargs):
+            raise HermesCallError("boom", returncode=1, stderr="boom")
+
+        monkeypatch.setattr("hermes_pipeline.phases.run", _phase_runner_fails)
+
+        run_harness(
+            fixture_name="happy-path",
+            loop=False,
+            phase_only=None,
+            keep_dir=True,
+            timeout=60,
+            convergence_threshold=2,
+            kanban_mode="hermes",
+            config=None,
+        )
+
+        # Check that archive calls were made (this tests that clear_active_task was called)
+        archive_calls = [
+            c for c in mock_kanban_sp.call_args_list
+            if c[0][0][:3] == ["hermes", "kanban", "archive"]
+        ]
+        assert len(archive_calls) == 1

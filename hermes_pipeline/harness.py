@@ -133,6 +133,32 @@ class ConvergenceHaltError(Exception):
     """Raised when the convergence detector halts a run mid-phase-loop."""
 
 
+class KanbanPreflightError(RuntimeError):
+    """Raised when --kanban hermes is selected but the tenant is not accessible."""
+
+
+def _kanban_preflight(*, tenant: str) -> None:
+    """Fail fast if the kanban tenant isn't accessible before constructing the real adapter.
+
+    Runs `hermes kanban list --tenant <tenant>` and raises KanbanPreflightError with an
+    actionable message on non-zero exit, rather than letting the failure surface later as a
+    silent non-blocking warning deep in HermesKanbanAdapter.
+    """
+    result = subprocess.run(
+        ["hermes", "kanban", "list", "--tenant", tenant],
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise KanbanPreflightError(
+            f"--kanban hermes requires `hermes login` and access to tenant '{tenant}'. "
+            f"Verify with: hermes kanban list --tenant {tenant}\n"
+            f"Preflight error: {detail}"
+        )
+
+
 def _classify_error_class(exc: Exception) -> str:
     """Bucket an exception into a coarse error class for convergence tracking / reports."""
     from .hermes_adapter import (
@@ -321,6 +347,7 @@ def run_harness(
     keep_dir: bool,
     timeout: int,
     convergence_threshold: int,
+    kanban_mode: str,
     config: Any,
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
@@ -330,7 +357,7 @@ def run_harness(
     from .phases import load_phases
     from .test_report import generate_report, summarize_report, diff_reports, summarize_diff
     from .state import State
-    from .kanban import NullKanbanAdapter
+    from .kanban import NullKanbanAdapter, HermesKanbanAdapter, KanbanOutbox, ActiveTasksStore
     from .logging_setup import new_tick_id
 
     preflight_check()
@@ -354,7 +381,25 @@ def run_harness(
         if phase_only:
             phases = filter_phases(all_phases, phase_only)
 
-        kanban = NullKanbanAdapter()
+        # tick_id must exist before any kanban-facing identity (State, adapter, runner) is
+        # constructed, since the card-body metadata needs it at construction time.
+        tick_id = new_tick_id()
+
+        kanban_metadata: dict[str, str] | None = None
+        if kanban_mode == "hermes":
+            kanban_outbox = KanbanOutbox(state_dir / "kanban_outbox.jsonl")
+            active_tasks = ActiveTasksStore(state_dir / "active_tasks.json")
+            _kanban_preflight(tenant=fixture["project_slug"])
+            kanban = HermesKanbanAdapter(kanban_outbox, active_tasks)
+            kanban_metadata = {
+                "tick_id": tick_id,
+                "fixture_name": fixture_name,
+                "state_dir": str(state_dir),
+            }
+        else:
+            kanban = NullKanbanAdapter()
+            active_tasks = None
+
         checkpoint_dir = state_dir / "pipeline_checkpoints"
         ready_dir = state_dir / "ready_for_review"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -367,8 +412,6 @@ def run_harness(
             ready_dir=ready_dir,
         )
 
-        tick_id = new_tick_id()
-
         runner = PipelineRunner(
             project=fixture["project_slug"],
             project_dir=temp_dir,
@@ -378,6 +421,7 @@ def run_harness(
             phases=phases,
             state=state,
             kanban=kanban,
+            kanban_metadata=kanban_metadata,
             run_phase_fn=lambda phase: _dispatch_phase(
                 phase,
                 state_dir=state_dir,
@@ -412,6 +456,11 @@ def run_harness(
                 success = False
             elif "convergence_error" in result_box:
                 log.warning(str(result_box["convergence_error"]))
+                if kanban_mode == "hermes":
+                    try:
+                        kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
+                    except Exception as e:
+                        log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
                 success = False
             elif "exception" in result_box:
                 raise result_box["exception"]
@@ -444,6 +493,14 @@ def run_harness(
                 next_n = 1
             next_report = output_dir.parent / f"{fixture_name}-report.{next_n}.json"
             next_report.write_text(report_json.read_text())
+
+        if kanban_mode == "hermes":
+            active_task_id = active_tasks.get(fixture["project_slug"])
+            print(
+                f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
+                f"task_id={active_task_id or '(none — check outbox)'} "
+                f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
+            )
 
         exit_code = 0 if (success and not timed_out) else 1
 
