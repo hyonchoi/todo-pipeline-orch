@@ -36,6 +36,16 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     hermes_dir.mkdir()
     (path / ".hermes" / "todo_id_counter").write_text("0")
 
+    # Create pipeline.toml contract for assignee configuration
+    pipeline_toml = (
+        "# Pipeline execution contract — read at tick start.\n"
+        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        "schema_version = 1\n"
+        'assignee = "default"\n'
+        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+    )
+    (path / ".hermes" / "pipeline.toml").write_text(pipeline_toml)
+
     subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "initial: mock project setup"], cwd=path, check=True, capture_output=True)
 
