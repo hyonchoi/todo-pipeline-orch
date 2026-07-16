@@ -36,13 +36,14 @@
   - **Decisions:** Priority `P1`, Effort `L`, Phase `4 (Development)`, Branch `feature/integration-test-harness`, Test Coverage `required`, Security Review `not-required`
   - **Completed:** v0.4.11 (2026-07-15)
 
-- [ ] **TODO-20: Add `--kanban {null,hermes}` option to `hermes-pipeline test`** — Let the mock integration harness exercise the real HermesKanbanAdapter, not just NullKanbanAdapter
+- [x] **TODO-20: Add `--kanban {null,hermes}` option to `hermes-pipeline test`** — Let the mock integration harness exercise the real HermesKanbanAdapter, not just NullKanbanAdapter
   - **What:** Add a `--kanban {null,hermes}` CLI flag to the `test` subcommand (`cli.py:536-565`), thread it through `run_harness()` (`harness.py:316-392`), and when `hermes` is selected, construct `HermesKanbanAdapter(outbox, active_tasks)` wired to `KanbanOutbox`/`ActiveTasksStore` paths under the fixture's temp `state_dir`, instead of hardcoding `NullKanbanAdapter()` (`harness.py:357`).
   - **Why:** The harness currently can't validate real kanban sync behavior (task creation, phase comments, complete/archive) end-to-end against a mock project — it silently no-ops. TODO-19's harness already runs real `hermes`/`claude` subprocesses for phases; kanban is the one system left mocked.
   - **Pros:** Closes the last gap in true end-to-end pipeline verification; reuses the existing `HermesKanbanAdapter`/outbox machinery with no new abstractions.
   - **Cons:** Real kanban calls against a mock tenant require a reachable `hermes kanban` backend/tenant — may need a dedicated test tenant or additional mocking at the `hermes kanban` CLI boundary to stay hermetic.
-  - **Context:** `docs/howto-mock-integration-test-harness.md` should also get a new "Run with real kanban adapter" step documenting the flag.
+  - **Context:** `docs/howto-mock-integration-test-harness.md` also got a new "Run with real kanban adapter" step documenting the flag.
   - **Depends on:** `TODO-19`
   - **Assumptions:** A test/mock kanban tenant is available or acceptable for CI use; if not, this TODO may need to scope down to "outbox/dry-run verification only."
   - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feature/harness-real-kanban-adapter`, Test Coverage `required`, Security Review `not-required`
+  - **Completed:** v0.5.0 (2026-07-16)
 
