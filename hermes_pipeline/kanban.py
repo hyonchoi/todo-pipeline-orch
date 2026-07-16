@@ -49,8 +49,14 @@ class KanbanClient(Protocol):
         todo_id: int,
         title: str,
         phase: str,
+        metadata: dict[str, str] | None = None,
     ) -> SyncResult:
-        """Set the active task for a project. Called when a TODO moves into Phase 1 (Development)."""
+        """Set the active task for a project. Called when a TODO moves into Phase 1 (Development).
+
+        metadata, when provided, is additional key/value context (e.g. tick_id, fixture_name,
+        state_dir) recorded in the card body for debug-trail purposes. Implementations that
+        don\'t render a body (e.g. NullKanbanAdapter) accept and ignore it.
+        """
         ...
 
     def update_phase(
@@ -83,6 +89,7 @@ class NullKanbanAdapter:
         todo_id: int,
         title: str,
         phase: str,
+        metadata: dict[str, str] | None = None,
     ) -> SyncResult:
         return SyncResult(ok=True)
 
@@ -329,10 +336,14 @@ class HermesKanbanAdapter:
         todo_id: int,
         title: str,
         phase: str,
+        metadata: dict[str, str] | None = None,
     ) -> SyncResult:
         """Set active task. Creates a task card in the project tenant."""
         # Create the task using --tenant for namespacing
         body = f"Phase: {phase}\nTODO ID: {todo_id}"
+        if metadata:
+            for key, value in metadata.items():
+                body += f"\n{key}: {value}"
         ok, output = self._run_cmd(
             [
                 "hermes", "kanban", "create",
