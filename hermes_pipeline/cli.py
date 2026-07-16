@@ -565,8 +565,9 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--kanban", choices=["null", "hermes"], default="null",
         help=(
-            "Kanban adapter to use (default: null, no network calls). "
-            "'hermes' constructs a real HermesKanbanAdapter and requires prior "
+            "Kanban mode (default: null, no network calls). "
+            "'hermes' uses kanban-as-scheduler: registers each phase as a "
+            "separate kanban task and polls for completion. Requires prior "
             "`hermes login` plus access to the fixture's kanban tenant "
             "(verify with: hermes kanban list --tenant mock-project)."
         ),
