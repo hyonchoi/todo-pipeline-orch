@@ -322,55 +322,35 @@ class TestRunHarnessTimeout:
 
 
 class TestKanbanModeHermes:
-    """Tests for --kanban hermes wiring in run_harness()."""
+    """Tests for --kanban hermes wiring in run_harness() using kanban-as-scheduler."""
 
-    @patch("hermes_pipeline.harness._poll_kanban_phases")
     @patch("hermes_pipeline.harness.subprocess.run")
-    def test_kanban_hermes_uses_unsuffixed_tenant(self, mock_harness_sp, mock_poll, tmp_path, monkeypatch):
-        """Regression test for the tenant-conflation bug: --tenant must be the fixture's
-        unsuffixed project_slug, never suffixed with tick_id."""
+    def test_kanban_hermes_registers_and_polls(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
+        """--kanban hermes uses register_todo_phases + polling, not PipelineRunner."""
 
-        # preflight `hermes kanban list --tenant ...` succeeds
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
         mock_harness_sp.return_value = preflight_result
-        mock_poll.return_value = True
-
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
-        # When _poll_kanban_phases is mocked, the events log is empty;
-        # mock report generation to avoid FileNotFoundError on empty JSONL.
-        with patch("hermes_pipeline.test_report.generate_report", return_value={}) as mock_gen, \
-             patch("hermes_pipeline.test_report.summarize_report", return_value="summary"):
-            result = run_harness(
-                fixture_name="happy-path",
-                loop=False,
-                phase_only="phase_2_autoplan",
-                keep_dir=True,
-                timeout=60,
-                convergence_threshold=3,
-                kanban_mode="hermes",
-                config=None,
-            )
 
-        # Verify preflight was called with unsuffixed tenant
-        # Two kanban list calls: preflight + get_todo_kanban_status at end of run_harness
-        preflight_calls = [
-            c for c in mock_harness_sp.call_args_list
-            if isinstance(c[0][0], list) and len(c[0][0]) >= 3
-            and c[0][0][:3] == ["hermes", "kanban", "list"]
-        ]
-        assert len(preflight_calls) >= 1, "expected at least one kanban list call"
-        # All calls should use unsuffixed tenant
-        for call in preflight_calls:
-            argv = call[0][0]
-            tenant_index = argv.index("--tenant") + 1
-            assert argv[tenant_index] == "mock-project"  # unsuffixed, regardless of tick_id
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                      return_value={"phase_2_autoplan": "done"})
+        mocker.patch("time.sleep")
+        mock_observe = mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
 
-        # Verify _poll_kanban_phases was called with the unsuffixed project_slug
-        mock_poll.assert_called_once()
-        assert mock_poll.call_args.kwargs["project_slug"] == "mock-project"
+        result = run_harness(
+            fixture_name="happy-path", loop=False,
+            phase_only="phase_2_autoplan", keep_dir=True,
+            timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        assert result.exit_code == 0
+        mock_observe.assert_called_once()
 
     @patch("hermes_pipeline.harness.subprocess.run")
-    def test_kanban_hermes_preflight_failure_raises_before_adapter_construction(self, mock_run, monkeypatch):
+    def test_kanban_hermes_preflight_failure_raises(self, mock_run, monkeypatch):
         from hermes_pipeline.harness import KanbanPreflightError
 
         preflight_fail = MagicMock(returncode=1, stdout="", stderr="not authenticated")
@@ -379,70 +359,59 @@ class TestKanbanModeHermes:
 
         with pytest.raises(KanbanPreflightError, match="hermes login"):
             run_harness(
-                fixture_name="happy-path",
-                loop=False,
-                phase_only=None,
-                keep_dir=False,
-                timeout=60,
-                convergence_threshold=3,
-                kanban_mode="hermes",
-                config=None,
+                fixture_name="happy-path", loop=False, phase_only=None,
+                keep_dir=False, timeout=60, convergence_threshold=3,
+                kanban_mode="hermes", config=None,
             )
 
     @patch("hermes_pipeline.harness.subprocess.run")
-    def test_kanban_null_explicit_produces_no_kanban_subprocess_calls(self, mock_run, monkeypatch, tmp_path):
+    def test_kanban_null_explicit_produces_no_kanban_calls(self, mock_run, monkeypatch, tmp_path):
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
-        # Reuse whatever phase-stubbing pattern to keep the run short
         with patch("hermes_pipeline.phases.run") as mock_phases_run:
             mock_phases_run.return_value = {"status": "success"}
             run_harness(
-                fixture_name="happy-path",
-                loop=False,
-                phase_only="phase_2_autoplan",
-                keep_dir=True,
-                timeout=60,
-                convergence_threshold=3,
-                kanban_mode="null",
-                config=None,
+                fixture_name="happy-path", loop=False,
+                phase_only="phase_2_autoplan", keep_dir=True,
+                timeout=60, convergence_threshold=3,
+                kanban_mode="null", config=None,
             )
-        kanban_calls = [
-            c for c in mock_run.call_args_list
-            if c[0][0][:2] == ["hermes", "kanban"]
-        ]
+        kanban_calls = [c for c in mock_run.call_args_list
+                        if c[0][0][:2] == ["hermes", "kanban"]]
         assert kanban_calls == []
 
     @patch("hermes_pipeline.harness.subprocess.run")
-    @patch("hermes_pipeline.harness._poll_kanban_phases")
-    def test_convergence_halt_clears_kanban(self, mock_poll, mock_harness_sp, monkeypatch):
-        """In the hermes polling branch, convergence-halt from _poll_kanban_phases
-        is caught as a ConvergenceHaltError and sets success=False without crashing."""
-        from hermes_pipeline.harness import ConvergenceHaltError
-
-        # preflight succeeds
-        mock_harness_sp.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-        mock_poll.side_effect = ConvergenceHaltError("3+ consecutive phase_failure failures, halting run")
-
+    def test_kanban_hermes_polling_emits_jsonl_events(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
+        preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        mock_harness_sp.return_value = preflight_result
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
-        # Mock report generation since events log is empty when polling is mocked
-        with patch("hermes_pipeline.test_report.generate_report", return_value={}), \
-             patch("hermes_pipeline.test_report.summarize_report", return_value="summary"):
-            result = run_harness(
-                fixture_name="happy-path",
-                loop=False,
-                phase_only=None,
-                keep_dir=True,
-                timeout=60,
-                convergence_threshold=2,
-                kanban_mode="hermes",
-                config=None,
-            )
 
-        # Should return non-zero exit code (failure), but not crash
-        assert result.exit_code == 1
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=[
+            {"phase_2_autoplan": "running"},       # poll loop iteration 1
+            {"phase_2_autoplan": "done"},          # poll loop iteration 2 (terminal)
+            {"phase_2_autoplan": "done"},          # observe_outcomes call inside _poll_kanban_phases
+            {"phase_2_autoplan": "done"},          # final status check at end of run_harness
+        ])
+
+        result = run_harness(
+            fixture_name="happy-path", loop=False,
+            phase_only="phase_2_autoplan", keep_dir=True,
+            timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        assert result.exit_code == 0
+        report = json.loads(result.report_path.read_text())
+        phases = report["phases"]
+        assert len(phases) == 1
+        assert phases[0]["phase_key"] == "phase_2_autoplan"
+        assert phases[0]["status"] == "completed"
 
     @patch("hermes_pipeline.harness.subprocess.run")
     def test_kanban_preflight_timeout_raises_actionable_error(self, mock_run, monkeypatch):
-        """_kanban_preflight should catch subprocess.TimeoutExpired and re-raise as KanbanPreflightError."""
         from hermes_pipeline.harness import KanbanPreflightError
         import subprocess
 
@@ -450,22 +419,73 @@ class TestKanbanModeHermes:
             cmd = args[0]
             if isinstance(cmd, (list, tuple)) and len(cmd) >= 3 and cmd[:3] == ["hermes", "kanban", "list"]:
                 raise subprocess.TimeoutExpired(cmd, 15)
-            from unittest.mock import MagicMock
             return MagicMock(returncode=0, stdout="", stderr="")
+
         mock_run.side_effect = _run_side_effect
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
 
         with pytest.raises(KanbanPreflightError, match="timed out.*15s"):
             run_harness(
-                fixture_name="happy-path",
-                loop=False,
-                phase_only=None,
-                keep_dir=False,
-                timeout=60,
-                convergence_threshold=3,
-                kanban_mode="hermes",
-                config=None,
+                fixture_name="happy-path", loop=False, phase_only=None,
+                keep_dir=False, timeout=60, convergence_threshold=3,
+                kanban_mode="hermes", config=None,
             )
+
+    def test_convergence_halt_stops_polling_hermes(self, monkeypatch, mocker):
+        mock_sp = mocker.patch("hermes_pipeline.harness.subprocess.run")
+        mock_sp.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1", "t2", "t3"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"p1": "running", "p2": "ready", "p3": "ready"}
+            elif call_count[0] == 2:
+                return {"p1": "failed", "p2": "running", "p3": "ready"}
+            elif call_count[0] == 3:
+                return {"p1": "failed", "p2": "failed", "p3": "running"}
+            return {"p1": "failed", "p2": "failed", "p3": "failed"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
+
+        result = run_harness(
+            fixture_name="happy-path", loop=False, phase_only=None,
+            keep_dir=True, timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        assert result.exit_code == 1
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_hermes_single_phase_registers_filtered(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
+        """--phase with --kanban hermes should pass phases_path to register_todo_phases."""
+
+        preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        mock_harness_sp.return_value = preflight_result
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        mock_register = mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                      return_value={"phase_2_autoplan": "done"})
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        run_harness(
+            fixture_name="happy-path", loop=False,
+            phase_only="phase_2_autoplan", keep_dir=True,
+            timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        call_kwargs = mock_register.call_args
+        assert call_kwargs.kwargs.get("phases_path") is not None
 
 
 class TestAutoCompleteGateTasks:

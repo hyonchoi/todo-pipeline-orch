@@ -571,6 +571,9 @@ def run_harness(
             result_box: dict[str, Any] = {}
 
             if kanban_mode == "hermes":
+                # Emit initial event so the events log file exists for report generation
+                base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
+
                 def _run_and_capture() -> None:
                     try:
                         todo_id_str = f"TODO-{fixture['todo_id']}"
