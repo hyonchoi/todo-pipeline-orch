@@ -192,6 +192,7 @@ def _auto_complete_gate_tasks(
     tick_id: str,
     *,
     completed_phase_key: str,
+    phases: list[Phase] | None = None,
 ) -> None:
     """Complete blocked gate tasks whose direct predecessor just finished.
 
@@ -208,7 +209,6 @@ def _auto_complete_gate_tasks(
     Best-effort: exceptions are logged, not raised.
     """
     from .kanban_tasks import BLOCKED, get_todo_kanban_tasks
-    from .phases import load_phases
 
     try:
         tasks = get_todo_kanban_tasks(tenant, tick_id)
@@ -216,9 +216,13 @@ def _auto_complete_gate_tasks(
         log.warning("failed to query kanban tasks for gate auto-complete: %s", e)
         return
 
-    # Build predecessor map from phase registration order.
-    # In register_todo_phases, each phase N gets --parent = task_id of phase N-1.
-    phases = load_phases()
+    # Build predecessor map from the same phase list used for registration.
+    # When --phase is used, only a subset of phases is registered — using
+    # load_phases() (all phases) would create predecessor mappings for
+    # phases that don't exist as kanban tasks, causing gates to never match.
+    if phases is None:
+        from .phases import load_phases
+        phases = load_phases()
     gate_predecessor = {}
     for i, phase in enumerate(phases):
         if getattr(phase, "gate", False) and i > 0:
@@ -262,6 +266,7 @@ def _poll_kanban_phases(
     detector: ConvergenceDetector,
     poll_interval: float = 5.0,
     max_poll_interval: float = 30.0,
+    phases: list[Phase] | None = None,
 ) -> bool:
     """Poll kanban-as-scheduler phases to completion.
 
@@ -332,7 +337,7 @@ def _poll_kanban_phases(
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
                     # Auto-complete any gate task whose predecessor just finished
                     _auto_complete_gate_tasks(
-                        project_slug, tick_id, completed_phase_key=phase_key
+                        project_slug, tick_id, completed_phase_key=phase_key, phases=phases
                     )
 
                 elif prev == "running" and status == "failed":
@@ -671,9 +676,10 @@ def run_harness(
                         phases_path=_phases_path_override,
                         monitor=monitor,
                         detector=detector,
+                        phases=phases,
                     )
 
-                success, timed_out, _ = _run_with_timeout(_poll, timeout=timeout)
+                success, timed_out, result_box = _run_with_timeout(_poll, timeout=timeout)
 
                 if timed_out:
                     try:
@@ -687,6 +693,12 @@ def run_harness(
                             base_monitor("phase_timed_out", {"phase_key": running_phase})
                     except Exception:
                         pass
+                elif "convergence_error" in result_box:
+                    # Convergence-halt fired during polling. The poll loop already
+                    # exited with all_terminal=True, so phases are already in terminal
+                    # state on the kanban board — no additional cleanup needed beyond
+                    # surfacing the convergence error in the result.
+                    log.warning("convergence-halt: %s", result_box["convergence_error"])
             else:
                 # Null kanban path: PipelineRunner (backward compat)
                 kanban = NullKanbanAdapter()
