@@ -47,3 +47,12 @@
   - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feature/harness-real-kanban-adapter`, Test Coverage `required`, Security Review `not-required`
   - **Completed:** v0.5.0 (2026-07-16)
 
+- [ ] **TODO-21: Revise pipeline harness to maximum use of production module/code** — The harness is to test/verify/validate the production (pipeline-watch) code. Currently, harness is written in its own logic code. It must use production code/function as much as possible to test the production.
+  - **What:** Refactor harness.py to import and delegate to production modules instead of custom implementations — e.g., use production runner, config loading, state management, tick generation, error classification, and convergence detection. Keep only fixture/seed logic in the harness.
+  - **Why:** The harness re-inplements logic that already exists in production modules (runner, circuit, state, config, tick, hermes_adapter, phases). This means bugs fixed in production don't benefit the harness, and harness fixes never reach production — defeating the purpose of a test/verification tool. Reusing production code paths ensures the harness actually validates pipeline-watch behavior.
+  - **Pros:** Single source of truth for pipeline logic, harness tests become integration tests (not unit tests of a parallel implementation), production bug fixes automatically improve harness coverage
+  - **Cons:** Tight coupling to production internals means API changes in production modules break the harness. Requires careful dependency graph analysis to avoid circular imports. Some production functions have side effects (markers, subprocess spawns) that need fixture isolation.
+  - **Context:** harness.py (28.7KB, 20 top-level symbols), production modules: cli.py, runner.py, phases.py, contract.py, kanban_tasks.py, state.py, circuit.py, tick.py, config.py, hermes_adapter.py
+  - **Depends on:** `TODO-19`, `TODO-20`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `worktree-todo21-harness-prod-reuse`, Test Coverage `required`, Security Review `not-required`
+
