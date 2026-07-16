@@ -514,7 +514,7 @@ class TestAutoCompleteGateTasks:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
 
-        _auto_complete_gate_tasks("demo", "01TICK")
+        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
 
         complete_calls = [
             c for c in mock_run.call_args_list
@@ -541,7 +541,7 @@ class TestAutoCompleteGateTasks:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
 
-        _auto_complete_gate_tasks("demo", "01TICK")
+        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
 
         complete_calls = [
             c for c in mock_run.call_args_list
@@ -558,7 +558,7 @@ class TestAutoCompleteGateTasks:
             side_effect=RuntimeError("query failed"),
         )
 
-        _auto_complete_gate_tasks("demo", "01TICK")  # Should not raise
+        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")  # Should not raise
 
 
 class TestPollKanbanPhases:
@@ -690,8 +690,14 @@ class TestPollKanbanPhases:
 
         mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1", "t2"])
         mock_auto = mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
-        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
-                      return_value={"phase_2_autoplan": "done", "phase_2b_plan_gate": "done"})
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"phase_2_autoplan": "running", "phase_2b_plan_gate": "blocked"}
+            return {"phase_2_autoplan": "done", "phase_2b_plan_gate": "done"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
         mocker.patch("time.sleep")
         mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
 
@@ -702,7 +708,7 @@ class TestPollKanbanPhases:
             monitor=monitor, detector=detector, poll_interval=0.1,
         )
 
-        mock_auto.assert_called_once_with("demo", "01TICK")
+        mock_auto.assert_called_once_with("demo", "01TICK", completed_phase_key="phase_2_autoplan")
 
     def test_emits_phase_failed_when_ready_transitions_directly_to_failed(self, tmp_path, mocker):
         """Regression: a phase can jump straight from ready/blocked to failed
