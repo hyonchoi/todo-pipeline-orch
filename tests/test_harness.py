@@ -34,9 +34,6 @@ class TestCreateMockProject:
         assert (tmp_path / ".git").exists()
         assert (tmp_path / "TODOS.md").exists()
         assert "TODO-" in (tmp_path / "TODOS.md").read_text()
-        config_toml = tmp_path / ".hermes" / "config.toml"
-        assert config_toml.exists()
-        assert "claude-haiku-4-5" in config_toml.read_text()
         assert "project_slug" in result
         assert "todo_id" in result
         assert "branch" in result

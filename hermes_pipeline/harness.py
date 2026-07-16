@@ -34,7 +34,6 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
 
     hermes_dir = path / ".hermes"
     hermes_dir.mkdir()
-    (path / ".hermes" / "config.toml").write_text(_get_hermes_config())
     (path / ".hermes" / "todo_id_counter").write_text("0")
 
     subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
@@ -59,16 +58,6 @@ def _get_todos_for_fixture(fixture_name: str) -> str:
         )
     else:
         raise ValueError(f"Unknown fixture: {fixture_name}")
-
-
-def _get_hermes_config() -> str:
-    return (
-        "[profile]\n"
-        'model = "claude-haiku-4-5"\n'
-        "\n"
-        "[selection]\n"
-        'model = "claude-haiku-4-5"\n'
-    )
 
 
 def _get_todo_id_for_fixture(fixture_name: str) -> int:
