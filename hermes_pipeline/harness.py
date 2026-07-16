@@ -62,9 +62,17 @@ def _get_todos_for_fixture(fixture_name: str) -> str:
     if fixture_name == "happy-path":
         return (
             "# TODOS\n\n"
-            "> Active entries below. Archive completed entries to TODOS-archive.md.\n\n"
-            "1. **TODO-1** Implement mock feature A — adds a simple data transformation module. "
-            "Priority: P1. Status: active.\n"
+            "> **Format rules (enforced by `todos-manager` skill):**\n"
+            "> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`\n"
+            "> - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold\n"
+            "> - Required fields: **What:**, **Why:**, **Decisions:**\n"
+            "> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**\n"
+            "> - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1\n"
+            "> - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`\n\n"
+            "- [ ] **TODO-1: Implement mock feature A** — adds a simple data transformation module\n"
+            "  - **What:** Create a mock feature for integration testing.\n"
+            "  - **Why:** Test fixture for the harness.\n"
+            "  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feat/mock-happy-path`, Test Coverage `not-required`, Security Review `not-required`\n"
         )
     else:
         raise ValueError(f"Unknown fixture: {fixture_name}")
