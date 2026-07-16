@@ -184,6 +184,54 @@ The entire run is threaded with a `--timeout` watchdog. If the worker thread is
 still alive after the timeout, the subprocess is killed via `killpg` and a
 `phase_timed_out` event is recorded before report generation.
 
+## Run with real kanban adapter
+
+By default (`hermes-pipeline test --fixture <name>`, or explicitly `--kanban null`), the harness
+uses a no-op kanban adapter — no network calls, no board changes. Pass `--kanban hermes` to drive
+a real `HermesKanbanAdapter` against a dedicated kanban tenant instead:
+
+```bash
+hermes-pipeline test --fixture happy-path --kanban hermes
+```
+
+**Precondition:** you must be logged in (`hermes login`) with access to the `mock-project`
+tenant. The harness runs a preflight check (`hermes kanban list --tenant mock-project`) before
+starting any phase and fails fast with an actionable error if this doesn't succeed — it will not
+silently exit 0 with no card and no local evidence.
+
+**Tenant is never suffixed.** Every `--kanban hermes` run creates a card in the same
+`mock-project` tenant; runs are distinguished by a `tick_id` recorded in each card's body, not by
+a separate tenant per run. Running `--kanban hermes` twice in a row produces two distinct cards
+in the same tenant, not two tenants.
+
+**Terminal-state table** — what the board looks like after a run ends, depending on how it ended:
+
+| Terminal state | Board state |
+|---|---|
+| Success (ready for review) | Card **live** — not archived; a later `merge`/`abandon` step clears it |
+| Phase failure (with or without `continue_on_failure`) | Card **archived** — inspectable, not deleted |
+| Convergence-halt (3+ consecutive same-class failures) | Card **archived** |
+| Overall `--timeout` fires | Card **live** — genuinely orphaned; this is intentional debug signal |
+| Process crash | Card **live** — genuinely orphaned; this is intentional debug signal |
+
+A live card after a run means "the run never got to clean up" (timeout/crash) or "still waiting
+on review/merge" (success). An archived card means "it failed cleanly and the card body has the
+`tick_id`/fixture/state_dir context for why."
+
+**Output.** On both success and failure, a `--kanban hermes` run prints:
+
+```
+[kanban] tenant=mock-project tick_id=01ARZ3ND... task_id=abc123 report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
+```
+
+Pass `--keep` to retain the temp directory (including `kanban_outbox.jsonl` and
+`active_tasks.json`) for post-run inspection.
+
+**Known limitation:** the outbox retry path (`drain_outbox`) does not currently carry the
+`tick_id`/fixture metadata on a queued-and-later-retried card — only the initial synchronous
+create attempt includes it. This is a pre-existing outbox-fidelity gap, not introduced by this
+feature.
+
 ## Related
 
 - [Explanation: Skill Test Harness Design](explanation-skill-test-harness-design.md) — Design rationale, phase 2 plans
