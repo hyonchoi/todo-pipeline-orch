@@ -5,6 +5,12 @@ and hermes (CLI-based) adapters. Includes atomic store management and a create-p
 outbox for resilient sync with cap and drop-oldest-first on overflow.
 """
 
+"""
+NOTE: HermesKanbanAdapter, KanbanOutbox, and ActiveTasksStore are retained for
+backward compatibility (--kanban null path, merge orchestration). The harness
+--kanban hermes path has moved to kanban-as-scheduler via kanban_tasks.py.
+"""
+
 from __future__ import annotations
 
 import json
