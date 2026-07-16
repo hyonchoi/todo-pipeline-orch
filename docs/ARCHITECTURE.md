@@ -178,7 +178,11 @@ The skill source lives at `skills/todos-manager/SKILL.md` (platform-neutral, git
 - Stable TODO-<n> IDs: `max(all IDs in TODOS.md + TODOS-archive.md) + 1`, immutable once committed
 - Preamble blockquote at top of TODOS.md documenting the schema
 
-The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. See [tests/skill-test-environment/README.md](../tests/skill-test-environment/README.md).
+The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. This Phase 1 harness provides pure-Python implementations of skill rules that serve as the test oracle, enabling instant feedback without API tokens. See:
+- [Reference: Skill Test Harness API](reference-skill-test-harness.md) — Complete function signatures, assertion types, fixtures
+- [How To: Skill Test Environment](howto-skill-test-environment.md) — Add unit tests, golden files, debug failures
+- [Explanation: Skill Test Harness Design](explanation-skill-test-harness-design.md) — Why pure-Python + golden files, Phase 1 vs. Phase 2 plans
+- [tests/skill-test-environment/README.md](../tests/skill-test-environment/README.md) — Quick start
 
 ## See Also
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state

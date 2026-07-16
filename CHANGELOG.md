@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.11] - 2026-07-15
+
+### Added
+- **Mock integration test harness** — Repeatable, verifiable end-to-end pipeline testing. Creates mock projects with preset TODOs, runs the full pipeline through isolated temp directories, monitors phase transitions, generates JSONL event logs and structured findings reports. Supports iterative fix cycles with `--loop` to diff reports across runs.
+- **`hermes-pipeline` CLI entrypoint** — Registered alias for the Hermes Pipeline CLI, accessible from any terminal.
+- **`hermes-pipeline test` subcommand** — Drives the mock harness via `--fixture`, `--loop`, `--phase`, `--keep`, `--timeout`, and `--convergence-threshold` flags.
+- **Convergence detector** — Automatic halt when N+ consecutive phase failures share the same error class, preventing infinite retry loops.
+- **`continue_on_failure` mode** — PipelineRunner continues through non-critical phase failures and auto-approves gate phases, surfolding structural correctness of the full pipeline.
+- **PipelineRunner monitor callbacks** — Real-time hooks for `phase_started`, `phase_completed`, and `phase_failed` transitions.
+- **Environment threading for subprocess isolation** — Phase subprocesses inherit only test-scoped environment variables, preventing the harness from reading user-level config or credentials.
+
+### Fixed
+- **Harness phase failure reporting** — Timeout and convergence-halt events are recorded in the JSONL event log so reports reflect the actual failure mode instead of silent truncation.
+- **Version test resilience** — Version parsing no longer fails when the VERSION file contains unexpected trailing content.
+
+### Changed
+- **Test report module** — New `test_report.py` provides `generate_report`, `summarize_report`, `diff_reports`, and `summarize_diff` for structured pipeline analysis.
+
 ## [0.4.10] - 2026-07-14
 
 ### Added

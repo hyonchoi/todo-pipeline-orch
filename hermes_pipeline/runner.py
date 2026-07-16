@@ -138,6 +138,8 @@ class PipelineRunner:
     run_phase_fn: Callable[[Phase], int]
     tick_id: str = ""
     pr_url_resolver: Callable[[], str] = lambda: ""
+    continue_on_failure: bool = False
+    monitor: Callable | None = None
 
     def run(self) -> bool:
         """
@@ -181,6 +183,9 @@ class PipelineRunner:
             log.warning("kanban.set_active_task failed (non-blocking): %s", e)
 
         # Step 2: Loop through phases
+        import time as _time
+        had_failures = False
+
         for phase_index, phase in enumerate(self.phases):
             log.info(
                 "Running phase %d/%d: %s (key=%s)",
@@ -189,6 +194,10 @@ class PipelineRunner:
                 phase.name,
                 phase.phase_key,
             )
+
+            # Monitor: phase started
+            if self.monitor:
+                self.monitor("phase_started", {"phase_key": phase.phase_key, "todo_id": self.todo_id})
 
             # Update kanban to "running"
             try:
@@ -200,8 +209,29 @@ class PipelineRunner:
             except Exception as e:
                 log.warning("kanban.update_phase (running) failed: %s", e)
 
-            # Run the phase
+            # Auto-approve gate phases when continue_on_failure=True
+            if phase.gate and self.continue_on_failure:
+                log.info("gate %s auto-approved (continue_on_failure mode)", phase.phase_key)
+                if self.monitor:
+                    self.monitor("phase_completed", {"phase_key": phase.phase_key, "todo_id": self.todo_id, "duration_ms": 0})
+                try:
+                    self.state.mark_phase_done(self.todo_id, phase.phase_key, phase_index)
+                except Exception as e:
+                    log.warning("state.mark_phase_done failed: %s", e)
+                try:
+                    self.kanban.update_phase(
+                        project=self.project,
+                        phase=phase.name,
+                        status="done",
+                    )
+                except Exception as e:
+                    log.warning("kanban.update_phase (done) failed: %s", e)
+                continue
+
+            # Run the phase with timing
+            phase_start = _time.time()
             rc = self.run_phase_fn(phase)
+            duration_ms = int((_time.time() - phase_start) * 1000)
 
             if rc != 0:
                 # Phase failed
@@ -210,6 +240,8 @@ class PipelineRunner:
                     phase.name,
                     rc,
                 )
+                if self.monitor:
+                    self.monitor("phase_failed", {"phase_key": phase.phase_key, "todo_id": self.todo_id, "duration_ms": duration_ms, "return_code": rc})
                 try:
                     self.kanban.update_phase(
                         project=self.project,
@@ -218,9 +250,14 @@ class PipelineRunner:
                     )
                 except Exception as e:
                     log.warning("kanban.update_phase (failed) failed: %s", e)
-                return False
+                if not self.continue_on_failure:
+                    return False
+                had_failures = True
+                continue
 
-            # Phase succeeded: mark done in state and update kanban
+            # Phase succeeded
+            if self.monitor:
+                self.monitor("phase_completed", {"phase_key": phase.phase_key, "todo_id": self.todo_id, "duration_ms": duration_ms})
             try:
                 self.state.mark_phase_done(self.todo_id, phase.phase_key, phase_index)
             except Exception as e:
@@ -234,6 +271,15 @@ class PipelineRunner:
                 )
             except Exception as e:
                 log.warning("kanban.update_phase (done) failed: %s", e)
+
+        # Check if any phase failed during continue_on_failure run
+        if had_failures:
+            log.warning("Pipeline completed with phase failures (continue_on_failure)")
+            try:
+                self.kanban.clear_active_task(project=self.project, outcome="failed")
+            except Exception as e:
+                log.warning("kanban.clear_active_task failed: %s", e)
+            return False
 
         # Step 3: All phases succeeded; move to ready_for_review
         log.info("All phases completed successfully; moving to ready_for_review")

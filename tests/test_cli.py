@@ -197,3 +197,28 @@ class TestMain:
         finally:
             for key in ["PIPELINE_PROJECTS_DIR", "PIPELINE_LOCK_DIR", "PIPELINE_STATE_DIR"]:
                 os.environ.pop(key, None)
+
+
+# --- Test subcommand parsing (Task 2) ---
+
+def test_test_subcommand_parsing():
+    """Verify 'test' subcommand parses --fixture flag."""
+    from hermes_pipeline.cli import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["test", "--fixture", "happy-path"])
+    assert args.command == "test"
+    assert args.fixture == "happy-path"
+
+def test_test_subcommand_loop_flag():
+    """Verify --loop flag is parsed."""
+    from hermes_pipeline.cli import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["test", "--fixture", "happy-path", "--loop"])
+    assert args.loop is True
+
+def test_test_subcommand_phase_flag():
+    """Verify --phase flag is parsed."""
+    from hermes_pipeline.cli import build_parser
+    parser = build_parser()
+    args = parser.parse_args(["test", "--fixture", "happy-path", "--phase", "phase_2_autoplan"])
+    assert args.phase == "phase_2_autoplan"

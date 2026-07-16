@@ -26,7 +26,7 @@
   - **Depends on:** `TODO-2`, `TODO-3`
   - **Decisions:** Priority `P3`, Effort `S`, Phase `2 (Design)`, Branch `feature/selection-model-fallback`, Test Coverage `required`, Security Review `not-required`
 
-- [ ] **TODO-19: partial impl of TODO-4, integration test data that is repeatable, verifiable mock data for whole pipeline from start to the end** — Repeatable mock integration test harness for pipeline end-to-end verification
+- [x] **TODO-19: partial impl of TODO-4, integration test data that is repeatable, verifiable mock data for whole pipeline from start to the end** — Repeatable mock integration test harness for pipeline end-to-end verification
   - **What:** Five deliverables: (1) setup script + mock project fixtures (git, preset, TODOS.md) in temp dir, (2) pipeline execution through mock project, (3) monitoring/verification of pipeline steps and kanban status, (4) findings report generation, (5) loopable 1-4 for iterative fix cycles. Assumes local running Hermes configuration.
   - **Why:** TODO-4 (end-to-end integration harness) is P1 with no implementation progress. This partial impl creates repeatable, verifiable mock data — a prerequisite for debugging cross-system bugs (Hermes + Kanban + Claude Code) without manual setup each time. Prior test infra (TODO-16) is structural-only; no integration-level fixtures exist.
   - **Pros:** Deterministic reproduction for cross-system debugging, reusable fixtures for future integration tests, validates pipeline end-to-end without prod data
@@ -34,4 +34,15 @@
   - **Context:** TODO-4 (parent), TODO-16 (skill-test-environment Phase 1, tests/skill-test-environment/). Pipeline modules: hermes_pipeline/decision/, hermes_pipeline/kanban.py, hermes_pipeline/runner.py, hermes_pipeline/phases.py
   - **Depends on:** `TODO-4`, `TODO-2`, `TODO-3`
   - **Decisions:** Priority `P1`, Effort `L`, Phase `4 (Development)`, Branch `feature/integration-test-harness`, Test Coverage `required`, Security Review `not-required`
+  - **Completed:** v0.4.11 (2026-07-15)
+
+- [ ] **TODO-20: Add `--kanban {null,hermes}` option to `hermes-pipeline test`** — Let the mock integration harness exercise the real HermesKanbanAdapter, not just NullKanbanAdapter
+  - **What:** Add a `--kanban {null,hermes}` CLI flag to the `test` subcommand (`cli.py:536-565`), thread it through `run_harness()` (`harness.py:316-392`), and when `hermes` is selected, construct `HermesKanbanAdapter(outbox, active_tasks)` wired to `KanbanOutbox`/`ActiveTasksStore` paths under the fixture's temp `state_dir`, instead of hardcoding `NullKanbanAdapter()` (`harness.py:357`).
+  - **Why:** The harness currently can't validate real kanban sync behavior (task creation, phase comments, complete/archive) end-to-end against a mock project — it silently no-ops. TODO-19's harness already runs real `hermes`/`claude` subprocesses for phases; kanban is the one system left mocked.
+  - **Pros:** Closes the last gap in true end-to-end pipeline verification; reuses the existing `HermesKanbanAdapter`/outbox machinery with no new abstractions.
+  - **Cons:** Real kanban calls against a mock tenant require a reachable `hermes kanban` backend/tenant — may need a dedicated test tenant or additional mocking at the `hermes kanban` CLI boundary to stay hermetic.
+  - **Context:** `docs/howto-mock-integration-test-harness.md` should also get a new "Run with real kanban adapter" step documenting the flag.
+  - **Depends on:** `TODO-19`
+  - **Assumptions:** A test/mock kanban tenant is available or acceptable for CI use; if not, this TODO may need to scope down to "outbox/dry-run verification only."
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feature/harness-real-kanban-adapter`, Test Coverage `required`, Security Review `not-required`
 
