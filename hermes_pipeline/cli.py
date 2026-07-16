@@ -562,6 +562,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--convergence-threshold", type=int, default=3,
         help="Consecutive same-class failures to halt run (default: 3)",
     )
+    test_parser.add_argument(
+        "--kanban", choices=["null", "hermes"], default="null",
+        help=(
+            "Kanban adapter to use (default: null, no network calls). "
+            "'hermes' constructs a real HermesKanbanAdapter and requires prior "
+            "`hermes login` plus access to the fixture's kanban tenant "
+            "(verify with: hermes kanban list --tenant mock-project)."
+        ),
+    )
     test_parser.set_defaults(func=_cmd_test)
 
     return parser
@@ -1553,6 +1562,7 @@ def _cmd_test(args, config: Config) -> int:
             keep_dir=args.keep,
             timeout=args.timeout,
             convergence_threshold=args.convergence_threshold,
+            kanban_mode=args.kanban,
             config=config,
         )
         if result.exit_code != 0:
