@@ -517,11 +517,6 @@ def test_runner_no_monitor_when_not_provided(tmp_path):
 def test_had_failures_clears_kanban_with_abandoned_outcome(tmp_path):
     """continue_on_failure=True + a phase failure should clear kanban with outcome='abandoned',
     not the invalid 'failed' literal."""
-    from unittest.mock import MagicMock
-    from hermes_pipeline.phases import Phase
-    from hermes_pipeline.runner import PipelineRunner
-    from hermes_pipeline.state import State
-
     kanban = MagicMock()
     kanban.set_active_task.return_value = MagicMock(ok=True)
     kanban.update_phase.return_value = MagicMock(ok=True)
@@ -560,11 +555,6 @@ def test_had_failures_clears_kanban_with_abandoned_outcome(tmp_path):
 def test_continue_on_failure_false_clears_kanban_before_early_return(tmp_path):
     """A phase failure with continue_on_failure=False must still call clear_active_task
     before returning — this was previously a silent cleanup gap."""
-    from unittest.mock import MagicMock
-    from hermes_pipeline.phases import Phase
-    from hermes_pipeline.runner import PipelineRunner
-    from hermes_pipeline.state import State
-
     kanban = MagicMock()
     kanban.set_active_task.return_value = MagicMock(ok=True)
     kanban.update_phase.return_value = MagicMock(ok=True)
@@ -602,11 +592,6 @@ def test_continue_on_failure_false_clears_kanban_before_early_return(tmp_path):
 
 def test_kanban_metadata_field_passed_to_set_active_task(tmp_path):
     """PipelineRunner.kanban_metadata, when set, is forwarded to set_active_task's metadata kwarg."""
-    from unittest.mock import MagicMock
-    from hermes_pipeline.phases import Phase
-    from hermes_pipeline.runner import PipelineRunner
-    from hermes_pipeline.state import State
-
     kanban = MagicMock()
     kanban.set_active_task.return_value = MagicMock(ok=True)
     kanban.update_phase.return_value = MagicMock(ok=True)

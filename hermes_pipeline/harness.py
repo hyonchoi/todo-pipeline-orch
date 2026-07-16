@@ -137,6 +137,10 @@ class KanbanPreflightError(RuntimeError):
     """Raised when --kanban hermes is selected but the tenant is not accessible."""
 
 
+# Preflight timeout for hermes kanban list (seconds)
+_PREFLIGHT_TIMEOUT = 15
+
+
 def _kanban_preflight(*, tenant: str) -> None:
     """Fail fast if the kanban tenant isn't accessible before constructing the real adapter.
 
@@ -149,11 +153,11 @@ def _kanban_preflight(*, tenant: str) -> None:
             ["hermes", "kanban", "list", "--tenant", tenant],
             capture_output=True,
             text=True,
-            timeout=15,
+            timeout=_PREFLIGHT_TIMEOUT,
         )
     except subprocess.TimeoutExpired:
         raise KanbanPreflightError(
-            f"Preflight check timed out after 15s: `hermes kanban list --tenant {tenant}` "
+            f"Preflight check timed out after {_PREFLIGHT_TIMEOUT}s: `hermes kanban list --tenant {tenant}` "
             f"did not respond. Verify your --kanban tenant is correct and reachable."
         )
     if result.returncode != 0:

@@ -474,12 +474,17 @@ def drain_outbox(adapter: KanbanClient, outbox: KanbanOutbox) -> None:
     for entry in outbox.all():
         if entry.operation == "set_active_task":
             raw_metadata = entry.params.get("metadata")
+            try:
+                metadata = json.loads(raw_metadata) if raw_metadata else None
+            except (json.JSONDecodeError, TypeError):
+                log.warning("failed to parse metadata for outbox entry %s: skipping metadata", entry.project)
+                metadata = None
             r = adapter.set_active_task(
                 entry.project,
                 todo_id=entry.params["todo_id"],
                 title=entry.params["title"],
                 phase=entry.params["phase"],
-                metadata=json.loads(raw_metadata) if raw_metadata else None,
+                metadata=metadata,
             )
         elif entry.operation == "update_phase":
             r = adapter.update_phase(

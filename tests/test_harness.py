@@ -329,7 +329,6 @@ class TestKanbanModeHermes:
     def test_kanban_hermes_uses_unsuffixed_tenant(self, mock_harness_sp, mock_kanban_sp, tmp_path, monkeypatch):
         """Regression test for the tenant-conflation bug: --tenant must be the fixture's
         unsuffixed project_slug, never suffixed with tick_id."""
-        from unittest.mock import MagicMock
 
         # preflight `hermes kanban list --tenant ...` succeeds
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
@@ -411,10 +410,8 @@ class TestKanbanModeHermes:
     def test_convergence_halt_clears_kanban(self, mock_harness_sp, mock_kanban_sp, monkeypatch):
         """A convergence-halt must call clear_active_task(outcome='abandoned') even though
         ConvergenceHaltError bypasses PipelineRunner.run()'s own cleanup path."""
-        from unittest.mock import MagicMock
 
         def _harness_run_side_effect(*args, **kwargs):
-            """Handle git commands (fixture setup) and hermes preflight via harness subprocess."""
             cmd = args[0]
             if isinstance(cmd, (list, tuple)):
                 if cmd[0] == "hermes":
@@ -472,14 +469,11 @@ class TestKanbanModeHermes:
         import subprocess
 
         def _run_side_effect(*args, **kwargs):
-            """Only timeout on hermes preflight call, let git commands succeed."""
             cmd = args[0]
             if isinstance(cmd, (list, tuple)) and len(cmd) >= 3 and cmd[:3] == ["hermes", "kanban", "list"]:
                 raise subprocess.TimeoutExpired(cmd, 15)
-            # git init, config, add, commit — just succeed
             from unittest.mock import MagicMock
             return MagicMock(returncode=0, stdout="", stderr="")
-
         mock_run.side_effect = _run_side_effect
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
 

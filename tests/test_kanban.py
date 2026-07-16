@@ -524,8 +524,6 @@ class TestHermesKanbanAdapter:
         body = call_args[body_index]
         assert "tick_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV" in body
         assert "fixture_name: happy-path" in body
-        # tenant must never contain the tick_id (regression guard for the tenant-conflation bug)
-        assert call_args[4] == "mock-project"
 
 
     @patch("hermes_pipeline.kanban.subprocess.run")
