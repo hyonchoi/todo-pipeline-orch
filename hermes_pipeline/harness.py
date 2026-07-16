@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -271,31 +271,17 @@ def _poll_kanban_phases(
                 elif prev == "running" and status == "done":
                     monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                    detector.record(phase_key, None)
 
                 elif prev == "running" and status == "failed":
                     monitor.current_phase_key = None
-                    try:
-                        monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                    except ConvergenceHaltError:
-                        log.warning(
-                            "convergence detector: %d+ consecutive phase_failure, halting",
-                            detector.threshold,
-                        )
-                        all_terminal = True
-                        break
-                    detector.record(phase_key, "phase_failure")
-                    if detector.should_halt():
-                        log.warning(
-                            "convergence detector: %d+ consecutive phase_failure, halting",
-                            detector.threshold,
-                        )
-                        all_terminal = True
-                        break
+                    # monitor() records the failure with the detector and raises
+                    # ConvergenceHaltError itself if the threshold is tripped —
+                    # see _ConvergenceMonitor.__call__. No separate detector.record()
+                    # call is needed here.
+                    monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
 
                 elif prev == "blocked" and status == "done":
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                    detector.record(phase_key, None)
         except ConvergenceHaltError:
             log.warning(
                 "convergence detector: %d+ consecutive phase_failure, halting",
@@ -497,6 +483,41 @@ def _kill_hung_phase_subprocess(*, state_dir: Path, todo_id: int) -> None:
         log.warning("failed to kill hung phase subprocess pid=%s: %s", pid, e)
 
 
+def _run_with_timeout(
+    fn: Callable[[], bool], *, timeout: int
+) -> tuple[bool, bool, dict[str, Any]]:
+    """Run `fn` on a daemon worker thread, joined with `timeout`.
+
+    Returns (success, timed_out, result_box). result_box carries
+    "convergence_error" or "exception" keys when fn raised those instead
+    of returning normally.
+    """
+    import threading
+
+    result_box: dict[str, Any] = {}
+
+    def _run_and_capture() -> None:
+        try:
+            result_box["success"] = fn()
+        except ConvergenceHaltError as e:
+            result_box["convergence_error"] = e
+        except Exception as e:  # noqa: BLE001 - surfaced via result_box
+            result_box["exception"] = e
+
+    worker = threading.Thread(target=_run_and_capture, daemon=True)
+    worker.start()
+    worker.join(timeout=timeout)
+
+    if worker.is_alive():
+        return False, True, result_box
+    if "convergence_error" in result_box:
+        log.warning(str(result_box["convergence_error"]))
+        return False, False, result_box
+    if "exception" in result_box:
+        raise result_box["exception"]
+    return result_box["success"], False, result_box
+
+
 def run_harness(
     *,
     fixture_name: str,
@@ -509,8 +530,6 @@ def run_harness(
     config: Any,
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
-    import threading
-
     from .runner import PipelineRunner
     from .phases import load_phases
     from .test_report import generate_report, summarize_report, diff_reports, summarize_diff
@@ -551,7 +570,7 @@ def run_harness(
                 import yaml as _yaml
                 _phases_path_override = temp_dir / "filtered-phases.yaml"
                 _phases_path_override.write_text(
-                    _yaml.dump({"phases": [p.__dict__ for p in phases]})
+                    _yaml.dump({"phases": [asdict(p) for p in phases]})
                 )
 
         checkpoint_dir = state_dir / "pipeline_checkpoints"
@@ -568,37 +587,26 @@ def run_harness(
 
         timed_out = False
         with isolate_config(state_dir=state_dir, lock_dir=lock_dir):
-            result_box: dict[str, Any] = {}
-
             if kanban_mode == "hermes":
                 # Emit initial event so the events log file exists for report generation
                 base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
 
-                def _run_and_capture() -> None:
-                    try:
-                        todo_id_str = f"TODO-{fixture['todo_id']}"
-                        result_box["success"] = _poll_kanban_phases(
-                            project_slug=fixture["project_slug"],
-                            tick_id=tick_id,
-                            state_dir=state_dir,
-                            todo_id=todo_id_str,
-                            project_dir=temp_dir,
-                            phases_path=_phases_path_override,
-                            monitor=monitor,
-                            detector=detector,
-                        )
-                    except ConvergenceHaltError as e:
-                        result_box["convergence_error"] = e
-                    except Exception as e:  # noqa: BLE001
-                        result_box["exception"] = e
+                def _poll() -> bool:
+                    todo_id_str = f"TODO-{fixture['todo_id']}"
+                    return _poll_kanban_phases(
+                        project_slug=fixture["project_slug"],
+                        tick_id=tick_id,
+                        state_dir=state_dir,
+                        todo_id=todo_id_str,
+                        project_dir=temp_dir,
+                        phases_path=_phases_path_override,
+                        monitor=monitor,
+                        detector=detector,
+                    )
 
-                worker = threading.Thread(target=_run_and_capture, daemon=True)
-                worker.start()
-                worker.join(timeout=timeout)
+                success, timed_out, _ = _run_with_timeout(_poll, timeout=timeout)
 
-                if worker.is_alive():
-                    timed_out = True
-                    success = False
+                if timed_out:
                     try:
                         in_flight = get_todo_kanban_status(fixture["project_slug"], tick_id)
                         running_phase = next(
@@ -610,13 +618,6 @@ def run_harness(
                             base_monitor("phase_timed_out", {"phase_key": running_phase})
                     except Exception:
                         pass
-                elif "convergence_error" in result_box:
-                    log.warning(str(result_box["convergence_error"]))
-                    success = False
-                elif "exception" in result_box:
-                    raise result_box["exception"]
-                else:
-                    success = result_box["success"]
             else:
                 # Null kanban path: PipelineRunner (backward compat)
                 kanban = NullKanbanAdapter()
@@ -643,32 +644,15 @@ def run_harness(
                     monitor=monitor,
                 )
 
-                def _run_and_capture() -> None:
-                    try:
-                        result_box["success"] = runner.run()
-                    except ConvergenceHaltError as e:
-                        result_box["convergence_error"] = e
-                    except Exception as e:  # noqa: BLE001
-                        result_box["exception"] = e
+                success, timed_out, result_box = _run_with_timeout(runner.run, timeout=timeout)
 
-                worker = threading.Thread(target=_run_and_capture, daemon=True)
-                worker.start()
-                worker.join(timeout=timeout)
-
-                if worker.is_alive():
-                    timed_out = True
-                    success = False
+                if timed_out:
+                    _kill_hung_phase_subprocess(state_dir=state_dir, todo_id=fixture["todo_id"])
                 elif "convergence_error" in result_box:
-                    log.warning(str(result_box["convergence_error"]))
                     try:
                         kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
                     except Exception as e:
                         log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
-                    success = False
-                elif "exception" in result_box:
-                    raise result_box["exception"]
-                else:
-                    success = result_box["success"]
 
         if timed_out and monitor.current_phase_key:
             base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
