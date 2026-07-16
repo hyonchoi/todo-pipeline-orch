@@ -324,17 +324,20 @@ class TestRunHarnessTimeout:
 class TestKanbanModeHermes:
     """Tests for --kanban hermes wiring in run_harness()."""
 
+    @patch("hermes_pipeline.kanban.subprocess.run")
     @patch("hermes_pipeline.harness.subprocess.run")
-    def test_kanban_hermes_uses_unsuffixed_tenant(self, mock_run, tmp_path, monkeypatch):
+    def test_kanban_hermes_uses_unsuffixed_tenant(self, mock_harness_sp, mock_kanban_sp, tmp_path, monkeypatch):
         """Regression test for the tenant-conflation bug: --tenant must be the fixture's
         unsuffixed project_slug, never suffixed with tick_id."""
         from unittest.mock import MagicMock
 
         # preflight `hermes kanban list --tenant ...` succeeds
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
-        # set_active_task's `hermes kanban create` call
+        mock_harness_sp.return_value = preflight_result
+
+        # set_active_task's `hermes kanban create` call (runs through kanban.py subprocess)
         create_result = MagicMock(returncode=0, stdout='{"id": "task-1"}', stderr="")
-        mock_run.side_effect = [preflight_result, create_result] + [MagicMock(returncode=0, stdout="", stderr="")] * 20
+        mock_kanban_sp.return_value = create_result
 
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
         # Run only phase_2_autoplan to keep the run short
@@ -352,12 +355,12 @@ class TestKanbanModeHermes:
             )
 
         create_call = None
-        for call in mock_run.call_args_list:
+        for call in mock_kanban_sp.call_args_list:
             argv = call[0][0]
-            if argv[:3] == ["hermes", "kanban", "create"]:
+            if isinstance(argv, list) and argv[:3] == ["hermes", "kanban", "create"]:
                 create_call = argv
                 break
-        assert create_call is not None, "expected a `hermes kanban create` subprocess call"
+        assert create_call is not None, "expected a `hermes kanban create` subprocess call in kanban.py"
         tenant_index = create_call.index("--tenant") + 1
         assert create_call[tenant_index] == "mock-project"  # unsuffixed, regardless of tick_id
 
@@ -382,7 +385,7 @@ class TestKanbanModeHermes:
             )
 
     @patch("hermes_pipeline.harness.subprocess.run")
-    def test_kanban_null_default_produces_no_kanban_subprocess_calls(self, mock_run, monkeypatch, tmp_path):
+    def test_kanban_null_explicit_produces_no_kanban_subprocess_calls(self, mock_run, monkeypatch, tmp_path):
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
         # Reuse whatever phase-stubbing pattern to keep the run short
         with patch("hermes_pipeline.phases.run") as mock_phases_run:
@@ -411,15 +414,27 @@ class TestKanbanModeHermes:
         from unittest.mock import MagicMock
 
         def _harness_run_side_effect(*args, **kwargs):
-            # Pass through or mock git commands during fixture setup
-            return MagicMock(returncode=0, stdout="[]", stderr="")
+            """Handle git commands (fixture setup) and hermes preflight via harness subprocess."""
+            cmd = args[0]
+            if isinstance(cmd, (list, tuple)):
+                if cmd[0] == "hermes":
+                    # hermes kanban list --tenant (preflight check)
+                    return MagicMock(returncode=0, stdout="[]", stderr="")
+            # git init / config / add / commit (fixture setup)
+            return MagicMock(returncode=0, stdout="", stderr="")
 
-        # Mock harness subprocess.run to handle both fixture setup and preflight
+        # Mock harness subprocess.run — handles fixture setup git cmds + preflight
         mock_harness_sp.side_effect = _harness_run_side_effect
 
-        # Mock kanban subprocess.run for kanban calls
+        # Mock kanban subprocess.run for adapter kanban calls (create, archive, etc.)
         def _kanban_run_side_effect(*args, **kwargs):
-            return MagicMock(returncode=0, stdout='{"id": "task-1"}', stderr="")
+            cmd = args[0]
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 3:
+                if cmd[2] == "create":
+                    return MagicMock(returncode=0, stdout='{"id": "task-1"}', stderr="")
+                if cmd[2] == "archive":
+                    return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
 
         mock_kanban_sp.side_effect = _kanban_run_side_effect
 
