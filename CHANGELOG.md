@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-16
+
+### Added
+- **`--kanban {null,hermes}` flag** — Opt-in real kanban adapter for the mock integration test harness, wired to a dedicated tenant with tick_id-labeled card bodies (TODO-20). Default (`null`) behavior is unchanged.
+- **Preflight validation** — `hermes kanban list --tenant` check with actionable error if the kanban board is unreachable.
+
+### Fixed
+- **Invalid `KanbanOutcome` literal** — `"failed"` corrected to `"abandoned"` across all call sites.
+- **Silent kanban-cleanup gaps** — Added cleanup on `continue_on_failure=False` phase failure and convergence-halt paths.
+
 ## [0.4.11] - 2026-07-15
 
 ### Added
