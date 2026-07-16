@@ -515,7 +515,8 @@ def run_harness(
     from .phases import load_phases
     from .test_report import generate_report, summarize_report, diff_reports, summarize_diff
     from .state import State
-    from .kanban import NullKanbanAdapter, HermesKanbanAdapter, KanbanOutbox, ActiveTasksStore
+    from .kanban import NullKanbanAdapter
+    from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .logging_setup import new_tick_id
 
     preflight_check()
@@ -539,24 +540,19 @@ def run_harness(
         if phase_only:
             phases = filter_phases(all_phases, phase_only)
 
-        # tick_id must exist before any kanban-facing identity (State, adapter, runner) is
-        # constructed, since the card-body metadata needs it at construction time.
         tick_id = new_tick_id()
 
-        kanban_metadata: dict[str, str] | None = None
         if kanban_mode == "hermes":
-            kanban_outbox = KanbanOutbox(state_dir / "kanban_outbox.jsonl")
-            active_tasks = ActiveTasksStore(state_dir / "active_tasks.json")
             _kanban_preflight(tenant=fixture["project_slug"])
-            kanban = HermesKanbanAdapter(kanban_outbox, active_tasks)
-            kanban_metadata = {
-                "tick_id": tick_id,
-                "fixture_name": fixture_name,
-                "state_dir": str(state_dir),
-            }
-        else:
-            kanban = NullKanbanAdapter()
-            active_tasks = None
+
+            # For --phase flag: create a temporary phases YAML for registration
+            _phases_path_override: Path | None = None
+            if phase_only:
+                import yaml as _yaml
+                _phases_path_override = temp_dir / "filtered-phases.yaml"
+                _phases_path_override.write_text(
+                    _yaml.dump({"phases": [p.__dict__ for p in phases]})
+                )
 
         checkpoint_dir = state_dir / "pipeline_checkpoints"
         ready_dir = state_dir / "ready_for_review"
@@ -570,65 +566,109 @@ def run_harness(
             ready_dir=ready_dir,
         )
 
-        runner = PipelineRunner(
-            project=fixture["project_slug"],
-            project_dir=temp_dir,
-            branch=fixture["branch"],
-            todo_id=fixture["todo_id"],
-            title=f"Mock TODO-{fixture['todo_id']}",
-            phases=phases,
-            state=state,
-            kanban=kanban,
-            kanban_metadata=kanban_metadata,
-            run_phase_fn=lambda phase: _dispatch_phase(
-                phase,
-                state_dir=state_dir,
-                todo_id=fixture["todo_id"],
-                tick_id=tick_id,
-                project_slug=fixture["project_slug"],
-                project_dir=temp_dir,
-                error_holder=error_holder,
-            ),
-            continue_on_failure=True,
-            monitor=monitor,
-        )
-
         timed_out = False
         with isolate_config(state_dir=state_dir, lock_dir=lock_dir):
             result_box: dict[str, Any] = {}
 
-            def _run_and_capture() -> None:
-                try:
-                    result_box["success"] = runner.run()
-                except ConvergenceHaltError as e:
-                    result_box["convergence_error"] = e
-                except Exception as e:  # noqa: BLE001 - surfaced via result_box
-                    result_box["exception"] = e
+            if kanban_mode == "hermes":
+                def _run_and_capture() -> None:
+                    try:
+                        todo_id_str = f"TODO-{fixture['todo_id']}"
+                        result_box["success"] = _poll_kanban_phases(
+                            project_slug=fixture["project_slug"],
+                            tick_id=tick_id,
+                            state_dir=state_dir,
+                            todo_id=todo_id_str,
+                            project_dir=temp_dir,
+                            phases_path=_phases_path_override,
+                            monitor=monitor,
+                            detector=detector,
+                        )
+                    except ConvergenceHaltError as e:
+                        result_box["convergence_error"] = e
+                    except Exception as e:  # noqa: BLE001
+                        result_box["exception"] = e
 
-            worker = threading.Thread(target=_run_and_capture, daemon=True)
-            worker.start()
-            worker.join(timeout=timeout)
+                worker = threading.Thread(target=_run_and_capture, daemon=True)
+                worker.start()
+                worker.join(timeout=timeout)
 
-            if worker.is_alive():
-                timed_out = True
-                success = False
-            elif "convergence_error" in result_box:
-                log.warning(str(result_box["convergence_error"]))
-                try:
-                    kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
-                except Exception as e:
-                    log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
-                success = False
-            elif "exception" in result_box:
-                raise result_box["exception"]
+                if worker.is_alive():
+                    timed_out = True
+                    success = False
+                    try:
+                        in_flight = get_todo_kanban_status(fixture["project_slug"], tick_id)
+                        running_phase = next(
+                            (k for k, v in in_flight.items()
+                             if v not in TERMINAL_STATUSES),
+                            None,
+                        )
+                        if running_phase and monitor.current_phase_key is None:
+                            base_monitor("phase_timed_out", {"phase_key": running_phase})
+                    except Exception:
+                        pass
+                elif "convergence_error" in result_box:
+                    log.warning(str(result_box["convergence_error"]))
+                    success = False
+                elif "exception" in result_box:
+                    raise result_box["exception"]
+                else:
+                    success = result_box["success"]
             else:
-                success = result_box["success"]
+                # Null kanban path: PipelineRunner (backward compat)
+                kanban = NullKanbanAdapter()
+                runner = PipelineRunner(
+                    project=fixture["project_slug"],
+                    project_dir=temp_dir,
+                    branch=fixture["branch"],
+                    todo_id=fixture["todo_id"],
+                    title=f"Mock TODO-{fixture['todo_id']}",
+                    phases=phases,
+                    state=state,
+                    kanban=kanban,
+                    kanban_metadata=None,
+                    run_phase_fn=lambda phase: _dispatch_phase(
+                        phase,
+                        state_dir=state_dir,
+                        todo_id=fixture["todo_id"],
+                        tick_id=tick_id,
+                        project_slug=fixture["project_slug"],
+                        project_dir=temp_dir,
+                        error_holder=error_holder,
+                    ),
+                    continue_on_failure=True,
+                    monitor=monitor,
+                )
+
+                def _run_and_capture() -> None:
+                    try:
+                        result_box["success"] = runner.run()
+                    except ConvergenceHaltError as e:
+                        result_box["convergence_error"] = e
+                    except Exception as e:  # noqa: BLE001
+                        result_box["exception"] = e
+
+                worker = threading.Thread(target=_run_and_capture, daemon=True)
+                worker.start()
+                worker.join(timeout=timeout)
+
+                if worker.is_alive():
+                    timed_out = True
+                    success = False
+                elif "convergence_error" in result_box:
+                    log.warning(str(result_box["convergence_error"]))
+                    try:
+                        kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
+                    except Exception as e:
+                        log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
+                    success = False
+                elif "exception" in result_box:
+                    raise result_box["exception"]
+                else:
+                    success = result_box["success"]
 
         if timed_out and monitor.current_phase_key:
-            # Overall timeout fired mid-phase: record it so the report reflects
-            # a timeout rather than silently truncating the event log.
             base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
-            _kill_hung_phase_subprocess(state_dir=state_dir, todo_id=fixture["todo_id"])
 
         output_dir = temp_dir / "reports"
         report = generate_report(events_log, output_dir)
@@ -652,10 +692,10 @@ def run_harness(
             next_report.write_text(report_json.read_text())
 
         if kanban_mode == "hermes":
-            active_task_id = active_tasks.get(fixture["project_slug"])
+            status_map = get_todo_kanban_status(fixture["project_slug"], tick_id)
             print(
                 f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
-                f"task_id={active_task_id or '(none — check outbox)'} "
+                f"phases={status_map} "
                 f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
             )
 

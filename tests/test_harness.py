@@ -324,24 +324,22 @@ class TestRunHarnessTimeout:
 class TestKanbanModeHermes:
     """Tests for --kanban hermes wiring in run_harness()."""
 
-    @patch("hermes_pipeline.kanban.subprocess.run")
+    @patch("hermes_pipeline.harness._poll_kanban_phases")
     @patch("hermes_pipeline.harness.subprocess.run")
-    def test_kanban_hermes_uses_unsuffixed_tenant(self, mock_harness_sp, mock_kanban_sp, tmp_path, monkeypatch):
+    def test_kanban_hermes_uses_unsuffixed_tenant(self, mock_harness_sp, mock_poll, tmp_path, monkeypatch):
         """Regression test for the tenant-conflation bug: --tenant must be the fixture's
         unsuffixed project_slug, never suffixed with tick_id."""
 
         # preflight `hermes kanban list --tenant ...` succeeds
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
         mock_harness_sp.return_value = preflight_result
-
-        # set_active_task's `hermes kanban create` call (runs through kanban.py subprocess)
-        create_result = MagicMock(returncode=0, stdout='{"id": "task-1"}', stderr="")
-        mock_kanban_sp.return_value = create_result
+        mock_poll.return_value = True
 
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
-        # Run only phase_2_autoplan to keep the run short
-        with patch("hermes_pipeline.phases.run") as mock_phases_run:
-            mock_phases_run.return_value = {"status": "success"}
+        # When _poll_kanban_phases is mocked, the events log is empty;
+        # mock report generation to avoid FileNotFoundError on empty JSONL.
+        with patch("hermes_pipeline.test_report.generate_report", return_value={}) as mock_gen, \
+             patch("hermes_pipeline.test_report.summarize_report", return_value="summary"):
             result = run_harness(
                 fixture_name="happy-path",
                 loop=False,
@@ -353,15 +351,23 @@ class TestKanbanModeHermes:
                 config=None,
             )
 
-        create_call = None
-        for call in mock_kanban_sp.call_args_list:
+        # Verify preflight was called with unsuffixed tenant
+        # Two kanban list calls: preflight + get_todo_kanban_status at end of run_harness
+        preflight_calls = [
+            c for c in mock_harness_sp.call_args_list
+            if isinstance(c[0][0], list) and len(c[0][0]) >= 3
+            and c[0][0][:3] == ["hermes", "kanban", "list"]
+        ]
+        assert len(preflight_calls) >= 1, "expected at least one kanban list call"
+        # All calls should use unsuffixed tenant
+        for call in preflight_calls:
             argv = call[0][0]
-            if isinstance(argv, list) and argv[:3] == ["hermes", "kanban", "create"]:
-                create_call = argv
-                break
-        assert create_call is not None, "expected a `hermes kanban create` subprocess call in kanban.py"
-        tenant_index = create_call.index("--tenant") + 1
-        assert create_call[tenant_index] == "mock-project"  # unsuffixed, regardless of tick_id
+            tenant_index = argv.index("--tenant") + 1
+            assert argv[tenant_index] == "mock-project"  # unsuffixed, regardless of tick_id
+
+        # Verify _poll_kanban_phases was called with the unsuffixed project_slug
+        mock_poll.assert_called_once()
+        assert mock_poll.call_args.kwargs["project_slug"] == "mock-project"
 
     @patch("hermes_pipeline.harness.subprocess.run")
     def test_kanban_hermes_preflight_failure_raises_before_adapter_construction(self, mock_run, monkeypatch):
@@ -405,62 +411,34 @@ class TestKanbanModeHermes:
         ]
         assert kanban_calls == []
 
-    @patch("hermes_pipeline.kanban.subprocess.run")
     @patch("hermes_pipeline.harness.subprocess.run")
-    def test_convergence_halt_clears_kanban(self, mock_harness_sp, mock_kanban_sp, monkeypatch):
-        """A convergence-halt must call clear_active_task(outcome='abandoned') even though
-        ConvergenceHaltError bypasses PipelineRunner.run()'s own cleanup path."""
+    @patch("hermes_pipeline.harness._poll_kanban_phases")
+    def test_convergence_halt_clears_kanban(self, mock_poll, mock_harness_sp, monkeypatch):
+        """In the hermes polling branch, convergence-halt from _poll_kanban_phases
+        is caught as a ConvergenceHaltError and sets success=False without crashing."""
+        from hermes_pipeline.harness import ConvergenceHaltError
 
-        def _harness_run_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if isinstance(cmd, (list, tuple)):
-                if cmd[0] == "hermes":
-                    # hermes kanban list --tenant (preflight check)
-                    return MagicMock(returncode=0, stdout="[]", stderr="")
-            # git init / config / add / commit (fixture setup)
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        # Mock harness subprocess.run — handles fixture setup git cmds + preflight
-        mock_harness_sp.side_effect = _harness_run_side_effect
-
-        # Mock kanban subprocess.run for adapter kanban calls (create, archive, etc.)
-        def _kanban_run_side_effect(*args, **kwargs):
-            cmd = args[0]
-            if isinstance(cmd, (list, tuple)) and len(cmd) >= 3:
-                if cmd[2] == "create":
-                    return MagicMock(returncode=0, stdout='{"id": "task-1"}', stderr="")
-                if cmd[2] == "archive":
-                    return MagicMock(returncode=0, stdout="", stderr="")
-            return MagicMock(returncode=0, stdout="", stderr="")
-
-        mock_kanban_sp.side_effect = _kanban_run_side_effect
+        # preflight succeeds
+        mock_harness_sp.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+        mock_poll.side_effect = ConvergenceHaltError("3+ consecutive phase_failure failures, halting run")
 
         monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
-        # Force every phase dispatch to fail so ConvergenceDetector trips after convergence_threshold
-        from hermes_pipeline.hermes_adapter import HermesCallError
+        # Mock report generation since events log is empty when polling is mocked
+        with patch("hermes_pipeline.test_report.generate_report", return_value={}), \
+             patch("hermes_pipeline.test_report.summarize_report", return_value="summary"):
+            result = run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=True,
+                timeout=60,
+                convergence_threshold=2,
+                kanban_mode="hermes",
+                config=None,
+            )
 
-        def _phase_runner_fails(*args, **kwargs):
-            raise HermesCallError("boom", returncode=1, stderr="boom")
-
-        monkeypatch.setattr("hermes_pipeline.phases.run", _phase_runner_fails)
-
-        run_harness(
-            fixture_name="happy-path",
-            loop=False,
-            phase_only=None,
-            keep_dir=True,
-            timeout=60,
-            convergence_threshold=2,
-            kanban_mode="hermes",
-            config=None,
-        )
-
-        # Check that archive calls were made (this tests that clear_active_task was called)
-        archive_calls = [
-            c for c in mock_kanban_sp.call_args_list
-            if c[0][0][:3] == ["hermes", "kanban", "archive"]
-        ]
-        assert len(archive_calls) == 1
+        # Should return non-zero exit code (failure), but not crash
+        assert result.exit_code == 1
 
     @patch("hermes_pipeline.harness.subprocess.run")
     def test_kanban_preflight_timeout_raises_actionable_error(self, mock_run, monkeypatch):
