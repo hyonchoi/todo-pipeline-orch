@@ -121,6 +121,7 @@ def test_runner_set_active_task_called(tmp_path):
         todo_id=1,
         title="Test TODO",
         phase="Phase 2: Autoplan",
+        metadata=None,
     )
 
 
@@ -511,3 +512,133 @@ def test_runner_no_monitor_when_not_provided(tmp_path):
     result = runner.run()
 
     assert result is True
+
+
+def test_had_failures_clears_kanban_with_abandoned_outcome(tmp_path):
+    """continue_on_failure=True + a phase failure should clear kanban with outcome='abandoned',
+    not the invalid 'failed' literal."""
+    from unittest.mock import MagicMock
+    from hermes_pipeline.phases import Phase
+    from hermes_pipeline.runner import PipelineRunner
+    from hermes_pipeline.state import State
+
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = MagicMock(ok=True)
+    kanban.update_phase.return_value = MagicMock(ok=True)
+    kanban.clear_active_task.return_value = MagicMock(ok=True)
+
+    state = State(
+        project="p",
+        lock_dir=tmp_path / "locks",
+        checkpoint_dir=tmp_path / "ckpt",
+        ready_dir=tmp_path / "ready",
+    )
+    phase = Phase(phase_key="phase_1", name="Phase 1", gate=False)
+
+    def failing_run_phase_fn(p):
+        return 1
+
+    runner = PipelineRunner(
+        project="p",
+        project_dir=tmp_path,
+        branch="feat/x",
+        todo_id=1,
+        title="T",
+        phases=[phase],
+        state=state,
+        kanban=kanban,
+        run_phase_fn=failing_run_phase_fn,
+        continue_on_failure=True,
+    )
+
+    result = runner.run()
+
+    assert result is False
+    kanban.clear_active_task.assert_called_once_with(project="p", outcome="abandoned")
+
+
+def test_continue_on_failure_false_clears_kanban_before_early_return(tmp_path):
+    """A phase failure with continue_on_failure=False must still call clear_active_task
+    before returning — this was previously a silent cleanup gap."""
+    from unittest.mock import MagicMock
+    from hermes_pipeline.phases import Phase
+    from hermes_pipeline.runner import PipelineRunner
+    from hermes_pipeline.state import State
+
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = MagicMock(ok=True)
+    kanban.update_phase.return_value = MagicMock(ok=True)
+    kanban.clear_active_task.return_value = MagicMock(ok=True)
+
+    state = State(
+        project="p",
+        lock_dir=tmp_path / "locks",
+        checkpoint_dir=tmp_path / "ckpt",
+        ready_dir=tmp_path / "ready",
+    )
+    phase = Phase(phase_key="phase_1", name="Phase 1", gate=False)
+
+    def failing_run_phase_fn(p):
+        return 1
+
+    runner = PipelineRunner(
+        project="p",
+        project_dir=tmp_path,
+        branch="feat/x",
+        todo_id=1,
+        title="T",
+        phases=[phase],
+        state=state,
+        kanban=kanban,
+        run_phase_fn=failing_run_phase_fn,
+        continue_on_failure=False,
+    )
+
+    result = runner.run()
+
+    assert result is False
+    kanban.clear_active_task.assert_called_once_with(project="p", outcome="abandoned")
+
+
+def test_kanban_metadata_field_passed_to_set_active_task(tmp_path):
+    """PipelineRunner.kanban_metadata, when set, is forwarded to set_active_task's metadata kwarg."""
+    from unittest.mock import MagicMock
+    from hermes_pipeline.phases import Phase
+    from hermes_pipeline.runner import PipelineRunner
+    from hermes_pipeline.state import State
+
+    kanban = MagicMock()
+    kanban.set_active_task.return_value = MagicMock(ok=True)
+    kanban.update_phase.return_value = MagicMock(ok=True)
+
+    state = State(
+        project="p",
+        lock_dir=tmp_path / "locks",
+        checkpoint_dir=tmp_path / "ckpt",
+        ready_dir=tmp_path / "ready",
+    )
+    phase = Phase(phase_key="phase_1", name="Phase 1", gate=False)
+
+    runner = PipelineRunner(
+        project="p",
+        project_dir=tmp_path,
+        branch="feat/x",
+        todo_id=1,
+        title="T",
+        phases=[phase],
+        state=state,
+        kanban=kanban,
+        run_phase_fn=lambda p: 0,
+        continue_on_failure=True,
+        kanban_metadata={"tick_id": "abc123"},
+    )
+
+    runner.run()
+
+    kanban.set_active_task.assert_called_once_with(
+        project="p",
+        todo_id=1,
+        title="T",
+        phase="Phase 1",
+        metadata={"tick_id": "abc123"},
+    )

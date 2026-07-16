@@ -140,6 +140,7 @@ class PipelineRunner:
     pr_url_resolver: Callable[[], str] = lambda: ""
     continue_on_failure: bool = False
     monitor: Callable | None = None
+    kanban_metadata: dict[str, str] | None = None
 
     def run(self) -> bool:
         """
@@ -178,6 +179,7 @@ class PipelineRunner:
                 todo_id=self.todo_id,
                 title=self.title,
                 phase=first_phase.name,
+                metadata=self.kanban_metadata,
             )
         except Exception as e:
             log.warning("kanban.set_active_task failed (non-blocking): %s", e)
@@ -251,6 +253,10 @@ class PipelineRunner:
                 except Exception as e:
                     log.warning("kanban.update_phase (failed) failed: %s", e)
                 if not self.continue_on_failure:
+                    try:
+                        self.kanban.clear_active_task(project=self.project, outcome="abandoned")
+                    except Exception as e:
+                        log.warning("kanban.clear_active_task failed: %s", e)
                     return False
                 had_failures = True
                 continue
@@ -276,7 +282,7 @@ class PipelineRunner:
         if had_failures:
             log.warning("Pipeline completed with phase failures (continue_on_failure)")
             try:
-                self.kanban.clear_active_task(project=self.project, outcome="failed")
+                self.kanban.clear_active_task(project=self.project, outcome="abandoned")
             except Exception as e:
                 log.warning("kanban.clear_active_task failed: %s", e)
             return False
