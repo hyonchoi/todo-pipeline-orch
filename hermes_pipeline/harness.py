@@ -169,6 +169,139 @@ def _kanban_preflight(*, tenant: str) -> None:
         )
 
 
+def _auto_complete_gate_tasks(tenant: str, tick_id: str) -> None:
+    """Complete all blocked gate tasks for a tick, unblocking child phases.
+
+    Queries kanban for blocked tasks matching tick_id, runs `hermes kanban complete`
+    on each. Best-effort: exceptions are logged, not raised.
+    """
+    from .kanban_tasks import BLOCKED, get_todo_kanban_tasks
+
+    try:
+        tasks = get_todo_kanban_tasks(tenant, tick_id)
+    except Exception as e:
+        log.warning("failed to query kanban tasks for gate auto-complete: %s", e)
+        return
+
+    for phase_key, info in tasks.items():
+        if info.status != BLOCKED:
+            continue
+        try:
+            result = subprocess.run(
+                ["hermes", "kanban", "complete", info.task_id],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                log.warning(
+                    "failed to complete gate task %s (%s): rc=%d stderr=%s",
+                    info.task_id, phase_key, result.returncode,
+                    result.stderr[:200],
+                )
+            else:
+                log.info("auto-completed gate task %s (%s)", info.task_id, phase_key)
+        except Exception as e:
+            log.warning("auto-complete gate task %s (%s) failed: %s", info.task_id, phase_key, e)
+
+
+def _poll_kanban_phases(
+    *,
+    project_slug: str,
+    tick_id: str,
+    state_dir: Path,
+    todo_id: str,
+    project_dir: Path,
+    phases_path: Path | None,
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    poll_interval: float = 5.0,
+) -> bool:
+    """Poll kanban-as-scheduler phases to completion.
+
+    1. Registers all phases as kanban tasks (register_todo_phases).
+    2. Auto-completes gate tasks so child phases become ready.
+    3. Polls get_todo_kanban_status() until all phases terminal.
+    4. Emits JSONL events via monitor.
+    5. Calls observe_outcomes() to write decision store.
+
+    Returns True if all phases completed successfully (all done), False otherwise.
+    """
+    from .kanban_tasks import (
+        TERMINAL_STATUSES,
+        get_todo_kanban_status,
+        observe_outcomes,
+        register_todo_phases,
+    )
+
+    log.info("registering kanban phases for %s tick %s", todo_id, tick_id)
+    register_todo_phases(
+        todo_id=todo_id,
+        tick_id=tick_id,
+        board_slug=project_slug,
+        project_dir=project_dir,
+        phases_path=phases_path,
+    )
+
+    _auto_complete_gate_tasks(project_slug, tick_id)
+
+    previous_status: dict[str, str] = {}
+    all_terminal = False
+
+    while not all_terminal:
+        time.sleep(poll_interval)
+
+        try:
+            status_map = get_todo_kanban_status(project_slug, tick_id)
+        except Exception as e:
+            log.warning("kanban status poll failed: %s", e)
+            continue
+
+        if not status_map:
+            continue
+
+        for phase_key, status in status_map.items():
+            prev = previous_status.get(phase_key)
+
+            if prev in (None, "ready", "blocked") and status == "running":
+                monitor.current_phase_key = phase_key
+                monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
+
+            elif prev == "running" and status == "done":
+                monitor.current_phase_key = None
+                monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                detector.record(phase_key, None)
+
+            elif prev == "running" and status == "failed":
+                monitor.current_phase_key = None
+                monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                detector.record(phase_key, "phase_failure")
+                if detector.should_halt():
+                    log.warning(
+                        "convergence detector: %d+ consecutive phase_failure, halting",
+                        detector.threshold,
+                    )
+                    all_terminal = True
+                    break
+
+            elif prev == "blocked" and status == "done":
+                monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                detector.record(phase_key, None)
+
+        previous_status = dict(status_map)
+
+        if not all_terminal:
+            all_terminal = all(s in TERMINAL_STATUSES for s in status_map.values())
+
+    try:
+        final_status = get_todo_kanban_status(project_slug, tick_id)
+        observe_outcomes(state_dir=state_dir, tick_id=tick_id, status_map=final_status)
+    except Exception as e:
+        log.warning("observe_outcomes failed: %s", e)
+
+    return all(s == "done" for s in previous_status.values())
+
+
 def _classify_error_class(exc: Exception) -> str:
     """Bucket an exception into a coarse error class for convergence tracking / reports."""
     from .hermes_adapter import (

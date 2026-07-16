@@ -489,3 +489,76 @@ class TestKanbanModeHermes:
                 config=None,
             )
 
+
+class TestAutoCompleteGateTasks:
+    """Tests for _auto_complete_gate_tasks()."""
+
+    def test_completes_blocked_gate_tasks(self, mocker):
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+        import json as _json
+
+        header_gate = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+        header_dev = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_4_development",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+
+        mock_data = [
+            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
+            {"id": "t_dev", "status": "ready", "body": header_dev + "\nphase"},
+        ]
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+
+        _auto_complete_gate_tasks("demo", "01TICK")
+
+        complete_calls = [
+            c for c in mock_run.call_args_list
+            if c[0][0][:3] == ["hermes", "kanban", "complete"]
+        ]
+        assert len(complete_calls) == 1
+        assert complete_calls[0][0][0][3] == "t_gate"
+
+    def test_skips_non_blocked_tasks(self, mocker):
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+        import json as _json
+
+        header = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_2_autoplan",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+
+        mock_data = [
+            {"id": "t1", "status": "running", "body": header},
+            {"id": "t2", "status": "done", "body": header.replace("phase_2_autoplan", "phase_3")},
+        ]
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+
+        _auto_complete_gate_tasks("demo", "01TICK")
+
+        complete_calls = [
+            c for c in mock_run.call_args_list
+            if c[0][0][:3] == ["hermes", "kanban", "complete"]
+        ]
+        assert len(complete_calls) == 0
+
+    def test_is_best_effort_on_query_failure(self, mocker):
+        """If get_todo_kanban_tasks raises, the function returns without error."""
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+            side_effect=RuntimeError("query failed"),
+        )
+
+        _auto_complete_gate_tasks("demo", "01TICK")  # Should not raise
+
