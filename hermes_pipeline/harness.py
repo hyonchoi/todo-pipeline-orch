@@ -360,8 +360,16 @@ def _poll_kanban_phases(
                     # call is needed here.
                     monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
 
-                elif prev == "blocked" and status == "done":
+                elif prev in (None, "ready", "blocked") and status == "done":
+                    # Phase completed between polls without ever being observed
+                    # as "running" (fast phase, coarse poll interval). Still
+                    # emit the event and run gate auto-complete so downstream
+                    # gates aren't left blocked.
+                    monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                    _auto_complete_gate_tasks(
+                        project_slug, tick_id, completed_phase_key=phase_key, phases=phases
+                    )
 
                 elif prev in (None, "ready", "blocked") and status == "failed":
                     monitor.current_phase_key = None

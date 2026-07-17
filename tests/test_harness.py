@@ -708,7 +708,9 @@ class TestPollKanbanPhases:
             monitor=monitor, detector=detector, poll_interval=0.1,
         )
 
-        mock_auto.assert_called_once_with("demo", "01TICK", completed_phase_key="phase_2_autoplan", phases=None)
+        mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2_autoplan", phases=None)
+        mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2b_plan_gate", phases=None)
+        assert mock_auto.call_count == 2
 
     def test_emits_phase_failed_when_ready_transitions_directly_to_failed(self, tmp_path, mocker):
         """Regression: a phase can jump straight from ready/blocked to failed
