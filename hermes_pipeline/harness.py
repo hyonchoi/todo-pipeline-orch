@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 import time
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -36,6 +36,16 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     hermes_dir.mkdir()
     (path / ".hermes" / "todo_id_counter").write_text("0")
 
+    # Create pipeline.toml contract for assignee configuration
+    pipeline_toml = (
+        "# Pipeline execution contract — read at tick start.\n"
+        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        "schema_version = 1\n"
+        'assignee = "default"\n'
+        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+    )
+    (path / ".hermes" / "pipeline.toml").write_text(pipeline_toml)
+
     subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
     subprocess.run(["git", "commit", "-m", "initial: mock project setup"], cwd=path, check=True, capture_output=True)
 
@@ -52,9 +62,17 @@ def _get_todos_for_fixture(fixture_name: str) -> str:
     if fixture_name == "happy-path":
         return (
             "# TODOS\n\n"
-            "> Active entries below. Archive completed entries to TODOS-archive.md.\n\n"
-            "1. **TODO-1** Implement mock feature A — adds a simple data transformation module. "
-            "Priority: P1. Status: active.\n"
+            "> **Format rules (enforced by `todos-manager` skill):**\n"
+            "> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`\n"
+            "> - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold\n"
+            "> - Required fields: **What:**, **Why:**, **Decisions:**\n"
+            "> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**\n"
+            "> - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1\n"
+            "> - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`\n\n"
+            "- [ ] **TODO-1: Implement mock feature A** — adds a simple data transformation module\n"
+            "  - **What:** Create a mock feature for integration testing.\n"
+            "  - **Why:** Test fixture for the harness.\n"
+            "  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feat/mock-happy-path`, Test Coverage `not-required`, Security Review `not-required`\n"
         )
     else:
         raise ValueError(f"Unknown fixture: {fixture_name}")
@@ -131,6 +149,252 @@ from .phases import Phase
 
 class ConvergenceHaltError(Exception):
     """Raised when the convergence detector halts a run mid-phase-loop."""
+
+
+class KanbanPreflightError(RuntimeError):
+    """Raised when --kanban hermes is selected but the tenant is not accessible."""
+
+
+# Preflight timeout for hermes kanban list (seconds)
+_PREFLIGHT_TIMEOUT = 15
+
+# Timeout for individual kanban gate complete subprocess calls (seconds)
+_GATE_COMPLETE_TIMEOUT = 10
+
+# Maximum poll interval for kanban-as-scheduler phase polling (seconds)
+_KANBAN_POLL_MAX_INTERVAL = 30.0
+
+# Maximum characters in error messages captured by the harness
+_ERROR_MESSAGE_MAX = 500
+
+# Maximum characters of subprocess stderr shown in error messages
+_STDERR_TRUNCATE = 200
+
+
+def _kanban_preflight(*, tenant: str) -> None:
+    """Fail fast if the kanban tenant isn't accessible before constructing the real adapter.
+
+    Runs `hermes kanban list --tenant <tenant>` and raises KanbanPreflightError with an
+    actionable message on non-zero exit, rather than letting the failure surface later as a
+    silent non-blocking warning deep in HermesKanbanAdapter.
+    """
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "list", "--tenant", tenant],
+            capture_output=True,
+            text=True,
+            timeout=_PREFLIGHT_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise KanbanPreflightError(
+            f"Preflight check timed out after {_PREFLIGHT_TIMEOUT}s: `hermes kanban list --tenant {tenant}` "
+            f"did not respond. Verify your --kanban tenant is correct and reachable."
+        )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise KanbanPreflightError(
+            f"--kanban hermes requires `hermes login` and access to tenant '{tenant}'. "
+            f"Verify with: hermes kanban list --tenant {tenant}\n"
+            f"Preflight error: {detail}"
+        )
+
+
+def _auto_complete_gate_tasks(
+    tenant: str,
+    tick_id: str,
+    *,
+    completed_phase_key: str,
+    phases: list[Phase] | None = None,
+) -> None:
+    """Complete blocked gate tasks whose direct predecessor just finished.
+
+    Gate tasks are created as blocked with --parent pointing to their
+    predecessor. In kanban-as-scheduler mode, the kanban board should
+    unblock them when the parent finishes. However, if the kanban board
+    doesn't propagate the unblock signal, we auto-complete the gate to
+    let child phases proceed.
+
+    Only completes gates whose predecessor matches completed_phase_key,
+    preventing gates from auto-completing at registration time before
+    their parent phase has run.
+
+    Best-effort: exceptions are logged, not raised.
+    """
+    from .kanban_tasks import BLOCKED, get_todo_kanban_tasks
+
+    try:
+        tasks = get_todo_kanban_tasks(tenant, tick_id)
+    except Exception as e:
+        log.warning("failed to query kanban tasks for gate auto-complete: %s", e)
+        return
+
+    # Build predecessor map from the same phase list used for registration.
+    # When --phase is used, only a subset of phases is registered — using
+    # load_phases() (all phases) would create predecessor mappings for
+    # phases that don't exist as kanban tasks, causing gates to never match.
+    if phases is None:
+        from .phases import load_phases
+        phases = load_phases()
+    gate_predecessor = {}
+    for i, phase in enumerate(phases):
+        if getattr(phase, "gate", False) and i > 0:
+            gate_predecessor[phase.phase_key] = phases[i - 1].phase_key
+
+    for phase_key, info in tasks.items():
+        if info.status != BLOCKED:
+            continue
+        # Only auto-complete gates whose predecessor just finished.
+        pred = gate_predecessor.get(phase_key)
+        if pred is None or pred != completed_phase_key:
+            continue
+        try:
+            result = subprocess.run(
+                ["hermes", "kanban", "complete", info.task_id],
+                capture_output=True,
+                text=True,
+                timeout=_GATE_COMPLETE_TIMEOUT,
+            )
+            if result.returncode != 0:
+                log.warning(
+                    "failed to complete gate task %s (%s): rc=%d stderr=%s",
+                    info.task_id, phase_key, result.returncode,
+                    result.stderr[:_STDERR_TRUNCATE],
+                )
+            else:
+                log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
+        except Exception as e:
+            log.warning("auto-complete gate task %s (%s) failed: %s", info.task_id, phase_key, e)
+
+
+def _poll_kanban_phases(
+    *,
+    project_slug: str,
+    tick_id: str,
+    state_dir: Path,
+    todo_id: str,
+    project_dir: Path,
+    phases_path: Path | None,
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    poll_interval: float = 5.0,
+    max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
+    phases: list[Phase] | None = None,
+) -> bool:
+    """Poll kanban-as-scheduler phases to completion.
+
+    1. Registers all phases as kanban tasks (register_todo_phases).
+    2. Auto-completes gate tasks so child phases become ready.
+    3. Polls get_todo_kanban_status() until all phases terminal.
+    4. Emits JSONL events via monitor.
+    5. Calls observe_outcomes() to write decision store.
+
+    Returns True if all phases completed successfully (all done), False otherwise.
+    """
+    from .kanban_tasks import (
+        TERMINAL_STATUSES,
+        get_todo_kanban_status,
+        observe_outcomes,
+        register_todo_phases,
+    )
+
+    from .contract import load_contract as _load_contract
+
+    # Resolve assignee from project contract (same path as pipeline-watch tick)
+    assignee = "default"
+    try:
+        assignee = _load_contract(state_dir).assignee
+    except Exception as e:
+        log.warning("failed to load pipeline contract, using assignee='default': %s", e)
+    log.info("registering kanban phases for %s tick %s (assignee=%s)", todo_id, tick_id, assignee)
+    register_todo_phases(
+        todo_id=todo_id,
+        tick_id=tick_id,
+        board_slug=project_slug,
+        project_dir=project_dir,
+        phases_path=phases_path,
+        assignee=assignee,
+    )
+
+    # Gate tasks will be auto-completed when their parent phase finishes,
+    # not at registration time — this ensures parent output exists before
+    # child phases can start.
+
+    previous_status: dict[str, str] = {}
+    all_terminal = False
+    current_interval = poll_interval
+
+    while not all_terminal:
+        time.sleep(current_interval)
+        current_interval = min(current_interval * 1.5, max_poll_interval)
+
+        try:
+            status_map = get_todo_kanban_status(project_slug, tick_id)
+        except Exception as e:
+            log.warning("kanban status poll failed: %s", e)
+            continue
+
+        if not status_map:
+            continue
+
+        try:
+            for phase_key, status in status_map.items():
+                prev = previous_status.get(phase_key)
+
+                if prev in (None, "ready", "blocked") and status == "running":
+                    monitor.current_phase_key = phase_key
+                    monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
+
+                elif prev == "running" and status == "done":
+                    monitor.current_phase_key = None
+                    monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                    # Auto-complete any gate task whose predecessor just finished
+                    _auto_complete_gate_tasks(
+                        project_slug, tick_id, completed_phase_key=phase_key, phases=phases
+                    )
+
+                elif prev == "running" and status == "failed":
+                    monitor.current_phase_key = None
+                    # monitor() records the failure with the detector and raises
+                    # ConvergenceHaltError itself if the threshold is tripped —
+                    # see _ConvergenceMonitor.__call__. No separate detector.record()
+                    # call is needed here.
+                    monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+
+                elif prev in (None, "ready", "blocked") and status == "done":
+                    # Phase completed between polls without ever being observed
+                    # as "running" (fast phase, coarse poll interval). Still
+                    # emit the event and run gate auto-complete so downstream
+                    # gates aren't left blocked.
+                    monitor.current_phase_key = None
+                    monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+                    _auto_complete_gate_tasks(
+                        project_slug, tick_id, completed_phase_key=phase_key, phases=phases
+                    )
+
+                elif prev in (None, "ready", "blocked") and status == "failed":
+                    monitor.current_phase_key = None
+                    monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+        except ConvergenceHaltError:
+            log.warning(
+                "convergence detector: %d+ consecutive phase_failure, halting",
+                detector.threshold,
+            )
+            all_terminal = True
+
+        if status_map != previous_status:
+            current_interval = poll_interval
+        previous_status = dict(status_map)
+
+        if not all_terminal:
+            all_terminal = all(s in TERMINAL_STATUSES for s in status_map.values())
+
+    try:
+        final_status = get_todo_kanban_status(project_slug, tick_id)
+        observe_outcomes(state_dir=state_dir, tick_id=tick_id, status_map=final_status)
+    except Exception as e:
+        log.warning("observe_outcomes failed: %s", e)
+
+    return all(s == "done" for s in previous_status.values())
 
 
 def _classify_error_class(exc: Exception) -> str:
@@ -313,6 +577,41 @@ def _kill_hung_phase_subprocess(*, state_dir: Path, todo_id: int) -> None:
         log.warning("failed to kill hung phase subprocess pid=%s: %s", pid, e)
 
 
+def _run_with_timeout(
+    fn: Callable[[], bool], *, timeout: int
+) -> tuple[bool, bool, dict[str, Any]]:
+    """Run `fn` on a daemon worker thread, joined with `timeout`.
+
+    Returns (success, timed_out, result_box). result_box carries
+    "convergence_error" or "exception" keys when fn raised those instead
+    of returning normally.
+    """
+    import threading
+
+    result_box: dict[str, Any] = {}
+
+    def _run_and_capture() -> None:
+        try:
+            result_box["success"] = fn()
+        except ConvergenceHaltError as e:
+            result_box["convergence_error"] = e
+        except Exception as e:  # noqa: BLE001 - surfaced via result_box
+            result_box["exception"] = e
+
+    worker = threading.Thread(target=_run_and_capture, daemon=True)
+    worker.start()
+    worker.join(timeout=timeout)
+
+    if worker.is_alive():
+        return False, True, result_box
+    if "convergence_error" in result_box:
+        log.warning(str(result_box["convergence_error"]))
+        return False, False, result_box
+    if "exception" in result_box:
+        raise result_box["exception"]
+    return result_box["success"], False, result_box
+
+
 def run_harness(
     *,
     fixture_name: str,
@@ -321,16 +620,16 @@ def run_harness(
     keep_dir: bool,
     timeout: int,
     convergence_threshold: int,
+    kanban_mode: str,
     config: Any,
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
-    import threading
-
     from .runner import PipelineRunner
     from .phases import load_phases
     from .test_report import generate_report, summarize_report, diff_reports, summarize_diff
     from .state import State
     from .kanban import NullKanbanAdapter
+    from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .logging_setup import new_tick_id
 
     preflight_check()
@@ -354,7 +653,20 @@ def run_harness(
         if phase_only:
             phases = filter_phases(all_phases, phase_only)
 
-        kanban = NullKanbanAdapter()
+        tick_id = new_tick_id()
+
+        if kanban_mode == "hermes":
+            _kanban_preflight(tenant=fixture["project_slug"])
+
+            # For --phase flag: create a temporary phases YAML for registration
+            _phases_path_override: Path | None = None
+            if phase_only:
+                import yaml as _yaml
+                _phases_path_override = temp_dir / "filtered-phases.yaml"
+                _phases_path_override.write_text(
+                    _yaml.dump({"phases": [asdict(p) for p in phases]})
+                )
+
         checkpoint_dir = state_dir / "pipeline_checkpoints"
         ready_dir = state_dir / "ready_for_review"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
@@ -367,62 +679,84 @@ def run_harness(
             ready_dir=ready_dir,
         )
 
-        tick_id = new_tick_id()
-
-        runner = PipelineRunner(
-            project=fixture["project_slug"],
-            project_dir=temp_dir,
-            branch=fixture["branch"],
-            todo_id=fixture["todo_id"],
-            title=f"Mock TODO-{fixture['todo_id']}",
-            phases=phases,
-            state=state,
-            kanban=kanban,
-            run_phase_fn=lambda phase: _dispatch_phase(
-                phase,
-                state_dir=state_dir,
-                todo_id=fixture["todo_id"],
-                tick_id=tick_id,
-                project_slug=fixture["project_slug"],
-                project_dir=temp_dir,
-                error_holder=error_holder,
-            ),
-            continue_on_failure=True,
-            monitor=monitor,
-        )
-
         timed_out = False
         with isolate_config(state_dir=state_dir, lock_dir=lock_dir):
-            result_box: dict[str, Any] = {}
+            if kanban_mode == "hermes":
+                # Emit initial event so the events log file exists for report generation
+                base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
 
-            def _run_and_capture() -> None:
-                try:
-                    result_box["success"] = runner.run()
-                except ConvergenceHaltError as e:
-                    result_box["convergence_error"] = e
-                except Exception as e:  # noqa: BLE001 - surfaced via result_box
-                    result_box["exception"] = e
+                def _poll() -> bool:
+                    todo_id_str = f"TODO-{fixture['todo_id']}"
+                    return _poll_kanban_phases(
+                        project_slug=fixture["project_slug"],
+                        tick_id=tick_id,
+                        state_dir=state_dir,
+                        todo_id=todo_id_str,
+                        project_dir=temp_dir,
+                        phases_path=_phases_path_override,
+                        monitor=monitor,
+                        detector=detector,
+                        phases=phases,
+                    )
 
-            worker = threading.Thread(target=_run_and_capture, daemon=True)
-            worker.start()
-            worker.join(timeout=timeout)
+                success, timed_out, result_box = _run_with_timeout(_poll, timeout=timeout)
 
-            if worker.is_alive():
-                timed_out = True
-                success = False
-            elif "convergence_error" in result_box:
-                log.warning(str(result_box["convergence_error"]))
-                success = False
-            elif "exception" in result_box:
-                raise result_box["exception"]
+                if timed_out:
+                    try:
+                        in_flight = get_todo_kanban_status(fixture["project_slug"], tick_id)
+                        running_phase = next(
+                            (k for k, v in in_flight.items()
+                             if v not in TERMINAL_STATUSES),
+                            None,
+                        )
+                        if running_phase and monitor.current_phase_key is None:
+                            base_monitor("phase_timed_out", {"phase_key": running_phase})
+                    except Exception:
+                        pass
+                elif "convergence_error" in result_box:
+                    # Convergence-halt fired during polling. The poll loop already
+                    # exited with all_terminal=True, so phases are already in terminal
+                    # state on the kanban board — no additional cleanup needed beyond
+                    # surfacing the convergence error in the result.
+                    log.warning("convergence-halt: %s", result_box["convergence_error"])
             else:
-                success = result_box["success"]
+                # Null kanban path: PipelineRunner (backward compat)
+                kanban = NullKanbanAdapter()
+                runner = PipelineRunner(
+                    project=fixture["project_slug"],
+                    project_dir=temp_dir,
+                    branch=fixture["branch"],
+                    todo_id=fixture["todo_id"],
+                    title=f"Mock TODO-{fixture['todo_id']}",
+                    phases=phases,
+                    state=state,
+                    kanban=kanban,
+                    kanban_metadata=None,
+                    run_phase_fn=lambda phase: _dispatch_phase(
+                        phase,
+                        state_dir=state_dir,
+                        todo_id=fixture["todo_id"],
+                        tick_id=tick_id,
+                        project_slug=fixture["project_slug"],
+                        project_dir=temp_dir,
+                        error_holder=error_holder,
+                    ),
+                    continue_on_failure=True,
+                    monitor=monitor,
+                )
+
+                success, timed_out, result_box = _run_with_timeout(runner.run, timeout=timeout)
+
+                if timed_out:
+                    _kill_hung_phase_subprocess(state_dir=state_dir, todo_id=fixture["todo_id"])
+                elif "convergence_error" in result_box:
+                    try:
+                        kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
+                    except Exception as e:
+                        log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
 
         if timed_out and monitor.current_phase_key:
-            # Overall timeout fired mid-phase: record it so the report reflects
-            # a timeout rather than silently truncating the event log.
             base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
-            _kill_hung_phase_subprocess(state_dir=state_dir, todo_id=fixture["todo_id"])
 
         output_dir = temp_dir / "reports"
         report = generate_report(events_log, output_dir)
@@ -445,6 +779,14 @@ def run_harness(
             next_report = output_dir.parent / f"{fixture_name}-report.{next_n}.json"
             next_report.write_text(report_json.read_text())
 
+        if kanban_mode == "hermes":
+            status_map = get_todo_kanban_status(fixture["project_slug"], tick_id)
+            print(
+                f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
+                f"phases={status_map} "
+                f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
+            )
+
         exit_code = 0 if (success and not timed_out) else 1
 
         return HarnessResult(
@@ -455,8 +797,6 @@ def run_harness(
         )
 
     except Exception as e:
-        if not keep_dir:
-            shutil.rmtree(temp_dir, ignore_errors=True)
         raise
 
     finally:

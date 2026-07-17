@@ -140,6 +140,8 @@ class PipelineRunner:
     pr_url_resolver: Callable[[], str] = lambda: ""
     continue_on_failure: bool = False
     monitor: Callable | None = None
+    kanban_metadata: dict[str, str] | None = None
+    _kanban_task_id: str | None = None
 
     def run(self) -> bool:
         """
@@ -173,14 +175,19 @@ class PipelineRunner:
         # Step 1: Set active task on kanban (best-effort)
         first_phase = self.phases[0]
         try:
-            self.kanban.set_active_task(
+            result = self.kanban.set_active_task(
                 project=self.project,
                 todo_id=self.todo_id,
                 title=self.title,
                 phase=first_phase.name,
+                metadata=self.kanban_metadata,
             )
+            if result.ok:
+                self._kanban_task_id = result.task_id
+            else:
+                log.warning("kanban.set_active_task returned error (non-blocking): %s", result.error)
         except Exception as e:
-            log.warning("kanban.set_active_task failed (non-blocking): %s", e)
+            log.warning("kanban.set_active_task raised exception (non-blocking): %s", e)
 
         # Step 2: Loop through phases
         import time as _time
@@ -251,6 +258,10 @@ class PipelineRunner:
                 except Exception as e:
                     log.warning("kanban.update_phase (failed) failed: %s", e)
                 if not self.continue_on_failure:
+                    try:
+                        self.kanban.clear_active_task(project=self.project, outcome="abandoned")
+                    except Exception as e:
+                        log.warning("kanban.clear_active_task failed: %s", e)
                     return False
                 had_failures = True
                 continue
@@ -276,7 +287,7 @@ class PipelineRunner:
         if had_failures:
             log.warning("Pipeline completed with phase failures (continue_on_failure)")
             try:
-                self.kanban.clear_active_task(project=self.project, outcome="failed")
+                self.kanban.clear_active_task(project=self.project, outcome="abandoned")
             except Exception as e:
                 log.warning("kanban.clear_active_task failed: %s", e)
             return False
@@ -291,7 +302,7 @@ class PipelineRunner:
                 todo_id=self.todo_id,
                 branch=self.branch,
                 pr_url=pr_url,
-                kanban_task_id=None,  # Will be set by kanban adapter if available
+                kanban_task_id=self._kanban_task_id,
             )
         except Exception as e:
             log.error("state.write_ready_for_review_min failed: %s", e)

@@ -76,8 +76,19 @@ class TestNullKanbanAdapter:
         assert result.ok is True
         assert result.error is None
 
+    def test_null_adapter_set_active_task_accepts_metadata(self):
+        adapter = NullKanbanAdapter()
+        result = adapter.set_active_task(
+            "project_a",
+            todo_id=1,
+            title="Test TODO",
+            phase="Phase 1",
+            metadata={"tick_id": "abc123", "fixture_name": "happy-path"},
+        )
+        assert result.ok is True
 
 class TestSyncResult:
+
     """Test SyncResult dataclass."""
 
     def test_sync_result_success(self):
@@ -481,6 +492,39 @@ class TestHermesKanbanAdapter:
         assert result.ok is False
         assert len(outbox.all()) == 1
         assert outbox.all()[0].project == "project_a"
+
+    @patch("hermes_pipeline.kanban.subprocess.run")
+    def test_set_active_task_includes_metadata_in_body(self, mock_run, tmp_path):
+        """metadata dict entries should appear in the --body argv, not in --tenant."""
+        outbox_path = tmp_path / "outbox.jsonl"
+        store_path = tmp_path / "active_tasks.json"
+        outbox = KanbanOutbox(outbox_path)
+        store = ActiveTasksStore(store_path)
+        adapter = HermesKanbanAdapter(outbox, store)
+
+        task_result = MagicMock()
+        task_result.returncode = 0
+        task_result.stdout = '{"id": "task-789"}'
+        task_result.stderr = ""
+        mock_run.side_effect = [task_result]
+
+        result = adapter.set_active_task(
+            "mock-project",
+            todo_id=1,
+            title="Test TODO",
+            phase="Phase 1",
+            metadata={"tick_id": "01ARZ3NDEKTSV4RRFFQ69G5FAV", "fixture_name": "happy-path"},
+        )
+
+        assert result.ok is True
+        call_args = mock_run.call_args[0][0]  # first positional arg: the cmd list
+        assert call_args[0:4] == ["hermes", "kanban", "create", "--tenant"]
+        assert call_args[4] == "mock-project"
+        body_index = call_args.index("--body") + 1
+        body = call_args[body_index]
+        assert "tick_id: 01ARZ3NDEKTSV4RRFFQ69G5FAV" in body
+        assert "fixture_name: happy-path" in body
+
 
     @patch("hermes_pipeline.kanban.subprocess.run")
     def test_update_phase_success(self, mock_run, tmp_path):

@@ -311,6 +311,7 @@ class TestRunHarnessTimeout:
             keep_dir=True,
             timeout=1,
             convergence_threshold=3,
+            kanban_mode="null",
             config=None,
         )
 
@@ -318,3 +319,478 @@ class TestRunHarnessTimeout:
         assert "timeout" in result.summary.lower()
         report_data = json.loads(result.report_path.read_text())
         assert any(p["status"] == "timeout" for p in report_data["phases"])
+
+
+class TestKanbanModeHermes:
+    """Tests for --kanban hermes wiring in run_harness() using kanban-as-scheduler."""
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_hermes_registers_and_polls(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
+        """--kanban hermes uses register_todo_phases + polling, not PipelineRunner."""
+
+        preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        mock_harness_sp.return_value = preflight_result
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                      return_value={"phase_2_autoplan": "done"})
+        mocker.patch("time.sleep")
+        mock_observe = mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        result = run_harness(
+            fixture_name="happy-path", loop=False,
+            phase_only="phase_2_autoplan", keep_dir=True,
+            timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        assert result.exit_code == 0
+        mock_observe.assert_called_once()
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_hermes_preflight_failure_raises(self, mock_run, monkeypatch):
+        from hermes_pipeline.harness import KanbanPreflightError
+
+        preflight_fail = MagicMock(returncode=1, stdout="", stderr="not authenticated")
+        mock_run.return_value = preflight_fail
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        with pytest.raises(KanbanPreflightError, match="hermes login"):
+            run_harness(
+                fixture_name="happy-path", loop=False, phase_only=None,
+                keep_dir=False, timeout=60, convergence_threshold=3,
+                kanban_mode="hermes", config=None,
+            )
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_null_explicit_produces_no_kanban_calls(self, mock_run, monkeypatch, tmp_path):
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        with patch("hermes_pipeline.phases.run") as mock_phases_run:
+            mock_phases_run.return_value = {"status": "success"}
+            run_harness(
+                fixture_name="happy-path", loop=False,
+                phase_only="phase_2_autoplan", keep_dir=True,
+                timeout=60, convergence_threshold=3,
+                kanban_mode="null", config=None,
+            )
+        kanban_calls = [c for c in mock_run.call_args_list
+                        if c[0][0][:2] == ["hermes", "kanban"]]
+        assert kanban_calls == []
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_hermes_polling_emits_jsonl_events(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
+        preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        mock_harness_sp.return_value = preflight_result
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=[
+            {"phase_2_autoplan": "running"},       # poll loop iteration 1
+            {"phase_2_autoplan": "done"},          # poll loop iteration 2 (terminal)
+            {"phase_2_autoplan": "done"},          # observe_outcomes call inside _poll_kanban_phases
+            {"phase_2_autoplan": "done"},          # final status check at end of run_harness
+        ])
+
+        result = run_harness(
+            fixture_name="happy-path", loop=False,
+            phase_only="phase_2_autoplan", keep_dir=True,
+            timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        assert result.exit_code == 0
+        report = json.loads(result.report_path.read_text())
+        phases = report["phases"]
+        assert len(phases) == 1
+        assert phases[0]["phase_key"] == "phase_2_autoplan"
+        assert phases[0]["status"] == "completed"
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_preflight_timeout_raises_actionable_error(self, mock_run, monkeypatch):
+        from hermes_pipeline.harness import KanbanPreflightError
+        import subprocess
+
+        def _run_side_effect(*args, **kwargs):
+            cmd = args[0]
+            if isinstance(cmd, (list, tuple)) and len(cmd) >= 3 and cmd[:3] == ["hermes", "kanban", "list"]:
+                raise subprocess.TimeoutExpired(cmd, 15)
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = _run_side_effect
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        with pytest.raises(KanbanPreflightError, match="timed out.*15s"):
+            run_harness(
+                fixture_name="happy-path", loop=False, phase_only=None,
+                keep_dir=False, timeout=60, convergence_threshold=3,
+                kanban_mode="hermes", config=None,
+            )
+
+    def test_convergence_halt_stops_polling_hermes(self, monkeypatch, mocker):
+        mock_sp = mocker.patch("hermes_pipeline.harness.subprocess.run")
+        mock_sp.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1", "t2", "t3"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"p1": "running", "p2": "ready", "p3": "ready"}
+            elif call_count[0] == 2:
+                return {"p1": "failed", "p2": "running", "p3": "ready"}
+            elif call_count[0] == 3:
+                return {"p1": "failed", "p2": "failed", "p3": "running"}
+            return {"p1": "failed", "p2": "failed", "p3": "failed"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
+
+        result = run_harness(
+            fixture_name="happy-path", loop=False, phase_only=None,
+            keep_dir=True, timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        assert result.exit_code == 1
+
+    @patch("hermes_pipeline.harness.subprocess.run")
+    def test_kanban_hermes_single_phase_registers_filtered(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
+        """--phase with --kanban hermes should pass phases_path to register_todo_phases."""
+
+        preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
+        mock_harness_sp.return_value = preflight_result
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+
+        mock_register = mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                      return_value={"phase_2_autoplan": "done"})
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        run_harness(
+            fixture_name="happy-path", loop=False,
+            phase_only="phase_2_autoplan", keep_dir=True,
+            timeout=60, convergence_threshold=3,
+            kanban_mode="hermes", config=None,
+        )
+
+        call_kwargs = mock_register.call_args
+        assert call_kwargs.kwargs.get("phases_path") is not None
+
+
+class TestAutoCompleteGateTasks:
+    """Tests for _auto_complete_gate_tasks()."""
+
+    def test_completes_blocked_gate_tasks(self, mocker):
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+        import json as _json
+
+        header_gate = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+        header_dev = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_4_development",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+
+        mock_data = [
+            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
+            {"id": "t_dev", "status": "ready", "body": header_dev + "\nphase"},
+        ]
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+
+        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+
+        complete_calls = [
+            c for c in mock_run.call_args_list
+            if c[0][0][:3] == ["hermes", "kanban", "complete"]
+        ]
+        assert len(complete_calls) == 1
+        assert complete_calls[0][0][0][3] == "t_gate"
+
+    def test_skips_non_blocked_tasks(self, mocker):
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+        import json as _json
+
+        header = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_2_autoplan",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+
+        mock_data = [
+            {"id": "t1", "status": "running", "body": header},
+            {"id": "t2", "status": "done", "body": header.replace("phase_2_autoplan", "phase_3")},
+        ]
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+
+        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+
+        complete_calls = [
+            c for c in mock_run.call_args_list
+            if c[0][0][:3] == ["hermes", "kanban", "complete"]
+        ]
+        assert len(complete_calls) == 0
+
+    def test_is_best_effort_on_query_failure(self, mocker):
+        """If get_todo_kanban_tasks raises, the function returns without error."""
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+            side_effect=RuntimeError("query failed"),
+        )
+
+        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")  # Should not raise
+
+
+class TestPollKanbanPhases:
+    """Tests for _poll_kanban_phases()."""
+
+    def test_registers_phases_and_polls_to_completion(self, tmp_path, mocker):
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+        import json as _json
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1", "t2"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"phase_2_autoplan": "running", "phase_4_development": "ready"}
+            return {"phase_2_autoplan": "done", "phase_4_development": "done"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
+
+        result = _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        assert result is True
+        assert call_count[0] >= 2
+
+        lines = events_log.read_text().strip().splitlines()
+        events = [_json.loads(l) for l in lines if l.strip()]
+        event_types = [e["event_type"] for e in events]
+        assert "phase_started" in event_types
+        assert "phase_completed" in event_types
+
+    def test_emits_phase_failed_event_on_kanban_failure(self, tmp_path, mocker):
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+        import json as _json
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=[
+            {"phase_2_autoplan": "running"},
+            {"phase_2_autoplan": "failed"},
+        ])
+
+        result = _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        assert result is False
+        lines = events_log.read_text().strip().splitlines()
+        events = [_json.loads(l) for l in lines if l.strip()]
+        failed = [e for e in events if e["event_type"] == "phase_failed"]
+        assert len(failed) == 1
+        assert failed[0]["phase_key"] == "phase_2_autoplan"
+
+    def test_convergence_halt_stops_polling(self, tmp_path, mocker):
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+        import json as _json
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1", "t2", "t3"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mock_observe = mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"p1": "running", "p2": "ready", "p3": "blocked"}
+            elif call_count[0] == 2:
+                return {"p1": "failed", "p2": "running", "p3": "blocked"}
+            elif call_count[0] == 3:
+                return {"p1": "failed", "p2": "failed", "p3": "blocked"}
+            return {"p1": "failed", "p2": "failed", "p3": "failed"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
+
+        result = _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        assert result is False
+        mock_observe.assert_called_once()
+
+    def test_auto_completes_blocked_gates(self, tmp_path, mocker):
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1", "t2"])
+        mock_auto = mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {"phase_2_autoplan": "running", "phase_2b_plan_gate": "blocked"}
+            return {"phase_2_autoplan": "done", "phase_2b_plan_gate": "done"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2_autoplan", phases=None)
+        mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2b_plan_gate", phases=None)
+        assert mock_auto.call_count == 2
+
+    def test_emits_phase_failed_when_ready_transitions_directly_to_failed(self, tmp_path, mocker):
+        """Regression: a phase can jump straight from ready/blocked to failed
+        without ever passing through running. Prior to this fix, such a
+        transition was silently absorbed by the terminal-status check without
+        emitting phase_failed or being seen by the convergence detector."""
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+        import json as _json
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                      return_value={"phase_2_autoplan": "failed"})
+
+        result = _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        assert result is False
+        lines = events_log.read_text().strip().splitlines()
+        events = [_json.loads(l) for l in lines if l.strip()]
+        failed = [e for e in events if e["event_type"] == "phase_failed"]
+        assert len(failed) == 1
+        assert failed[0]["phase_key"] == "phase_2_autoplan"
+
+    def test_poll_interval_backs_off_and_resets_on_change(self, tmp_path, mocker):
+        """Regression: fixed 5s poll interval added constant load for
+        long-running phases. Interval should grow while status is unchanged
+        and reset when a transition occurs."""
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        sleep_calls = []
+        mocker.patch("time.sleep", side_effect=lambda s: sleep_calls.append(s))
+
+        call_count = [0]
+        def fake_status(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] <= 3:
+                return {"phase_2_autoplan": "running"}
+            return {"phase_2_autoplan": "done"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
+
+        _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=1.0, max_poll_interval=10.0,
+        )
+
+        # Unchanged status ("running" repeated) should back off between polls 2-3.
+        assert sleep_calls[2] > sleep_calls[1]
+        # Transition to "done" grows the interval for that poll (backoff is only
+        # reset for the *next* sleep, after the transition is observed).
+        assert sleep_calls[3] > sleep_calls[2]
+        # First two sleeps stay at the base interval: poll 1 sees the initial
+        # empty->running "change" and resets before poll 2 fires.
+        assert sleep_calls[0] == sleep_calls[1] == 1.0
+
+

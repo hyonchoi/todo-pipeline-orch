@@ -33,6 +33,7 @@ def test_happy_path_e2e_runs_all_phases_and_generates_report(tmp_path):
             keep_dir=True,
             timeout=60,
             convergence_threshold=3,
+            kanban_mode="null",
             config=None,
         )
 
@@ -67,6 +68,7 @@ def test_happy_path_e2e_single_phase_execution(tmp_path):
             keep_dir=True,
             timeout=60,
             convergence_threshold=3,
+            kanban_mode="null",
             config=None,
         )
 
@@ -99,6 +101,7 @@ def test_happy_path_e2e_phase_failure_recorded_and_run_continues(tmp_path):
             keep_dir=True,
             timeout=60,
             convergence_threshold=3,
+            kanban_mode="null",
             config=None,
         )
 

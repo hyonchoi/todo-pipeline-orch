@@ -3,6 +3,10 @@
 Provides a Protocol-based KanbanClient interface with implementations for null (no-op)
 and hermes (CLI-based) adapters. Includes atomic store management and a create-preserving
 outbox for resilient sync with cap and drop-oldest-first on overflow.
+
+NOTE: HermesKanbanAdapter, KanbanOutbox, and ActiveTasksStore are retained for
+backward compatibility (--kanban null path, merge orchestration). The harness
+--kanban hermes path has moved to kanban-as-scheduler via kanban_tasks.py.
 """
 
 from __future__ import annotations
@@ -49,8 +53,14 @@ class KanbanClient(Protocol):
         todo_id: int,
         title: str,
         phase: str,
+        metadata: dict[str, str] | None = None,
     ) -> SyncResult:
-        """Set the active task for a project. Called when a TODO moves into Phase 1 (Development)."""
+        """Set the active task for a project. Called when a TODO moves into Phase 1 (Development).
+
+        metadata, when provided, is additional key/value context (e.g. tick_id, fixture_name,
+        state_dir) recorded in the card body for debug-trail purposes. Implementations that
+        don\'t render a body (e.g. NullKanbanAdapter) accept and ignore it.
+        """
         ...
 
     def update_phase(
@@ -83,6 +93,7 @@ class NullKanbanAdapter:
         todo_id: int,
         title: str,
         phase: str,
+        metadata: dict[str, str] | None = None,
     ) -> SyncResult:
         return SyncResult(ok=True)
 
@@ -329,10 +340,14 @@ class HermesKanbanAdapter:
         todo_id: int,
         title: str,
         phase: str,
+        metadata: dict[str, str] | None = None,
     ) -> SyncResult:
         """Set active task. Creates a task card in the project tenant."""
         # Create the task using --tenant for namespacing
         body = f"Phase: {phase}\nTODO ID: {todo_id}"
+        if metadata:
+            for key, value in metadata.items():
+                body += f"\n{key}: {value}"
         ok, output = self._run_cmd(
             [
                 "hermes", "kanban", "create",
@@ -345,15 +360,18 @@ class HermesKanbanAdapter:
 
         if not ok:
             # Queue for retry
+            params: dict[str, str | int] = {
+                "todo_id": todo_id,
+                "title": title,
+                "phase": phase,
+            }
+            if metadata:
+                params["metadata"] = json.dumps(metadata)
             entry = OutboxEntry(
                 project=project,
                 operation="set_active_task",
                 has_task_id=False,
-                params={
-                    "todo_id": todo_id,
-                    "title": title,
-                    "phase": phase,
-                },
+                params=params,
             )
             self.outbox.enqueue(entry, has_task_id=False)
             return SyncResult(ok=False, error=output)
@@ -459,11 +477,18 @@ def drain_outbox(adapter: KanbanClient, outbox: KanbanOutbox) -> None:
     """Retry all queued outbox operations. Dequeues on success, leaves on failure."""
     for entry in outbox.all():
         if entry.operation == "set_active_task":
+            raw_metadata = entry.params.get("metadata")
+            try:
+                metadata = json.loads(raw_metadata) if raw_metadata else None
+            except (json.JSONDecodeError, TypeError):
+                log.warning("failed to parse metadata for outbox entry %s: skipping metadata", entry.project)
+                metadata = None
             r = adapter.set_active_task(
                 entry.project,
                 todo_id=entry.params["todo_id"],
                 title=entry.params["title"],
                 phase=entry.params["phase"],
+                metadata=metadata,
             )
         elif entry.operation == "update_phase":
             r = adapter.update_phase(
