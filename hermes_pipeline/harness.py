@@ -158,17 +158,11 @@ class KanbanPreflightError(RuntimeError):
 # Preflight timeout for hermes kanban list (seconds)
 _PREFLIGHT_TIMEOUT = 15
 
-# Timeout for individual kanban gate complete subprocess calls (seconds)
-_GATE_COMPLETE_TIMEOUT = 10
-
 # Maximum poll interval for kanban-as-scheduler phase polling (seconds)
 _KANBAN_POLL_MAX_INTERVAL = 30.0
 
 # Maximum characters in error messages captured by the harness
 _ERROR_MESSAGE_MAX = 500
-
-# Maximum characters of subprocess stderr shown in error messages
-_STDERR_TRUNCATE = 200
 
 
 def _kanban_preflight(*, tenant: str) -> None:
@@ -220,7 +214,7 @@ def _auto_complete_gate_tasks(
 
     Best-effort: exceptions are logged, not raised.
     """
-    from .kanban_tasks import BLOCKED, get_todo_kanban_tasks
+    from .kanban_tasks import BLOCKED, complete_todo_kanban_task, get_todo_kanban_tasks
 
     try:
         tasks = get_todo_kanban_tasks(tenant, tick_id)
@@ -247,23 +241,10 @@ def _auto_complete_gate_tasks(
         pred = gate_predecessor.get(phase_key)
         if pred is None or pred != completed_phase_key:
             continue
-        try:
-            result = subprocess.run(
-                ["hermes", "kanban", "complete", info.task_id],
-                capture_output=True,
-                text=True,
-                timeout=_GATE_COMPLETE_TIMEOUT,
-            )
-            if result.returncode != 0:
-                log.warning(
-                    "failed to complete gate task %s (%s): rc=%d stderr=%s",
-                    info.task_id, phase_key, result.returncode,
-                    result.stderr[:_STDERR_TRUNCATE],
-                )
-            else:
-                log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
-        except Exception as e:
-            log.warning("auto-complete gate task %s (%s) failed: %s", info.task_id, phase_key, e)
+        if complete_todo_kanban_task(tenant, info.task_id):
+            log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
+        else:
+            log.warning("gate task %s (%s) remains blocked: auto-complete after %s done failed", info.task_id, phase_key, completed_phase_key)
 
 
 def _poll_kanban_phases(

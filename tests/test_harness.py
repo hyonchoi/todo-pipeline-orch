@@ -513,15 +513,57 @@ class TestAutoCompleteGateTasks:
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+        mock_complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
 
         _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
 
-        complete_calls = [
-            c for c in mock_run.call_args_list
-            if c[0][0][:3] == ["hermes", "kanban", "complete"]
+        mock_complete.assert_called_once_with("demo", "t_gate")
+
+    def test_does_not_log_success_when_completion_fails(self, mocker, caplog):
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+        import json as _json
+
+        header_gate = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+        mock_data = [
+            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
         ]
-        assert len(complete_calls) == 1
-        assert complete_calls[0][0][0][3] == "t_gate"
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+        mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
+
+        with caplog.at_level("INFO"):
+            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+
+        assert "auto-completed gate task" not in caplog.text
+
+    def test_warns_when_completion_fails(self, mocker, caplog):
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+        import json as _json
+
+        header_gate = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+        mock_data = [
+            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
+        ]
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+        mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
+
+        with caplog.at_level("WARNING"):
+            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+
+        assert "t_gate" in caplog.text
+        assert "phase_2b_plan_gate" in caplog.text
+        assert "remains blocked" in caplog.text
 
     def test_skips_non_blocked_tasks(self, mocker):
         from hermes_pipeline.harness import _auto_complete_gate_tasks
@@ -540,14 +582,11 @@ class TestAutoCompleteGateTasks:
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+        mock_complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
 
         _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
 
-        complete_calls = [
-            c for c in mock_run.call_args_list
-            if c[0][0][:3] == ["hermes", "kanban", "complete"]
-        ]
-        assert len(complete_calls) == 0
+        mock_complete.assert_not_called()
 
     def test_is_best_effort_on_query_failure(self, mocker):
         """If get_todo_kanban_tasks raises, the function returns without error."""

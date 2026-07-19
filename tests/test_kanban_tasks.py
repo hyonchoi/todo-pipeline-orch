@@ -853,6 +853,42 @@ class TestObserveOutcomes:
         assert result == {"phase_4_dev": "running"}
 
 
+class TestCompleteTodoKanbanTask:
+    """Tests for complete_todo_kanban_task()."""
+
+    def test_calls_hermes_kanban_complete(self, mocker):
+        from hermes_pipeline.kanban_tasks import complete_todo_kanban_task
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(returncode=0, stdout="", stderr="")
+
+        result = complete_todo_kanban_task("demo", "task-001")
+
+        assert result is True
+        assert mock_run.call_count == 1
+        args = mock_run.call_args[0][0]
+        assert args == ["hermes", "kanban", "complete", "task-001"]
+
+    def test_swallows_nonzero_returncode(self, mocker):
+        from hermes_pipeline.kanban_tasks import complete_todo_kanban_task
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(returncode=1, stdout="", stderr="boom")
+
+        result = complete_todo_kanban_task("demo", "task-001")  # Should not raise
+
+        assert result is False
+
+    def test_swallows_exceptions(self, mocker):
+        from hermes_pipeline.kanban_tasks import complete_todo_kanban_task
+
+        mocker.patch("subprocess.run", side_effect=FileNotFoundError)
+
+        result = complete_todo_kanban_task("demo", "task-001")  # Should not raise
+
+        assert result is False
+
+
 class TestGetTodoKanbanTasks:
     """Tests for get_todo_kanban_tasks() — task id + status per phase."""
 
