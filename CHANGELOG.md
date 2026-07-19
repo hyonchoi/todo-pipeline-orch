@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2] - 2026-07-19
+
+### Added
+
+- Regression tests confirming that harness kanban-phase registration correctly resolves task assignee from the pipeline contract, and falls back to `"default"` with a warning when the contract can't be loaded.
+
+### Fixed
+
+- Test coverage for the harness kanban-scheduler checklist is now fully wired to production functions — the remaining checklist rows are linked to real tests, closing out TODO-24.
+
 ## [0.5.1] - 2026-07-19
 
 ### Changed
