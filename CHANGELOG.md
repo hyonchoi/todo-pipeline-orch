@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] - 2026-07-19
+
+### Changed
+
+- Gate-task auto-completion now routes through `kanban_tasks.complete_todo_kanban_task` instead of a harness-local subprocess call, keeping the production completion path in one place.
+
+### Fixed
+
+- A failed gate-task completion no longer gets logged as a success — the harness now only reports "auto-completed" when the completion actually succeeded.
+- A gate that fails to auto-complete now logs a warning naming the task and phase, so a stuck gate can be traced back to its failed completion attempt instead of failing silently.
+
 ## [0.5.0] - 2026-07-16
 
 ### Added
