@@ -72,3 +72,10 @@
   - **Depends on:** `TODO-20`
   - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/harden-kanban-scheduler-edge-cases`, Test Coverage `required`, Security Review `not-required`
 
+- [ ] **TODO-24: Wire remaining harness kanban-scheduler checklist rows to production functions** — Complete checklist rows 1-6, 10-13 — mechanical production-function wiring left out of TODO-21's narrowed scope.
+  - **What:** Refactor `harness.py::_poll_kanban_phases` and callees to call production functions for checklist rows 1-6 and 10-13 (registration, status polling, outcome persistence, contract lookup, timeout reporting) instead of local re-implementations. Also resolve the flagged follow-up: whether `_auto_complete_gate_tasks`'s predecessor/eligibility logic should move from harness.py into `phases.py`.
+  - **Why:** TODO-21 was narrowed to only the two rows requiring new design decisions (gate completion routing, circuit-breaker premise correction). The remaining 11 checklist rows are still open acceptance criteria from `docs/checklist-harness-production-coverage.md` and must be wired for the harness to actually validate production behavior.
+  - **Context:** docs/checklist-harness-production-coverage.md (rows 1-6, 10-13), hermes_pipeline/harness.py, kanban_tasks.py, phases.py, contract.py
+  - **Depends on:** `TODO-21`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `worktree-todo24-harness-remaining-checklist`, Test Coverage `required`, Security Review `not-required`
+
