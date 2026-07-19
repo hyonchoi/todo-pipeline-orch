@@ -230,6 +230,32 @@ def _archive_tasks(task_ids: list[str]) -> None:
             log.warning("failed to archive task %s: %s", task_id, e)
 
 
+def complete_todo_kanban_task(tenant: str, task_id: str) -> None:
+    """Complete a kanban task via `hermes kanban complete` (best-effort).
+
+    `hermes kanban complete` has no --tenant flag — tenant is accepted for
+    call-site symmetry with other kanban_tasks functions but unused.
+    """
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "complete", task_id],
+            capture_output=True,
+            text=True,
+            timeout=HERMES_COMMAND_TIMEOUT,
+        )
+        if result.returncode != 0:
+            log.warning(
+                "failed to complete kanban task %s: rc=%d stderr=%s",
+                task_id,
+                result.returncode,
+                result.stderr[:ERROR_MSG_MAX_LENGTH],
+            )
+        else:
+            log.info("completed kanban task %s", task_id)
+    except Exception as e:
+        log.warning("failed to complete task %s: %s", task_id, e)
+
+
 def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:
     """Query kanban for all tasks of a tick, return {phase_key: status}.
 
