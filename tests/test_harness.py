@@ -832,4 +832,71 @@ class TestPollKanbanPhases:
         # empty->running "change" and resets before poll 2 fires.
         assert sleep_calls[0] == sleep_calls[1] == 1.0
 
+    def test_assignee_resolved_from_contract(self, tmp_path, mocker):
+        """register_todo_phases' assignee comes from contract.load_contract."""
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+
+        mock_register = mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"]
+        )
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "done"},
+        )
+        mock_contract = mocker.Mock(assignee="alice")
+        mocker.patch("hermes_pipeline.contract.load_contract", return_value=mock_contract)
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        assert mock_register.call_args.kwargs["assignee"] == "alice"
+
+    def test_assignee_defaults_when_contract_load_fails(self, tmp_path, mocker):
+        """If load_contract raises, assignee falls back to 'default'."""
+        from hermes_pipeline.harness import (
+            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+        )
+
+        mock_register = mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"]
+        )
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "done"},
+        )
+        mocker.patch(
+            "hermes_pipeline.contract.load_contract", side_effect=Exception("no contract")
+        )
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+
+        assert mock_register.call_args.kwargs["assignee"] == "default"
+
 
