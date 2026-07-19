@@ -865,8 +865,8 @@ class TestPollKanbanPhases:
 
         assert mock_register.call_args.kwargs["assignee"] == "alice"
 
-    def test_assignee_defaults_when_contract_load_fails(self, tmp_path, mocker):
-        """If load_contract raises, assignee falls back to 'default'."""
+    def test_assignee_defaults_when_contract_load_fails(self, tmp_path, mocker, caplog):
+        """If load_contract raises, assignee falls back to 'default' and warns."""
         from hermes_pipeline.harness import (
             _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
         )
@@ -890,13 +890,15 @@ class TestPollKanbanPhases:
         detector = ConvergenceDetector(threshold=3)
         monitor = _ConvergenceMonitor(base_monitor, detector, {})
 
-        _poll_kanban_phases(
-            project_slug="demo", tick_id="01TICK",
-            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
-            project_dir=tmp_path, phases_path=None,
-            monitor=monitor, detector=detector, poll_interval=0.1,
-        )
+        with caplog.at_level("WARNING"):
+            _poll_kanban_phases(
+                project_slug="demo", tick_id="01TICK",
+                state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+                project_dir=tmp_path, phases_path=None,
+                monitor=monitor, detector=detector, poll_interval=0.1,
+            )
 
         assert mock_register.call_args.kwargs["assignee"] == "default"
+        assert "failed to load pipeline contract" in caplog.text
 
 
