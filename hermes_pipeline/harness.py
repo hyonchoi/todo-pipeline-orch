@@ -241,8 +241,8 @@ def _auto_complete_gate_tasks(
         pred = gate_predecessor.get(phase_key)
         if pred is None or pred != completed_phase_key:
             continue
-        complete_todo_kanban_task(tenant, info.task_id)
-        log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
+        if complete_todo_kanban_task(tenant, info.task_id):
+            log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
 
 
 def _poll_kanban_phases(

@@ -519,6 +519,28 @@ class TestAutoCompleteGateTasks:
 
         mock_complete.assert_called_once_with("demo", "t_gate")
 
+    def test_does_not_log_success_when_completion_fails(self, mocker, caplog):
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
+        import json as _json
+
+        header_gate = _json.dumps(
+            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+             "todo_id": "TODO-1", "project_slug": "demo"},
+            sort_keys=True,
+        )
+        mock_data = [
+            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
+        ]
+
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
+        mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
+
+        with caplog.at_level("INFO"):
+            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+
+        assert "auto-completed gate task" not in caplog.text
+
     def test_skips_non_blocked_tasks(self, mocker):
         from hermes_pipeline.harness import _auto_complete_gate_tasks
         import json as _json

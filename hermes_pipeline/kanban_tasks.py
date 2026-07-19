@@ -230,11 +230,14 @@ def _archive_tasks(task_ids: list[str]) -> None:
             log.warning("failed to archive task %s: %s", task_id, e)
 
 
-def complete_todo_kanban_task(tenant: str, task_id: str) -> None:
+def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:
     """Complete a kanban task via `hermes kanban complete` (best-effort).
 
     `hermes kanban complete` has no --tenant flag — tenant is accepted for
     call-site symmetry with other kanban_tasks functions but unused.
+
+    Returns True on success, False otherwise, so callers can distinguish
+    failure from success instead of assuming this always worked.
     """
     try:
         result = subprocess.run(
@@ -250,10 +253,12 @@ def complete_todo_kanban_task(tenant: str, task_id: str) -> None:
                 result.returncode,
                 result.stderr[:ERROR_MSG_MAX_LENGTH],
             )
-        else:
-            log.info("completed kanban task %s", task_id)
+            return False
+        log.info("completed kanban task %s", task_id)
+        return True
     except Exception as e:
         log.warning("failed to complete task %s: %s", task_id, e)
+        return False
 
 
 def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:

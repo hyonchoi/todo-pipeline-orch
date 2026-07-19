@@ -862,8 +862,9 @@ class TestCompleteTodoKanbanTask:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(returncode=0, stdout="", stderr="")
 
-        complete_todo_kanban_task("demo", "task-001")
+        result = complete_todo_kanban_task("demo", "task-001")
 
+        assert result is True
         assert mock_run.call_count == 1
         args = mock_run.call_args[0][0]
         assert args == ["hermes", "kanban", "complete", "task-001"]
@@ -874,14 +875,18 @@ class TestCompleteTodoKanbanTask:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(returncode=1, stdout="", stderr="boom")
 
-        complete_todo_kanban_task("demo", "task-001")  # Should not raise
+        result = complete_todo_kanban_task("demo", "task-001")  # Should not raise
+
+        assert result is False
 
     def test_swallows_exceptions(self, mocker):
         from hermes_pipeline.kanban_tasks import complete_todo_kanban_task
 
         mocker.patch("subprocess.run", side_effect=FileNotFoundError)
 
-        complete_todo_kanban_task("demo", "task-001")  # Should not raise
+        result = complete_todo_kanban_task("demo", "task-001")  # Should not raise
+
+        assert result is False
 
 
 class TestGetTodoKanbanTasks:
