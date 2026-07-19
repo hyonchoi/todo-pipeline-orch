@@ -243,6 +243,8 @@ def _auto_complete_gate_tasks(
             continue
         if complete_todo_kanban_task(tenant, info.task_id):
             log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
+        else:
+            log.warning("gate task %s (%s) remains blocked: auto-complete after %s done failed", info.task_id, phase_key, completed_phase_key)
 
 
 def _poll_kanban_phases(
