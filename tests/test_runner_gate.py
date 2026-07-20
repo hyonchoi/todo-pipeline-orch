@@ -1,7 +1,7 @@
 """Tests for runner gate handling (Task 8).
 
 Covers:
-- check_gate_status() pure read (CP2)
+- gate_status() pure read (CP2)
 - all_phases_complete() rejection sidecar exception to sentinel check
 - _invoke_hermes() gate phase skip/halt
 """
@@ -13,10 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from hermes_pipeline.gate_state import GateStatus, gate_status
 from hermes_pipeline.gates import (
-    GateStatus,
     PLAN_GATE_PHASE_KEY,
-    check_gate_status,
     read_rejection_sidecar,
     write_decision_sheet,
     write_rejection_sidecar,
@@ -50,15 +49,15 @@ def _make_kanban_header(tick_id: str, phase_key: str, todo_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# check_gate_status (CP2)
+# gate_status (CP2)
 # ---------------------------------------------------------------------------
 
 
-class TestCheckGateStatus:
+class TestGateStatus:
     def test_blocked(self, mocker):
         """Gate task exists in kanban with blocked status."""
         mocker.patch(
-            "hermes_pipeline.gates.get_todo_kanban_tasks",
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
             return_value={
                 PLAN_GATE_PHASE_KEY: KanbanTaskInfo(
                     task_id="t1", phase_key=PLAN_GATE_PHASE_KEY,
@@ -68,15 +67,15 @@ class TestCheckGateStatus:
         )
         # No rejection sidecar
         mocker.patch(
-            "hermes_pipeline.gates.read_rejection_sidecar", return_value=None,
+            "hermes_pipeline.gate_state.read_rejection_sidecar", return_value=None,
         )
-        assert check_gate_status(
+        assert gate_status(
             state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
         ) == GateStatus.BLOCKED
 
     def test_ready(self, mocker):
         mocker.patch(
-            "hermes_pipeline.gates.get_todo_kanban_tasks",
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
             return_value={
                 PLAN_GATE_PHASE_KEY: KanbanTaskInfo(
                     task_id="t1", phase_key=PLAN_GATE_PHASE_KEY,
@@ -85,15 +84,15 @@ class TestCheckGateStatus:
             },
         )
         mocker.patch(
-            "hermes_pipeline.gates.read_rejection_sidecar", return_value=None,
+            "hermes_pipeline.gate_state.read_rejection_sidecar", return_value=None,
         )
-        assert check_gate_status(
+        assert gate_status(
             state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
         ) == GateStatus.READY
 
     def test_running(self, mocker):
         mocker.patch(
-            "hermes_pipeline.gates.get_todo_kanban_tasks",
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
             return_value={
                 PLAN_GATE_PHASE_KEY: KanbanTaskInfo(
                     task_id="t1", phase_key=PLAN_GATE_PHASE_KEY,
@@ -102,21 +101,21 @@ class TestCheckGateStatus:
             },
         )
         mocker.patch(
-            "hermes_pipeline.gates.read_rejection_sidecar", return_value=None,
+            "hermes_pipeline.gate_state.read_rejection_sidecar", return_value=None,
         )
-        assert check_gate_status(
+        assert gate_status(
             state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
         ) == GateStatus.RUNNING
 
     def test_failed_from_rejection_sidecar(self, mocker):
         """Rejection sidecar takes priority over kanban status."""
         mocker.patch(
-            "hermes_pipeline.gates.read_rejection_sidecar",
+            "hermes_pipeline.gate_state.read_rejection_sidecar",
             return_value={"tick_id": "T1", "rejection_count": 1, "reason": "bad"},
         )
         # Kanban still shows blocked (sidecar written but task not yet archived)
         mocker.patch(
-            "hermes_pipeline.gates.get_todo_kanban_tasks",
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
             return_value={
                 PLAN_GATE_PHASE_KEY: KanbanTaskInfo(
                     task_id="t1", phase_key=PLAN_GATE_PHASE_KEY,
@@ -124,19 +123,19 @@ class TestCheckGateStatus:
                 )
             },
         )
-        assert check_gate_status(
+        assert gate_status(
             state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
         ) == GateStatus.FAILED
 
     def test_unknown_when_no_kanban_task(self, mocker):
         mocker.patch(
-            "hermes_pipeline.gates.get_todo_kanban_tasks",
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
             return_value={},  # No tasks found
         )
         mocker.patch(
-            "hermes_pipeline.gates.read_rejection_sidecar", return_value=None,
+            "hermes_pipeline.gate_state.read_rejection_sidecar", return_value=None,
         )
-        assert check_gate_status(
+        assert gate_status(
             state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
         ) == GateStatus.UNKNOWN
 
@@ -196,6 +195,35 @@ class TestAllPhasesCompleteRejection:
 
         assert all_phases_complete("proj", "T1", state_dir=tmp_path) is False
 
+    def test_rejection_routed_through_gate_state(self, tmp_path, mocker):
+        """all_phases_complete's plan-gate special case calls
+        gate_state.gate_status rather than re-implementing the sidecar
+        read inline."""
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={
+                "phase_2_autoplan": "done",
+                "phase_3_writing_plan": "done",
+                # phase_2b_plan_gate is missing (archived)
+            },
+        )
+        _write_expected_phases(tmp_path, [
+            "phase_2_autoplan",
+            "phase_2b_plan_gate",
+            "phase_3_writing_plan",
+        ])
+
+        mocked_gate_status = mocker.patch(
+            "hermes_pipeline.gate_state.gate_status",
+            return_value=GateStatus.FAILED,
+        )
+
+        assert all_phases_complete("proj", "T1", state_dir=tmp_path) is True
+        mocked_gate_status.assert_called_once_with(
+            state_dir=tmp_path, project_slug="proj", tick_id="T1",
+            gate_key="phase_2b_plan_gate",
+        )
+
 
 # ---------------------------------------------------------------------------
 # _invoke_hermes gate phase handling
@@ -207,7 +235,7 @@ class TestInvokeHermesGate:
         """When a gate phase is approved (RUNNING), _invoke_hermes returns
         success without calling hermes subprocess."""
         mocker.patch(
-            "hermes_pipeline.gates.check_gate_status",
+            "hermes_pipeline.gate_state.gate_status",
             return_value=GateStatus.RUNNING,
         )
         run_hermes = mocker.patch("hermes_pipeline.phases._run_hermes_subprocess")
@@ -229,7 +257,7 @@ class TestInvokeHermesGate:
         """When a gate phase is blocked, _invoke_hermes raises RuntimeError
         (the tick holds)."""
         mocker.patch(
-            "hermes_pipeline.gates.check_gate_status",
+            "hermes_pipeline.gate_state.gate_status",
             return_value=GateStatus.BLOCKED,
         )
 
@@ -248,7 +276,7 @@ class TestInvokeHermesGate:
         """When a gate phase is rejected (FAILED), _invoke_hermes raises
         RuntimeError so the runner records the failure."""
         mocker.patch(
-            "hermes_pipeline.gates.check_gate_status",
+            "hermes_pipeline.gate_state.gate_status",
             return_value=GateStatus.FAILED,
         )
 

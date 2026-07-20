@@ -303,7 +303,7 @@ def _reject(
     """Write the rejection sidecar and archive the gate task. Returns the count.
 
     The rejection sidecar is the source of truth for a FAILED plan gate
-    (check_gate_status reads it, not kanban). The prior-tick handler
+    (gate_state.gate_status reads it, not kanban). The prior-tick handler
     (Task 8) keys off the sidecar to release the tick without stalling.
     We archive rather than complete the gate task: completing would unblock
     the child phase and let a rejected plan proceed.
