@@ -34,4 +34,12 @@
   - **Depends on:** `TODO-20`
   - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/harden-kanban-scheduler-edge-cases`, Test Coverage `required`, Security Review `not-required`
 
+- [ ] **TODO-24: Refine gstack's phases.yaml — review phase composition and instructions** — Audit `hermes_pipeline/data/profiles/gstack/phases.yaml` for phase composition and per-phase instruction quality
+  - **What:** Review `hermes_pipeline/data/profiles/gstack/phases.yaml` (9 phases: autoplan → plan_gate → writing_plan → development → review → cso → document_release → finish_branch → ship_gate) for: (1) phase composition — are these the right phases, in the right order, with correct gates; (2) each phase's `prompt` field — is the instruction clear, correctly scoped, and consistent with the underlying skill's current behavior; (3) `tools`/`turns`/`timeout` budgets — are they still appropriate. Deliverable is a revised phases.yaml (or a design doc proposing changes) — not a full pipeline rewrite.
+  - **Why:** The 9-phase pipeline was assembled incrementally via prior TODOs (TODO-6/7/8), each adding/replacing a phase in isolation. No holistic review has been done of phase ordering, tool grants, turn/timeout budgets, or prompt wording as a set.
+  - **Pros:** Catches stale/inconsistent phase prompts before they cause pipeline failures; opportunity to right-size turn/timeout budgets based on real run history.
+  - **Cons:** Risk of scope creep into a full pipeline redesign; changes to phase prompts affect live orchestrator runs.
+  - **Context:** Related prior work — `TODO-7` (added phase_5_review) and `TODO-8` (replaced phase_8 ship gate), both in TODOS-archive.md.
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/refine-phases-yaml`, Test Coverage `not-required`, Security Review `not-required`
+
 ## Completed
