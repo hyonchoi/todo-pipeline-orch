@@ -139,6 +139,57 @@ class TestGateStatus:
             state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
         ) == GateStatus.UNKNOWN
 
+    def test_done_status_maps_to_running(self, mocker):
+        """When kanban task has status="done" (completion marker),
+        gate_status should map it to GateStatus.RUNNING.
+
+        Kanban uses "done" for completed tasks, but our enum has "running"
+        (the approved status after approve-plan). This mapping ensures
+        approved gates don't stall."""
+        mocker.patch(
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
+            return_value={
+                PLAN_GATE_PHASE_KEY: KanbanTaskInfo(
+                    task_id="t1", phase_key=PLAN_GATE_PHASE_KEY,
+                    status="done",  # Kanban completion marker
+                    todo_id="TODO-5",
+                )
+            },
+        )
+        mocker.patch(
+            "hermes_pipeline.gate_state.read_rejection_sidecar", return_value=None,
+        )
+        # Should NOT raise ValueError; should map "done" → RUNNING
+        result = gate_status(
+            state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
+        )
+        assert result == GateStatus.RUNNING
+
+    def test_unknown_status_maps_to_unknown(self, mocker):
+        """When kanban task has an unexpected status not in GateStatus enum,
+        gate_status should return GateStatus.UNKNOWN instead of raising.
+
+        This handles future kanban status additions and guards against
+        incompatible status values."""
+        mocker.patch(
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
+            return_value={
+                PLAN_GATE_PHASE_KEY: KanbanTaskInfo(
+                    task_id="t1", phase_key=PLAN_GATE_PHASE_KEY,
+                    status="unknown_future_status",  # Not in enum
+                    todo_id="TODO-5",
+                )
+            },
+        )
+        mocker.patch(
+            "hermes_pipeline.gate_state.read_rejection_sidecar", return_value=None,
+        )
+        # Should NOT raise ValueError; should return UNKNOWN
+        result = gate_status(
+            state_dir=Path("/tmp"), project_slug="proj", tick_id="T1",
+        )
+        assert result == GateStatus.UNKNOWN
+
 
 # ---------------------------------------------------------------------------
 # all_phases_complete rejection exception (CP1 - tick stall fix)
