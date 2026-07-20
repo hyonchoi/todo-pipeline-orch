@@ -78,7 +78,7 @@ class TestCmdInit:
 
         _cmd_init(FakeArgs(project="demo", force=False), config)
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
-        contract.write_text('schema_version = 1\nassignee = "custom"\n')
+        contract.write_text('schema_version = 2\nassignee = "custom"\n')
 
         result = _cmd_init(FakeArgs(project="demo", force=False), config)
 
@@ -94,13 +94,13 @@ class TestCmdInit:
 
         _cmd_init(FakeArgs(project="demo", force=False), config)
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
-        contract.write_text('schema_version = 1\nassignee = "custom"\n')
+        contract.write_text('schema_version = 2\nassignee = "custom"\n')
 
         result = _cmd_init(FakeArgs(project="demo", force=True), config)
 
         assert result == 0
         assert 'assignee = "custom"' not in contract.read_text()
-        assert "schema_version = 1" in contract.read_text()
+        assert "schema_version = 2" in contract.read_text()
 
 
 class TestInitAssignee:
@@ -137,6 +137,75 @@ class TestInitAssignee:
         assert result == 0
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         assert 'assignee = "default"' in contract.read_text()
+
+
+class TestInitProfile:
+    def test_init_profile_parser_defaults_to_gstack(self):
+        parser = build_parser()
+        args = parser.parse_args(["init", "demo"])
+        assert args.profile == "gstack"
+
+    def test_init_profile_parser_accepts_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["init", "demo", "--profile", "agent-skills"])
+        assert args.profile == "agent-skills"
+
+    def test_init_writes_selected_profile(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="agent-skills"), config
+        )
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert 'profile = "agent-skills"' in contract.read_text()
+
+    def test_init_without_profile_flag_defaults_to_gstack(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(FakeArgs(project="demo", force=False, assignee=None), config)
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert 'profile = "gstack"' in contract.read_text()
+
+    def test_init_unknown_profile_returns_error(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="bogus-profile"), config
+        )
+
+        assert result == 2
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert not contract.exists()
+        assert "bogus-profile" in capsys.readouterr().out
+
+    def test_init_capabilities_computed_from_selected_profile(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="agent-skills"), config
+        )
+
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        text = contract.read_text()
+        # agent-skills profile's non-gate phases only use Read/Write/Edit/Bash
+        assert '"Read"' in text
+        assert '"Bash"' in text
 
 
 class TestInstallProfileParser:
@@ -203,7 +272,7 @@ class TestCmdDoctor:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read", "Write"]\n'
+            'schema_version = 2\ncapabilities = ["Read", "Write"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -222,7 +291,7 @@ class TestCmdDoctor:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read"]\n'
+            'schema_version = 2\ncapabilities = ["Read"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -238,6 +307,81 @@ class TestCmdDoctor:
         assert "Write" in out and "Bash" in out
 
 
+class TestDoctorProfileAware:
+    def test_doctor_loads_phases_from_contract_profile(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\n'
+            'capabilities = ["Read", "Write", "Bash"]\n'
+            'profile = "agent-skills"\n'
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        out = capsys.readouterr().out
+        assert result == 1
+        assert "Edit" in out
+
+    def test_doctor_unknown_profile_returns_2(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\n'
+            'capabilities = ["Read", "Write", "Bash"]\n'
+            'profile = "nonexistent-profile"\n'
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        assert "MISSING" in capsys.readouterr().out
+
+    def test_doctor_malformed_profile_yaml_returns_2(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\ncapabilities = ["Read", "Write", "Bash"]\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            side_effect=ValueError("malformed phases.yaml"),
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        assert "INVALID" in capsys.readouterr().out
+
+    def test_doctor_ok_message_includes_profile(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\ncapabilities = ["Read", "Write"]\nprofile = "gstack"\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write")],
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        assert "profile=gstack" in capsys.readouterr().out
+
+
 class TestDoctorMissingProfile:
     def test_doctor_checks_profile_for_non_default_assignee(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"
@@ -245,7 +389,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -270,7 +414,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         call_count = {"n": 0}
         original_run = _test_sp.run
@@ -299,7 +443,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -322,7 +466,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",

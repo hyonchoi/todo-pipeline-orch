@@ -6,15 +6,17 @@ model/tools/skills flags this would otherwise need — see TODO-16).
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 from .phases import Phase, load_phases
 
-CONTRACT_SCHEMA_VERSION = 1
+CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_FILENAME = "pipeline.toml"
 DEFAULT_CAPABILITIES: tuple[str, ...] = ("Read", "Write", "Edit", "Bash")
+PROFILE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
 
 class ContractError(Exception):
@@ -42,6 +44,10 @@ class PipelineContract:
     schema_version: int
     assignee: str = "default"
     capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES
+    # Which pipeline skill-set profile's phases.yaml this project runs
+    # (e.g. "gstack", "agent-skills") — distinct from bundled_profile_dir()'s
+    # unrelated "Hermes profile" (SOUL.md agent-identity) concept below.
+    profile: str = "gstack"
 
 
 def contract_path(project_state: Path) -> Path:
@@ -57,10 +63,13 @@ def default_contract() -> PipelineContract:
     )
 
 
-def _render_default_contract_toml() -> str:
-    # Compute capabilities from phases.yaml so init writes a contract that
-    # matches the current phase definitions, not a stale hardcoded tuple.
-    caps = sorted(required_capabilities(load_phases()))
+def _render_default_contract_toml(profile: str = "gstack") -> str:
+    # Compute capabilities from the selected profile's phases.yaml so init
+    # writes a contract that matches that profile's phase definitions, not
+    # a stale hardcoded tuple or the wrong profile's requirements.
+    from .phases import resolve_profile_phases_path
+
+    caps = sorted(required_capabilities(load_phases(resolve_profile_phases_path(profile))))
     caps_toml = ", ".join(f'"{c}"' for c in caps)
     return (
         "# Pipeline execution contract — read at tick start.\n"
@@ -68,6 +77,7 @@ def _render_default_contract_toml() -> str:
         f"schema_version = {CONTRACT_SCHEMA_VERSION}\n"
         'assignee = "default"\n'
         f"capabilities = [{caps_toml}]\n"
+        f'profile = "{profile}"\n'
     )
 
 
@@ -85,10 +95,11 @@ def _render_contract_toml(contract: PipelineContract) -> str:
         f"schema_version = {contract.schema_version}\n"
         f'assignee = "{contract.assignee}"\n'
         f"capabilities = [{caps_toml}]\n"
+        f'profile = "{contract.profile}"\n'
     )
 
 
-def write_default_contract(project_state: Path) -> bool:
+def write_default_contract(project_state: Path, profile: str = "gstack") -> bool:
     """Write the default contract if one doesn't already exist.
 
     Returns:
@@ -99,7 +110,7 @@ def write_default_contract(project_state: Path) -> bool:
     if path.exists():
         return False
     project_state.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_default_contract_toml())
+    path.write_text(_render_default_contract_toml(profile))
     return True
 
 
@@ -141,10 +152,18 @@ def load_contract(project_state: Path) -> PipelineContract:
     if not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities):
         raise ContractSchemaError(f"{path}: 'capabilities' must be a list of strings")
 
+    profile = data.get("profile", "gstack")
+    if not isinstance(profile, str) or not PROFILE_NAME_RE.match(profile):
+        raise ContractSchemaError(
+            f"{path}: 'profile' must be a lowercase alphanumeric/hyphen string, "
+            f"1-64 chars (got {profile!r})"
+        )
+
     return PipelineContract(
         schema_version=schema_version,
         assignee=assignee,
         capabilities=tuple(capabilities),
+        profile=profile,
     )
 
 

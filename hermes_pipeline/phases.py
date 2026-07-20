@@ -20,10 +20,34 @@ class Phase:
     terminal: bool = False
     gate: bool = False
 
+def resolve_profile_phases_path(profile: str) -> Path:
+    """Resolve the bundled phases.yaml for a pipeline skill-set profile.
+
+    Raises:
+        ContractSchemaError: No phases.yaml exists for `profile`; the
+            message lists the available profile names.
+    """
+    from importlib.resources import files
+
+    from .contract import ContractSchemaError
+
+    profiles_root = files("hermes_pipeline").joinpath("data", "profiles")
+    candidate = profiles_root.joinpath(profile, "phases.yaml")
+    if not candidate.is_file():
+        available = sorted(
+            p.name for p in Path(profiles_root).iterdir()
+            if p.is_dir() and (p / "phases.yaml").is_file()
+        )
+        raise ContractSchemaError(
+            f"unknown profile '{profile}'. Available profiles: {', '.join(available)}. "
+            f"Use --profile to select one at init, or edit 'profile' in .hermes/pipeline.toml."
+        )
+    return Path(candidate)
+
+
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:
     if config_path is None:
-        from importlib.resources import files
-        config_path = files("hermes_pipeline").joinpath("data", "phases.yaml")
+        config_path = resolve_profile_phases_path("gstack")
     config_path = Path(config_path)
     with open(config_path) as f:
         data = yaml.safe_load(f)
@@ -199,9 +223,28 @@ def _invoke_review_phase(
     )
 
 
+def _resolve_execution_profile(state_dir: Path) -> str:
+    """Determine which phase profile to execute under for this project.
+
+    Reads the project's pipeline contract (same `.hermes` dir as `state_dir`)
+    for its declared `profile`. Falls back to "gstack" only if no contract
+    exists (e.g. ad-hoc test fixtures) so callers without a contract keep
+    working. A contract that exists but is malformed or version-mismatched
+    is a real configuration error and must propagate, not be silently
+    treated as "use gstack".
+    """
+    from .contract import ContractMissingError, load_contract
+
+    try:
+        return load_contract(Path(state_dir)).profile
+    except ContractMissingError:
+        return "gstack"
+
+
 def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
     """Execute a single phase via hermes subprocess and write ready_for_review on terminal success."""
-    phases_cfg = {p.phase_key: p for p in load_phases()}
+    profile = _resolve_execution_profile(state_dir)
+    phases_cfg = {p.phase_key: p for p in load_phases(resolve_profile_phases_path(profile))}
     phase = phases_cfg.get(phase_key)
     if phase is None:
         raise UnknownPhaseError(

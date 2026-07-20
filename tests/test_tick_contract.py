@@ -43,7 +43,7 @@ class TestTickContractAssignee:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "reviewer-bot"\ncapabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'schema_version = 2\nassignee = "reviewer-bot"\ncapabilities = ["Read", "Write", "Edit", "Bash"]\n'
         )
 
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
@@ -79,7 +79,7 @@ class TestTickContractAssignee:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read"]\n'
+            'schema_version = 2\ncapabilities = ["Read"]\n'
         )
 
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
@@ -104,3 +104,36 @@ class TestTickContractAssignee:
 
         assert result == 0
         mock_register.assert_not_called()
+
+    def test_tick_checks_capabilities_against_contract_profile(self, tmp_path, mocker):
+        """Capability validation must load phases from the contract's declared
+        profile, not the hardcoded gstack default — else a project running a
+        non-gstack profile is checked against the wrong phase requirements."""
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mock_register = mocker.patch("hermes_pipeline.cli.register_todo_phases", return_value=["t_1"])
+        from hermes_pipeline import phases as phases_mod
+        from hermes_pipeline.phases import resolve_profile_phases_path
+        spy_load_phases = mocker.patch(
+            "hermes_pipeline.cli.load_phases", wraps=phases_mod.load_phases,
+        )
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "default"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "agent-skills"\n'
+        )
+
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+        result = _cmd_tick(FakeArgs(), config)
+
+        assert result == 0
+        mock_register.assert_called_once()
+        agent_skills_path = resolve_profile_phases_path("agent-skills")
+        assert any(
+            call.args and call.args[0] == agent_skills_path
+            for call in spy_load_phases.call_args_list
+        )

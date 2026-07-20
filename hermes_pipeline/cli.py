@@ -512,6 +512,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--assignee", default=None,
         help="Set the assignee field (e.g., --assignee pipeline)",
     )
+    init_parser.add_argument(
+        "--profile", default="gstack",
+        help="Pipeline skill-set profile (e.g., gstack, agent-skills). Default: gstack. "
+             "Each profile defines a different set of phases and required capabilities.",
+    )
     init_parser.set_defaults(func=_cmd_init)
 
     # doctor: Verify the pipeline execution contract
@@ -1072,14 +1077,16 @@ def _tick_project(
         required_capabilities,
     )
 
-    phases = load_phases()
+    from .phases import resolve_profile_phases_path
 
     try:
         contract = load_contract(project_state)
+        phases = load_phases(resolve_profile_phases_path(contract.profile))
     except ContractMissingError:
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
+        phases = load_phases()
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
             assignee="default",
@@ -1319,7 +1326,24 @@ def _cmd_init(args, config: Config) -> int:
         return 2
 
     from .state_migration import _get_project_state_dir
-    from .contract import contract_path, write_default_contract
+    from .contract import PROFILE_NAME_RE, ContractSchemaError, contract_path, write_default_contract
+    from .phases import resolve_profile_phases_path
+
+    profile = getattr(args, "profile", "gstack") or "gstack"
+    if not PROFILE_NAME_RE.match(profile):
+        msg = (
+            f"invalid profile {profile!r}: must be a lowercase alphanumeric/hyphen "
+            "string, 1-64 chars"
+        )
+        log.error(msg)
+        print(f"ERROR: {msg}")
+        return 2
+    try:
+        resolve_profile_phases_path(profile)
+    except ContractSchemaError as e:
+        log.error("invalid profile: %s", e)
+        print(f"ERROR: {e}")
+        return 2
 
     project_state = _get_project_state_dir(project_dir)
     path = contract_path(project_state)
@@ -1327,7 +1351,7 @@ def _cmd_init(args, config: Config) -> int:
     try:
         if args.force and path.exists():
             path.unlink()
-        written = write_default_contract(project_state)
+        written = write_default_contract(project_state, profile)
     except OSError as e:
         log.error("failed to write pipeline contract at %s: %s", path, e)
         return 1
@@ -1345,6 +1369,7 @@ def _cmd_init(args, config: Config) -> int:
                 schema_version=data["schema_version"],
                 assignee=assignee,
                 capabilities=tuple(data.get("capabilities", list(DEFAULT_CAPABILITIES))),
+                profile=data.get("profile", "gstack"),
             )
             path.write_text(_render_contract_toml(contract))
         except (tomllib.TOMLDecodeError, KeyError) as e:
@@ -1389,13 +1414,25 @@ def _cmd_doctor(args, config: Config) -> int:
         print(f"INVALID: {e}")
         return 2
 
-    phases = load_phases()
+    # Load phases from the contract's selected profile
+    from .phases import resolve_profile_phases_path
+
+    try:
+        profile_path = resolve_profile_phases_path(contract.profile)
+        phases = load_phases(profile_path)
+    except ContractSchemaError as e:
+        print(f"MISSING: {e}")
+        return 2
+    except Exception as e:
+        print(f"INVALID: failed to load phases for profile '{contract.profile}': {e}")
+        return 2
+
     missing = missing_capabilities(contract, phases)
     if missing:
         print(
             f"DRIFT: contract capabilities {sorted(contract.capabilities)} at "
             f"{contract_path(project_state)} are missing {sorted(missing)} "
-            f"required by phases.yaml — edit the contract to add them"
+            f"required by profile '{contract.profile}' — edit the contract to add them"
         )
         return 1
 
@@ -1435,7 +1472,7 @@ def _cmd_doctor(args, config: Config) -> int:
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
-        f"capabilities={sorted(contract.capabilities)}"
+        f"profile={contract.profile} capabilities={sorted(contract.capabilities)}"
     )
     return 0
 

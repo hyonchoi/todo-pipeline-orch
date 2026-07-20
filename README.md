@@ -55,10 +55,9 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Why single global lock, state migration decisions, trade-offs |
 | [Set up the pipeline profile](docs/howto-pipeline-profile.md) | How-to | Installing the dedicated pipeline Hermes profile for unattended execution |
 | [Configure the pipeline contract](docs/howto-pipeline-contract.md) | How-to | Editing assignee, fixing capability drift, schema migration |
+| [Use the agent-skills profile](docs/howto-agent-skills-profile.md) | How-to | Selecting a different skill-set for pipeline phases (`gstack` or `agent-skills`) |
 | [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Design rationale: versioned contracts, drift detection, capability gates |
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` replaces Anthropic SDK calls |
-| [Pipeline execution contract](docs/howto-pipeline-contract.md) | How-to | Creating, editing, validating `.hermes/pipeline.toml` |
-| [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Why versioned contracts, drift detection, capability gates |
 | [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
 | [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works and design rationale |
 | [TODOS Manager skill](skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 7 subcommands |
@@ -153,11 +152,12 @@ Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful 
 uv run pipeline-watch recover-counter <project>
 ```
 
-Write the default pipeline execution contract for a project (idempotent — run again with `--force` to regenerate after editing `phases.yaml`). Use `--assignee` to set the Hermes profile for kanban tasks:
+Write the default pipeline execution contract for a project (idempotent — run again with `--force` to regenerate after editing `phases.yaml`). Use `--assignee` to set the Hermes profile for kanban tasks, and `--profile` to choose a pipeline skill-set (default: `gstack`):
 ```bash
 uv run pipeline-watch init <project>
 uv run pipeline-watch init <project> --force
 uv run pipeline-watch init <project> --assignee pipeline
+uv run pipeline-watch init <project> --profile agent-skills
 ```
 
 Install the bundled pipeline Hermes profile for unattended kanban execution:
@@ -166,7 +166,7 @@ uv run pipeline-watch install-profile
 uv run pipeline-watch install-profile --force  # reinstall after SOUL.md changes
 ```
 
-Verify a project's pipeline execution contract against `phases.yaml` (exit 0 clean, 1 drift, 2 missing/invalid or missing profile):
+Verify a project's pipeline execution contract against its configured profile's phases (exit 0 clean, 1 drift, 2 missing/invalid contract or profile):
 ```bash
 uv run pipeline-watch doctor <project>
 ```

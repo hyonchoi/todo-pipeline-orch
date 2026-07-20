@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.3] - 2026-07-20
+
+### Added
+
+- Pluggable pipeline phase profiles: `hermes-pipeline init --profile <name>` lets a project choose which skill-set drives its phases (`gstack`, the default, or the new `agent-skills` profile). Each profile ships its own bundled `phases.yaml` and computes its own required capabilities.
+- `agent-skills` profile: a 9-phase pipeline that maps to the `agent-skills:*` skill family instead of gstack's own skills.
+- Pipeline contracts now record a `profile` field (schema bumped to v2), validated against a lowercase alphanumeric/hyphen naming rule so a malformed or path-unsafe profile name is rejected before any file resolution happens.
+- `hermes-pipeline doctor` is profile-aware: it loads phases from the contract's declared profile and reports drift/missing/invalid profile errors by name.
+- Docs: `docs/howto-agent-skills-profile.md` walks through setting up the agent-skills profile; `docs/howto-pipeline-contract.md` documents the new `profile` field and schema v2.
+
+### Changed
+
+- Phase execution (`tick`, `doctor`, `init`) now resolves phases from the project's contract-selected profile instead of a single hardcoded `phases.yaml`, falling back to `gstack` only when no contract exists yet.
+- Existing (schema v1) contracts without a `profile` field are rejected with a clear version-mismatch error — re-run `init` to upgrade.
+
 ## [0.5.2] - 2026-07-19
 
 ### Added

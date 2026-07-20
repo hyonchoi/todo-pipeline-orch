@@ -1,5 +1,9 @@
 from pathlib import Path
-from hermes_pipeline.phases import Phase, load_phases
+
+import pytest
+
+from hermes_pipeline.contract import ContractSchemaError
+from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
 
 FIXTURE = """
 phases:
@@ -114,3 +118,75 @@ def test_real_phases_yaml_plan_gate_is_nonterminal_gate():
     assert gate.prompt == ""
     assert gate.tools == ""
     assert gate.turns == 0
+
+
+def test_resolve_profile_phases_path_gstack():
+    path = resolve_profile_phases_path("gstack")
+    assert path.name == "phases.yaml"
+    assert "gstack" in str(path)
+    assert path.is_file()
+
+
+def test_resolve_profile_phases_path_unknown_raises_with_available_profiles():
+    with pytest.raises(ContractSchemaError, match="gstack"):
+        resolve_profile_phases_path("bogus-profile")
+
+
+def test_load_phases_no_args_still_returns_gstack_phases():
+    phases = load_phases()
+    assert phases[0].phase_key == "phase_2_autoplan"
+
+
+def test_real_phases_yaml_finish_branch_uses_ship_skill():
+    phases = {p.phase_key: p for p in load_phases()}
+    finish = phases["phase_8_finish_branch"]
+    assert "/ship" in finish.prompt
+    assert "finishing-a-development-branch" not in finish.prompt
+
+
+AGENT_SKILLS_PHASE_ORDER = [
+    "phase_1_spec",
+    "phase_1b_spec_gate",
+    "phase_2_plan",
+    "phase_3_implement",
+    "phase_4_review",
+    "phase_5_security",
+    "phase_6_document_release",
+    "phase_7_ship",
+    "phase_8_ship",
+]
+
+
+def test_agent_skills_phases_yaml_order():
+    phases = load_phases(resolve_profile_phases_path("agent-skills"))
+    assert [p.phase_key for p in phases] == AGENT_SKILLS_PHASE_ORDER
+
+
+def test_agent_skills_phases_yaml_gates():
+    phases = {p.phase_key: p for p in load_phases(resolve_profile_phases_path("agent-skills"))}
+    assert phases["phase_1b_spec_gate"].gate is True
+    assert phases["phase_1b_spec_gate"].terminal is False
+    assert phases["phase_8_ship"].gate is True
+    assert phases["phase_8_ship"].terminal is True
+
+
+def test_agent_skills_phases_yaml_non_gate_phases_reference_skills():
+    phases = {p.phase_key: p for p in load_phases(resolve_profile_phases_path("agent-skills"))}
+    assert "agent-skills:spec-driven-development" in phases["phase_1_spec"].prompt
+    assert "agent-skills:planning-and-task-breakdown" in phases["phase_2_plan"].prompt
+    assert "agent-skills:incremental-implementation" in phases["phase_3_implement"].prompt
+    assert "agent-skills:test-driven-development" in phases["phase_3_implement"].prompt
+    assert "agent-skills:code-review-and-quality" in phases["phase_4_review"].prompt
+    assert "agent-skills:security-and-hardening" in phases["phase_5_security"].prompt
+    assert "agent-skills:ship" in phases["phase_7_ship"].prompt
+
+
+def test_agent_skills_phases_yaml_document_release_matches_gstack_verbatim():
+    gstack_phases = {p.phase_key: p for p in load_phases(resolve_profile_phases_path("gstack"))}
+    agent_skills_phases = {
+        p.phase_key: p for p in load_phases(resolve_profile_phases_path("agent-skills"))
+    }
+    assert (
+        agent_skills_phases["phase_6_document_release"].prompt
+        == gstack_phases["phase_7_document_release"].prompt
+    )
