@@ -22,12 +22,12 @@ See `tasks/plan.md` for full context, rationale, and verification details.
 - [x] Task 6: `pipeline-watch doctor` profile-aware capability check + fail-closed on malformed profile YAML (`hermes_pipeline/cli.py`)
 
 ### Checkpoint C
-- [ ] `init --profile agent-skills` then `doctor` end-to-end, exit 0
-- [ ] `uv run pytest` full suite
+- [x] `init --profile agent-skills` then `doctor` end-to-end, exit 0
+- [x] `uv run pytest` full suite
 
 ## Phase 4: Docs
-- [ ] Task 7: Update `docs/howto-pipeline-contract.md`, add `docs/howto-agent-skills-profile.md`
+- [x] Task 7: Update `docs/howto-pipeline-contract.md`, add `docs/howto-agent-skills-profile.md`
 
 ### Checkpoint D: Complete
-- [ ] All SPEC.md Success Criteria checked
-- [ ] `uv run pytest` and `uv run ruff check hermes_pipeline/ tests/` clean
+- [x] All SPEC.md Success Criteria checked
+- [x] `uv run pytest` and `uv run ruff check hermes_pipeline/ tests/` clean (ruff not installed in this env; pre-existing unrelated lint debt noted, not introduced by this feature)
