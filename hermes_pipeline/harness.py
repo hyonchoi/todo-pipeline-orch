@@ -41,7 +41,7 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
         "# Pipeline execution contract — read at tick start.\n"
         "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
         "schema_version = 1\n"
-        'assignee = "default"\n'
+        'assignee = "pipeline"\n'
         'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
     )
     (path / ".hermes" / "pipeline.toml").write_text(pipeline_toml)
@@ -615,7 +615,14 @@ def run_harness(
 
     preflight_check()
 
-    temp_dir = Path(tempfile.mkdtemp(prefix="harness-"))
+    # Allocate under ~/.hermes/tmp rather than the OS default temp root: on
+    # macOS, tempfile.mkdtemp() resolves under /var/folders/..., which is a
+    # symlink to /private/var/folders/... — a prefix the Hermes agent's
+    # write-tool sensitive-path guard blocks, causing every worker in
+    # --kanban hermes mode to crash-loop on writes inside the mock project.
+    harness_tmp_root = Path("~/.hermes/tmp").expanduser()
+    harness_tmp_root.mkdir(parents=True, exist_ok=True)
+    temp_dir = Path(tempfile.mkdtemp(prefix="harness-", dir=harness_tmp_root))
     try:
         fixture = create_mock_project(temp_dir, fixture_name)
 

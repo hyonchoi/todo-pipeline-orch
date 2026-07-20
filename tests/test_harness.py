@@ -301,7 +301,7 @@ class TestRunHarnessTimeout:
         monkeypatch.setattr("hermes_pipeline.phases.run", _hang_forever)
         monkeypatch.setattr(
             "hermes_pipeline.harness.tempfile.mkdtemp",
-            lambda prefix=None: str(tmp_path / "harness-run"),
+            lambda prefix=None, dir=None: str(tmp_path / "harness-run"),
         )
 
         result = run_harness(
