@@ -18,8 +18,8 @@ See `tasks/plan.md` for full context, rationale, and verification details.
 - [x] Manual: both profiles load with correct phase counts (9 / 9)
 
 ## Phase 3: CLI Surface
-- [ ] Task 5: `pipeline-watch init --profile` flag (`hermes_pipeline/cli.py`)
-- [ ] Task 6: `pipeline-watch doctor` profile-aware capability check + fail-closed on malformed profile YAML (`hermes_pipeline/cli.py`)
+- [x] Task 5: `pipeline-watch init --profile` flag (`hermes_pipeline/cli.py`)
+- [x] Task 6: `pipeline-watch doctor` profile-aware capability check + fail-closed on malformed profile YAML (`hermes_pipeline/cli.py`)
 
 ### Checkpoint C
 - [ ] `init --profile agent-skills` then `doctor` end-to-end, exit 0
