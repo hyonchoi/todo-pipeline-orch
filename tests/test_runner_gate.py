@@ -281,6 +281,35 @@ class TestAllPhasesCompleteRejection:
             gate_key="phase_2b_plan_gate",
         )
 
+    def test_unknown_gate_status_stalls(self, tmp_path, mocker):
+        """When gate_state.gate_status returns UNKNOWN (not FAILED),
+        all_phases_complete falls through to the partial-registration
+        stall (return False) rather than treating it as approved."""
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={
+                "phase_2_autoplan": "done",
+                "phase_3_writing_plan": "done",
+                # phase_2b_plan_gate is missing (archived)
+            },
+        )
+        _write_expected_phases(tmp_path, [
+            "phase_2_autoplan",
+            "phase_2b_plan_gate",
+            "phase_3_writing_plan",
+        ])
+
+        mocked_gate_status = mocker.patch(
+            "hermes_pipeline.gate_state.gate_status",
+            return_value=GateStatus.UNKNOWN,
+        )
+
+        assert all_phases_complete("proj", "T1", state_dir=tmp_path) is False
+        mocked_gate_status.assert_called_once_with(
+            state_dir=tmp_path, project_slug="proj", tick_id="T1",
+            gate_key="phase_2b_plan_gate",
+        )
+
 
 # ---------------------------------------------------------------------------
 # _invoke_hermes gate phase handling
