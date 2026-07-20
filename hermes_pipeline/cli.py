@@ -1326,10 +1326,18 @@ def _cmd_init(args, config: Config) -> int:
         return 2
 
     from .state_migration import _get_project_state_dir
-    from .contract import ContractSchemaError, contract_path, write_default_contract
+    from .contract import PROFILE_NAME_RE, ContractSchemaError, contract_path, write_default_contract
     from .phases import resolve_profile_phases_path
 
     profile = getattr(args, "profile", "gstack") or "gstack"
+    if not PROFILE_NAME_RE.match(profile):
+        msg = (
+            f"invalid profile {profile!r}: must be a lowercase alphanumeric/hyphen "
+            "string, 1-64 chars"
+        )
+        log.error(msg)
+        print(f"ERROR: {msg}")
+        return 2
     try:
         resolve_profile_phases_path(profile)
     except ContractSchemaError as e:
