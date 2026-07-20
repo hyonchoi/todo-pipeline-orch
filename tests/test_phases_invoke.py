@@ -22,7 +22,7 @@ def _fake_phase(*, phase_key: str, terminal: bool, prompt: str = "do thing",
     )
 
 def test_invoke_writes_ready_for_review_on_terminal_phase(state_dir, monkeypatch):
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_8_finish_branch", terminal=True),
     ])
     monkeypatch.setattr(
@@ -45,7 +45,7 @@ def test_invoke_writes_ready_for_review_on_terminal_phase(state_dir, monkeypatch
     assert rfr["tick_id"] == "01JT"
 
 def test_invoke_does_not_write_rfr_for_non_terminal_phase(state_dir, monkeypatch):
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     monkeypatch.setattr(
@@ -61,7 +61,7 @@ def test_invoke_does_not_write_rfr_for_non_terminal_phase(state_dir, monkeypatch
 def test_invoke_passes_todo_context_into_prompt(state_dir, monkeypatch):
     """A picked TODO must be visible to Claude. The static phase prompt alone
     leaves Claude with no idea which TODO this run is for."""
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False, prompt="do thing"),
     ])
     seen = {}
@@ -79,7 +79,7 @@ def test_invoke_passes_todo_context_into_prompt(state_dir, monkeypatch):
     assert "do thing" in seen["prompt"]
 
 def test_invoke_raises_on_unknown_phase_key(state_dir, monkeypatch):
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     with pytest.raises(phases_mod.UnknownPhaseError):
@@ -88,8 +88,56 @@ def test_invoke_raises_on_unknown_phase_key(state_dir, monkeypatch):
             tick_id="01JT", state_dir=state_dir, project_slug="demo",
         )
 
+
+def test_invoke_uses_profile_from_contract_not_gstack_default(tmp_path, monkeypatch):
+    """A contract declaring profile='agent-skills' must execute agent-skills
+    phases, not silently fall back to the gstack default (regression for the
+    profile-not-threaded-to-execution bug)."""
+    from hermes_pipeline.contract import write_default_contract
+
+    state_dir = tmp_path / ".hermes"
+    (state_dir / "ready_for_review").mkdir(parents=True)
+    write_default_contract(state_dir, profile="agent-skills")
+
+    seen = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": "ok"}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+
+    out = phases_mod._invoke_hermes(
+        todo_id="TODO-7", phase_key="phase_1_spec",
+        tick_id="01JT", state_dir=state_dir, project_slug="demo",
+    )
+    assert out["status"] == "success"
+    assert "prompt" in seen
+
+    with pytest.raises(phases_mod.UnknownPhaseError):
+        phases_mod._invoke_hermes(
+            todo_id="TODO-7", phase_key="phase_2_autoplan",
+            tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        )
+
+
+def test_invoke_falls_back_to_gstack_without_contract(state_dir, monkeypatch):
+    """No pipeline.toml exists in state_dir — execution must still work,
+    defaulting to the bundled gstack profile."""
+    seen = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": "ok"}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+
+    out = phases_mod._invoke_hermes(
+        todo_id="TODO-7", phase_key="phase_2_autoplan",
+        tick_id="01JT", state_dir=state_dir, project_slug="demo",
+    )
+    assert out["status"] == "success"
+    assert "prompt" in seen
+
+
 def test_invoke_propagates_subprocess_failure(state_dir, monkeypatch):
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     monkeypatch.setattr(
@@ -104,7 +152,7 @@ def test_invoke_propagates_subprocess_failure(state_dir, monkeypatch):
 
 def test_invoke_failure_error_includes_stderr(state_dir, monkeypatch):
     """Phase failure RuntimeError must include stderr for debugging."""
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     monkeypatch.setattr(
@@ -167,7 +215,7 @@ def test_run_hermes_subprocess_propagates_exception(monkeypatch):
 
 def test_invoke_on_pid_records_child_pid_in_marker(state_dir, monkeypatch):
     """_invoke_hermes should record the child PID in the phase marker via on_pid."""
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
 
@@ -194,7 +242,7 @@ def test_invoke_on_pid_records_child_pid_in_marker(state_dir, monkeypatch):
 
 def test_invoke_load_phases_exception_propagates(monkeypatch):
     """When load_phases raises, the exception should propagate from _invoke_hermes."""
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: (_ for _ in ()).throw(ValueError("yaml corrupt")))
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: (_ for _ in ()).throw(ValueError("yaml corrupt")))
     with pytest.raises(ValueError, match="yaml corrupt"):
         phases_mod._invoke_hermes(
             todo_id="TODO-7",
@@ -209,7 +257,7 @@ def test_run_logs_sidecar_write_failure(state_dir, monkeypatch, caplog):
     import logging
     caplog.set_level(logging.WARNING)
 
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     monkeypatch.setattr(
@@ -242,7 +290,7 @@ def test_run_logs_sidecar_write_failure(state_dir, monkeypatch, caplog):
 def test_run_sidecar_fileexists_error_suppressed(state_dir, monkeypatch):
     """When append_outcome raises FileExistsError, it should be silently
     swallowed so as not to mask the original phase failure."""
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),
     ])
     monkeypatch.setattr(
@@ -271,7 +319,7 @@ def test_run_sidecar_fileexists_error_suppressed(state_dir, monkeypatch):
 def test_invoke_routes_review_phase_through_review_lifecycle(state_dir, monkeypatch, tmp_path):
     """phase_5_review must go through capture -> hermes -> finalize, not the
     generic rc-check path."""
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_5_review", terminal=False,
                     prompt="run /review", turns=30, timeout=2400),
     ])
@@ -300,7 +348,7 @@ def test_invoke_routes_review_phase_through_review_lifecycle(state_dir, monkeypa
 
 
 def test_invoke_review_phase_short_circuits_on_no_diff(state_dir, monkeypatch, tmp_path):
-    monkeypatch.setattr(phases_mod, "load_phases", lambda: [
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_5_review", terminal=False, prompt="run /review"),
     ])
     from hermes_pipeline import review_phase as rp
