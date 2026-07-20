@@ -1403,13 +1403,25 @@ def _cmd_doctor(args, config: Config) -> int:
         print(f"INVALID: {e}")
         return 2
 
-    phases = load_phases()
+    # Load phases from the contract's selected profile
+    from .phases import resolve_profile_phases_path
+
+    try:
+        profile_path = resolve_profile_phases_path(contract.profile)
+        phases = load_phases(profile_path)
+    except ContractSchemaError as e:
+        print(f"MISSING: {e}")
+        return 2
+    except Exception as e:
+        print(f"INVALID: failed to load phases for profile '{contract.profile}': {e}")
+        return 2
+
     missing = missing_capabilities(contract, phases)
     if missing:
         print(
             f"DRIFT: contract capabilities {sorted(contract.capabilities)} at "
             f"{contract_path(project_state)} are missing {sorted(missing)} "
-            f"required by phases.yaml — edit the contract to add them"
+            f"required by profile '{contract.profile}' — edit the contract to add them"
         )
         return 1
 
@@ -1449,7 +1461,7 @@ def _cmd_doctor(args, config: Config) -> int:
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
-        f"capabilities={sorted(contract.capabilities)}"
+        f"profile={contract.profile} capabilities={sorted(contract.capabilities)}"
     )
     return 0
 

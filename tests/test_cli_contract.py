@@ -307,6 +307,81 @@ class TestCmdDoctor:
         assert "Write" in out and "Bash" in out
 
 
+class TestDoctorProfileAware:
+    def test_doctor_loads_phases_from_contract_profile(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\n'
+            'capabilities = ["Read", "Write", "Bash"]\n'
+            'profile = "agent-skills"\n'
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        out = capsys.readouterr().out
+        assert result == 1
+        assert "Edit" in out
+
+    def test_doctor_unknown_profile_returns_2(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\n'
+            'capabilities = ["Read", "Write", "Bash"]\n'
+            'profile = "nonexistent-profile"\n'
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        assert "MISSING" in capsys.readouterr().out
+
+    def test_doctor_malformed_profile_yaml_returns_2(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\ncapabilities = ["Read", "Write", "Bash"]\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            side_effect=ValueError("malformed phases.yaml"),
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        assert "INVALID" in capsys.readouterr().out
+
+    def test_doctor_ok_message_includes_profile(self, tmp_path, mocker, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\ncapabilities = ["Read", "Write"]\nprofile = "gstack"\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.load_phases",
+            return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write")],
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        assert "profile=gstack" in capsys.readouterr().out
+
+
 class TestDoctorMissingProfile:
     def test_doctor_checks_profile_for_non_default_assignee(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"
