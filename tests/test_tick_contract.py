@@ -43,7 +43,7 @@ class TestTickContractAssignee:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "reviewer-bot"\ncapabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'schema_version = 2\nassignee = "reviewer-bot"\ncapabilities = ["Read", "Write", "Edit", "Bash"]\n'
         )
 
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
@@ -79,7 +79,7 @@ class TestTickContractAssignee:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read"]\n'
+            'schema_version = 2\ncapabilities = ["Read"]\n'
         )
 
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")

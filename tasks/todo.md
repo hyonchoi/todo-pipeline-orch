@@ -3,7 +3,7 @@
 See `tasks/plan.md` for full context, rationale, and verification details.
 
 ## Phase 1: Contract Schema + Phase Resolution
-- [ ] Task 1: Add `profile` field to `PipelineContract`, bump `CONTRACT_SCHEMA_VERSION` to 2 (`hermes_pipeline/contract.py`)
+- [x] Task 1: Add `profile` field to `PipelineContract`, bump `CONTRACT_SCHEMA_VERSION` to 2 (`hermes_pipeline/contract.py`)
 - [ ] Task 2: Add `resolve_profile_phases_path()`, repoint `load_phases()` default (`hermes_pipeline/phases.py`)
 
 ### Checkpoint A

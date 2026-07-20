@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .phases import Phase, load_phases
 
-CONTRACT_SCHEMA_VERSION = 1
+CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_FILENAME = "pipeline.toml"
 DEFAULT_CAPABILITIES: tuple[str, ...] = ("Read", "Write", "Edit", "Bash")
 
@@ -42,6 +42,10 @@ class PipelineContract:
     schema_version: int
     assignee: str = "default"
     capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES
+    # Which pipeline skill-set profile's phases.yaml this project runs
+    # (e.g. "gstack", "agent-skills") — distinct from bundled_profile_dir()'s
+    # unrelated "Hermes profile" (SOUL.md agent-identity) concept below.
+    profile: str = "gstack"
 
 
 def contract_path(project_state: Path) -> Path:
@@ -68,6 +72,7 @@ def _render_default_contract_toml() -> str:
         f"schema_version = {CONTRACT_SCHEMA_VERSION}\n"
         'assignee = "default"\n'
         f"capabilities = [{caps_toml}]\n"
+        'profile = "gstack"\n'
     )
 
 
@@ -85,6 +90,7 @@ def _render_contract_toml(contract: PipelineContract) -> str:
         f"schema_version = {contract.schema_version}\n"
         f'assignee = "{contract.assignee}"\n'
         f"capabilities = [{caps_toml}]\n"
+        f'profile = "{contract.profile}"\n'
     )
 
 
@@ -141,10 +147,15 @@ def load_contract(project_state: Path) -> PipelineContract:
     if not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities):
         raise ContractSchemaError(f"{path}: 'capabilities' must be a list of strings")
 
+    profile = data.get("profile", "gstack")
+    if not isinstance(profile, str) or not profile:
+        raise ContractSchemaError(f"{path}: 'profile' must be a non-empty string")
+
     return PipelineContract(
         schema_version=schema_version,
         assignee=assignee,
         capabilities=tuple(capabilities),
+        profile=profile,
     )
 
 

@@ -78,7 +78,7 @@ class TestCmdInit:
 
         _cmd_init(FakeArgs(project="demo", force=False), config)
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
-        contract.write_text('schema_version = 1\nassignee = "custom"\n')
+        contract.write_text('schema_version = 2\nassignee = "custom"\n')
 
         result = _cmd_init(FakeArgs(project="demo", force=False), config)
 
@@ -94,13 +94,13 @@ class TestCmdInit:
 
         _cmd_init(FakeArgs(project="demo", force=False), config)
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
-        contract.write_text('schema_version = 1\nassignee = "custom"\n')
+        contract.write_text('schema_version = 2\nassignee = "custom"\n')
 
         result = _cmd_init(FakeArgs(project="demo", force=True), config)
 
         assert result == 0
         assert 'assignee = "custom"' not in contract.read_text()
-        assert "schema_version = 1" in contract.read_text()
+        assert "schema_version = 2" in contract.read_text()
 
 
 class TestInitAssignee:
@@ -203,7 +203,7 @@ class TestCmdDoctor:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read", "Write"]\n'
+            'schema_version = 2\ncapabilities = ["Read", "Write"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -222,7 +222,7 @@ class TestCmdDoctor:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read"]\n'
+            'schema_version = 2\ncapabilities = ["Read"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -245,7 +245,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -270,7 +270,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         call_count = {"n": 0}
         original_run = _test_sp.run
@@ -299,7 +299,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
@@ -322,7 +322,7 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 1\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
+            'schema_version = 2\nassignee = "pipeline"\ncapabilities = ["Read", "Write", "Bash"]\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
