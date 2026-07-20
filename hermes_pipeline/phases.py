@@ -20,10 +20,33 @@ class Phase:
     terminal: bool = False
     gate: bool = False
 
+def resolve_profile_phases_path(profile: str) -> Path:
+    """Resolve the bundled phases.yaml for a pipeline skill-set profile.
+
+    Raises:
+        ContractSchemaError: No phases.yaml exists for `profile`; the
+            message lists the available profile names.
+    """
+    from importlib.resources import files
+
+    from .contract import ContractSchemaError
+
+    profiles_root = files("hermes_pipeline").joinpath("data", "profiles")
+    candidate = profiles_root.joinpath(profile, "phases.yaml")
+    if not candidate.is_file():
+        available = sorted(
+            p.name for p in Path(profiles_root).iterdir()
+            if p.is_dir() and (p / "phases.yaml").is_file()
+        )
+        raise ContractSchemaError(
+            f"no phases.yaml for profile '{profile}' — available profiles: {available}"
+        )
+    return Path(candidate)
+
+
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:
     if config_path is None:
-        from importlib.resources import files
-        config_path = files("hermes_pipeline").joinpath("data", "phases.yaml")
+        config_path = resolve_profile_phases_path("gstack")
     config_path = Path(config_path)
     with open(config_path) as f:
         data = yaml.safe_load(f)

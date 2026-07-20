@@ -1,5 +1,9 @@
 from pathlib import Path
-from hermes_pipeline.phases import Phase, load_phases
+
+import pytest
+
+from hermes_pipeline.contract import ContractSchemaError
+from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
 
 FIXTURE = """
 phases:
@@ -114,3 +118,27 @@ def test_real_phases_yaml_plan_gate_is_nonterminal_gate():
     assert gate.prompt == ""
     assert gate.tools == ""
     assert gate.turns == 0
+
+
+def test_resolve_profile_phases_path_gstack():
+    path = resolve_profile_phases_path("gstack")
+    assert path.name == "phases.yaml"
+    assert "gstack" in str(path)
+    assert path.is_file()
+
+
+def test_resolve_profile_phases_path_unknown_raises_with_available_profiles():
+    with pytest.raises(ContractSchemaError, match="gstack"):
+        resolve_profile_phases_path("bogus-profile")
+
+
+def test_load_phases_no_args_still_returns_gstack_phases():
+    phases = load_phases()
+    assert phases[0].phase_key == "phase_2_autoplan"
+
+
+def test_real_phases_yaml_finish_branch_uses_ship_skill():
+    phases = {p.phase_key: p for p in load_phases()}
+    finish = phases["phase_8_finish_branch"]
+    assert "/ship" in finish.prompt
+    assert "finishing-a-development-branch" not in finish.prompt

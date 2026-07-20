@@ -63,7 +63,7 @@ phases:
     timeout: 1800
   - phase_key: "phase_8_finish_branch"
     name: "Phase 8: Finish Branch"
-    prompt: "Use superpowers finishing-a-development-branch. Open a PR and HALT — do NOT merge."
+    prompt: "Use the gstack /ship skill. Open a PR and HALT — do NOT merge."
     tools: "Read,Write,Bash"
     turns: 15
     timeout: 1800
