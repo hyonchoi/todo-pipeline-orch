@@ -186,6 +186,12 @@ class TestAllPhasesCompleteRejection:
                 # plan-gate missing, no rejection sidecar
             },
         )
+        # gate_status()'s kanban fallback path would otherwise shell out to
+        # the real `hermes` CLI when no rejection sidecar is found.
+        mocker.patch(
+            "hermes_pipeline.gate_state.get_todo_kanban_tasks",
+            return_value={},
+        )
         _write_expected_phases(tmp_path, [
             "phase_2_autoplan",
             "phase_2b_plan_gate",
