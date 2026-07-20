@@ -129,6 +129,42 @@ def test_load_contract_accepts_hyphenated_profile(tmp_path):
     assert contract.profile == "agent-skills"
 
 
+def test_load_contract_rejects_trailing_hyphen_profile(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+        'profile = "gstack-"\n'
+    )
+
+    with pytest.raises(ContractSchemaError, match="profile"):
+        load_contract(project_state)
+
+
+def test_load_contract_rejects_profile_over_64_chars(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+        f'profile = "{"a" * 65}"\n'
+    )
+
+    with pytest.raises(ContractSchemaError, match="profile"):
+        load_contract(project_state)
+
+
+def test_load_contract_accepts_profile_at_64_chars(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+        f'profile = "{"a" * 64}"\n'
+    )
+
+    contract = load_contract(project_state)
+    assert contract.profile == "a" * 64
+
+
 def test_load_contract_missing_schema_version_raises(tmp_path):
     project_state = tmp_path / ".hermes"
     project_state.mkdir(parents=True)

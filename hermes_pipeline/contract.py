@@ -16,7 +16,7 @@ from .phases import Phase, load_phases
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_FILENAME = "pipeline.toml"
 DEFAULT_CAPABILITIES: tuple[str, ...] = ("Read", "Write", "Edit", "Bash")
-PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+PROFILE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
 
 
 class ContractError(Exception):

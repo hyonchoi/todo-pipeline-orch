@@ -1077,14 +1077,16 @@ def _tick_project(
         required_capabilities,
     )
 
-    phases = load_phases()
+    from .phases import resolve_profile_phases_path
 
     try:
         contract = load_contract(project_state)
+        phases = load_phases(resolve_profile_phases_path(contract.profile))
     except ContractMissingError:
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
+        phases = load_phases()
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
             assignee="default",

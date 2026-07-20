@@ -136,6 +136,20 @@ def test_invoke_falls_back_to_gstack_without_contract(state_dir, monkeypatch):
     assert "prompt" in seen
 
 
+def test_invoke_propagates_malformed_contract_error(state_dir, monkeypatch):
+    """A contract that exists but fails to parse/validate is a real
+    configuration error - it must not be silently treated as 'use gstack'."""
+    from hermes_pipeline.contract import ContractSchemaError
+
+    (state_dir / "pipeline.toml").write_text("schema_version = ")
+
+    with pytest.raises(ContractSchemaError):
+        phases_mod._invoke_hermes(
+            todo_id="TODO-7", phase_key="phase_2_autoplan",
+            tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        )
+
+
 def test_invoke_propagates_subprocess_failure(state_dir, monkeypatch):
     monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_2_autoplan", terminal=False),

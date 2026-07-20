@@ -227,14 +227,17 @@ def _resolve_execution_profile(state_dir: Path) -> str:
     """Determine which phase profile to execute under for this project.
 
     Reads the project's pipeline contract (same `.hermes` dir as `state_dir`)
-    for its declared `profile`. Falls back to "gstack" if no contract exists
-    (e.g. ad-hoc test fixtures) so callers without a contract keep working.
+    for its declared `profile`. Falls back to "gstack" only if no contract
+    exists (e.g. ad-hoc test fixtures) so callers without a contract keep
+    working. A contract that exists but is malformed or version-mismatched
+    is a real configuration error and must propagate, not be silently
+    treated as "use gstack".
     """
-    from .contract import ContractError, load_contract
+    from .contract import ContractMissingError, load_contract
 
     try:
         return load_contract(Path(state_dir)).profile
-    except ContractError:
+    except ContractMissingError:
         return "gstack"
 
 
