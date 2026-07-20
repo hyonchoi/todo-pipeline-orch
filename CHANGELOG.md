@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-07-20
+
+### Changed
+
+- Extracted plan-gate status logic (`GateStatus` enum, `check_gate_status()` → `gate_status()`) out of `hermes_pipeline/gates.py` into a new read-only `hermes_pipeline/gate_state.py` module. `kanban_tasks.py`'s inline rejection-sidecar check now routes through this shared module instead of duplicating the logic.
+
 ## [0.5.3] - 2026-07-20
 
 ### Added
