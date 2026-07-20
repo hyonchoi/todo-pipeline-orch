@@ -8,6 +8,8 @@
 > - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 
+## Harness
+
 - [ ] **TODO-4: build a massive integration test project for Hermes, Kanban, and Claude Code** — End-to-end phase progression harness
   - **What:** Build an automated, step-by-step integration harness on a dedicated test project with mock TODOs, driving real phase progression across Hermes, Kanban, and Claude Code.
   - **Why:** Current behavior is hard to debug once Kanban and Claude Code interact, especially around blocking decisions and late-phase review transitions.
@@ -25,6 +27,14 @@
   - **Context:** Builds on TODO-2/3 once `config.py` and `decision/agent.py` exist. Today's design fails loudly on 404 (acceptable for v1). Revisit when Anthropic announces opus-4-7 EOL.
   - **Depends on:** `TODO-2`, `TODO-3`
   - **Decisions:** Priority `P3`, Effort `S`, Phase `2 (Design)`, Branch `feature/selection-model-fallback`, Test Coverage `required`, Security Review `not-required`
+
+- [ ] **TODO-23: Harden kanban-as-scheduler edge cases in harness.py** — Fix timeout/hang gaps found in TODO-20 adversarial review
+  - **What:** Address remaining edge cases in `_poll_kanban_phases`/`_run_with_timeout` surfaced by Codex and Claude adversarial review of TODO-20: (1) daemon polling thread stays alive after `_run_with_timeout` times out in `--kanban hermes` mode, with no stop/archive/cancel of registered kanban tasks before temp project cleanup; (2) `--phase <gate> --kanban hermes` creates a single blocked gate task with no predecessor entry, hanging until overall timeout; (3) unrecognized/unknown kanban status value causes silent infinite poll loop; (4) `ConvergenceHaltError` may be masked by a simultaneous worker-join timeout race; (5) `_auto_complete_gate_tasks` idempotency under status flapping is unverified, now more relevant since a fix in TODO-20 broadened which transitions call it.
+  - **Why:** These are known correctness/robustness gaps in the kanban-as-scheduler harness path, identified but out of scope for TODO-20's core `--kanban` flag delivery. Left unaddressed, they can cause silent hangs or leaked background threads in `--kanban hermes` test runs.
+  - **Depends on:** `TODO-20`
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/harden-kanban-scheduler-edge-cases`, Test Coverage `required`, Security Review `not-required`
+
+## Completed
 
 - [x] **TODO-19: partial impl of TODO-4, integration test data that is repeatable, verifiable mock data for whole pipeline from start to the end** — Repeatable mock integration test harness for pipeline end-to-end verification
   - **What:** Five deliverables: (1) setup script + mock project fixtures (git, preset, TODOS.md) in temp dir, (2) pipeline execution through mock project, (3) monitoring/verification of pipeline steps and kanban status, (4) findings report generation, (5) loopable 1-4 for iterative fix cycles. Assumes local running Hermes configuration.
@@ -66,12 +76,6 @@
   - **Depends on:** `TODO-19`, `TODO-20`, `TODO-22`
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `worktree-todo21-harness-prod-reuse`, Test Coverage `required`, Security Review `not-required`
 
-- [ ] **TODO-23: Harden kanban-as-scheduler edge cases in harness.py** — Fix timeout/hang gaps found in TODO-20 adversarial review
-  - **What:** Address remaining edge cases in `_poll_kanban_phases`/`_run_with_timeout` surfaced by Codex and Claude adversarial review of TODO-20: (1) daemon polling thread stays alive after `_run_with_timeout` times out in `--kanban hermes` mode, with no stop/archive/cancel of registered kanban tasks before temp project cleanup; (2) `--phase <gate> --kanban hermes` creates a single blocked gate task with no predecessor entry, hanging until overall timeout; (3) unrecognized/unknown kanban status value causes silent infinite poll loop; (4) `ConvergenceHaltError` may be masked by a simultaneous worker-join timeout race; (5) `_auto_complete_gate_tasks` idempotency under status flapping is unverified, now more relevant since a fix in TODO-20 broadened which transitions call it.
-  - **Why:** These are known correctness/robustness gaps in the kanban-as-scheduler harness path, identified but out of scope for TODO-20's core `--kanban` flag delivery. Left unaddressed, they can cause silent hangs or leaked background threads in `--kanban hermes` test runs.
-  - **Depends on:** `TODO-20`
-  - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/harden-kanban-scheduler-edge-cases`, Test Coverage `required`, Security Review `not-required`
-
 - [x] **TODO-24: Wire remaining harness kanban-scheduler checklist rows to production functions** — Complete checklist rows 1-6, 10-13 — mechanical production-function wiring left out of TODO-21's narrowed scope.
   - **What:** Refactor `harness.py::_poll_kanban_phases` and callees to call production functions for checklist rows 1-6 and 10-13 (registration, status polling, outcome persistence, contract lookup, timeout reporting) instead of local re-implementations. Also resolve the flagged follow-up: whether `_auto_complete_gate_tasks`'s predecessor/eligibility logic should move from harness.py into `phases.py`.
   - **Why:** TODO-21 was narrowed to only the two rows requiring new design decisions (gate completion routing, circuit-breaker premise correction). The remaining 11 checklist rows are still open acceptance criteria from `docs/checklist-harness-production-coverage.md` and must be wired for the harness to actually validate production behavior.
@@ -80,4 +84,3 @@
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `worktree-todo24-harness-remaining-checklist`, Test Coverage `required`, Security Review `not-required`
   - **Completed:** 2026-07-19
   - **Resolved design:** Most production-function wiring already existed in `harness.py` after #19 merged (re-read confirmed rows 1, 4, 6/7, 10, 11, 12 already call production functions directly; rows 2, 3 are internal to `register_todo_phases`; rows 5, 8, 9, 13 are N/A/harness-internal per the checklist doc). Actual remaining work, scoped and closed via [#21](https://github.com/hyonchoi/todo-pipeline-orch/issues/21): updated `docs/checklist-harness-production-coverage.md`'s Test link column for rows 1, 2, 3, 4, 10, 11, 12; wrote a new spy test for row 12 (contract/assignee resolution, previously untested); recorded the decision that `_auto_complete_gate_tasks`'s predecessor/eligibility logic stays in `harness.py` (harness-fixture workaround for the kanban board not propagating unblock signals, not a `phases.py`/production concern).
-
