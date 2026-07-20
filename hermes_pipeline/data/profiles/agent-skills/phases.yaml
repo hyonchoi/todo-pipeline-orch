@@ -1,0 +1,73 @@
+phases:
+  - phase_key: "phase_1_spec"
+    name: "Phase 1: Spec"
+    prompt: |
+      Use the agent-skills:spec-driven-development skill's Specify phase in claude code.
+
+      The selected TODO is {todo_id} — it is already marked in-flight in TODOS.md.
+      Work on {todo_id} only; do not pick a different TODO.
+
+      1. Write the spec to SPEC.md at the repo root.
+      2. Create a new branch from main.
+      3. Commit the generated spec.
+      4. Save the branch name to .hermes/pipeline_branch.txt.
+    tools: "Read,Write,Bash"
+    turns: 20
+    timeout: 1800
+  - phase_key: "phase_1b_spec_gate"
+    name: "Phase 1b: Spec Gate"
+    gate: true
+  - phase_key: "phase_2_plan"
+    name: "Phase 2: Plan"
+    prompt: "Use the agent-skills:planning-and-task-breakdown skill in claude code. Read the spec from SPEC.md, write the plan to tasks/plan.md and the task checklist to tasks/todo.md. Commit the generated docs."
+    tools: "Read,Write,Bash"
+    turns: 15
+    timeout: 1800
+  - phase_key: "phase_3_implement"
+    name: "Phase 3: Implement"
+    prompt: "Use the agent-skills:incremental-implementation skill alongside agent-skills:test-driven-development in claude code. Read tasks/plan.md and tasks/todo.md and implement the plan in thin, test-driven slices. Commit as you go."
+    tools: "Read,Write,Edit,Bash"
+    turns: 60
+    timeout: 3600
+  - phase_key: "phase_4_review"
+    name: "Phase 4: Code Review"
+    prompt: |
+      Use the agent-skills:code-review-and-quality skill (or the agent-skills:code-reviewer
+      subagent) on the current branch.
+
+      AUTONOMOUS MODE — there is no human at the terminal. Apply the review's
+      fixes without asking for confirmation. Do NOT pause for user input.
+
+      Scope: {todo_id}. Focus on correctness bugs and simplification cleanups
+      in the changes on this branch. Apply fixes directly to the working tree.
+      Do NOT run tests, commit, revert, or reset — the pipeline does that after
+      you finish.
+    tools: "Read,Edit,Bash"
+    turns: 30
+    timeout: 2400
+  - phase_key: "phase_5_security"
+    name: "Phase 5: Security Review"
+    prompt: "Use the agent-skills:security-and-hardening skill (or the agent-skills:security-auditor subagent). Run a security review of the current branch. Save findings to docs/ and commit."
+    tools: "Read,Write,Bash"
+    turns: 20
+    timeout: 1800
+  - phase_key: "phase_6_document_release"
+    name: "Phase 6: Document Release"
+    prompt: |
+      Generate release docs.
+      1. Update CHANGELOG.md.
+      2. Update README.md project structure if changed.
+      3. Commit.
+    tools: "Read,Write,Edit,Bash"
+    turns: 15
+    timeout: 1800
+  - phase_key: "phase_7_ship"
+    name: "Phase 7: Ship"
+    prompt: "Use the agent-skills:ship skill. Open a PR and HALT — do NOT merge."
+    tools: "Read,Write,Bash"
+    turns: 15
+    timeout: 1800
+  - phase_key: "phase_8_ship"
+    name: "Phase 8: Ship Gate"
+    gate: true
+    terminal: true
