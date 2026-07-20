@@ -61,10 +61,13 @@ def default_contract() -> PipelineContract:
     )
 
 
-def _render_default_contract_toml() -> str:
-    # Compute capabilities from phases.yaml so init writes a contract that
-    # matches the current phase definitions, not a stale hardcoded tuple.
-    caps = sorted(required_capabilities(load_phases()))
+def _render_default_contract_toml(profile: str = "gstack") -> str:
+    # Compute capabilities from the selected profile's phases.yaml so init
+    # writes a contract that matches that profile's phase definitions, not
+    # a stale hardcoded tuple or the wrong profile's requirements.
+    from .phases import resolve_profile_phases_path
+
+    caps = sorted(required_capabilities(load_phases(resolve_profile_phases_path(profile))))
     caps_toml = ", ".join(f'"{c}"' for c in caps)
     return (
         "# Pipeline execution contract — read at tick start.\n"
@@ -72,7 +75,7 @@ def _render_default_contract_toml() -> str:
         f"schema_version = {CONTRACT_SCHEMA_VERSION}\n"
         'assignee = "default"\n'
         f"capabilities = [{caps_toml}]\n"
-        'profile = "gstack"\n'
+        f'profile = "{profile}"\n'
     )
 
 
@@ -94,7 +97,7 @@ def _render_contract_toml(contract: PipelineContract) -> str:
     )
 
 
-def write_default_contract(project_state: Path) -> bool:
+def write_default_contract(project_state: Path, profile: str = "gstack") -> bool:
     """Write the default contract if one doesn't already exist.
 
     Returns:
@@ -105,7 +108,7 @@ def write_default_contract(project_state: Path) -> bool:
     if path.exists():
         return False
     project_state.mkdir(parents=True, exist_ok=True)
-    path.write_text(_render_default_contract_toml())
+    path.write_text(_render_default_contract_toml(profile))
     return True
 
 

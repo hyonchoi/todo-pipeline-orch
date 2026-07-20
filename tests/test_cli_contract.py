@@ -139,6 +139,75 @@ class TestInitAssignee:
         assert 'assignee = "default"' in contract.read_text()
 
 
+class TestInitProfile:
+    def test_init_profile_parser_defaults_to_gstack(self):
+        parser = build_parser()
+        args = parser.parse_args(["init", "demo"])
+        assert args.profile == "gstack"
+
+    def test_init_profile_parser_accepts_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["init", "demo", "--profile", "agent-skills"])
+        assert args.profile == "agent-skills"
+
+    def test_init_writes_selected_profile(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="agent-skills"), config
+        )
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert 'profile = "agent-skills"' in contract.read_text()
+
+    def test_init_without_profile_flag_defaults_to_gstack(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(FakeArgs(project="demo", force=False, assignee=None), config)
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert 'profile = "gstack"' in contract.read_text()
+
+    def test_init_unknown_profile_returns_error(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="bogus-profile"), config
+        )
+
+        assert result == 2
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        assert not contract.exists()
+        assert "bogus-profile" in capsys.readouterr().out
+
+    def test_init_capabilities_computed_from_selected_profile(self, tmp_path):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="agent-skills"), config
+        )
+
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        text = contract.read_text()
+        # agent-skills profile's non-gate phases only use Read/Write/Edit/Bash
+        assert '"Read"' in text
+        assert '"Bash"' in text
+
+
 class TestInstallProfileParser:
     def test_install_profile_parses_force(self):
         parser = build_parser()
