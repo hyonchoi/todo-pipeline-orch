@@ -272,9 +272,9 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
     #   FAILED (rejected)   → raise RuntimeError so the runner records failure
     #   BLOCKED / READY / UNKNOWN → raise RuntimeError (tick holds)
     if phase.gate:
-        from .gates import GateStatus, check_gate_status
+        from .gate_state import GateStatus, gate_status as _gate_status
 
-        status = check_gate_status(
+        status = _gate_status(
             state_dir=sd, project_slug=project_slug, tick_id=tick_id,
             gate_key=phase.phase_key,
         )
