@@ -1,164 +1,202 @@
-# Spec: TODO-24 / Issue #21 — Close remaining harness checklist rows
+# Spec: Pluggable Pipeline Skill-Set Profiles
 
 ## Objective
 
-Close out `docs/checklist-harness-production-coverage.md` rows 1, 2, 3, 4, 10, 11, 12
-by giving each a real "Test link" (existing test or a new spy test), and record a
-decision on where `_auto_complete_gate_tasks`'s predecessor/eligibility logic should
-live.
+Today `hermes_pipeline` has exactly one phase composition, bundled at
+`hermes_pipeline/data/phases.yaml`, whose prompts hardcode gstack + superpowers
+skill invocations (`autoplan`, `writing-plans`, `subagent-driven-development`,
+gstack `/review`, `cso`). A project cannot run the pipeline against a
+different skill ecosystem — e.g. the `agent-skills` plugin
+(`spec-driven-development`, `incremental-implementation`,
+`test-driven-development`, `agent-skills:code-reviewer`,
+`agent-skills:security-auditor`) — without hand-editing the bundled YAML in
+place, which drifts on every `hermes_pipeline` upgrade.
 
-This is bookkeeping + one small test addition, not a refactor. A re-read of
-`harness.py` after #19 merged shows the production-function wiring for these rows
-already exists; what's missing is (a) the checklist doc still says
-`TODO(TODO-21)` for rows that are in fact covered, and (b) row 12
-(contract/assignee resolution) has production wiring but no dedicated test.
+Users of this pipeline: solo devs / small teams running `pipeline-watch tick`
+unattended, who want to choose *which* skill ecosystem backs each phase per
+project, without forking the package.
 
-Success: every row 1-13 in the checklist has a correct test link (or an explicit
-N/A with rationale, as rows 5/8/9/13 already have), and the gate-logic placement
-question is closed with a documented rationale — no more open follow-ups from
-TODO-21/TODO-24.
+Success: a project can declare `profile = "agent-skills"` (or `"gstack"`, the
+current default) in its execution contract, and `pipeline-watch` loads a
+completely independent, self-contained phase list for that profile —
+different phase count, names, order, and prompts allowed — with no shared
+phase-schema constraint between profiles.
 
-## Decisions (pre-resolved, not open questions)
+## Decisions (pre-resolved)
 
-- **Gate-logic placement:** `_auto_complete_gate_tasks`'s predecessor-map
-  construction and eligibility filtering **stay in `harness.py`**. This logic
-  exists only to compensate for the kanban board not propagating unblock
-  signals in the harness's simulated environment — it is a harness-fixture
-  workaround, not a pipeline-watch production concern. `phases.py` should not
-  gain harness-specific compensation logic. The completion *mechanic* itself
-  (the actual status flip) already correctly delegates to
-  `kanban_tasks.complete_todo_kanban_task` per #19 — that part is unchanged.
-- **Row 12 test:** write a new spy test. Assert `register_todo_phases`'s
-  `--assignee` argument is populated from
-  `contract.load_contract(state_dir).assignee`, plus the fallback-to-`"default"`
-  path when `load_contract` raises (already implemented in
-  `_poll_kanban_phases`, lines ~284-288 of `hermes_pipeline/harness.py`).
+- **Independent profiles, not shared-skeleton-swap-skills.** Each profile is
+  its own full `phases.yaml`-shaped file. The `agent-skills` profile is not
+  required to have a `phase_6_1_cso` equivalent, or the same phase count, as
+  `gstack`. This was chosen over "one canonical phase list, swap skill per
+  slot" because the two ecosystems don't decompose into equivalent stages
+  1:1 (e.g. gstack's `autoplan` bundles CEO/Eng/UI/DX review into one phase;
+  `agent-skills:spec-driven-development` is a four-gate Specify→Plan→Tasks→Implement
+  flow that doesn't map onto a single phase).
+- **Config surface: `.hermes/pipeline.toml`.** Add a `profile` field to
+  `PipelineContract` (`hermes_pipeline/contract.py`). Bundled profiles ship
+  inside the package under `hermes_pipeline/data/profiles/<name>/phases.yaml`;
+  `profile` selects which bundled directory `load_phases()` reads from. This
+  reuses the existing `load_phases(config_path: Path | str | None)` override
+  parameter (`hermes_pipeline/phases.py:23`) — no new phase-loading mechanism
+  needed, just a new resolution step from `profile` name to path.
+- **No runtime skill-availability check.** The pipeline does not verify the
+  named skills/plugins are actually installed in the executing Hermes
+  profile before a tick starts — same as today, where gstack skill
+  availability isn't pre-flighted either. A phase whose skill isn't
+  installed fails at execution time with whatever error `hermes chat -q`
+  surfaces; this is out of scope for this spec.
+- **`gstack` profile is a rename, plus one prompt swap.** The current
+  `hermes_pipeline/data/phases.yaml` becomes
+  `hermes_pipeline/data/profiles/gstack/phases.yaml`, unchanged except
+  `phase_8_finish_branch`'s prompt switches from superpowers
+  `finishing-a-development-branch` to the gstack `/ship` skill (open PR and
+  HALT, same contract as before). This is the default profile when `profile`
+  is unset in an existing project's contract — read: purely additive, zero
+  contract-schema migration required for current users, but this one prompt
+  changes for everyone on the `gstack` profile.
 
 ## Scope
 
 In scope:
-- `docs/checklist-harness-production-coverage.md` — update Test link column,
-  rows 1, 2, 3, 4, 10, 11, 12.
-- `tests/test_harness.py` — add one new test class/test for row 12
-  (contract/assignee resolution), if no equivalent exists after verification.
-- Confirm (do not re-derive) that rows 1, 2, 3, 4, 10, 11 already have adequate
-  test links from `tests/test_kanban_tasks.py` / `tests/test_harness.py`; link
-  them by exact test path.
+- `hermes_pipeline/contract.py` — add `profile: str = "gstack"` field to
+  `PipelineContract`, schema version bump, TOML read/write/render updates.
+- `hermes_pipeline/phases.py` — add a `resolve_profile_phases_path(profile: str) -> Path`
+  helper that maps a profile name to its bundled `phases.yaml` path, raising
+  a clear error for an unknown profile name.
+- `hermes_pipeline/data/profiles/gstack/phases.yaml` — move of the existing
+  bundled file, with `phase_8_finish_branch`'s prompt updated to use `/ship`
+  instead of `finishing-a-development-branch` (see phase mapping below).
+- `hermes_pipeline/data/profiles/agent-skills/phases.yaml` — new phase list,
+  authored per the mapping below.
+- `hermes_pipeline/cli.py` — `init` gains a `--profile` flag; `doctor`
+  resolves capabilities against the project's configured profile, not always
+  the bundled default.
+- Docs: `docs/howto-pipeline-contract.md`, `docs/explanation-pipeline-contract.md`
+  updated for the new field; new `docs/howto-agent-skills-profile.md`.
 
 Out of scope:
-- Any change to `harness.py` behavior beyond what's needed to make row 12
-  testable (expect none — the assignee-resolution code path already exists).
-- Rows 5, 6, 7, 8, 9, 13 — already correctly marked (7 has a real link, 5/8/9/13
-  are N/A with rationale, 6 has no independent production fn per the doc).
-- Moving any logic into `phases.py` (see Decisions above — explicitly rejected).
+- Per-phase skill override within a single profile (rejected — see Decisions).
+- Any change to `hermes_pipeline/harness.py` phase-polling/gate logic — this
+  spec only changes *which phases.yaml is loaded*, not how phases execute.
+- Skill-availability pre-flight / doctor checks for whether the named
+  agent-skills plugin skills are installed (out of scope, see Decisions).
+- Migrating existing projects — `profile` defaults to `"gstack"`, matching
+  current behavior with zero contract changes required.
 
-## Row-by-row mapping (to verify and link)
+## Agent-skills profile phase mapping
 
-| # | Transition | Candidate test | Action |
-|---|---|---|---|
-| 1 | `register_todo_phases` creates tasks w/ parent chain, gate BLOCKED | `tests/test_kanban_tasks.py::TestRegisterTodoPhases::test_creates_tasks_with_parent_chain`, `::test_gate_phase_registered_blocked_without_goal` | Link both |
-| 2 | `_persist_expected_phases` (internal) | `tests/test_kanban_tasks.py::TestPersistExpectedPhases::test_writes_to_project_hermes_dir` | Link |
-| 3 | `_archive_tasks` on mid-registration failure | `tests/test_kanban_tasks.py::TestRegisterTodoPhases::test_mid_registration_failure_archives_created_tasks` | Link |
-| 4 | `get_todo_kanban_status` snapshot | `tests/test_kanban_tasks.py::TestGetTodoKanbanStatus::test_returns_status_map`, `::test_returns_empty_for_no_matching_tick` | Link both |
-| 10 | Terminal-status loop exit | `tests/test_harness.py::TestPollKanbanPhases::test_registers_phases_and_polls_to_completion` (asserts `result is True` after both phases hit `done`) | Link |
-| 11 | `observe_outcomes` on loop exit | `tests/test_kanban_tasks.py::TestObserveOutcomes::test_writes_phase_complete_outcomes` + `tests/test_harness.py::TestPollKanbanPhases::test_convergence_halt_stops_polling` (asserts `observe_outcomes` called once even on halt) | Link both |
-| 12 | `contract.load_contract` → assignee | **none found** | Write new test |
-
-Verify each candidate still passes and actually asserts the row's stated
-condition before linking it — don't link on file/name match alone.
+| Bundled gstack phase | agent-skills equivalent | Notes |
+|---|---|---|
+| `phase_2_autoplan` (CEO/Eng/UI/DX review, plan docs, branch) | `phase_1_spec` — `agent-skills:spec-driven-development` Specify phase | Produces `SPEC.md` instead of `docs/pipeline/{todo_id}-plan.md`; branch creation stays in the prompt. |
+| `phase_2b_plan_gate` (gate) | `phase_1b_spec_gate` (gate) | Same gate mechanic, human approves the spec instead of the plan. |
+| `phase_3_writing_plan` | `phase_2_plan` — `agent-skills:planning-and-task-breakdown` (Plan+Tasks phases per SKILL.md) | Writes `tasks/plan.md` + `tasks/todo.md` per that skill's stated output convention, not `docs/pipeline/{todo_id}-impl-plan.md`. |
+| `phase_4_development` | `phase_3_implement` — `agent-skills:incremental-implementation` + `agent-skills:test-driven-development` | Per spec-driven-development's own Phase 4 guidance. |
+| `phase_5_review` | `phase_4_review` — `agent-skills:code-review-and-quality` (or the `agent-skills:code-reviewer` subagent) | Same autonomous-mode framing (no user input, apply fixes directly) as current phase_5 prompt. |
+| `phase_6_1_cso` | `phase_5_security` — `agent-skills:security-and-hardening` (or `agent-skills:security-auditor` subagent) | |
+| `phase_7_document_release` | `phase_6_document_release` | Same prompt, ecosystem-agnostic (CHANGELOG/README updates) — copied verbatim. |
+| `phase_8_finish_branch` | `phase_7_ship` | Both profiles switch from superpowers `finishing-a-development-branch` to the `ship` skill (gstack `/ship`; agent-skills `agent-skills:ship`) — open PR and HALT, same as before. Requires updating the bundled `gstack/phases.yaml` prompt too (not just adding the agent-skills equivalent). |
+| `phase_9_ship` (gate, terminal) | `phase_8_ship` (gate, terminal) | Same mechanic. |
 
 ## Commands
 
 ```
-Test:  uv run pytest tests/test_harness.py tests/test_kanban_tasks.py -v
+Test:  uv run pytest tests/test_contract.py tests/test_phases.py -v
 Lint:  uv run ruff check hermes_pipeline/ tests/
 Full test suite: uv run pytest
+Manual: uv run pipeline-watch init <project> --profile agent-skills
+        uv run pipeline-watch doctor <project>
 ```
 
 ## Project Structure
 
 ```
-hermes_pipeline/harness.py            → harness under change (read-only for this task, except if row 12 needs it — expected: no change)
-hermes_pipeline/kanban_tasks.py       → production functions rows reference
-tests/test_harness.py                 → add row 12 test here, under a new or existing class
-tests/test_kanban_tasks.py            → existing coverage for rows 1-4, 11
-docs/checklist-harness-production-coverage.md → the doc being updated
+hermes_pipeline/contract.py                          → add `profile` field + schema version bump
+hermes_pipeline/phases.py                             → add resolve_profile_phases_path()
+hermes_pipeline/cli.py                                → `init --profile`, `doctor` profile-aware capability check
+hermes_pipeline/data/profiles/gstack/phases.yaml      → moved from hermes_pipeline/data/phases.yaml
+hermes_pipeline/data/profiles/agent-skills/phases.yaml→ new
+tests/test_contract.py                                → profile field round-trip, unknown-profile error
+tests/test_phases.py                                  → resolve_profile_phases_path() cases
+docs/howto-pipeline-contract.md                       → document `profile` field
+docs/howto-agent-skills-profile.md                    → new how-to
 ```
 
 ## Code Style
 
-New test follows the existing `mocker.patch(...)` spy style used throughout
-`tests/test_harness.py`'s `TestPollKanbanPhases` class — patch
-`hermes_pipeline.contract.load_contract`, call `_poll_kanban_phases`, assert
-the mock for `register_todo_phases` received the expected `assignee` kwarg.
+Follow existing dataclass + tomllib patterns in `contract.py` — no new
+dependencies. Example of the extended contract load path:
 
 ```python
-def test_assignee_resolved_from_contract(self, tmp_path, mocker):
-    from hermes_pipeline.harness import (
-        _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
-    )
-    mock_register = mocker.patch(
-        "hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"]
-    )
-    mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
-    mocker.patch("time.sleep")
-    mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
-    mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
-                  return_value={"phase_2_autoplan": "done"})
-    mock_contract = mocker.Mock(assignee="alice")
-    mocker.patch("hermes_pipeline.contract.load_contract", return_value=mock_contract)
+@dataclass(frozen=True)
+class PipelineContract:
+    schema_version: int
+    assignee: str = "default"
+    capabilities: tuple[str, ...] = DEFAULT_CAPABILITIES
+    profile: str = "gstack"
 
-    events_log = tmp_path / "events.jsonl"
-    monitor = _ConvergenceMonitor(HarnessMonitor(events_log), ConvergenceDetector(threshold=3), {})
 
-    _poll_kanban_phases(
-        project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
-        todo_id="TODO-1", project_dir=tmp_path, phases_path=None,
-        monitor=monitor, detector=ConvergenceDetector(threshold=3), poll_interval=0.1,
-    )
-
-    assert mock_register.call_args.kwargs["assignee"] == "alice"
+def resolve_profile_phases_path(profile: str) -> Path:
+    from importlib.resources import files
+    base = files("hermes_pipeline").joinpath("data", "profiles", profile, "phases.yaml")
+    path = Path(base)
+    if not path.is_file():
+        raise ContractSchemaError(
+            f"unknown pipeline profile {profile!r} — expected one of: "
+            f"{', '.join(sorted(p.name for p in Path(files('hermes_pipeline').joinpath('data', 'profiles')).iterdir()))}"
+        )
+    return path
 ```
 
-Plus a fallback-path test where `load_contract` raises and `assignee` defaults
-to `"default"` (mirroring the existing `log.warning` fallback at
-`harness.py:287-288`).
+Bumping `CONTRACT_SCHEMA_VERSION` to 2 is required (new field with a default
+is backward-compatible in TOML terms, but the project's existing
+version-mismatch-fails-closed design in `load_contract` treats any field-set
+change as a version bump — see CLAUDE.md's version-sync convention, which
+applies to this package's own schema versioning, not just VERSION/pyproject).
 
 ## Testing Strategy
 
-- Framework: pytest + `pytest-mock` (`mocker` fixture), consistent with the rest
-  of `tests/test_harness.py`.
-- Level: unit/spy tests on `_poll_kanban_phases`, not integration — matches
-  existing `TestPollKanbanPhases` conventions.
-- No coverage threshold beyond: every checklist row 1-13 has a linked,
-  passing, assertion-verified test or documented N/A.
+- Framework: pytest, matching existing `tests/test_contract.py` / `tests/test_phases.py` conventions.
+- Unit: `resolve_profile_phases_path("gstack")` and `("agent-skills")` both
+  resolve to real files with parseable YAML; unknown profile name raises
+  `ContractSchemaError` with the list of valid profiles in the message.
+- Unit: `load_contract` on a v1 contract (no `profile` field) defaults to
+  `"gstack"`; a v2 contract with `profile = "agent-skills"` round-trips.
+- Integration: `pipeline-watch init <project> --profile agent-skills` writes
+  a contract that `pipeline-watch doctor <project>` then validates cleanly
+  against `profiles/agent-skills/phases.yaml`'s required capabilities.
 
 ## Boundaries
 
-- **Always:** run `uv run pytest tests/test_harness.py tests/test_kanban_tasks.py`
-  before considering a row "linked"; verify the linked test's assertions
-  actually match the row's stated condition, not just naming similarity.
-- **Ask first:** any change to `harness.py` or `kanban_tasks.py` production
-  code beyond adding the row-12 test (none currently expected).
-- **Never:** move `_auto_complete_gate_tasks` logic into `phases.py` (decided
-  against, see Decisions); mark a row "done" in the checklist without a
-  verified test link or explicit N/A rationale.
+- **Always:** keep `gstack` as the default profile for contracts that don't
+  specify one — this must not require any migration for existing projects.
+- **Ask first:** removing or renaming any `gstack` profile phase_key (a
+  project's `.hermes/` state may reference phase_keys from an in-flight tick).
+- **Never:** make phase_keys collide across profiles in a way that could
+  cause `.hermes/` state written under one profile to be silently
+  reinterpreted under another if a project's `profile` field is edited
+  mid-flight — `doctor` should detect and fail closed on a profile change
+  while a tick is in-flight for a todo.
 
 ## Success Criteria
 
-- [ ] `docs/checklist-harness-production-coverage.md` rows 1, 2, 3, 4, 10, 11, 12
-      each have a real test link, no `TODO(TODO-21)` remaining except where
-      legitimately still open.
-- [ ] New spy test(s) for row 12 exist in `tests/test_harness.py`, pass, and
-      assert `register_todo_phases`'s `assignee` kwarg is sourced from
-      `contract.load_contract(...).assignee` with fallback to `"default"`.
-- [ ] Decision on `_auto_complete_gate_tasks` logic placement is recorded in
-      the checklist doc (row 7 note) and/or TODOS.md: stays in harness.py,
-      with rationale.
-- [ ] `uv run pytest tests/test_harness.py tests/test_kanban_tasks.py` passes.
-- [ ] Issue #21 acceptance criteria satisfied; TODOS.md TODO-24 entry updated/closed.
+- [ ] `PipelineContract` has a `profile` field; `CONTRACT_SCHEMA_VERSION` bumped.
+- [ ] `hermes_pipeline/data/profiles/gstack/phases.yaml` is the moved
+      bundled file, with `phase_8_finish_branch` updated to use `/ship`;
+      existing tests referencing the old `hermes_pipeline/data/phases.yaml`
+      path are updated.
+- [ ] `hermes_pipeline/data/profiles/agent-skills/phases.yaml` exists per the
+      phase mapping table above, and is loadable via `load_phases()`.
+- [ ] `pipeline-watch init <project> --profile agent-skills` and
+      `pipeline-watch doctor <project>` both work end-to-end against the new
+      profile.
+- [ ] `uv run pytest` passes.
+- [ ] Docs updated: `docs/howto-pipeline-contract.md` +
+      new `docs/howto-agent-skills-profile.md`.
 
 ## Open Questions
 
-None — both prior open questions (gate-logic placement, row-12 test) were
-resolved above before writing this spec.
+- Should `pipeline-watch doctor` warn (not just silently trust) when a
+  project's configured `profile` names a bundled directory that exists but
+  whose `phases.yaml` fails to parse — vs. today's fail-closed-with-error
+  behavior for other contract issues? Assumed: same fail-closed pattern
+  applies, no special-casing needed, but flagging for confirmation.
