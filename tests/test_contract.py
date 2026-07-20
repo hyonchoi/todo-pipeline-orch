@@ -93,6 +93,42 @@ def test_load_contract_malformed_toml_raises_schema_error(tmp_path):
         load_contract(project_state)
 
 
+def test_load_contract_rejects_profile_with_path_separator(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+        'profile = "../../etc/passwd"\n'
+    )
+
+    with pytest.raises(ContractSchemaError, match="profile"):
+        load_contract(project_state)
+
+
+def test_load_contract_rejects_empty_profile(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+        'profile = ""\n'
+    )
+
+    with pytest.raises(ContractSchemaError, match="profile"):
+        load_contract(project_state)
+
+
+def test_load_contract_accepts_hyphenated_profile(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+        'profile = "agent-skills"\n'
+    )
+
+    contract = load_contract(project_state)
+    assert contract.profile == "agent-skills"
+
+
 def test_load_contract_missing_schema_version_raises(tmp_path):
     project_state = tmp_path / ".hermes"
     project_state.mkdir(parents=True)

@@ -115,7 +115,7 @@ uv run pipeline-watch tick
 
 **"ContractVersionMismatchError: schema_version=99, expected 2"**
 - The contract file has a `schema_version` the code doesn't recognize.
-- **Fix:** Run `pipeline-watch init <project> --force` to regenerate with the current schema version.
+- **Fix:** Run `pipeline-watch init <project> --force` to regenerate with the current schema version. This resets `profile` to `gstack` unless you also pass `--profile <name>` — if the project was previously running a non-default profile, re-specify it explicitly or the regenerated contract will silently switch phase sets.
 
 **"ContractMissingError"**
 - No `.hermes/pipeline.toml` exists for this project.

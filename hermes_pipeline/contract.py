@@ -6,6 +6,7 @@ model/tools/skills flags this would otherwise need — see TODO-16).
 """
 from __future__ import annotations
 
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +16,7 @@ from .phases import Phase, load_phases
 CONTRACT_SCHEMA_VERSION = 2
 CONTRACT_FILENAME = "pipeline.toml"
 DEFAULT_CAPABILITIES: tuple[str, ...] = ("Read", "Write", "Edit", "Bash")
+PROFILE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
 class ContractError(Exception):
@@ -151,8 +153,11 @@ def load_contract(project_state: Path) -> PipelineContract:
         raise ContractSchemaError(f"{path}: 'capabilities' must be a list of strings")
 
     profile = data.get("profile", "gstack")
-    if not isinstance(profile, str) or not profile:
-        raise ContractSchemaError(f"{path}: 'profile' must be a non-empty string")
+    if not isinstance(profile, str) or not PROFILE_NAME_RE.match(profile):
+        raise ContractSchemaError(
+            f"{path}: 'profile' must be a lowercase alphanumeric/hyphen string, "
+            f"1-64 chars (got {profile!r})"
+        )
 
     return PipelineContract(
         schema_version=schema_version,

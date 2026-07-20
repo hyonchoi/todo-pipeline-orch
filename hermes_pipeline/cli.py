@@ -514,7 +514,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument(
         "--profile", default="gstack",
-        help="Pipeline skill-set profile to use (e.g., gstack, agent-skills)",
+        help="Pipeline skill-set profile (e.g., gstack, agent-skills). Default: gstack. "
+             "Each profile defines a different set of phases and required capabilities.",
     )
     init_parser.set_defaults(func=_cmd_init)
 
