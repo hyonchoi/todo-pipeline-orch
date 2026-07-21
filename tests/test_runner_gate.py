@@ -330,7 +330,7 @@ class TestInvokeHermesGate:
             "hermes_pipeline.phases", fromlist=["_invoke_hermes"]
         )._invoke_hermes(
             todo_id="TODO-5",
-            phase_key="phase_2b_plan_gate",
+            phase_key="phase_9_ship",
             tick_id="T1",
             state_dir=tmp_path,
             project_slug="proj",
@@ -352,7 +352,7 @@ class TestInvokeHermesGate:
                 "hermes_pipeline.phases", fromlist=["_invoke_hermes"]
             )._invoke_hermes(
                 todo_id="TODO-5",
-                phase_key="phase_2b_plan_gate",
+                phase_key="phase_9_ship",
                 tick_id="T1",
                 state_dir=tmp_path,
                 project_slug="proj",
@@ -371,7 +371,7 @@ class TestInvokeHermesGate:
                 "hermes_pipeline.phases", fromlist=["_invoke_hermes"]
             )._invoke_hermes(
                 todo_id="TODO-5",
-                phase_key="phase_2b_plan_gate",
+                phase_key="phase_9_ship",
                 tick_id="T1",
                 state_dir=tmp_path,
                 project_slug="proj",

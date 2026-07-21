@@ -496,7 +496,7 @@ class TestAutoCompleteGateTasks:
         import json as _json
 
         header_gate = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+            {"tick_id": "01TICK", "phase_key": "phase_9_ship",
              "todo_id": "TODO-1", "project_slug": "demo"},
             sort_keys=True,
         )
@@ -515,7 +515,7 @@ class TestAutoCompleteGateTasks:
         mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
         mock_complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
 
-        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_8_finish_branch")
 
         mock_complete.assert_called_once_with("demo", "t_gate")
 
@@ -524,7 +524,7 @@ class TestAutoCompleteGateTasks:
         import json as _json
 
         header_gate = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+            {"tick_id": "01TICK", "phase_key": "phase_9_ship",
              "todo_id": "TODO-1", "project_slug": "demo"},
             sort_keys=True,
         )
@@ -537,7 +537,7 @@ class TestAutoCompleteGateTasks:
         mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
 
         with caplog.at_level("INFO"):
-            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_8_finish_branch")
 
         assert "auto-completed gate task" not in caplog.text
 
@@ -546,7 +546,7 @@ class TestAutoCompleteGateTasks:
         import json as _json
 
         header_gate = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_2b_plan_gate",
+            {"tick_id": "01TICK", "phase_key": "phase_9_ship",
              "todo_id": "TODO-1", "project_slug": "demo"},
             sort_keys=True,
         )
@@ -559,10 +559,10 @@ class TestAutoCompleteGateTasks:
         mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
 
         with caplog.at_level("WARNING"):
-            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
+            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_8_finish_branch")
 
         assert "t_gate" in caplog.text
-        assert "phase_2b_plan_gate" in caplog.text
+        assert "phase_9_ship" in caplog.text
         assert "remains blocked" in caplog.text
 
     def test_skips_non_blocked_tasks(self, mocker):

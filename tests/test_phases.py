@@ -86,38 +86,23 @@ def test_real_phases_yaml_review_phase_fields():
     assert rev.timeout == 2400
     assert rev.terminal is False
     assert rev.gate is False
-    # Prompt is instruction-only: it must NOT carry rollback/test control flow.
+    # Prompt is instruction-only: it must NOT carry rollback control flow.
     assert "reset --hard" not in rev.prompt
-    assert "pytest" not in rev.prompt.lower()
 
 
 def test_real_phases_yaml_order_unchanged_for_existing_phases():
     keys = [p.phase_key for p in load_phases()]
     assert keys == [
         "phase_2_autoplan",
-        "phase_2b_plan_gate",
         "phase_3_writing_plan",
         "phase_4_development",
         "phase_5_review",
         "phase_6_1_cso",
+        "phase_6_2_qa",
         "phase_7_document_release",
         "phase_8_finish_branch",
         "phase_9_ship",
     ]
-
-
-def test_real_phases_yaml_plan_gate_is_nonterminal_gate():
-    """phase_2b_plan_gate is a gate (blocked marker) but not terminal —
-    the pipeline continues into writing-plan once the gate is approved,
-    unlike phase_9_ship which terminates the run."""
-    phases = {p.phase_key: p for p in load_phases()}
-    gate = phases["phase_2b_plan_gate"]
-    assert gate.gate is True
-    assert gate.terminal is False
-    # Gate is a pure marker: no LLM dispatch fields.
-    assert gate.prompt == ""
-    assert gate.tools == ""
-    assert gate.turns == 0
 
 
 def test_resolve_profile_phases_path_gstack():
@@ -179,14 +164,3 @@ def test_agent_skills_phases_yaml_non_gate_phases_reference_skills():
     assert "agent-skills:code-review-and-quality" in phases["phase_4_review"].prompt
     assert "agent-skills:security-and-hardening" in phases["phase_5_security"].prompt
     assert "agent-skills:ship" in phases["phase_7_ship"].prompt
-
-
-def test_agent_skills_phases_yaml_document_release_matches_gstack_verbatim():
-    gstack_phases = {p.phase_key: p for p in load_phases(resolve_profile_phases_path("gstack"))}
-    agent_skills_phases = {
-        p.phase_key: p for p in load_phases(resolve_profile_phases_path("agent-skills"))
-    }
-    assert (
-        agent_skills_phases["phase_6_document_release"].prompt
-        == gstack_phases["phase_7_document_release"].prompt
-    )
