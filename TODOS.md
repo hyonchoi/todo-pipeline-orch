@@ -70,4 +70,11 @@
   - **Depends on:** `TODO-24`
   - **Decisions:** Priority `P3`, Effort `M`, Phase `2 (Design)`, Branch `feature/conditional-phase-registration`, Test Coverage `required`, Security Review `not-required`
 
+- [ ] **TODO-29: Remove dead ready_for_review/merge.py Phase-9 path superseded by ship.py** — merge.py's run_phase9/_cmd_merge read a ready_for_review record that only TODO-27's deleted code ever writes — dead once TODO-27 lands.
+  - **What:** Delete `merge.py` (`run_phase9`, `make_default_bump_fn`, `default_bump_fn`, `default_confirm_fn`), the `cli.py merge` subcommand (`_cmd_merge`, its parser registration at `cli.py:421`), and `ReadyForReview`/`read_ready_for_review`/`write_ready_for_review`/`write_ready_for_review_min`/`list_ready_for_review_pending` in `state.py`.
+  - **Why:** `state.write_ready_for_review`/`write_ready_for_review_min` — the only writers of a `ready_for_review` record — live exclusively in `phases.py:342` (inside `_invoke_hermes`) and `runner.py:301` (inside `PipelineRunner`), both deleted by TODO-27. Once that lands, nothing ever populates a `ready_for_review` record, making `merge.py`/`_cmd_merge` permanently unreachable. Production's real Phase 9 path is `ship.py`'s `maybe_ship_ready`/`approve_ship`, which uses its own `ShipSidecar`/kanban-task mechanism and never touches `ready_for_review`.
+  - **Context:** Surfaced while reviewing TODO-27's harness-parity cleanup.
+  - **Depends on:** `TODO-27`
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feature/remove-dead-ready-for-review-path`, Test Coverage `required`, Security Review `not-required`
+
 ## Completed
