@@ -4,20 +4,21 @@ phases:
     prompt: |
       Use the gstack autoplan skill in claude code.
 
-      The selected TODO is {todo_id} — it is already marked in-flight in TODOS.md.
-      Work on {todo_id} only; do not pick a different TODO.
+      The selected TODO is {todo_id} — it is already marked in-flight in the
+      kanban board (not in TODOS.md text). Work on {todo_id} only; do not
+      pick a different TODO.
 
       1. Run CEO/Eng/UI/DX reviews for {todo_id}.
       2. Write all plan and auxiliary documents into docs/pipeline/ (e.g., {todo_id}-plan.md and any review artifacts).
       3. Create a new branch from main.
       4. Commit all generated docs.
-      5. Save the branch name to .hermes/pipeline_branch.txt.
+
+      If {todo_id} itself is ambiguous or needs revision before you can
+      proceed, or you hit any other blocker, do NOT ask for clarification
+      and do NOT hang — exit non-zero instead.
     tools: "Read,Write,Bash"
     turns: 20
     timeout: 1800
-  - phase_key: "phase_2b_plan_gate"
-    name: "Phase 2b: Plan Gate"
-    gate: true
   - phase_key: "phase_3_writing_plan"
     name: "Phase 3: Writing Plan"
     prompt: "Use the writing-plans skill in claude code. Read the plan from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the generated docs."
@@ -26,48 +27,132 @@ phases:
     timeout: 1800
   - phase_key: "phase_4_development"
     name: "Phase 4: Development"
-    prompt: "Use subagent-driven-development in claude code. Read the implementation plan from docs/pipeline/{todo_id}-impl-plan.md and implement it. Commit all generated docs."
+    prompt: |
+      Use subagent-driven-development in claude code. Read the
+      implementation plan from docs/pipeline/{todo_id}-impl-plan.md and
+      implement it. Commit all changes.
+
+      If the implementation plan is unworkable or contradicts the
+      codebase, or you hit any other blocker, do NOT ask for clarification
+      and do NOT hang — exit non-zero instead.
     tools: "Read,Write,Edit,Bash"
     turns: 60
     timeout: 3600
   - phase_key: "phase_5_review"
     name: "Phase 5: Code Review"
     prompt: |
-      Use the gstack /review skill on the current branch.
+      Use the gstack /review skill in claude code on the current branch.
 
-      AUTONOMOUS MODE — there is no human at the terminal. Apply the review's
-      fixes without asking for confirmation. Do NOT pause for user input.
+      AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
+      user input. When the skill's Step 5c would normally batch-ask about
+      ASK-classified findings, skip the question and fix all of them anyway —
+      treat every finding as approved.
 
       Scope: {todo_id}. Focus on correctness bugs and simplification cleanups
-      in the changes on this branch. Apply fixes directly to the working tree.
-      Do NOT run tests, commit, revert, or reset — the pipeline does that after
-      you finish.
+      in the changes on this branch.
+
+      After applying all fixes, run the project's test suite (detect the
+      framework the same way /review's own stack detection does — pytest,
+      jest, vitest, rspec, go test, etc.) and verify it passes. If tests fail,
+      fix and re-run until they pass, or until you've made a good-faith effort
+      within your turn budget — then revert to the pre-review state and note
+      why in the commit message.
+
+      Commit your changes (or the revert) with a clear message.
+
+      If you cannot proceed, exit non-zero rather than leaving uncommitted
+      changes.
     tools: "Read,Edit,Bash"
     turns: 30
     timeout: 2400
   - phase_key: "phase_6_1_cso"
     name: "Phase 6.1: CSO Security Review"
-    prompt: "Use the gstack cso skill. Run a security review of the current branch. Save findings to docs/pipeline/ and commit."
-    tools: "Read,Write,Bash"
+    prompt: |
+      Check {todo_id}'s TODOS.md entry for `Security Review: required` in its
+      Decisions line. If it says `not-required`, exit 0 immediately — do not
+      run any review.
+
+      If `required`: use the gstack cso skill in claude code. Run a security
+      review of the current branch.
+
+      AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
+      user input. If the skill would normally ask for approval before
+      applying a fix, skip the question and apply it anyway — treat every
+      finding as approved.
+
+      Apply fixes directly. Save findings to docs/pipeline/ and commit.
+    tools: "Read,Write,Edit,Bash"
+    turns: 20
+    timeout: 1800
+  - phase_key: "phase_6_2_qa"
+    name: "Phase 6.2: QA"
+    prompt: |
+      Check {todo_id}'s TODOS.md entry for `UI Review: required` in its
+      Decisions line. If it says `not-required`, exit 0 immediately — do not
+      run any QA.
+
+      If `required`: use the gstack qa skill in claude code. Test the web UI
+      changes on the current branch.
+
+      AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
+      user input. If the skill would normally ask for approval before
+      applying a fix, skip the question and apply it anyway — treat every
+      finding as approved.
+
+      Apply fixes directly. Save findings to docs/pipeline/ and commit.
+    tools: "Read,Write,Edit,Bash"
     turns: 20
     timeout: 1800
   - phase_key: "phase_7_document_release"
     name: "Phase 7: Document Release"
     prompt: |
-      Generate release docs.
-      1. Update CHANGELOG.md.
-      2. Update README.md project structure if changed.
-      3. Commit.
+      1. Use the gstack document-release skill in claude code to update
+         existing docs (CHANGELOG.md, README.md, and others), which will
+         identify any docs that are missing entirely. Then use the
+         document-generate skill in claude code to create those missing
+         docs.
+
+      2. Determine the version bump level from {todo_id}'s TODOS.md Decisions
+         line: Effort `S` → patch bump, Effort `M` or `L` → minor bump.
+
+      3. Bump the version and keep every version-bearing file in this project
+         in sync, in the same commit — this includes VERSION/package.json
+         (if present) and any language-specific manifest and lockfile (e.g.
+         pyproject.toml + uv.lock for Python/uv projects, package.json +
+         package-lock.json for Node, Cargo.toml + Cargo.lock for Rust) —
+         plus CHANGELOG.md (new `## [X.Y.Z] - YYYY-MM-DD` entry). Check this
+         project's CLAUDE.md for any explicit version-sync rules before
+         bumping.
+
+      4. Before committing, verify all version-bearing files agree on the
+         same version number — do not commit if they've drifted.
+
+      5. Commit.
     tools: "Read,Write,Edit,Bash"
-    turns: 15
+    turns: 20
     timeout: 1800
   - phase_key: "phase_8_finish_branch"
     name: "Phase 8: Finish Branch"
-    prompt: "Use the gstack /ship skill. Open a PR and HALT — do NOT merge."
-    tools: "Read,Write,Bash"
-    turns: 15
-    timeout: 1800
+    prompt: |
+      Use the gstack /ship skill in claude code.
+
+      AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
+      user input. Loop through the skill's fix-and-reverify cycles for as
+      long as they keep making progress — do not stop after one pass.
+
+      If no git remote is configured, PR creation isn't possible. In that
+      case, run every other step of the skill (verification, version bump
+      checks, etc.) and leave the branch committed and ready, without
+      creating a PR — this is expected, not a failure. The next phase's gate
+      is where a human reviews the branch.
+
+      Only exit non-zero if the skill concludes that a fresh /ship invocation
+      from a new context is required. Do NOT attempt to simulate that
+      yourself.
+    tools: "Read,Write,Edit,Bash"
+    turns: 50
+    timeout: 3000
   - phase_key: "phase_9_ship"
-    name: "Phase 9: Ship Gate"
+    name: "Phase 9: Human Review"
     gate: true
     terminal: true
