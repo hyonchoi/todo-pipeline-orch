@@ -164,7 +164,10 @@ def _run_hermes_subprocess(
 class UnknownPhaseError(KeyError):
     """phase_key is not defined in phases.yaml."""
 
-def _render_phase_prompt(template: str, *, todo_id: str, tick_id: str, project_slug: str) -> str:
+def _render_phase_prompt(
+    template: str, *, todo_id: str, tick_id: str, project_slug: str,
+    spec_path: str | None = None, reference_paths: list[str] | None = None,
+) -> str:
     """Inject the pipeline context the phase prompt needs.
 
     A picked TODO must be visible to the LLM — otherwise a TODO-7 pick can
@@ -173,6 +176,12 @@ def _render_phase_prompt(template: str, *, todo_id: str, tick_id: str, project_s
     `{tick_id}` / `{project_slug}` substitution for phases that want to
     weave the values into prose. `.format()` with named-only fields is safe
     here because every prompt in configs/phases.yaml is repo-owned.
+
+    `spec_path`/`reference_paths` are optional, pre-validated (existence +
+    project_dir containment already checked by the caller) TODOS.md
+    Spec:/Reference: values for the pipeline's first phase only. Omitted
+    entirely when absent so prompt output for TODOs without these fields
+    stays byte-identical to before this feature existed.
     """
     header = (
         f"Pipeline context:\n"
@@ -181,6 +190,13 @@ def _render_phase_prompt(template: str, *, todo_id: str, tick_id: str, project_s
         f"- project_slug: {project_slug}\n"
         f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
     )
+    spec_reference_block = ""
+    if spec_path:
+        spec_reference_block += f"Spec (authoritative): {spec_path}\n"
+    if reference_paths:
+        spec_reference_block += f"Reference material: {', '.join(reference_paths)}\n"
+    if spec_reference_block:
+        header += spec_reference_block + "\n"
     try:
         body = template.format(todo_id=todo_id, tick_id=tick_id, project_slug=project_slug)
     except (KeyError, IndexError):
