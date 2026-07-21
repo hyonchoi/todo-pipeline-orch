@@ -257,16 +257,62 @@ def _resolve_execution_profile(state_dir: Path) -> str:
         return "gstack"
 
 
+
+
+def _resolve_spec_reference_paths(*, project_dir: str | None, todo_id: str) -> tuple[str | None, list[str]]:
+    """Resolve and validate Spec:/Reference: paths for injection into the
+    first phase's prompt. Fail-soft throughout: any TODOS.md read/parse
+    problem, missing file, or containment violation drops that item only
+    and never raises.
+    """
+    if project_dir is None:
+        return None, []
+
+    from .todos_md import find_todo_fields
+
+    project_root = Path(project_dir).resolve()
+    todos_md_path = project_root / "TODOS.md"
+    fields = find_todo_fields(todos_md_path, todo_id)
+
+    def _validate(rel_path: str) -> str | None:
+        try:
+            resolved = (project_root / rel_path).resolve()
+        except (OSError, ValueError):
+            return None
+        try:
+            resolved.relative_to(project_root)
+        except ValueError:
+            log.warning(
+                "todos_md: %s path %r for %s resolves outside project_dir, dropping",
+                rel_path, rel_path, todo_id,
+            )
+            return None
+        if not resolved.is_file():
+            log.warning("todos_md: %s path %r for %s does not exist, dropping",
+                        rel_path, rel_path, todo_id)
+            return None
+        return rel_path
+
+    spec_path = fields["spec"]
+    if spec_path is not None:
+        spec_path = _validate(spec_path)
+
+    reference_paths = [p for p in (_validate(r) for r in fields["references"]) if p is not None]
+
+    return spec_path, reference_paths
+
 def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, project_slug: str, **kw) -> dict:
     """Execute a single phase via hermes subprocess and write ready_for_review on terminal success."""
     profile = _resolve_execution_profile(state_dir)
-    phases_cfg = {p.phase_key: p for p in load_phases(resolve_profile_phases_path(profile))}
+    phases_list = load_phases(resolve_profile_phases_path(profile))
+    phases_cfg = {p.phase_key: p for p in phases_list}
     phase = phases_cfg.get(phase_key)
     if phase is None:
         raise UnknownPhaseError(
             f"phase_key {phase_key!r} not found in phases.yaml; "
             f"known keys: {sorted(phases_cfg)}"
         )
+    is_first_phase = bool(phases_list) and phase.phase_key == phases_list[0].phase_key
 
     sd = Path(state_dir)
 
@@ -303,8 +349,13 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
             f"is {status.value}, cannot proceed"
         )
 
+    spec_path, reference_paths = (
+        _resolve_spec_reference_paths(project_dir=kw.get("project_dir"), todo_id=todo_id)
+        if is_first_phase else (None, [])
+    )
     prompt = _render_phase_prompt(
         phase.prompt, todo_id=todo_id, tick_id=tick_id, project_slug=project_slug,
+        spec_path=spec_path, reference_paths=reference_paths,
     )
 
     result = _run_hermes_subprocess(

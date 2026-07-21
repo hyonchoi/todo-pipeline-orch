@@ -381,3 +381,165 @@ def test_invoke_review_phase_short_circuits_on_no_diff(state_dir, monkeypatch, t
         state_dir=state_dir, project_slug="demo", project_dir=str(tmp_path),
     )
     assert out["outcome"] == rp.OUTCOME_NO_DIFF
+
+
+
+def test_first_phase_injects_spec_and_reference(state_dir, monkeypatch, tmp_path):
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False, prompt="do thing"),
+        _fake_phase(phase_key="phase_3_other", terminal=False, prompt="do other"),
+    ])
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "docs" / "pipeline").mkdir(parents=True)
+    spec_file = project_dir / "docs" / "pipeline" / "TODO-25-spec.md"
+    spec_file.write_text("spec content")
+    ref_file = project_dir / "docs" / "notes" / "a.md"
+    ref_file.parent.mkdir(parents=True)
+    ref_file.write_text("ref content")
+    (project_dir / "TODOS.md").write_text(f"""\
+# TODOS
+
+- [ ] **TODO-25: Do the thing** — summary
+  - **Spec:** docs/pipeline/TODO-25-spec.md
+  - **Reference:** docs/notes/a.md
+""")
+    seen = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": ""}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    phases_mod._invoke_hermes(
+        todo_id="TODO-25", phase_key="phase_2_autoplan",
+        tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        project_dir=str(project_dir),
+    )
+    assert "Spec (authoritative): docs/pipeline/TODO-25-spec.md" in seen["prompt"]
+    assert "Reference material: docs/notes/a.md" in seen["prompt"]
+
+
+def test_non_first_phase_does_not_inject(state_dir, monkeypatch, tmp_path):
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False, prompt="do thing"),
+        _fake_phase(phase_key="phase_3_other", terminal=False, prompt="do other"),
+    ])
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    (project_dir / "docs" / "pipeline").mkdir(parents=True)
+    (project_dir / "docs" / "pipeline" / "TODO-25-spec.md").write_text("spec content")
+    (project_dir / "TODOS.md").write_text("""\
+# TODOS
+
+- [ ] **TODO-25: Do the thing** — summary
+  - **Spec:** docs/pipeline/TODO-25-spec.md
+""")
+    seen = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": ""}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    phases_mod._invoke_hermes(
+        todo_id="TODO-25", phase_key="phase_3_other",
+        tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        project_dir=str(project_dir),
+    )
+    assert "Spec (authoritative):" not in seen["prompt"]
+
+
+def test_missing_spec_file_dropped_reference_kept(state_dir, monkeypatch, tmp_path):
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False, prompt="do thing"),
+    ])
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    ref_file = project_dir / "docs" / "notes" / "a.md"
+    ref_file.parent.mkdir(parents=True)
+    ref_file.write_text("ref content")
+    (project_dir / "TODOS.md").write_text("""\
+# TODOS
+
+- [ ] **TODO-25: Do the thing** — summary
+  - **Spec:** docs/pipeline/nonexistent-spec.md
+  - **Reference:** docs/notes/a.md
+""")
+    seen = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": ""}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    phases_mod._invoke_hermes(
+        todo_id="TODO-25", phase_key="phase_2_autoplan",
+        tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        project_dir=str(project_dir),
+    )
+    assert "Spec (authoritative):" not in seen["prompt"]
+    assert "Reference material: docs/notes/a.md" in seen["prompt"]
+
+
+def test_traversal_path_dropped_independently_of_existence(state_dir, monkeypatch, tmp_path):
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False, prompt="do thing"),
+    ])
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    # File exists on disk (outside project_dir) but must still be rejected
+    # by the containment check, independent of the existence check.
+    outside_file = tmp_path / "outside.md"
+    outside_file.write_text("outside content")
+    ref_file = project_dir / "docs" / "notes" / "a.md"
+    ref_file.parent.mkdir(parents=True)
+    ref_file.write_text("ref content")
+    (project_dir / "TODOS.md").write_text("""\
+# TODOS
+
+- [ ] **TODO-25: Do the thing** — summary
+  - **Spec:** ../outside.md
+  - **Reference:** docs/notes/a.md
+""")
+    seen = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": ""}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    phases_mod._invoke_hermes(
+        todo_id="TODO-25", phase_key="phase_2_autoplan",
+        tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        project_dir=str(project_dir),
+    )
+    assert "Spec (authoritative):" not in seen["prompt"]
+    assert "Reference material: docs/notes/a.md" in seen["prompt"]
+
+
+def test_no_todos_md_no_injection_phase_runs_normally(state_dir, monkeypatch, tmp_path):
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
+        _fake_phase(phase_key="phase_2_autoplan", terminal=False, prompt="do thing"),
+    ])
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    seen = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": ""}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    out = phases_mod._invoke_hermes(
+        todo_id="TODO-25", phase_key="phase_2_autoplan",
+        tick_id="01JT", state_dir=state_dir, project_slug="demo",
+        project_dir=str(project_dir),
+    )
+    assert out["status"] == "success"
+    assert "Spec (authoritative):" not in seen["prompt"]
+
+
+def test_empty_phases_list_does_not_raise_indexerror(state_dir, monkeypatch, tmp_path):
+    """load_phases() returning [] must not crash phases_list[0] lookup —
+    but phase lookup itself already raises UnknownPhaseError first, which
+    is the correct existing behavior; this confirms no IndexError leaks
+    through first-phase detection before that point."""
+    monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [])
+    import pytest
+    with pytest.raises(phases_mod.UnknownPhaseError):
+        phases_mod._invoke_hermes(
+            todo_id="TODO-25", phase_key="phase_2_autoplan",
+            tick_id="01JT", state_dir=state_dir, project_slug="demo",
+            project_dir=str(tmp_path),
+        )
