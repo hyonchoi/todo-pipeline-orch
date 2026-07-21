@@ -38,6 +38,8 @@ TODOS.md is stored at the repo root. Each entry occupies a single markdown list 
 | **Assumptions:** | Preconditions |
 | **Completed:** | Version + date (set when done) |
 | **Resolved design:** | Design decisions (zero or more) |
+| **Spec:** | Single path to the authoritative deliverable (e.g. from office-hours / grill-with-docs / spec skills) — drives the pipeline's first phase. `--revise`-only: never AI-suggested, never part of `--add` auto-research; always user-typed verbatim. |
+| **Reference:** | Comma-separated list of supplementary/background paths, threaded into the pipeline's first phase prompt. Same `--revise`-only, never-auto-suggested rule as `Spec:`. Not a synonym for `Context:`, which stays free-text prose. |
 
 ## Example: complete entry
 
@@ -63,7 +65,8 @@ When creating or converting TODOS.md, insert this blockquote as the file header:
 > - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
 > - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
 > - Required fields: **What:**, **Why:**, **Decisions:**
-> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
+> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
 > - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 ```

@@ -4,7 +4,8 @@
 > - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
 > - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
 > - Required fields: **What:**, **Why:**, **Decisions:**
-> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
+> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
 > - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 
