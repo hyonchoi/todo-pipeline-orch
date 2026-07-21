@@ -274,7 +274,7 @@ def _resolve_spec_reference_paths(*, project_dir: str | None, todo_id: str) -> t
     todos_md_path = project_root / "TODOS.md"
     fields = find_todo_fields(todos_md_path, todo_id)
 
-    def _validate(rel_path: str) -> str | None:
+    def _validate(field_type: str, rel_path: str) -> str | None:
         try:
             resolved = (project_root / rel_path).resolve()
         except (OSError, ValueError):
@@ -284,20 +284,20 @@ def _resolve_spec_reference_paths(*, project_dir: str | None, todo_id: str) -> t
         except ValueError:
             log.warning(
                 "todos_md: %s path %r for %s resolves outside project_dir, dropping",
-                rel_path, rel_path, todo_id,
+                field_type, rel_path, todo_id,
             )
             return None
         if not resolved.is_file():
             log.warning("todos_md: %s path %r for %s does not exist, dropping",
-                        rel_path, rel_path, todo_id)
+                        field_type, rel_path, todo_id)
             return None
         return rel_path
 
     spec_path = fields["spec"]
     if spec_path is not None:
-        spec_path = _validate(spec_path)
+        spec_path = _validate("Spec", spec_path)
 
-    reference_paths = [p for p in (_validate(r) for r in fields["references"]) if p is not None]
+    reference_paths = [p for p in (_validate("Reference", r) for r in fields["references"]) if p is not None]
 
     return spec_path, reference_paths
 
