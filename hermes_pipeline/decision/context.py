@@ -22,71 +22,6 @@ def _pid_alive(pid: int) -> bool:
     except OSError:
         return True
 
-def _rfr_ids(state_dir: Path) -> list[str]:
-    """Extract TODO IDs from ready_for_review/todo-<n>.json files.
-
-    Normalizes to the canonical `TODO-N` form so the union with
-    `phase_started/*` markers (which already use `TODO-N`) actually dedupes.
-    Accepts both `todo-7.json` (the State writer's format) and a bare
-    `7.json` legacy form so a pre-rename state dir doesn't drop in-flight
-    work on the floor.
-    """
-    d = state_dir / "ready_for_review"
-    if not d.exists():
-        return []
-    out = []
-    for p in d.iterdir():
-        if not p.is_file() or p.suffix != ".json":
-            continue
-        stem = p.stem
-        if stem.startswith("todo-"):
-            stem = stem[len("todo-"):]
-        try:
-            tid = int(stem)
-        except ValueError:
-            continue
-        out.append(f"TODO-{tid}")
-    return out
-
-def _phase_started_ids(state_dir: Path, *, max_phase_timeout_min: int) -> list[str]:
-    """Extract TODO IDs from phase_started/ markers, sweeping stale + dead.
-
-    A marker is swept only if BOTH conditions hold: (a) older than
-    `max_phase_timeout_min`, AND (b) the recorded `child_pid` is no longer
-    alive (or unrecorded). A wedged-but-alive Claude run must remain
-    visible — otherwise the next tick would re-pick the same TODO and we'd
-    have two phases mutating the same repo.
-    """
-    d = state_dir / "phase_started"
-    if not d.exists():
-        return []
-    cutoff = time.time() - max_phase_timeout_min * 60
-    out = []
-    for p in d.iterdir():
-        if not p.is_file():
-            continue
-        stale_mtime = p.stat().st_mtime < cutoff
-        if not stale_mtime:
-            out.append(p.stem)
-            continue
-        # Past the timeout — but verify the process is actually dead before
-        # sweeping. If we can't read the marker, fall back to mtime alone.
-        child_pid = None
-        try:
-            data = json.loads(p.read_text())
-            child_pid = data.get("child_pid")
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        if child_pid is not None and _pid_alive(int(child_pid)):
-            # Wedged but alive. Surface as in-flight; do NOT sweep.
-            out.append(p.stem)
-            continue
-        try:
-            p.unlink()
-        except FileNotFoundError:
-            pass
-    return out
-
 def _extract_in_flight_ids(snapshot: dict) -> set[str]:
     """Extract TODO IDs with in-flight tasks from a kanban snapshot.
 
@@ -135,32 +70,26 @@ def build_in_flight(
     board_slug: str | None = None,
     snapshot: dict | None = None,
 ) -> list[str]:
-    """Compute in-flight set from kanban state, falling back to file markers.
+    """Compute in-flight set from kanban state.
 
     Args:
-        state_dir: State directory path.
-        max_phase_timeout_min: Max age in minutes before a lock is stale.
+        state_dir: State directory path (no longer used for fallback).
+        max_phase_timeout_min: Max age in minutes before a lock is stale (no longer used).
         board_slug: Kanban board slug for kanban-aware lookup.
-            If None or kanban CLI fails, falls back to file markers.
         snapshot: Pre-fetched kanban snapshot (from _fetch_kanban_snapshot).
             If provided, used instead of fetching from the CLI.
 
     Returns:
         Sorted list of TODO IDs currently in flight.
     """
+    if snapshot is not None:
+        kanban_in_flight = _extract_in_flight_ids(snapshot)
+        return sorted(kanban_in_flight)
     if board_slug is not None:
-        if snapshot is not None:
-            kanban_in_flight = _extract_in_flight_ids(snapshot)
-            return sorted(kanban_in_flight)
         kanban_in_flight = _kanban_in_flight_ids(board_slug)
         if kanban_in_flight is not None:
             return sorted(kanban_in_flight)
-
-    # Fallback: existing file markers
-    return sorted(
-        set(_rfr_ids(state_dir))
-        | set(_phase_started_ids(state_dir, max_phase_timeout_min=max_phase_timeout_min))
-    )
+    return []
 
 def _fetch_kanban_snapshot(project_slug: str) -> dict | None:
     """Fetch kanban board state via `hermes kanban list --json`.
