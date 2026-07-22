@@ -399,42 +399,6 @@ def _classify_error_class(exc: Exception) -> str:
     return "phase_failure"
 
 
-def _dispatch_phase(
-    phase: Phase,
-    *,
-    state_dir: Path,
-    todo_id: int,
-    tick_id: str,
-    project_slug: str,
-    project_dir: Path,
-    error_holder: dict[str, Any],
-) -> int:
-    """Run a single phase through the real pipeline entrypoint (`phases.run`).
-
-    This dispatches actual Hermes / Claude Code subprocess calls — the same
-    code path production pipeline ticks use — rather than a stub. Returns
-    0 on success, 1 on failure (classified error stashed in error_holder for
-    the monitor wrapper to attach to the phase_failed event).
-    """
-    from .phases import run as phases_run
-
-    try:
-        phases_run(
-            state_dir=state_dir,
-            todo_id=f"TODO-{todo_id}" if isinstance(todo_id, int) else todo_id,
-            tick_id=tick_id,
-            phase_key=phase.phase_key,
-            project_slug=project_slug,
-            project_dir=project_dir,
-        )
-        return 0
-    except Exception as e:  # noqa: BLE001 - classify and report, don't crash the harness
-        error_holder["error_class"] = _classify_error_class(e)
-        error_holder["error_message"] = str(e)[:500]
-        log.warning("phase %s failed: %s", phase.phase_key, e)
-        return 1
-
-
 class _ConvergenceMonitor:
     """Wraps a monitor callback: forwards events, feeds the convergence detector,
     and tracks the currently in-flight phase for partial-report generation on
@@ -525,38 +489,6 @@ class HarnessResult:
     summary: str
 
 
-def _kill_hung_phase_subprocess(*, state_dir: Path, todo_id: int) -> None:
-    """Kill a hermes/claude subprocess left running after overall --timeout fires.
-
-    The phase-level timeout (hermes_adapter.py:255) eventually cleans it up,
-    but --loop iterations shouldn't accumulate live subprocesses in the meantime.
-    """
-    import signal as _signal
-
-    marker_path = Path(state_dir) / "phase_started" / f"TODO-{todo_id}.json"
-    try:
-        marker = _json.loads(marker_path.read_text())
-    except (FileNotFoundError, _json.JSONDecodeError):
-        return
-    pid = marker.get("child_pid")
-    if pid is None:
-        return
-    try:
-        # Verify the PID is still alive before attempting to kill the session group.
-        # os.kill(pid, 0) raises ProcessLookupError if the process already exited,
-        # which prevents SIGKILL from hitting an unrelated process that reused the PID.
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return
-    except PermissionError:
-        # Process exists but we can't signal it; skip killpg to avoid collateral damage.
-        return
-    try:
-        # phases.py spawns subprocesses with start_new_session=True, so pid is a
-        # session leader and killpg(pgid=pid) targets only that process's group.
-        os.killpg(pid, _signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError) as e:
-        log.warning("failed to kill hung phase subprocess pid=%s: %s", pid, e)
 
 
 def _run_with_timeout(
@@ -602,15 +534,11 @@ def run_harness(
     keep_dir: bool,
     timeout: int,
     convergence_threshold: int,
-    kanban_mode: str,
     config: Any,
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
-    from .runner import PipelineRunner
     from .phases import load_phases
     from .test_report import generate_report, summarize_report, diff_reports, summarize_diff
-    from .state import State
-    from .kanban import NullKanbanAdapter
     from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .logging_setup import new_tick_id
 
@@ -644,105 +572,61 @@ def run_harness(
 
         tick_id = new_tick_id()
 
-        if kanban_mode == "hermes":
-            _kanban_preflight(tenant=fixture["project_slug"])
+        _kanban_preflight(tenant=fixture["project_slug"])
 
-            # For --phase flag: create a temporary phases YAML for registration
-            _phases_path_override: Path | None = None
-            if phase_only:
-                import yaml as _yaml
-                _phases_path_override = temp_dir / "filtered-phases.yaml"
-                _phases_path_override.write_text(
-                    _yaml.dump({"phases": [asdict(p) for p in phases]})
-                )
+        # For --phase flag: create a temporary phases YAML for registration
+        _phases_path_override: Path | None = None
+        if phase_only:
+            import yaml as _yaml
+            _phases_path_override = temp_dir / "filtered-phases.yaml"
+            _phases_path_override.write_text(
+                _yaml.dump({"phases": [asdict(p) for p in phases]})
+            )
 
         checkpoint_dir = state_dir / "pipeline_checkpoints"
         ready_dir = state_dir / "ready_for_review"
         checkpoint_dir.mkdir(parents=True, exist_ok=True)
         ready_dir.mkdir(parents=True, exist_ok=True)
 
-        state = State(
-            project=fixture["project_slug"],
-            lock_dir=lock_dir,
-            checkpoint_dir=checkpoint_dir,
-            ready_dir=ready_dir,
-        )
-
         timed_out = False
         with isolate_config(state_dir=state_dir, lock_dir=lock_dir):
-            if kanban_mode == "hermes":
-                # Emit initial event so the events log file exists for report generation
-                base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
+            # Emit initial event so the events log file exists for report generation
+            base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
 
-                def _poll() -> bool:
-                    todo_id_str = f"TODO-{fixture['todo_id']}"
-                    return _poll_kanban_phases(
-                        project_slug=fixture["project_slug"],
-                        tick_id=tick_id,
-                        state_dir=state_dir,
-                        todo_id=todo_id_str,
-                        project_dir=temp_dir,
-                        phases_path=_phases_path_override,
-                        monitor=monitor,
-                        detector=detector,
-                        phases=phases,
-                    )
-
-                success, timed_out, result_box = _run_with_timeout(_poll, timeout=timeout)
-
-                if timed_out:
-                    try:
-                        in_flight = get_todo_kanban_status(fixture["project_slug"], tick_id)
-                        running_phase = next(
-                            (k for k, v in in_flight.items()
-                             if v not in TERMINAL_STATUSES),
-                            None,
-                        )
-                        if running_phase and monitor.current_phase_key is None:
-                            base_monitor("phase_timed_out", {"phase_key": running_phase})
-                    except Exception:
-                        pass
-                elif "convergence_error" in result_box:
-                    # Convergence-halt fired during polling. The poll loop already
-                    # exited with all_terminal=True, so phases are already in terminal
-                    # state on the kanban board — no additional cleanup needed beyond
-                    # surfacing the convergence error in the result.
-                    log.warning("convergence-halt: %s", result_box["convergence_error"])
-            else:
-                # Null kanban path: PipelineRunner (backward compat)
-                kanban = NullKanbanAdapter()
-                runner = PipelineRunner(
-                    project=fixture["project_slug"],
+            def _poll() -> bool:
+                todo_id_str = f"TODO-{fixture['todo_id']}"
+                return _poll_kanban_phases(
+                    project_slug=fixture["project_slug"],
+                    tick_id=tick_id,
+                    state_dir=state_dir,
+                    todo_id=todo_id_str,
                     project_dir=temp_dir,
-                    branch=fixture["branch"],
-                    todo_id=fixture["todo_id"],
-                    title=f"Mock TODO-{fixture['todo_id']}",
-                    phases=phases,
-                    state=state,
-                    kanban=kanban,
-                    kanban_metadata=None,
-                    run_phase_fn=lambda phase: _dispatch_phase(
-                        phase,
-                        state_dir=state_dir,
-                        todo_id=fixture["todo_id"],
-                        tick_id=tick_id,
-                        project_slug=fixture["project_slug"],
-                        project_dir=temp_dir,
-                        error_holder=error_holder,
-                    ),
-                    continue_on_failure=True,
+                    phases_path=_phases_path_override,
                     monitor=monitor,
+                    detector=detector,
+                    phases=phases,
                 )
 
-                success, timed_out, result_box = _run_with_timeout(runner.run, timeout=timeout)
+            success, timed_out, result_box = _run_with_timeout(_poll, timeout=timeout)
 
-                if timed_out:
-                    _kill_hung_phase_subprocess(state_dir=state_dir, todo_id=fixture["todo_id"])
-                elif "convergence_error" in result_box:
-                    try:
-                        kanban.clear_active_task(project=fixture["project_slug"], outcome="abandoned")
-                    except Exception as e:
-                        log.warning("kanban.clear_active_task (convergence-halt) failed: %s", e)
+            if timed_out:
+                try:
+                    in_flight = get_todo_kanban_status(fixture["project_slug"], tick_id)
+                    running_phase = next(
+                        (k for k, v in in_flight.items()
+                         if v not in TERMINAL_STATUSES),
+                        None,
+                    )
+                    if running_phase and monitor.current_phase_key is None:
+                        base_monitor("phase_timed_out", {"phase_key": running_phase})
+                except Exception:
+                    pass
+            elif "convergence_error" in result_box:
+                # Convergence-halt fired during polling. The poll loop already
+                # exited with all_terminal=True, so phases are already in terminal
+                # state on the kanban board — no additional cleanup needed beyond
+                # surfacing the convergence error in the result.
+                log.warning("convergence-halt: %s", result_box["convergence_error"])
 
         if timed_out and monitor.current_phase_key:
             base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
@@ -768,13 +652,12 @@ def run_harness(
             next_report = output_dir.parent / f"{fixture_name}-report.{next_n}.json"
             next_report.write_text(report_json.read_text())
 
-        if kanban_mode == "hermes":
-            status_map = get_todo_kanban_status(fixture["project_slug"], tick_id)
-            print(
-                f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
-                f"phases={status_map} "
-                f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
-            )
+        status_map = get_todo_kanban_status(fixture["project_slug"], tick_id)
+        print(
+            f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
+            f"phases={status_map} "
+            f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
+        )
 
         exit_code = 0 if (success and not timed_out) else 1
 

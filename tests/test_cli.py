@@ -74,31 +74,3 @@ def test_test_subcommand_phase_flag():
     assert args.phase == "phase_2_autoplan"
 
 
-def test_test_subcommand_kanban_rejects_invalid_choice(capsys):
-    """Verify --kanban flag rejects invalid choice."""
-    from hermes_pipeline.cli import build_parser
-
-    parser = build_parser()
-    with pytest.raises(SystemExit) as exc_info:
-        parser.parse_args(["test", "--fixture", "happy-path", "--kanban", "not-a-real-choice"])
-    assert exc_info.value.code == 2
-    captured = capsys.readouterr()
-    assert "invalid choice" in captured.err
-
-
-def test_test_subcommand_kanban_defaults_to_null():
-    """Verify --kanban flag defaults to null."""
-    from hermes_pipeline.cli import build_parser
-
-    parser = build_parser()
-    args = parser.parse_args(["test", "--fixture", "happy-path"])
-    assert args.kanban == "null"
-
-
-def test_test_subcommand_kanban_accepts_hermes():
-    """Verify --kanban flag accepts hermes choice."""
-    from hermes_pipeline.cli import build_parser
-
-    parser = build_parser()
-    args = parser.parse_args(["test", "--fixture", "happy-path", "--kanban", "hermes"])
-    assert args.kanban == "hermes"
