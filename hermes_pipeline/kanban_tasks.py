@@ -439,21 +439,6 @@ def all_phases_complete(
                     # archived (no longer in the kanban list). A rejection
                     # sidecar on disk is the authoritative signal — treat it
                     # as a completion (failed) status so the tick advances.
-                    # Import here to avoid circular dep (gate_state ↔ kanban_tasks).
-                    if key == "phase_2b_plan_gate":
-                        from .gate_state import GateStatus, gate_status
-
-                        status = gate_status(
-                            state_dir=state_dir_path, project_slug=tenant,
-                            tick_id=tick_id, gate_key=key,
-                        )
-                        if status == GateStatus.FAILED:
-                            log.info(
-                                "plan-gate %s rejected — skipping "
-                                "missing-phase check for tick %s",
-                                key, tick_id,
-                            )
-                            continue
                     log.warning(
                         "expected phase %s not found in status map for tick %s "
                         "(partial registration suspected)",
