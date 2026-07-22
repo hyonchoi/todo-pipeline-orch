@@ -164,3 +164,63 @@ def test_agent_skills_phases_yaml_non_gate_phases_reference_skills():
     assert "agent-skills:code-review-and-quality" in phases["phase_4_review"].prompt
     assert "agent-skills:security-and-hardening" in phases["phase_5_security"].prompt
     assert "agent-skills:ship" in phases["phase_7_ship"].prompt
+
+
+
+def test_render_phase_prompt_no_spec_reference_unchanged():
+    """Regression guard: omitting spec/reference kwargs must produce
+    byte-identical output to pre-TODO-25 behavior."""
+    from hermes_pipeline import phases as phases_mod
+    out = phases_mod._render_phase_prompt(
+        "do thing", todo_id="TODO-7", tick_id="01JT", project_slug="demo",
+    )
+    assert "Spec (authoritative):" not in out
+    assert "Reference material:" not in out
+    assert out == (
+        "Pipeline context:\n"
+        "- todo_id: TODO-7\n"
+        "- tick_id: 01JT\n"
+        "- project_slug: demo\n"
+        "Work on TODO-7 ONLY. Do not pick a different TODO.\n\n"
+        "do thing"
+    )
+
+
+def test_render_phase_prompt_both_spec_and_reference():
+    from hermes_pipeline import phases as phases_mod
+    out = phases_mod._render_phase_prompt(
+        "do thing", todo_id="TODO-25", tick_id="01JT", project_slug="demo",
+        spec_path="docs/pipeline/TODO-25-spec.md",
+        reference_paths=["docs/notes/a.md", "docs/notes/b.md"],
+    )
+    assert "Spec (authoritative): docs/pipeline/TODO-25-spec.md\n" in out
+    assert "Reference material: docs/notes/a.md, docs/notes/b.md\n" in out
+
+
+def test_render_phase_prompt_only_spec():
+    from hermes_pipeline import phases as phases_mod
+    out = phases_mod._render_phase_prompt(
+        "do thing", todo_id="TODO-25", tick_id="01JT", project_slug="demo",
+        spec_path="docs/pipeline/TODO-25-spec.md",
+    )
+    assert "Spec (authoritative): docs/pipeline/TODO-25-spec.md\n" in out
+    assert "Reference material:" not in out
+
+
+def test_render_phase_prompt_only_reference():
+    from hermes_pipeline import phases as phases_mod
+    out = phases_mod._render_phase_prompt(
+        "do thing", todo_id="TODO-25", tick_id="01JT", project_slug="demo",
+        reference_paths=["docs/notes/a.md"],
+    )
+    assert "Spec (authoritative):" not in out
+    assert "Reference material: docs/notes/a.md\n" in out
+
+
+def test_render_phase_prompt_empty_reference_list_omitted():
+    from hermes_pipeline import phases as phases_mod
+    out = phases_mod._render_phase_prompt(
+        "do thing", todo_id="TODO-25", tick_id="01JT", project_slug="demo",
+        reference_paths=[],
+    )
+    assert "Reference material:" not in out

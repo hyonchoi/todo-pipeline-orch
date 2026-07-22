@@ -177,6 +177,8 @@ The skill supports seven subcommands. Each has its own workflow below.
 
 ### `--revise`: Revise an existing TODO entry with AI-pre-filled suggestions
 
+**Exception:** `**Spec:**` and `**Reference:**` are never AI-pre-filled or auto-detected (e.g. no scanning `docs/pipeline/TODO-<n>-*.md` and offering it as a suggestion) — the user must type these values verbatim. A wrong guessed path is worse than an empty field. These two fields also never appear in `--add`'s auto-research (see step 4.5).
+
 Read `sections/revise.md` and follow its steps in full.
 
 ---

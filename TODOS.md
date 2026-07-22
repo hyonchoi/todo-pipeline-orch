@@ -4,7 +4,8 @@
 > - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
 > - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
 > - Required fields: **What:**, **Why:**, **Decisions:**
-> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
+> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
 > - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 
@@ -34,20 +35,13 @@
   - **Depends on:** `TODO-20`
   - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/harden-kanban-scheduler-edge-cases`, Test Coverage `required`, Security Review `not-required`
 
-- [ ] **TODO-24: Refine gstack's phases.yaml — review phase composition and instructions** — Audit `hermes_pipeline/data/profiles/gstack/phases.yaml` for phase composition and per-phase instruction quality
+- [x] **TODO-24: Refine gstack's phases.yaml — review phase composition and instructions** — Audit `hermes_pipeline/data/profiles/gstack/phases.yaml` for phase composition and per-phase instruction quality
   - **What:** Review `hermes_pipeline/data/profiles/gstack/phases.yaml` (9 phases: autoplan → plan_gate → writing_plan → development → review → cso → document_release → finish_branch → ship_gate) for: (1) phase composition — are these the right phases, in the right order, with correct gates; (2) each phase's `prompt` field — is the instruction clear, correctly scoped, and consistent with the underlying skill's current behavior; (3) `tools`/`turns`/`timeout` budgets — are they still appropriate. Deliverable is a revised phases.yaml (or a design doc proposing changes) — not a full pipeline rewrite.
   - **Why:** The 9-phase pipeline was assembled incrementally via prior TODOs (TODO-6/7/8), each adding/replacing a phase in isolation. No holistic review has been done of phase ordering, tool grants, turn/timeout budgets, or prompt wording as a set.
   - **Pros:** Catches stale/inconsistent phase prompts before they cause pipeline failures; opportunity to right-size turn/timeout budgets based on real run history.
   - **Cons:** Risk of scope creep into a full pipeline redesign; changes to phase prompts affect live orchestrator runs.
   - **Context:** Related prior work — `TODO-7` (added phase_5_review) and `TODO-8` (replaced phase_8 ship gate), both in TODOS-archive.md.
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/refine-phases-yaml`, Test Coverage `not-required`, Security Review `not-required`
-
-- [ ] **TODO-25: TODOS.md: add optional Spec/Reference field, threaded into autoplan phase prompt** — Add a `**Spec:**` field to the TODOS.md schema; when present, phase_2_autoplan reads and passes that file to the autoplan skill.
-  - **What:** Add an optional `**Spec:**` (or `**Reference:**`) field to the TODOS.md entry schema pointing to a spec/reference md file path. When a TODO entry has this field, `phases.py`'s `_render_phase_prompt` for `phase_2_autoplan` must read the field, and inject the file path/content into the autoplan prompt so the skill runs off that doc rather than only the inline TODO text.
-  - **Why:** Currently phase_2_autoplan only sees the TODO's inline What/Why/Context — there's no way to hand it a fuller spec doc when one exists, forcing either inline bloat in TODOS.md or the spec being invisible to the pipeline.
-  - **Context:** Surfaced during TODO-24 phase_2_autoplan review — schema change lives in `todos-manager` skill (preamble field list) plus `hermes_pipeline/phases.py` (`_render_phase_prompt`, `load_phases`).
-  - **Depends on:** `TODO-24`
-  - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/todos-spec-field`, Test Coverage `required`, Security Review `not-required`
 
 - [ ] **TODO-26: Remove dead plan-gate code after phase_2b_plan_gate removal** — Delete approve_plan.py, its CLI subcommand, and gates.py plan-gate logic once phases.yaml drops phase_2b.
   - **What:** Once `phase_2b_plan_gate` is removed from `phases.yaml` (TODO-24), delete the now-dead plan-gate machinery: `hermes_pipeline/approve_plan.py` (entire module), the `approve-plan` CLI subcommand in `cli.py` (parser + `_cmd_approve_plan`), and the plan-gate-specific logic in `gates.py` (`PLAN_GATE_PHASE_KEY`, `is_high_risk` status-map handling) and `gate_state.py` (confirm `gate_status()`'s default arg/callers still make sense with only `phase_9_ship` using `gate: true`), and `kanban_tasks.py`'s `all_phases_complete` partial-registration guard (~line 443: the `if key == "phase_2b_plan_gate":` branch that treats a rejected/archived gate task as a completion signal) — this branch stops matching anything once phase_2b is removed from phases.yaml and must be deleted alongside the rest.
@@ -78,3 +72,11 @@
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/remove-dead-post-phases-run-cleanup`, Test Coverage `required`, Security Review `not-required`
 
 ## Completed
+
+- [x] **TODO-25: TODOS.md: add optional Spec/Reference field, threaded into autoplan phase prompt** — Add a `**Spec:**` field to the TODOS.md schema; when present, phase_2_autoplan reads and passes that file to the autoplan skill.
+  - **What:** Add an optional `**Spec:**` (or `**Reference:**`) field to the TODOS.md entry schema pointing to a spec/reference md file path. When a TODO entry has this field, `phases.py`'s `_render_phase_prompt` for `phase_2_autoplan` must read the field, and inject the file path/content into the autoplan prompt so the skill runs off that doc rather than only the inline TODO text.
+  - **Why:** Currently phase_2_autoplan only sees the TODO's inline What/Why/Context — there's no way to hand it a fuller spec doc when one exists, forcing either inline bloat in TODOS.md or the spec being invisible to the pipeline.
+  - **Context:** Surfaced during TODO-24 phase_2_autoplan review — schema change lives in `todos-manager` skill (preamble field list) plus `hermes_pipeline/phases.py` (`_render_phase_prompt`, `load_phases`).
+  - **Depends on:** `TODO-24`
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/todos-spec-field`, Test Coverage `required`, Security Review `not-required`
+  - **Completed:** v0.5.5 (2026-07-21)
