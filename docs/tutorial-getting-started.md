@@ -88,18 +88,18 @@ export PIPELINE_PROJECTS_DIR=~/my-projects
 
 (In production, you'd add this to your shell profile or systemd environment file.)
 
-Verify the configuration:
+Verify the configuration by checking that the default pipeline contract was written:
 
 ```bash
-uv run pipeline-watch status
+cat ~/my-projects/demo-app/.hermes/pipeline.toml
 ```
 
 Expected output:
+```toml
+schema_version = 1
+assignee = "default"
+capabilities = ["Bash", "Edit", "Read", "Write"]
 ```
-No pending records
-```
-
-This is correct — no TODOs are ready for review yet. The status command shows TODOs that are eligible to merge.
 
 Write the pipeline execution contract for this project — a small TOML file declaring which assignee and tool capabilities its phases require:
 
@@ -191,51 +191,37 @@ If the file doesn't exist, the project is active by default. To archive a projec
 
 ---
 
-## Step 5: Check pipeline status
+## Step 5: Check pipeline progress
 
-Once a TODO has been selected and is progressing through phases, check the pending records:
+Once a TODO has been selected and is progressing through phases, check the kanban board to see phase status:
 
 ```bash
-uv run pipeline-watch status
+hermes kanban list --tenant demo-app --query "todo_id=TODO-1"
 ```
 
-When TODOs are ready for review, you'll see a table like:
-
-```
-PROJECT    | TODO | BRANCH               | PR | STATUS | AGE
------------|------|----------------------|----|--------|-----
-demo-app   | 1    | feature/todo-1-...   |    | pending| 5m
-```
+You'll see all phases as kanban tasks with their statuses (blocked, ready, running, done, failed).
 
 ---
 
-## Step 6: Merge a TODO
+## Step 6: Approve and ship a TODO
 
-Now merge TODO-1 to main. The merge command runs Phase 9 of the pipeline: it confirms the merge, bumps the version, and commits to main.
+Once all phases are complete and the TODO is ready for review, ship it with the approve command. The approve command runs Phase 9 of the pipeline: it confirms the merge, bumps the version, and commits to main.
 
 ```bash
-uv run pipeline-watch merge demo-app 1
+uv run pipeline-watch approve demo-app --todo TODO-1
 ```
 
 The command will:
-1. Ask for confirmation (type the TODO ID to confirm)
-2. Bump the project's version (if a VERSION file exists)
-3. Execute `git merge --ff-only <branch> -m "Merge TODO-1 ..."`
-4. Record the merge in the pipeline state
+1. Read the ship-gate sidecar to find the PR and branch
+2. Check for a clean working tree and matching PR head
+3. Bump the project's version (if a VERSION file exists)
+4. Execute `gh pr merge --squash` to merge to main
+5. Complete the ship gate task on the kanban board
 
-If you don't have a VERSION file or git main branch set up, the merge will fail gracefully with a helpful error. For a full end-to-end test, set up a main branch:
-
-```bash
-cd ~/my-projects/demo-app
-git checkout -b main
-# Merge will now succeed
-```
-
-To skip confirmation (useful in automation):
-
-```bash
-uv run pipeline-watch merge demo-app 1 --abandon
-```
+For a full end-to-end test, make sure you have:
+- `gh` CLI authenticated for your repository
+- A clean git working tree
+- A PR ready for merging
 
 ---
 
@@ -263,8 +249,8 @@ You now have a working pipeline-watch setup that:
 
 ✅ Discovers projects with TODOS.md files via Hermes agent  
 ✅ Selects TODOs and registers phases as kanban tasks with dependency chains  
-✅ Displays pending records in a table  
-✅ Merges TODOs to main with version bumping  
+✅ Checks phase progress on the kanban board  
+✅ Ships approved TODOs to main with version bumping  
 ✅ Runs automatically every 5 minutes via Hermes cron (optional)  
 
 ### Next steps
@@ -278,10 +264,9 @@ You now have a working pipeline-watch setup that:
 
 **Understand the architecture:**
 - Read [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) to understand how phases map to kanban tasks
-- Read [Architecture](../README.md#architecture) to see how pipeline-watch orchestrates the phases and merges
+- Read [Architecture](../README.md#architecture) to see how pipeline-watch orchestrates the phases and ships
 - Check [docs/pipeline-modularization-plan.md](pipeline-modularization-plan.md) for the full design
 
 **When things break:**
-- Check [Troubleshooting](../README.md#troubleshooting) for solutions to "command not found: uv", merge hangs, and other issues
-- Run `pipeline-watch kill` to stop stuck phases — see [docs/howto-kill-stuck-phase.md](howto-kill-stuck-phase.md)
+- Check [Troubleshooting](../README.md#troubleshooting) for solutions to "command not found: uv" and other issues
 - Check Hermes logs in `~/.hermes/`

@@ -6,9 +6,9 @@ today, verified by reading full function bodies — not signatures, not docs.
 
 **Scope:** one automated pipeline-watch cycle in the kanban-as-scheduler path
 (`kanban_mode == "hermes"`, i.e. `harness.py::_poll_kanban_phases` and its
-callees). The non-kanban `PipelineRunner` + null-adapter path, multi-project
-scan, Slack alerts, and preflight startup checks are out of scope — see
-[docs/gstack design doc TODO-22] "NOT in scope" section for rationale.
+callees). Multi-project scan, Slack alerts, and preflight startup checks are
+out of scope — see [docs/gstack design doc TODO-22] "NOT in scope" section for
+rationale.
 
 **Cross-reference:** rows that overlap `docs/hermes-state-machine.md`'s
 existing 16-row tick-level table cite the matching row instead of duplicating
@@ -63,8 +63,7 @@ unchanged and unaffected by this decision.
 
 ## Not covered by this checklist (see design doc "NOT in scope")
 
-- Non-kanban `PipelineRunner` + null-adapter harness path (rows would live in
-  a separate checklist if that path is ever prioritized).
+- Multi-project scan coverage
 - `tick.py::TickLock.acquire` — the kanban-as-scheduler path as implemented in
   `harness.py` does not itself acquire a tick lock (that's a pipeline-watch
   tick-runner concern, upstream of what the harness fixture drives). If TODO-21

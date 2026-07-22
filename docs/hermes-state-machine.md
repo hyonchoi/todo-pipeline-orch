@@ -17,7 +17,6 @@ file writes / file deletes.
 | hermes chat failure | phase running | failed | `.hermes/ready_for_review/todo-N.json` with merge_status=failed, `.hermes/outcomes/<tick>.json` (failed_at_phase_*) | `.hermes/phase_started/TODO-N.json` |
 | Phase 9 typed-confirm match | ready_for_review (pending) | merged | RFR updated to merged, `.hermes/outcomes/<tick>.json` (merged) | — |
 | Phase 9 typed-confirm mismatch | ready_for_review (pending) | unchanged | — | — |
-| `pipeline-watch kill` | phase running | killed | `.hermes/outcomes/<tick>.json` (killed_by_operator) | `.hermes/phase_started/TODO-N.json`, optionally `.hermes/tick.lock/` |
 | Stale marker sweep (read time) | phase running (orphaned) | absent | — | `.hermes/phase_started/TODO-N.json` |
 | Prompt SHA mismatch | tick lock held | tick lock released | `.hermes/decisions/<tick>.json` (rationale=prompt_sha_mismatch), Slack alert | `.hermes/tick.lock/` |
 

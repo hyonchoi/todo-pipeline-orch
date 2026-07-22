@@ -13,15 +13,13 @@ Ship a TODO that has passed all pipeline phases and is waiting at the Phase 9 sh
 
 ### 1. Confirm the TODO is ready to ship
 
-Check that the pipeline detected ship-ready state:
+Check that the pipeline detected ship-ready state by verifying kanban task statuses — all phases except `phase_9_ship` should be `done` or `failed`, and `phase_9_ship` should be `blocked`:
 
 ```bash
-uv run pipeline-watch status
+hermes kanban list <project> --query "todo_id=TODO-5"
 ```
 
-Look for a pending ready-for-review record matching the TODO.
-
-Alternatively, verify kanban task statuses — all phases except `phase_9_ship` should be `done` or `failed`, and `phase_9_ship` should be `blocked`.
+Look for the TODO's kanban card with all phases except ship in completion status.
 
 ### 2. Run the approve command
 
@@ -102,6 +100,5 @@ If the process crashes after the merge but before completing the gate, re-runnin
 ## See Also
 
 - [CLI reference](reference-cli.md) — `approve` subcommand
-- [How to approve a plan gate](howto-approve-plan-gate.md) — Phase 2b human checkpoint
 - [Circuit breaker explanation](explanation-circuit-breaker.md) — Why stalled ticks alert
 - [Pipeline state machine](hermes-state-machine.md) — Ship gate state transitions

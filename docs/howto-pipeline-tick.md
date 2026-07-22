@@ -125,7 +125,7 @@ in `~/.hermes/`.
 **"tick already in flight, skipping".**
 A prior tick's kanban tasks are still running or ready. Check the board:
 `hermes kanban list --tenant demo`. If tasks are stuck in `running`,
-use [pipeline-watch kill](howto-kill-stuck-phase.md) to clear them.
+manually clear them via `hermes kanban update <project> <task_id> --status done`.
 
 **"Error: tick.lock held by pid X"**.
 The tick lock is held. If the PID is alive (within `max_tick_duration_min` —
@@ -153,5 +153,4 @@ for how to temporarily loosen the threshold.
 
 - [Kanban-as-Scheduler reference](reference-kanban-as-scheduler.md) — full API docs
 - [Pipeline State Machine](hermes-state-machine.md) — full tick lifecycle
-- [How to kill a stuck phase](howto-kill-stuck-phase.md)
 - [How to configure the circuit breaker](howto-config-toml.md)

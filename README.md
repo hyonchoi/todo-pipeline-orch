@@ -11,11 +11,10 @@ See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
 ## Features
 
 - **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
-- **CLI subcommands**: `tick`, `merge`, `status`, `kill`, `recover-counter`, `approve-plan` for pipeline management
-- **Multi-project scan loop**: `tick` and `kill` without a project argument scan all active projects in one execution
+- **CLI subcommands**: `tick`, `approve` for pipeline management
+- **Multi-project scan loop**: `tick` without a project argument scans all active projects in one execution
 - **Logging flags**: `--verbose` and `--debug` global flags for detailed diagnostics (selection results, lock state, agent call summaries, circuit breaker transitions)
 - **Pending records table**: Display ready-for-review records with status and age
-- **Plan Gate (phase_2b)** — Human review checkpoint between Autoplan and Writing Plan. Blocks the pipeline until a human approves or rejects the plan via `pipeline-watch approve-plan`. Includes risk classifier, decision sheet schema, and override sanitization.
 - **Phase 5 code review (v0.4)**: New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q`, with pre-review snapshot, post-review pytest run, deterministic commit-on-pass or restore-on-fail, and machine-verified outcomes (`review_clean`, `review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`)
 - **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
 - **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
@@ -40,7 +39,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `pipeline-watch` end-to-end |
 | [Architecture overview](docs/ARCHITECTURE.md) | Explanation | Understanding lane structure, data flow, phase execution |
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
-| [Approve or reject a plan gate](docs/howto-approve-plan-gate.md) | How-to | Responding to plan-gate alerts, reviewing decisions, overriding recommendations |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
 | [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `pipeline-watch tick` uses kanban for phase state and ordering |
@@ -48,7 +46,6 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
 | [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
 | [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
-| [Kill a stuck in-flight phase](docs/howto-kill-stuck-phase.md) | How-to | A phase is wedged past `max_phase_timeout_min` |
 | [Set up multiple projects](docs/howto-multi-project-setup.md) | How-to | Configuring per-project settings and the scan loop |
 | [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
 | [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
@@ -117,34 +114,9 @@ Run a single pipeline tick (scans all active projects, select a TODO, register k
 uv run pipeline-watch tick
 ```
 
-Display pipeline status:
+Approve and ship a ready TODO (runs deterministic guards, bumps version, squash-merges to main, completes the ship gate):
 ```bash
-uv run pipeline-watch status
-```
-
-Merge a ready TODO to main:
-```bash
-uv run pipeline-watch merge <project> <todo_id>
-# Or with --abandon flag to skip confirmation
-uv run pipeline-watch merge <project> <todo_id> --abandon
-```
-
-Kill in-flight phases (writes a `killed_by_operator` outcome sidecar and releases the tick lock if held by the killed tick). Without a project argument, scans all active projects:
-```bash
-# Kill a specific TODO across all projects
-uv run pipeline-watch kill --todo TODO-N
-# Kill every in-flight phase across all projects
-uv run pipeline-watch kill --all
-```
-
-Approve or reject a plan-gate decision sheet (unblocks the pipeline at the plan gate):
-```bash
-# Approve the plan for a TODO
-uv run pipeline-watch approve-plan <project> --todo TODO-N --approve
-# Reject with a reason
-uv run pipeline-watch approve-plan <project> --todo TODO-N --reject --reason "..."
-# Override individual decisions without re-running Autoplan
-uv run pipeline-watch approve-plan <project> --todo TODO-N --approve --override q_id=LABEL
+uv run pipeline-watch approve myproject --todo TODO-5
 ```
 
 Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful when bootstrapping a project with hand-written TODOs but no counter file):
@@ -273,14 +245,6 @@ blocks when a contract *exists* but is stale or under-declares capabilities.
 - Check `PIPELINE_PROJECTS_DIR` is set and contains `TODOS.md` files
 - Ensure the Hermes cron tick is running: `hermes cron list`
 
-**"error: argument todo_id: invalid int value"**
-- `todo_id` must be a number, e.g., `123` (not `ABC` or `some-id`)
-- **Fix:** Run `uv run pipeline-watch merge --help` to see usage
-
-**Merge operation hangs**
-- Check if another merge is already in progress (lock file in `PIPELINE_LOCK_DIR`)
-- Verify git repository is accessible and has write permissions
-
 ## Architecture
 
 The package is organized into lanes:
@@ -290,7 +254,6 @@ The package is organized into lanes:
 - **Lane C**: Kanban integration (kanban-as-scheduler — phases as kanban tasks with `--parent` dependency chains; see [reference-kanban-as-scheduler.md](docs/reference-kanban-as-scheduler.md))
 - **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)
 - **Lane D.5**: Code review phase (`review_phase.py` — pre-review snapshot, hermes `/review` subprocess, post-review pytest + deterministic commit/restore, machine-verified outcomes)
-- **Lane D.6**: Plan gate (`gates.py`, `approve_plan.py`, `decision/schema.py` — decision sheet I/O, risk classifier, gate status, approve/reject logic)
 - **Lane E**: Merge orchestration (Phase 9)
 - **Lane F**: CLI, watcher, status, and installation (this lane; includes `project_config.py` for multi-project scanning and `state_migration.py` for per-project state)
 - **Lane G**: Hermes adapter (`hermes_adapter.py` — wraps `hermes chat -q` for all LLM calls, replaces direct Anthropic SDK usage)

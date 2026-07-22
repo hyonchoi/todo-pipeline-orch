@@ -20,14 +20,13 @@ pipeline through `PipelineRunner`, monitors each phase, and produces `report.jso
 uv run hermes-pipeline test --fixture happy-path --timeout 120
 ```
 
-This creates a temporary project with a single TODO entry, runs all 9 phases, and
+This creates a temporary project with a single TODO entry, runs all 9 phases (minus the deleted plan-gate), and
 cleans up. Expect ~30 seconds with `claude-haiku-4-5` pinned in the fixture config.
 
 Output:
 ```
 2026-07-15 18:40:23,101 INFO hermes_pipeline.runner Running phase 1/9: Phase 2: Autoplan (key=phase_2_autoplan)
-2026-07-15 18:40:26,916 INFO hermes_pipeline.runner Running phase 2/9: Phase 2b: Plan Gate (key=phase_2b_plan_gate)
-2026-07-15 18:40:26,916 INFO hermes_pipeline.runner gate phase_2b_plan_gate auto-approved (continue_on_failure mode)
+2026-07-15 18:40:26,916 INFO hermes_pipeline.runner Running phase 2/9: Phase 3: Writing Plan (key=phase_3_writing_plan)
 ...
 2026-07-15 18:40:43,782 INFO hermes_pipeline.runner All phases completed successfully; moving to ready_for_review
 ```
