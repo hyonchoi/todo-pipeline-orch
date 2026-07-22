@@ -26,14 +26,12 @@ from .circuit import CircuitBreaker
 from .config import Config, CircuitBreakerConfig, _validate_project_slug
 from .decision import run_selection, store as _cli_dec_store
 from .decision.context import build_context
-from .kanban import NullKanbanAdapter, HermesKanbanAdapter
+from .kanban import HermesKanbanAdapter
 from .kanban_tasks import all_phases_complete, observe_outcomes, register_todo_phases
 from .logging_setup import configure as configure_logging
 from .outcomes import CURRENT_TICK_ID_FILE, OUTCOME_PICKED_NONE
 from .logging_setup import new_tick_id as _new_tick_id
-from .merge import run_phase9, make_default_bump_fn
 from .phases import load_phases
-from .status import collect_pending, format_table
 from .tick import TickLock, TickLockHeld
 
 log = logging.getLogger(__name__)
@@ -169,186 +167,6 @@ def _release_tick_lock_if_owned_by(state_dir: Path, tick_ids: set[str]) -> None:
     except OSError:
         pass
 
-def cmd_kill(
-    *,
-    state_dir: Path,
-    all_: bool = False,
-    todo: str | None = None,
-    project: str | None = None,
-    config: Config | None = None,
-) -> int:
-    """Kill in-flight phase(s) and write killed_by_operator outcome sidecars.
-
-    When project is specified, kills in that project's state directory.
-    When project is omitted, scans all projects for in-flight phases.
-
-    - Reads phase_started/* markers
-    - SIGTERMs the recorded child_pid (and/or sends hermes run kill <job_id>)
-    - Writes killed_by_operator outcome sidecars
-    - Deletes markers
-    - Releases tick.lock ONLY if its holder is one of the killed ticks
-    """
-    # Multi-project kill: scan all projects
-    if project is None and config is not None:
-        return _kill_all_projects(config, all_=all_, todo=todo)
-    ps_dir = state_dir / "phase_started"
-    if not ps_dir.exists():
-        print("no in-flight phases")
-        return 0
-
-    targets = []
-    if todo:
-        p = ps_dir / f"{todo}.json"
-        if p.exists():
-            targets.append(p)
-        else:
-            print(f"no in-flight phase for {todo}")
-            return 2
-    elif all_:
-        targets = [f for f in ps_dir.iterdir() if f.is_file() and f.suffix == ".json"]
-    else:
-        print("error: specify --all or --todo TODO-N")
-        return 2
-
-    killed_tick_ids: set[str] = set()
-    unconfirmed: list[str] = []
-    for p in targets:
-        try:
-            data = json.loads(p.read_text())
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            print(f"warning: unreadable marker {p.name}: {e}")
-            continue
-        job_id = data.get("job_id")
-        child_pid = data.get("child_pid")
-        tick_id = data.get("tick_id", "")
-
-        # Verify the phase actually died before we declare it killed. A
-        # SIGTERM-ignoring or already-detached Claude process must NOT be
-        # recorded as killed_by_operator while it keeps mutating the repo;
-        # if confirmation fails, leave the marker in place so future ticks
-        # still see the TODO as in-flight.
-        exit_confirmed = True
-        if child_pid:
-            exit_confirmed = _confirm_pid_exited(int(child_pid))
-        elif job_id:
-            # hermes run kill is the only handle we have; trust its return code.
-            exit_confirmed = (_hermes_run_kill(job_id) == 0)
-        else:
-            print(f"warning: no child_pid or job_id on marker {p.name}; cannot confirm kill")
-            exit_confirmed = False
-
-        # Best-effort secondary kill via hermes runner even when we had a pid.
-        if child_pid and job_id:
-            _hermes_run_kill(job_id)
-
-        if not exit_confirmed:
-            print(
-                f"error: failed to confirm exit for {p.name} "
-                f"(pid={child_pid} job={job_id}); leaving marker in place"
-            )
-            unconfirmed.append(p.name)
-            continue
-
-        if tick_id:
-            try:
-                _cli_dec_store.append_outcome(
-                    state_dir, tick_id,
-                    outcome="killed_by_operator",
-                    detail={"todo_id": p.stem},
-                )
-            except FileExistsError:
-                # Outcome already terminal — fine, marker cleanup still proceeds.
-                pass
-            killed_tick_ids.add(tick_id)
-
-        p.unlink()
-
-    _release_tick_lock_if_owned_by(state_dir, killed_tick_ids)
-    return 1 if unconfirmed else 0
-
-def _kill_all_projects(
-    config: Config,
-    *,
-    all_: bool = False,
-    todo: str | None = None,
-) -> int:
-    """Scan all projects and kill in-flight phases.
-
-    Args:
-        config: Global config.
-        all_: Kill all in-flight phases across all projects.
-        todo: Kill a specific TODO across all projects.
-
-    Returns:
-        0 if successful, 1 if some kills unconfirmed, 2 if TODO not found.
-    """
-    from .project_config import _discover_projects
-
-    projects = _discover_projects(config)
-    if not projects:
-        print("no active projects found")
-        return 0
-
-    # Both counters are project-scoped (a project is "unconfirmed" if its
-    # cmd_kill couldn't confirm every kill). Don't mix phase counts with
-    # project counts — only their zero/non-zero state drives the result below.
-    projects_with_kills = 0
-    projects_unconfirmed = 0
-    # Track whether we checked any project for a specific TODO
-    todo_checked = False
-    todo_found = False
-
-    for project_dir, _toml_data in projects:
-        project_slug = project_dir.name
-        project_state = project_dir / ".hermes"
-        ps_dir = project_state / "phase_started"
-
-        if not ps_dir.exists():
-            log.debug("project %s: no phase_started dir, skipping", project_slug)
-            continue
-
-        # Count targets in this project
-        if all_:
-            targets = [f for f in ps_dir.iterdir() if f.is_file() and f.suffix == ".json"]
-        elif todo:
-            p = ps_dir / f"{todo}.json"
-            todo_checked = True
-            targets = [p] if p.exists() else []
-            if p.exists():
-                todo_found = True
-        else:
-            continue
-
-        if not targets:
-            log.debug("project %s: no targets for kill, skipping", project_slug)
-            continue
-
-        log.info("project %s: killing %d in-flight phases", project_slug, len(targets))
-        # Kill phases in this project using existing cmd_kill logic
-        result = cmd_kill(
-            state_dir=project_state,
-            all_=all_,
-            todo=todo,
-        )
-        if result == 0:
-            projects_with_kills += 1
-        else:
-            projects_unconfirmed += 1
-
-    # If the user asked for a specific TODO and it wasn't found anywhere,
-    # be explicit rather than hiding behind "no in-flight phases found".
-    if todo and todo_checked and not todo_found:
-        print(f"no in-flight phase for {todo} in any project")
-        return 2
-
-    if projects_with_kills == 0 and projects_unconfirmed == 0:
-        print("no in-flight phases found")
-        return 0
-    elif projects_unconfirmed > 0:
-        return 1
-    else:
-        return 0
-
 def _parse_todo_id(value: str) -> int:
     """Parse todo_id argument with helpful error message."""
     try:
@@ -406,20 +224,6 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
 
-    # merge: Phase 9 merge
-    merge_parser = subparsers.add_parser(
-        "merge",
-        help="Execute Phase 9: merge a ready TODO to main",
-    )
-    merge_parser.add_argument("project", help="Project name")
-    merge_parser.add_argument("todo_id", type=_parse_todo_id, help="TODO ID to merge (must be a number)")
-    merge_parser.add_argument(
-        "--abandon",
-        action="store_true",
-        help="Abandon the merge without confirmation",
-    )
-    merge_parser.set_defaults(func=_cmd_merge)
-
     # approve: Phase 9 ship gate — bump-in-PR, merge, complete gate
     approve_parser = subparsers.add_parser(
         "approve",
@@ -435,52 +239,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="Pass twice (--force --force) to bypass ONLY the SHA-staleness guard (audited)",
     )
     approve_parser.set_defaults(func=_cmd_approve)
-
-    # approve-plan: Phase 2b plan gate — approve/reject the decision sheet
-    approve_plan_parser = subparsers.add_parser(
-        "approve-plan",
-        help="Approve or reject a plan-gate decision sheet for a TODO",
-    )
-    approve_plan_parser.add_argument("project", help="Project name")
-    approve_plan_parser.add_argument(
-        "--todo", required=True, type=_parse_todo_id_flag,
-        help="TODO whose plan to approve/reject (e.g. TODO-5)",
-    )
-    ap_action = approve_plan_parser.add_mutually_exclusive_group(required=True)
-    ap_action.add_argument(
-        "--approve", action="store_true", help="Approve the plan",
-    )
-    ap_action.add_argument(
-        "--reject", action="store_true", help="Reject the plan (requires --reason)",
-    )
-    approve_plan_parser.add_argument(
-        "--override", action="append", metavar="Q_ID=LABEL", default=None,
-        help="Override a recommendation (repeatable), e.g. --override q1=B. "
-             "Only valid with --approve.",
-    )
-    approve_plan_parser.add_argument(
-        "--reason", default=None,
-        help="Rejection reason (required with --reject)",
-    )
-    approve_plan_parser.set_defaults(func=_cmd_approve_plan)
-
-    # status: List pending records
-    status_parser = subparsers.add_parser(
-        "status",
-        help="Display pending ready-for-review records",
-    )
-    status_parser.set_defaults(func=_cmd_status)
-
-    # kill: Kill in-flight phases
-    kill_parser = subparsers.add_parser(
-        "kill",
-        help="Kill in-flight phase(s)",
-    )
-    kill_group = kill_parser.add_mutually_exclusive_group(required=True)
-    kill_group.add_argument("--all", dest="all_", action="store_true", help="Kill all in-flight phases")
-    kill_group.add_argument("--todo", help="Kill a specific TODO (e.g., TODO-1)")
-    kill_parser.add_argument("project", nargs="?", default=None, help="Project name (optional — omit to scan all projects)")
-    kill_parser.set_defaults(func=_cmd_kill)
 
     # tick: Pipeline tick — select TODO, register kanban phases
     tick_parser = subparsers.add_parser(
@@ -611,154 +369,6 @@ def _cmd_approve(args, config: Config) -> int:
     except Exception as e:
         log.error("approve command failed: %s", e, exc_info=True)
         return 2
-
-
-def _cmd_approve_plan(args, config: Config) -> int:
-    """Handle 'approve-plan' subcommand: approve or reject a plan-gate sheet.
-
-    Exit codes: 0 success, 3 refused by a guard, 2 unexpected error.
-    """
-    from . import approve_plan as ap
-    from .state_migration import _get_project_state_dir
-
-    # Flag-combination guards — self-contained, no project dir needed.
-    if args.reject and not args.reason:
-        print(
-            "approve-plan refused: --reject requires --reason "
-            "(explain why the plan was rejected)",
-            file=sys.stderr,
-        )
-        return 3
-    if args.approve and args.reason:
-        print(
-            "approve-plan refused: --reason is only valid with --reject",
-            file=sys.stderr,
-        )
-        return 3
-    if args.reject and args.override:
-        print(
-            "approve-plan refused: --override is only valid with --approve",
-            file=sys.stderr,
-        )
-        return 3
-
-    project_dir = _resolve_project_dir(config, args.project)
-    if project_dir is None:
-        return 2
-
-    state_dir = _get_project_state_dir(project_dir)
-    try:
-        overrides = ap._parse_overrides(args.override) if args.approve else None
-        summary = ap.approve_plan(
-            project_dir=project_dir,
-            project_slug=args.project,
-            todo_id=args.todo,
-            state_dir=state_dir,
-            overrides=overrides,
-            reject_reason=args.reason if args.reject else None,
-        )
-        print(summary)
-        return 0
-    except ap.ApproveRefused as e:
-        print(f"approve-plan refused: {e}", file=sys.stderr)
-        return 3
-    except Exception as e:
-        log.error("approve-plan command failed: %s", e, exc_info=True)
-        return 2
-
-
-def _cmd_merge(args, config: Config) -> int:
-    """Handle 'merge' subcommand."""
-    try:
-        project = args.project
-        todo_id = args.todo_id
-        abandon = args.abandon
-
-        # Find the project directory
-        project_dir = _resolve_project_dir(config, project)
-        if project_dir is None:
-            return 2
-
-        # Build kanban adapter
-        if config.kanban_adapter == "hermes":
-            kanban = HermesKanbanAdapter()
-        else:
-            kanban = NullKanbanAdapter()
-
-        # Prepare State for reading ready-for-review record
-        checkpoint_dir = config.state_dir / "pipeline_checkpoints"
-        ready_dir = config.state_dir / "ready_for_review"
-
-        from .state import State
-        state = State(
-            project=project,
-            lock_dir=config.lock_dir,
-            checkpoint_dir=checkpoint_dir,
-            ready_dir=ready_dir,
-        )
-
-        # Run Phase 9
-        if abandon:
-            # Abandon: reject without confirmation
-            def confirm_fn(tid: int) -> bool:
-                return False
-        else:
-            # Normal: use default confirmation
-            from .merge import default_confirm_fn
-            confirm_fn = default_confirm_fn
-
-        bump_fn = make_default_bump_fn(project_dir)
-
-        run_phase9(
-            state=state,
-            project_dir=project_dir,
-            todo_id=todo_id,
-            kanban=kanban,
-            confirm_fn=confirm_fn,
-            bump_fn=bump_fn,
-        )
-        return 0
-    except Exception as e:
-        log.error(f"merge command failed: {e}", exc_info=True)
-        return 2
-
-
-def _cmd_status(args, config: Config) -> int:
-    """Handle 'status' subcommand."""
-    try:
-        rows = collect_pending(config.projects_dir, config.lock_dir)
-        table = format_table(rows)
-        print(table, end="")
-        return 0
-    except Exception as e:
-        log.error(f"status command failed: {e}", exc_info=True)
-        return 2
-
-def _cmd_kill(args, config: Config) -> int:
-    """Handle 'kill' subcommand.
-
-    If project is specified, kill in that project.
-    If project is omitted and --all, scan all projects for in-flight phases.
-    If project is omitted and --todo, kill that TODO across all projects.
-    """
-    from .state_migration import _get_project_state_dir
-
-    # Resolve project-specific state directory when project is given
-    if args.project is not None:
-        project_dir = _resolve_project_dir(config, args.project)
-        if project_dir is None:
-            return 2
-        state_dir = _get_project_state_dir(project_dir)
-    else:
-        state_dir = config.state_dir
-
-    return cmd_kill(
-        state_dir=state_dir,
-        all_=args.all_,
-        todo=args.todo,
-        project=args.project,
-        config=config,
-    )
 
 
 def _read_prior_tick_id(state_dir: Path) -> str | None:
@@ -1123,16 +733,6 @@ def _tick_project(
         # False, so detect/alert "ready to ship" BEFORE the early-return below.
         from . import ship
         ship.maybe_ship_ready(
-            project_dir=project_dir,
-            project_slug=project_slug,
-            prior_tick_id=prior_tick_id,
-            state_dir=project_state,
-            slack_channel=slack_channel,
-        )
-
-        # Plan-gate: detect blocked plan-gate before all_phases_complete check.
-        from . import gates
-        gates.maybe_plan_gate_ready(
             project_dir=project_dir,
             project_slug=project_slug,
             prior_tick_id=prior_tick_id,

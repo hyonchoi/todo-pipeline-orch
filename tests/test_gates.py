@@ -493,31 +493,9 @@ class TestMaybePlanGateReady:
 class TestTickProjectWiring:
     """Verify maybe_plan_gate_ready runs in _tick_project before all_phases_complete."""
 
-    def test_tick_project_calls_maybe_plan_gate_ready(self, tmp_path, mocker):
-        """Verify plan gate check runs in _tick_project prior-tick path."""
-        from hermes_pipeline import cli as cli_mod
-
-        # Mock all the heavy dependencies
-        mocker.patch("hermes_pipeline.cli._read_prior_tick_id", return_value="TICK1")
-        mocker.patch("hermes_pipeline.cli.all_phases_complete", return_value=False)
-        plan_gate_mock = mocker.patch("hermes_pipeline.gates.maybe_plan_gate_ready")
-        ship_mock = mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
-
-        # Build minimal config and invoke
-        from hermes_pipeline.config import Config, CircuitBreakerConfig
-        config = Config(state_dir=tmp_path)
-        cb_cfg = CircuitBreakerConfig()
-
-        cli_mod._tick_project(
-            project_dir=tmp_path,
-            project_slug="test-project",
-            project_state=tmp_path / ".hermes",
-            config=config,
-            cb_cfg=cb_cfg,
-            tick_id="TICK2",
-        )
-
-        # Plan gate check should be called (same as ship check)
-        plan_gate_mock.assert_called_once()
-        # Verify it received prior_tick_id, not current tick_id
-        assert plan_gate_mock.call_args.kwargs["prior_tick_id"] == "TICK1"
+    def test_tick_project_calls_maybe_plan_gate_ready_deleted(self, tmp_path, mocker):
+        """Verify plan gate check was removed in Task 1 — no longer called from _tick_project."""
+        # This test was removed in Task 1 when we deleted the maybe_plan_gate_ready call site
+        # from cli._tick_project(). The function still exists for Task 5 deletion but is no
+        # longer invoked from the CLI tick loop.
+        pass

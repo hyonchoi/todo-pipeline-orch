@@ -157,9 +157,14 @@ class TestVerboseDebugFlags:
         projects_dir.mkdir()
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # Create a test project directory for recover-counter
+        proj = projects_dir / "test-proj"
+        proj.mkdir()
+        (proj / "TODOS.md").write_text("# TODOs\n")
         monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
-        result = main(["--verbose", "status"])
+        # Use recover-counter instead of deleted 'status' subcommand
+        result = main(["--verbose", "recover-counter", "test-proj"])
         assert result == 0
         root = logging.getLogger()
         assert root.level == logging.INFO
@@ -171,9 +176,14 @@ class TestVerboseDebugFlags:
         projects_dir.mkdir()
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # Create a test project directory for recover-counter
+        proj = projects_dir / "test-proj"
+        proj.mkdir()
+        (proj / "TODOS.md").write_text("# TODOs\n")
         monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
-        result = main(["status", "--debug"])
+        # Use recover-counter instead of deleted 'status' subcommand
+        result = main(["recover-counter", "test-proj", "--debug"])
         assert result == 0
         root = logging.getLogger()
         assert root.level == logging.DEBUG
@@ -185,9 +195,14 @@ class TestVerboseDebugFlags:
         projects_dir.mkdir()
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # Create a test project directory for recover-counter
+        proj = projects_dir / "test-proj"
+        proj.mkdir()
+        (proj / "TODOS.md").write_text("# TODOs\n")
         monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
-        result = main(["status", "--verbose"])
+        # Use recover-counter instead of deleted 'status' subcommand
+        result = main(["recover-counter", "test-proj", "--verbose"])
         assert result == 0
         root = logging.getLogger()
         assert root.level == logging.INFO
@@ -199,9 +214,14 @@ class TestVerboseDebugFlags:
         projects_dir.mkdir()
         state_dir = tmp_path / "state"
         state_dir.mkdir()
+        # Create a test project directory for recover-counter
+        proj = projects_dir / "test-proj"
+        proj.mkdir()
+        (proj / "TODOS.md").write_text("# TODOs\n")
         monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
-        result = main(["--debug", "status"])
+        # Use recover-counter instead of deleted 'status' subcommand
+        result = main(["--debug", "recover-counter", "test-proj"])
         assert result == 0
         root = logging.getLogger()
         assert root.level == logging.DEBUG
