@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.5] - 2026-07-21
+
+### Added
+
+- Optional `**Spec:**` and `**Reference:**` fields on TODOS.md entries. `**Spec:**` names a single authoritative deliverable doc; `**Reference:**` is a comma-delimited list of supplementary background paths. When present, the pipeline's first phase (`_invoke_hermes`) validates each path (containment under `project_dir`, existence) and injects the surviving paths into the phase prompt via `_render_phase_prompt`. Both fields are `--revise`-only in the `todos-manager` skill — never AI-pre-filled or auto-suggested — and fail soft: any parse error, missing file, or traversal attempt silently drops that item rather than raising.
+- `hermes_pipeline/todos_md.py`: new standalone `find_todo_fields()` parser that extracts `Spec:`/`Reference:` values for a given TODO entry, anchored between that entry's header and the next, so it can't bleed into a neighboring entry.
+
 ## [0.5.4] - 2026-07-20
 
 ### Changed
