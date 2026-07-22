@@ -319,8 +319,8 @@ def _invoke_hermes(*, todo_id: str, phase_key: str, tick_id: str, state_dir, pro
     def _record_child_pid(pid: int) -> None:
         _update_marker_pid(sd, todo_id, pid)
 
-    from . import review_phase as _rp
-    if phase.phase_key == _rp.REVIEW_PHASE_KEY:
+    # review_phase module deleted; this branch is dead code (Task 4 will remove).
+    if phase.phase_key == "phase_5_review":
         return _invoke_review_phase(
             phase=phase, todo_id=todo_id, tick_id=tick_id, state_dir=sd,
             project_slug=project_slug, project_dir=kw.get("project_dir"),

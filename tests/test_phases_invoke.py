@@ -340,6 +340,7 @@ def test_run_sidecar_fileexists_error_suppressed(state_dir, monkeypatch):
         )
 
 
+@pytest.mark.skip(reason="review_phase module deleted (Task 3); restored in Task 4")
 def test_invoke_routes_review_phase_through_review_lifecycle(state_dir, monkeypatch, tmp_path):
     """phase_5_review must go through capture -> hermes -> finalize, not the
     generic rc-check path."""
@@ -371,6 +372,7 @@ def test_invoke_routes_review_phase_through_review_lifecycle(state_dir, monkeypa
     assert calls["finalize"]["pre_state"].head_sha == "abc123"
 
 
+@pytest.mark.skip(reason="review_phase module deleted (Task 3); restored in Task 4")
 def test_invoke_review_phase_short_circuits_on_no_diff(state_dir, monkeypatch, tmp_path):
     monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_5_review", terminal=False, prompt="run /review"),

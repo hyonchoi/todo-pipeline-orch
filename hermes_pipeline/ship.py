@@ -201,6 +201,24 @@ def _run_git(args: list[str], *, cwd: Path | str) -> str:
     return result.stdout.strip()
 
 
+def _bump_version(project_dir: Path | str) -> tuple[str, str]:
+    """Increment the patch version of the VERSION file (inline former merge.py helper)."""
+    project_dir = Path(project_dir)
+    version_file = project_dir / "VERSION"
+    if version_file.exists():
+        current = version_file.read_text().strip()
+    else:
+        current = "0.1.0"
+    parts = current.split(".")
+    if len(parts) >= 3:
+        major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
+        patch += 1
+        new_version = f"{major}.{minor}.{patch}"
+    else:
+        new_version = "0.1.1"
+    return new_version, f"bump to {new_version}"
+
+
 def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tuple[str, str]:
     """Bump VERSION/pyproject/CHANGELOG on work_branch, commit, push.
 
@@ -211,10 +229,8 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
     The original branch is saved and restored so a crash (CI-red refusal,
     merge failure) never leaves the operator on the wrong branch.
     """
-    from .merge import make_default_bump_fn
-
     project_dir = Path(project_dir)
-    new_version, _label = make_default_bump_fn(project_dir)(None)
+    new_version, _label = _bump_version(project_dir)
 
     orig_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_dir)
     try:
