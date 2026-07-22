@@ -1,12 +1,10 @@
 """Kanban integration for pipeline orchestration.
 
-Provides a Protocol-based KanbanClient interface with implementations for null (no-op)
-and hermes (CLI-based) adapters. Includes atomic store management and a create-preserving
+Provides a Protocol-based KanbanClient interface with the hermes (CLI-based)
+adapter implementation. Includes atomic store management and a create-preserving
 outbox for resilient sync with cap and drop-oldest-first on overflow.
 
-NOTE: HermesKanbanAdapter, KanbanOutbox, and ActiveTasksStore are retained for
-backward compatibility (--kanban null path, merge orchestration). The harness
---kanban hermes path has moved to kanban-as-scheduler via kanban_tasks.py.
+The harness --kanban hermes path uses kanban-as-scheduler via kanban_tasks.py.
 """
 
 from __future__ import annotations
