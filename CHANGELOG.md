@@ -15,11 +15,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Plan-gate branches in `hermes_pipeline/gates.py` and `hermes_pipeline/gate_state.py` — `PLAN_GATE_PHASE_KEY`, plan-gate phase marker logic.
 - Null-kanban-scheduler branches in `hermes_pipeline/harness.py`, `hermes_pipeline/phases.py` — `PipelineRunner` dispatch, `run()` function, `_invoke_hermes()` / `_invoke_review_phase()` null-mode handlers, marker-based state fallback, gate-dispatch harness.
 - CLI subcommands: `merge`, `status`, `kill` (null-scheduler dead code; Hermes kanban-only consolidation in v0.5.2 and later supersedes these).
+- `ReadyForReview` and its `State` methods (`write_ready_for_review`, `write_ready_for_review_min`, `read_ready_for_review`, `set_merge_status`, `list_ready_for_review_pending`) in `hermes_pipeline/state.py` — orphaned once `phases.py`/`runner.py` (their only writers) were deleted.
+- `hermes_pipeline/gates.py` decision-sheet and rejection-sidecar I/O (`write_decision_sheet`, `read_decision_sheet`, `write_rejection_sidecar`, `read_rejection_sidecar`, `_sanitize_override`, `_HIGH_RISK_KEYWORDS`) — dead once the plan-gate branch was removed; only `REJECTION_SUFFIX` remains (still read by `decision/context.py`'s rejection-count reader).
 - Test modules and fixtures tied to deleted plan-gate and null-scheduler subsystems.
 
 ### Changed
 
-- `hermes_pipeline/phases.py` `in_flight_ids()` — removed file-marker fallback during kanban service outages. Now returns empty list if kanban lookup fails (strict single-kanban design, no degraded fallback).
+- `hermes_pipeline/decision/context.py` `build_in_flight()` — removed file-marker fallback during kanban service outages. Now returns empty list if kanban lookup fails (strict single-kanban design, no degraded fallback). Added explicit test coverage for the outage path.
 
 ## [0.5.5] - 2026-07-21
 

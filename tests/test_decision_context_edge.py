@@ -208,4 +208,49 @@ class TestKanbanSnapshot:
         assert result == {"columns": [], "_error": "kanban snapshot unavailable"}
 
 
+class TestBuildInFlightKanbanOutage:
+    """build_in_flight() has no file-marker fallback (strict single-kanban
+    design) — on any kanban lookup failure it must return [], never raise
+    and never silently resurrect the deleted phase_started/ready_for_review
+    fallback."""
+
+    def test_no_snapshot_and_no_board_slug_returns_empty(self, tmp_path):
+        """No snapshot, no board_slug — nothing to look up, returns []."""
+        result = build_in_flight(tmp_path, max_phase_timeout_min=60)
+        assert result == []
+
+    def test_snapshot_none_and_kanban_lookup_fails_returns_empty(self, tmp_path, mocker):
+        """snapshot=None and the board_slug lookup itself fails (returns
+        None) — must return [], not raise and not fall back to reading
+        state_dir markers."""
+        mocker.patch(
+            "hermes_pipeline.decision.context._kanban_in_flight_ids",
+            return_value=None,
+        )
+        result = build_in_flight(
+            tmp_path, max_phase_timeout_min=60, board_slug="demo",
+        )
+        assert result == []
+
+    def test_snapshot_provided_bypasses_board_slug_lookup(self, tmp_path, mocker):
+        """When a snapshot is pre-fetched, it's used directly and
+        _kanban_in_flight_ids (the CLI-calling path) is never invoked."""
+        spy = mocker.patch(
+            "hermes_pipeline.decision.context._kanban_in_flight_ids",
+        )
+        snapshot = {
+            "tasks": [
+                {"status": "running", "body": json.dumps({"todo_id": "TODO-7"})},
+            ]
+        }
+        result = build_in_flight(
+            tmp_path,
+            max_phase_timeout_min=60,
+            board_slug="demo",
+            snapshot=snapshot,
+        )
+        assert result == ["TODO-7"]
+        spy.assert_not_called()
+
+
 
