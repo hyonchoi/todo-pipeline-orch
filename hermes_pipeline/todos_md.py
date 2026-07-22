@@ -66,6 +66,9 @@ def _extract(text: str, todo_id: str) -> dict:
     references: list[str] = []
     if ref_match:
         raw = ref_match.group(1)
+        # Comma-delimited; a path containing a literal comma will be split
+        # incorrectly. Documented as a schema constraint (see schema.md) —
+        # not worth quoting/escaping machinery for a rare edge case.
         references = [r.strip() for r in raw.split(",") if r.strip()]
 
     return {"spec": spec, "references": references}

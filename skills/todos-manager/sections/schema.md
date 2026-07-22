@@ -39,7 +39,7 @@ TODOS.md is stored at the repo root. Each entry occupies a single markdown list 
 | **Completed:** | Version + date (set when done) |
 | **Resolved design:** | Design decisions (zero or more) |
 | **Spec:** | Single path to the authoritative deliverable (e.g. from office-hours / grill-with-docs / spec skills) — drives the pipeline's first phase. `--revise`-only: never AI-suggested, never part of `--add` auto-research; always user-typed verbatim. |
-| **Reference:** | Comma-separated list of supplementary/background paths, threaded into the pipeline's first phase prompt. Same `--revise`-only, never-auto-suggested rule as `Spec:`. Not a synonym for `Context:`, which stays free-text prose. |
+| **Reference:** | Comma-separated list of supplementary/background paths, threaded into the pipeline's first phase prompt. Same `--revise`-only, never-auto-suggested rule as `Spec:`. Not a synonym for `Context:`, which stays free-text prose. Paths must not contain literal commas (the list is split on `,`). |
 
 ## Example: complete entry
 
