@@ -21,6 +21,16 @@ def _fake_phase(*, phase_key: str, terminal: bool, prompt: str = "do thing",
         tools="Read", turns=turns, timeout=timeout, terminal=terminal,
     )
 
+def _capture_prompt(monkeypatch) -> dict:
+    """Patch _run_hermes_subprocess to record the rendered prompt instead of
+    running a subprocess. Returns the dict the prompt will be captured into."""
+    seen: dict = {}
+    def _capture(**kw):
+        seen["prompt"] = kw["prompt"]
+        return {"returncode": 0, "stdout": ""}
+    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    return seen
+
 def test_invoke_writes_ready_for_review_on_terminal_phase(state_dir, monkeypatch):
     monkeypatch.setattr(phases_mod, "load_phases", lambda *a, **k: [
         _fake_phase(phase_key="phase_8_finish_branch", terminal=True),
@@ -404,11 +414,7 @@ def test_first_phase_injects_spec_and_reference(state_dir, monkeypatch, tmp_path
   - **Spec:** docs/pipeline/TODO-25-spec.md
   - **Reference:** docs/notes/a.md
 """)
-    seen = {}
-    def _capture(**kw):
-        seen["prompt"] = kw["prompt"]
-        return {"returncode": 0, "stdout": ""}
-    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    seen = _capture_prompt(monkeypatch)
     phases_mod._invoke_hermes(
         todo_id="TODO-25", phase_key="phase_2_autoplan",
         tick_id="01JT", state_dir=state_dir, project_slug="demo",
@@ -433,11 +439,7 @@ def test_non_first_phase_does_not_inject(state_dir, monkeypatch, tmp_path):
 - [ ] **TODO-25: Do the thing** — summary
   - **Spec:** docs/pipeline/TODO-25-spec.md
 """)
-    seen = {}
-    def _capture(**kw):
-        seen["prompt"] = kw["prompt"]
-        return {"returncode": 0, "stdout": ""}
-    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    seen = _capture_prompt(monkeypatch)
     phases_mod._invoke_hermes(
         todo_id="TODO-25", phase_key="phase_3_other",
         tick_id="01JT", state_dir=state_dir, project_slug="demo",
@@ -462,11 +464,7 @@ def test_missing_spec_file_dropped_reference_kept(state_dir, monkeypatch, tmp_pa
   - **Spec:** docs/pipeline/nonexistent-spec.md
   - **Reference:** docs/notes/a.md
 """)
-    seen = {}
-    def _capture(**kw):
-        seen["prompt"] = kw["prompt"]
-        return {"returncode": 0, "stdout": ""}
-    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    seen = _capture_prompt(monkeypatch)
     phases_mod._invoke_hermes(
         todo_id="TODO-25", phase_key="phase_2_autoplan",
         tick_id="01JT", state_dir=state_dir, project_slug="demo",
@@ -496,11 +494,7 @@ def test_traversal_path_dropped_independently_of_existence(state_dir, monkeypatc
   - **Spec:** ../outside.md
   - **Reference:** docs/notes/a.md
 """)
-    seen = {}
-    def _capture(**kw):
-        seen["prompt"] = kw["prompt"]
-        return {"returncode": 0, "stdout": ""}
-    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    seen = _capture_prompt(monkeypatch)
     phases_mod._invoke_hermes(
         todo_id="TODO-25", phase_key="phase_2_autoplan",
         tick_id="01JT", state_dir=state_dir, project_slug="demo",
@@ -516,11 +510,7 @@ def test_no_todos_md_no_injection_phase_runs_normally(state_dir, monkeypatch, tm
     ])
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
-    seen = {}
-    def _capture(**kw):
-        seen["prompt"] = kw["prompt"]
-        return {"returncode": 0, "stdout": ""}
-    monkeypatch.setattr(phases_mod, "_run_hermes_subprocess", _capture)
+    seen = _capture_prompt(monkeypatch)
     out = phases_mod._invoke_hermes(
         todo_id="TODO-25", phase_key="phase_2_autoplan",
         tick_id="01JT", state_dir=state_dir, project_slug="demo",
