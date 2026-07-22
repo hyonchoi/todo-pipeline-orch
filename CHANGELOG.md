@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.6] - 2026-07-22
+
+### Removed
+
+- `hermes_pipeline/approve_plan.py` — dead plan-gate subsystem module (CLI `approve-plan` subcommand removed in v0.5.5; no remaining call sites).
+- `hermes_pipeline/runner.py` — dead null-kanban-scheduler subsystem module; consolidation into single-kanban-only design removes its `PipelineRunner` orchestration role.
+- `hermes_pipeline/watcher.py` — dead watcher entrypoint (replaced by `__main__.py` event loop in v0.5.1).
+- Plan-gate branches in `hermes_pipeline/gates.py` and `hermes_pipeline/gate_state.py` — `PLAN_GATE_PHASE_KEY`, plan-gate phase marker logic.
+- Null-kanban-scheduler branches in `hermes_pipeline/harness.py`, `hermes_pipeline/phases.py` — `PipelineRunner` dispatch, `run()` function, `_invoke_hermes()` / `_invoke_review_phase()` null-mode handlers, marker-based state fallback, gate-dispatch harness.
+- CLI subcommands: `merge`, `status`, `kill` (null-scheduler dead code; Hermes kanban-only consolidation in v0.5.2 and later supersedes these).
+- Test modules and fixtures tied to deleted plan-gate and null-scheduler subsystems.
+
+### Changed
+
+- `hermes_pipeline/phases.py` `in_flight_ids()` — removed file-marker fallback during kanban service outages. Now returns empty list if kanban lookup fails (strict single-kanban design, no degraded fallback).
+
 ## [0.5.5] - 2026-07-21
 
 ### Added
