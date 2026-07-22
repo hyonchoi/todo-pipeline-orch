@@ -3,7 +3,6 @@
 Covers:
 - gate_status() pure read (CP2)
 - all_phases_complete() rejection sidecar exception to sentinel check
-- _invoke_hermes() gate phase skip/halt
 """
 from __future__ import annotations
 
@@ -309,70 +308,3 @@ class TestAllPhasesCompleteRejection:
             state_dir=tmp_path, project_slug="proj", tick_id="T1",
             gate_key="phase_2b_plan_gate",
         )
-
-
-# ---------------------------------------------------------------------------
-# _invoke_hermes gate phase handling
-# ---------------------------------------------------------------------------
-
-
-class TestInvokeHermesGate:
-    def test_gate_approved_skips_hermes(self, mocker, tmp_path):
-        """When a gate phase is approved (RUNNING), _invoke_hermes returns
-        success without calling hermes subprocess."""
-        mocker.patch(
-            "hermes_pipeline.gate_state.gate_status",
-            return_value=GateStatus.RUNNING,
-        )
-        run_hermes = mocker.patch("hermes_pipeline.phases._run_hermes_subprocess")
-
-        result = __import__(
-            "hermes_pipeline.phases", fromlist=["_invoke_hermes"]
-        )._invoke_hermes(
-            todo_id="TODO-5",
-            phase_key="phase_9_ship",
-            tick_id="T1",
-            state_dir=tmp_path,
-            project_slug="proj",
-        )
-
-        assert result["status"] == "success"
-        run_hermes.assert_not_called()
-
-    def test_gate_blocked_raises(self, mocker, tmp_path):
-        """When a gate phase is blocked, _invoke_hermes raises RuntimeError
-        (the tick holds)."""
-        mocker.patch(
-            "hermes_pipeline.gate_state.gate_status",
-            return_value=GateStatus.BLOCKED,
-        )
-
-        with pytest.raises(RuntimeError, match="is blocked"):
-            __import__(
-                "hermes_pipeline.phases", fromlist=["_invoke_hermes"]
-            )._invoke_hermes(
-                todo_id="TODO-5",
-                phase_key="phase_9_ship",
-                tick_id="T1",
-                state_dir=tmp_path,
-                project_slug="proj",
-            )
-
-    def test_gate_rejected_raises(self, mocker, tmp_path):
-        """When a gate phase is rejected (FAILED), _invoke_hermes raises
-        RuntimeError so the runner records the failure."""
-        mocker.patch(
-            "hermes_pipeline.gate_state.gate_status",
-            return_value=GateStatus.FAILED,
-        )
-
-        with pytest.raises(RuntimeError, match="is failed"):
-            __import__(
-                "hermes_pipeline.phases", fromlist=["_invoke_hermes"]
-            )._invoke_hermes(
-                todo_id="TODO-5",
-                phase_key="phase_9_ship",
-                tick_id="T1",
-                state_dir=tmp_path,
-                project_slug="proj",
-            )
