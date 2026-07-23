@@ -83,3 +83,9 @@
   - **Depends on:** `TODO-27`
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/remove-dead-post-phases-run-cleanup`, Test Coverage `required`, Security Review `not-required`
   - **Completed:** v0.5.6 (2026-07-22)
+
+
+- [ ] **TODO-30: Add live status monitoring to `pipeline-watch test` poll loop** — Replace silent timeout wait with real-time kanban phase status table and transitions
+  - **What:** (1) Add live console output to `_poll_kanban_phases()` in harness.py — print an initial status table after registration, then log each phase status transition (→ running, → done, → failed) as the poll loop detects them. (2) Remove the wall-clock timeout ceiling from `run_harness()` so the poll loop runs to natural completion (all phases terminal) instead of being killed by `--timeout`. The timeout flag remains as an optional safety fallback, defaulting to a large value.
+  - **Why:** The `test` command sits silent during the entire poll duration, giving no feedback until timeout or completion. Users can't track which phases are executing or see progress. Additionally, the artificial timeout can kill a running pipeline before phases finish.
+  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `—`, Test Coverage `required`, Security Review `not-required`
