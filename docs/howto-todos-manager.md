@@ -55,7 +55,7 @@ todos-manager --add
 
 1. The skill computes the next `TODO-<n>` ID by scanning both TODOS.md and TODOS-archive.md
 2. Prompts for **title** and **summary**
-3. **Auto-research phase** — silently reads TODOS.md, TODOS-archive.md, git log, design docs under `docs/gstack/`, CLAUDE.md, and source files implied by the title. Derives `What`, `Why`, `Pros`, `Cons`, `Context`, `Priority`, `Effort`, `Phase`, `Branch`, `Test Coverage`, `Security Review`, and `Depends on` from what it finds. Budget capped at 20 file reads and 10 searches.
+3. **Auto-research phase** — silently reads TODOS.md, TODOS-archive.md, git log, design docs under `docs/gstack/`, CLAUDE.md, and source files implied by the title. Derives `What`, `Why`, `Pros`, `Cons`, `Context`, `Priority`, `Effort`, `Phase`, `Branch`, `Test Coverage`, `Security Review`, `UI Review`, and `Depends on` from what it finds. Budget capped at 20 file reads and 10 searches.
 4. **Gap questions** — for any field research couldn't resolve, asks one question at a time (`Why` first, then `What`, `Priority`, `Effort`, `Depends on`)
 5. **Synthesis block** — shows all derived and user-answered fields with confidence tags (high/medium/low):
 
@@ -72,6 +72,7 @@ Phase:           4 (Development)                              [Confidence: high]
 Branch:          feature/rate-limit                           [Confidence: medium]
 Test Coverage:   required                                     [Confidence: high]
 Security Review: not-required                                 [Confidence: high]
+UI Review:       not-required                                 [Confidence: high]
 Depends on:      TODO-6                                       [Confidence: high]
 ======== END SYNTHESIS ========
 
@@ -88,7 +89,7 @@ These are pre-fills — confirm or edit each in the next step.
   - **What:** Add rate-limiting middleware to the API server.
   - **Why:** Critical for production stability under concurrent load.
   - **Depends on:** `TODO-6` (authentication middleware)
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/rate-limit`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/rate-limit`, Test Coverage `필요`, Security Review `불필요`, UI Review `불필요`
 ======== END PREVIEW ========
 
 Proceed? [y / edit / cancel]
@@ -111,7 +112,7 @@ Proceed? [y / edit / cancel]
 | Summary | 10–100 characters |
 | `What` | Non-empty |
 | `Why` | 10–200 characters |
-| `Decisions` | Must include Priority, Effort, Phase, Branch, Test Coverage, Security Review |
+| `Decisions` | Must include Priority, Effort, Phase, Branch, Test Coverage, Security Review, UI Review |
 | `Depends on` | Each `TODO-<n>` must exist in TODOS.md or TODOS-archive.md |
 
 ## Convert an existing TODOS.md
@@ -257,6 +258,7 @@ Phase:           4 (Development)                       [Confidence: medium]
 Branch:          feature/modularize-watcher            [Confidence: high]
 Test Coverage:   required                              [Confidence: high]
 Security Review: not-required                          [Confidence: high]
+UI Review:       not-required                          [Confidence: high]
 Pros:            Testable modules, clear boundaries    [Confidence: medium]
 Cons:            Migration effort, import path updates [Confidence: medium]
 Context:         docs/pipeline-modularization-plan.md  [Confidence: high]
@@ -274,7 +276,7 @@ These are pre-fills — confirm or edit each in the next step.
 
 **Output on success:**
 ```
-✓ TODO-5 revised. Updated fields: Priority, Effort, Phase, Branch, Test Coverage, Security Review, Pros, Cons, Context, Depends on.
+✓ TODO-5 revised. Updated fields: Priority, Effort, Phase, Branch, Test Coverage, Security Review, UI Review, Pros, Cons, Context, Depends on.
 ```
 
 ## Verification

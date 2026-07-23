@@ -41,7 +41,7 @@ Error: **Why:** field must be 10–200 characters.
 Remediation: Provide a rationale for why this task matters.
 
 Error: **Decisions:** field is missing.
-Remediation: Set key decisions: Priority, Effort, Phase, Branch, Test Coverage, Security Review.
+Remediation: Set key decisions: Priority, Effort, Phase, Branch, Test Coverage, Security Review, UI Review.
 
 Error: Dependency TODO-99 does not exist in TODOS.md or TODOS-archive.md.
 Remediation: Check the list of valid IDs or remove TODO-99 from the depends_on list.

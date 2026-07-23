@@ -33,7 +33,7 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
    **Required fields:**
    - **What:** Missing if absent; weak if present but empty after trimming whitespace.
    - **Why:** Missing if absent; weak if present but fewer than 10 characters after trimming.
-   - **Decisions:** Missing if absent; weak if present but missing any of the required sub-keys (Priority, Effort, Phase, Branch, Test Coverage, Security Review).
+   - **Decisions:** Missing if absent; weak if present but missing any of the required sub-keys (Priority, Effort, Phase, Branch, Test Coverage, Security Review, UI Review).
 
    **Optional fields** (flag as optional gaps if absent):
    - **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**
@@ -76,6 +76,7 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
    Branch:          feature/modularize-watcher            [Confidence: high]
    Test Coverage:   required                              [Confidence: high]
    Security Review: not-required                          [Confidence: high]
+   UI Review:       not-required                          [Confidence: high]
    Pros:            Testable modules, clear boundaries    [Confidence: medium]
    Cons:            Migration effort, import path updates [Confidence: medium]
    Context:         docs/pipeline-modularization-plan.md  [Confidence: high]
