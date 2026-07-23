@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.7] - 2026-07-23
+
+### Added
+
+- `UI Review` decision field for `todos-manager` TODO entries, mirroring the existing `Security Review` field — `required`/`not-required`, auto-derived from title/summary keywords (ui, frontend, design, visual, layout, component, css, style, dashboard, artifact, page, screen, modal, form, navigation, button, icon, animation) during `--add`, surfaced in the synthesis block, validated as a required `Decisions` sub-key, and gap-checked by `--revise`.
+
 ## [0.5.6] - 2026-07-22
 
 ### Removed
