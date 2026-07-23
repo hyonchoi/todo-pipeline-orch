@@ -40,7 +40,7 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     pipeline_toml = (
         "# Pipeline execution contract — read at tick start.\n"
         "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
-        "schema_version = 1\n"
+        "schema_version = 2\n"
         'assignee = "pipeline"\n'
         'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
     )
