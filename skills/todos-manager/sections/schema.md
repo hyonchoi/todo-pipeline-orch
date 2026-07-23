@@ -25,7 +25,7 @@ TODOS.md is stored at the repo root. Each entry occupies a single markdown list 
 |-------|-------------|--------|
 | **What:** | What needs to be done | Free text |
 | **Why:** | Why this task matters | Free text |
-| **Decisions:** | Key decisions | Backtick-delimited: `Priority \`P1\`, Effort \`M\`, Phase \`4 (Development)\`, Branch \`feature/...\`, Test Coverage \`required/not-required\`, Security Review \`required/not-required\`` |
+| **Decisions:** | Key decisions | Backtick-delimited: `Priority \`P1\`, Effort \`M\`, Phase \`4 (Development)\`, Branch \`feature/...\`, Test Coverage \`required/not-required\`, Security Review \`required/not-required\`, UI Review \`required/not-required\`` |
 
 ## Optional fields
 
@@ -51,7 +51,7 @@ TODOS.md is stored at the repo root. Each entry occupies a single markdown list 
   - **Cons:** Migration effort, import path updates across test suite
   - **Context:** Design lives in [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
   - **Depends on:** `TODO-40` (design review finalized)
-  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/modularize-watcher`, Test Coverage `required`, Security Review `not-required`
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/modularize-watcher`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
 ```
 
 ## Preamble Template

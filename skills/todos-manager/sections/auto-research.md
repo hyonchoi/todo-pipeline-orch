@@ -42,6 +42,7 @@ hard limits during signal collection:
 | `Branch` | Follow naming convention observed in last 5 branches (`git branch --sort=-committerdate`) |
 | `Test Coverage` | `required` if `What` implies new logic or new function; `not-required` if docs-only or config-only |
 | `Security Review` | `required` if title/summary contains: auth, token, secret, permission, credential, API key; else `not-required` |
+| `UI Review` | `required` if title/summary contains: ui, frontend, design, visual, layout, component, css, style, dashboard, artifact, page, screen, modal, form, navigation, button, icon, animation; else `not-required` |
 | `Depends on` | TODO-<n> IDs found in matching design docs, or `[→]` TODOs on related topics |
 | `Context` | Path to matching design doc if found |
 
@@ -79,6 +80,7 @@ Phase:           <derived>                      [Confidence: high/medium/low]
 Branch:          <derived>                      [Confidence: high/medium/low]
 Test Coverage:   <derived>                      [Confidence: high/medium/low]
 Security Review: <derived>                      [Confidence: high/medium/low]
+UI Review:       <derived or answered>          [Confidence: high/medium/low]
 Depends on:      <derived or answered, or "(none)">
 ======== END SYNTHESIS ========
 
@@ -90,5 +92,6 @@ always `high`. Derived fields are `high` if backed by an exact match (design
 doc found, related TODO with same keywords, explicit blocking keyword in
 summary), `medium` if inferred from a pattern (branch naming convention,
 recent commit phase reference), and `low` if defaulted with no supporting
-signal (e.g. Priority defaulted to `P2`, Security Review defaulted to
-`not-required` with no keyword match). Never mark a defaulted field `high`.
+signal (e.g. Priority defaulted to `P2`, Security Review or UI Review
+defaulted to `not-required` with no keyword match). Never mark a defaulted
+field `high`.

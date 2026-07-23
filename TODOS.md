@@ -52,6 +52,16 @@
 
 ## Completed
 
+- [x] **TODO-31: Add 'UI Review' decision for phase_6_2 skip signal to TODOS.md schema** — Document `UI Review required/not-required` in schema, auto-research, SKILL.md, and preamble so new TODO entries always carry the skip signal phase_6_2 reads.
+  - **What:** Add `UI Review required/not-required` to the Decisions field definition in sections/schema.md, sections/auto-research.md derivation rules, SKILL.md workflow/preamble, and TODOS.md preamble blockquote. Auto-detect from title/summary keywords: ui, frontend, design, visual, layout, component, css, style, dashboard, artifact, page, screen, modal, form, navigation, button, icon, animation.
+  - **Why:** phase_6_2_qa prompt already checks `UI Review: required` in Decisions, but the sub-field is undocumented in schema, auto-research, SKILL.md, and preamble — new entries omit it, causing phase_6_2 to have no skip signal to check.
+  - **Pros:** All new TODO entries get a UI Review decision; phase_6_2 can skip non-UI work without dispatching a no-op QA task; consistent with Security Review pattern
+  - **Cons:** Adds another Decisions sub-field — revising old entries to backfill UI Review is a manual effort for ~30 existing TODOs
+  - **Context:** phases.yaml phase_6_2_qa already reads `UI Review: required`; TODO-24 (phases.yaml refinement) is where this gap was surfaced.
+  - **Depends on:** `TODO-24`
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/ui-review-decision-schema`, Test Coverage `not-required`, Security Review `not-required`
+  - **Completed:** v0.5.7 (2026-07-23)
+
 - [x] **TODO-26: Remove dead plan-gate code after phase_2b_plan_gate removal** — Delete approve_plan.py, its CLI subcommand, and gates.py plan-gate logic once phases.yaml drops phase_2b.
   - **What:** Once `phase_2b_plan_gate` is removed from `phases.yaml` (TODO-24), delete the now-dead plan-gate machinery: `hermes_pipeline/approve_plan.py` (entire module), the `approve-plan` CLI subcommand in `cli.py` (parser + `_cmd_approve_plan`), and the plan-gate-specific logic in `gates.py` (`PLAN_GATE_PHASE_KEY`, `is_high_risk` status-map handling) and `gate_state.py` (confirm `gate_status()`'s default arg/callers still make sense with only `phase_9_ship` using `gate: true`), and `kanban_tasks.py`'s `all_phases_complete` partial-registration guard (~line 443: the `if key == "phase_2b_plan_gate":` branch that treats a rejected/archived gate task as a completion signal) — this branch stops matching anything once phase_2b is removed from phases.yaml and must be deleted alongside the rest.
   - **Why:** `approve-plan` was exclusively wired to `phase_2b_plan_gate` (`PLAN_GATE_PHASE_KEY = "phase_2b_plan_gate"`); once that gate is removed the CLI, its handler, and gates.py's plan-gate branch become unreachable dead code.
@@ -89,3 +99,12 @@
   - **What:** (1) Add live console output to `_poll_kanban_phases()` in harness.py — print an initial status table after registration, then log each phase status transition (→ running, → done, → failed) as the poll loop detects them. (2) Remove the wall-clock timeout ceiling from `run_harness()` so the poll loop runs to natural completion (all phases terminal) instead of being killed by `--timeout`. The timeout flag remains as an optional safety fallback, defaulting to a large value.
   - **Why:** The `test` command sits silent during the entire poll duration, giving no feedback until timeout or completion. Users can't track which phases are executing or see progress. Additionally, the artificial timeout can kill a running pipeline before phases finish.
   - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `—`, Test Coverage `required`, Security Review `not-required`
+
+- [ ] **TODO-32: Separate `data/profiles` into identity and phase-config contexts** — Split mixed Hermes identity profile and pipeline phase definitions into distinct directories
+  - **What:** Separate `hermes_pipeline/data/profiles` into two distinct directories (or restructure) — one for Hermes' identity/profile data (`pipeline/SOUL.md`) and another for pipeline phase configurations (`gstack/phases.yaml`, `agent-skills/phases.yaml`). The `pipeline/` subdirectory contains persona/identity data, while `gstack/` and `agent-skills/` contain pipeline orchestration metadata. These two contexts currently share a `profiles` namespace but represent completely different domains.
+  - **Why:** The `data/profiles` directory mixes two unrelated contexts: Hermes' core identity profile (`pipeline/SOUL.md`) and phase definition configs for different pipelines (`gstack/phases.yaml`, `agent-skills/phases.yaml`). They share a `profiles` namespace but represent completely different domains — one is persona/identity data, the other is pipeline orchestration metadata. This conflation makes it easy to accidentally load the wrong type of data and obscures the semantic distinction between "who Hermes is" and "how pipelines run."
+  - **Pros:** Clearer directory semantics reduces risk of loading wrong data type; each domain can evolve its own file structure independently; easier to reason about which load paths access identity vs phase config
+  - **Cons:** Requires updating all import/load paths that reference `data/profiles/`; breaks any external tooling that assumes the current layout; migration touches multiple files
+  - **Context:** Current layout: `data/profiles/pipeline/SOUL.md` (identity), `data/profiles/gstack/phases.yaml` (gstack phases), `data/profiles/agent-skills/phases.yaml` (agent-skills phases)
+  - **Assumptions:** The codebase loads these paths by relative routing (`data/profiles/pipeline/`, `data/profiles/gstack/`, `data/profiles/agent-skills/`), so any restructure requires updating import/load paths.
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/separate-profiles-data`, Test Coverage `required`, Security Review `not-required`

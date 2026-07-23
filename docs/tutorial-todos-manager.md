@@ -78,7 +78,7 @@ Invoke `todos-manager --add`. The skill guides you through the fields:
 - [ ] **TODO-1: Set up database connection pool** — Avoid opening new connection per request
   - **What:** Set up a PostgreSQL connection pool for the API server.
   - **Why:** Opening a new connection per request adds latency and risks hitting connection limits under load.
-  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feature/db-pool`, Test Coverage `필요`, Security Review `불필요`
+  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feature/db-pool`, Test Coverage `필요`, Security Review `불필요`, UI Review `불필요`
 ======== END PREVIEW ========
 Proceed? [y / edit / cancel]
 ```
@@ -154,6 +154,7 @@ Phase:           4 (Development)                       [Confidence: medium]
 Branch:          feature/rate-limit                    [Confidence: high]
 Test Coverage:   required                              [Confidence: high]
 Security Review: not-required                          [Confidence: high]
+UI Review:       not-required                          [Confidence: high]
 Pros:            Production stability, graceful degradation [Confidence: medium]
 Cons:            Migration effort, import path updates [Confidence: medium]
 Context:         docs/gstack/api-rate-limiting.md      [Confidence: high]
@@ -169,7 +170,7 @@ These are pre-fills — confirm or edit each in the next step.
 
 **Output:**
 ```
-✓ TODO-3 revised. Updated fields: Priority, Effort, Phase, Branch, Test Coverage, Security Review, Pros, Cons, Context.
+✓ TODO-3 revised. Updated fields: Priority, Effort, Phase, Branch, Test Coverage, Security Review, UI Review, Pros, Cons, Context.
 ```
 
 Verify the result:

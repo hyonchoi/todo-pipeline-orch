@@ -62,6 +62,11 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using --init, --add, --convert, --audit, --archive, --list, --revise |
 | [Install TODOS Manager](scripts/install-todos-manager.sh) | How-to | Symlink skill to user-level skill directories |
 | [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for the todos-manager skill |
+| [Skill test environment quickstart](docs/howto-skill-test-environment.md) | How-to | Adding and maintaining tests in the skill test harness |
+| [Skill test harness API](docs/reference-skill-test-harness.md) | Reference | Complete API for the todos-manager skill test environment |
+| [Why the skill test harness is pure-Python](docs/explanation-skill-test-harness-design.md) | Explanation | Design rationale: golden-file architecture, Phase 1 vs Phase 2 |
+| [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `hermes-pipeline test` against mock project data end-to-end |
+| [Harness production-code coverage checklist](docs/checklist-harness-production-coverage.md) | Reference | Acceptance criteria for maximal harness reuse of production code paths |
 
 | [Approve and ship a TODO](docs/howto-approve-and-ship.md) | How-to | Running `pipeline-watch approve` — full ship workflow |
 | [CLI reference](docs/reference-cli.md) | Reference | All subcommands, arguments, exit codes, environment variables |
