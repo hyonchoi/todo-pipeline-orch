@@ -297,6 +297,12 @@ def _poll_kanban_phases(
         assignee=assignee,
     )
 
+    initial_status = get_todo_kanban_status(project_slug, tick_id)
+    log.info(
+        "initial phase status: %s",
+        ", ".join(f"{k}={v}" for k, v in sorted(initial_status.items())) or "(none)",
+    )
+
     # Gate tasks will be auto-completed when their parent phase finishes,
     # not at registration time — this ensures parent output exists before
     # child phases can start.

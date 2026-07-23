@@ -336,6 +336,76 @@ class TestPollKanbanPhasesConsoleOutput:
         )
         assert any("p1" in r.message and "failed" in r.message for r in caplog.records)
 
+    def test_initial_status_table_prints_after_registration(self, monkeypatch, mocker, tmp_path, caplog):
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch, mocker, tmp_path=tmp_path,
+            status_sequence=[
+                {"p1": "ready"},
+                {"p1": "done"},
+                {"p1": "done"},
+            ],
+        )
+        assert any("initial phase status" in r.message.lower() for r in caplog.records)
+
+    def test_initial_status_table_prints_before_any_transition(self, monkeypatch, mocker, tmp_path, caplog):
+        """Even if the first poll already shows a phase terminal, the initial table
+        must have printed first."""
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch, mocker, tmp_path=tmp_path,
+            status_sequence=[
+                {"p1": "done"},
+                {"p1": "done"},
+            ],
+        )
+        messages = [r.message.lower() for r in caplog.records]
+        initial_idx = next(i for i, m in enumerate(messages) if "initial phase status" in m)
+        transition_idx = next(i for i, m in enumerate(messages) if "p1" in m and "-> done" in m)
+        assert initial_idx < transition_idx
+
+    def test_registration_failure_emits_no_transition_logs(self, monkeypatch, mocker, tmp_path, caplog):
+        """If register_todo_phases() raises, the poll loop must never start —
+        matches today's behavior, no new failure path."""
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
+
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        monkeypatch.setattr("hermes_pipeline.harness.time.sleep", lambda *_a, **_kw: None)
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            side_effect=RuntimeError("boom"),
+        )
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status")
+
+        log_path = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(log_path)
+        detector = ConvergenceDetector(threshold=99)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        with pytest.raises(RuntimeError, match="boom"):
+            _poll_kanban_phases(
+                project_slug="proj",
+                tick_id="tick-1",
+                state_dir=tmp_path,
+                todo_id="TODO-30",
+                project_dir=tmp_path,
+                phases_path=None,
+                monitor=monitor,
+                detector=detector,
+                poll_interval=0.0,
+                max_poll_interval=0.0,
+            )
+
+        assert not any("initial phase status" in r.message.lower() for r in caplog.records)
+        assert not any("->" in r.message for r in caplog.records)
+
 
 class TestRunHarnessTimeout:
     """Overall --timeout must actually bound a hung phase, not just be accepted and ignored."""
@@ -673,7 +743,7 @@ class TestPollKanbanPhases:
         call_count = [0]
         def fake_status(*args, **kwargs):
             call_count[0] += 1
-            if call_count[0] == 1:
+            if call_count[0] <= 2:
                 return {"phase_2_autoplan": "running", "phase_4_development": "ready"}
             return {"phase_2_autoplan": "done", "phase_4_development": "done"}
 
@@ -861,7 +931,7 @@ class TestPollKanbanPhases:
         call_count = [0]
         def fake_status(*args, **kwargs):
             call_count[0] += 1
-            if call_count[0] <= 3:
+            if call_count[0] <= 4:
                 return {"phase_2_autoplan": "running"}
             return {"phase_2_autoplan": "done"}
 
