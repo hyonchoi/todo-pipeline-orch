@@ -208,99 +208,49 @@ class TestKanbanSnapshot:
         assert result == {"columns": [], "_error": "kanban snapshot unavailable"}
 
 
-class TestBuildInFlightFallback:
-    """build_in_flight fallback when kanban returns None."""
+class TestBuildInFlightKanbanOutage:
+    """build_in_flight() has no file-marker fallback (strict single-kanban
+    design) — on any kanban lookup failure it must return [], never raise
+    and never silently resurrect the deleted phase_started/ready_for_review
+    fallback."""
 
-    def test_kanban_none_with_file_markers(self, state_dir, mocker):
-        """Kanban returns None, file markers exist -> use file markers."""
+    def test_no_snapshot_and_no_board_slug_returns_empty(self, tmp_path):
+        """No snapshot, no board_slug — nothing to look up, returns []."""
+        result = build_in_flight(tmp_path, max_phase_timeout_min=60)
+        assert result == []
+
+    def test_snapshot_none_and_kanban_lookup_fails_returns_empty(self, tmp_path, mocker):
+        """snapshot=None and the board_slug lookup itself fails (returns
+        None) — must return [], not raise and not fall back to reading
+        state_dir markers."""
         mocker.patch(
             "hermes_pipeline.decision.context._kanban_in_flight_ids",
             return_value=None,
         )
-
-        # Create a file marker
-        marker_dir = state_dir / "phase_started"
-        marker_dir.mkdir(exist_ok=True)
-        marker = marker_dir / "TODO-3.json"
-        marker.write_text(json.dumps({"tick_id": "old"}))
-
         result = build_in_flight(
-            state_dir=state_dir,
-            max_phase_timeout_min=120,
-            board_slug="demo",
-        )
-        assert "TODO-3" in result
-
-    def test_kanban_none_no_file_markers(self, state_dir, mocker):
-        """Kanban returns None, no file markers -> empty list."""
-        mocker.patch(
-            "hermes_pipeline.decision.context._kanban_in_flight_ids",
-            return_value=None,
-        )
-
-        result = build_in_flight(
-            state_dir=state_dir,
-            max_phase_timeout_min=120,
-            board_slug="demo",
+            tmp_path, max_phase_timeout_min=60, board_slug="demo",
         )
         assert result == []
 
-    def test_kanban_success_ignores_file_markers(self, state_dir, mocker):
-        """Kanban succeeds -> file markers are NOT used (kanban takes precedence)."""
-        mocker.patch(
+    def test_snapshot_provided_bypasses_board_slug_lookup(self, tmp_path, mocker):
+        """When a snapshot is pre-fetched, it's used directly and
+        _kanban_in_flight_ids (the CLI-calling path) is never invoked."""
+        spy = mocker.patch(
             "hermes_pipeline.decision.context._kanban_in_flight_ids",
-            return_value={"TODO-7"},
         )
-
-        # Create a conflicting file marker
-        marker_dir = state_dir / "phase_started"
-        marker_dir.mkdir(exist_ok=True)
-        marker = marker_dir / "TODO-3.json"
-        marker.write_text(json.dumps({"tick_id": "old"}))
-
-        result = build_in_flight(
-            state_dir=state_dir,
-            max_phase_timeout_min=120,
-            board_slug="demo",
-        )
-        assert result == ["TODO-7"]
-        assert "TODO-3" not in result
-
-    def test_no_board_slug_uses_file_markers(self, state_dir):
-        """No board_slug -> falls back to file markers."""
-        # Create a file marker
-        marker_dir = state_dir / "phase_started"
-        marker_dir.mkdir(exist_ok=True)
-        marker = marker_dir / "TODO-3.json"
-        marker.write_text(json.dumps({"tick_id": "old"}))
-
-        result = build_in_flight(
-            state_dir=state_dir,
-            max_phase_timeout_min=120,
-        )
-        assert "TODO-3" in result
-
-    def test_pre_fetched_snapshot_used(self, state_dir, mocker):
-        """When snapshot is provided WITH board_slug, it is used instead of fetching."""
-        # Ensure _fetch_kanban_snapshot is NOT called
-        fetch_mock = mocker.patch(
-            "hermes_pipeline.decision.context._fetch_kanban_snapshot",
-        )
-
         snapshot = {
             "tasks": [
-                {
-                    "status": "running",
-                    "body": '{"todo_id":"TODO-99"}\n...',
-                },
+                {"status": "running", "body": json.dumps({"todo_id": "TODO-7"})},
             ]
         }
-
         result = build_in_flight(
-            state_dir=state_dir,
-            max_phase_timeout_min=120,
+            tmp_path,
+            max_phase_timeout_min=60,
             board_slug="demo",
             snapshot=snapshot,
         )
-        assert result == ["TODO-99"]
-        fetch_mock.assert_not_called()
+        assert result == ["TODO-7"]
+        spy.assert_not_called()
+
+
+

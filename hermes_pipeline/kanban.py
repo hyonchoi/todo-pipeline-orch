@@ -1,12 +1,10 @@
 """Kanban integration for pipeline orchestration.
 
-Provides a Protocol-based KanbanClient interface with implementations for null (no-op)
-and hermes (CLI-based) adapters. Includes atomic store management and a create-preserving
+Provides a Protocol-based KanbanClient interface with the hermes (CLI-based)
+adapter implementation. Includes atomic store management and a create-preserving
 outbox for resilient sync with cap and drop-oldest-first on overflow.
 
-NOTE: HermesKanbanAdapter, KanbanOutbox, and ActiveTasksStore are retained for
-backward compatibility (--kanban null path, merge orchestration). The harness
---kanban hermes path has moved to kanban-as-scheduler via kanban_tasks.py.
+The harness --kanban hermes path uses kanban-as-scheduler via kanban_tasks.py.
 """
 
 from __future__ import annotations
@@ -59,7 +57,7 @@ class KanbanClient(Protocol):
 
         metadata, when provided, is additional key/value context (e.g. tick_id, fixture_name,
         state_dir) recorded in the card body for debug-trail purposes. Implementations that
-        don\'t render a body (e.g. NullKanbanAdapter) accept and ignore it.
+        don't render a body accept and ignore it.
         """
         ...
 
@@ -81,38 +79,6 @@ class KanbanClient(Protocol):
     ) -> SyncResult:
         """Clear the active task (merge, reject, or abandon). Called after Phase 8/9."""
         ...
-
-
-class NullKanbanAdapter:
-    """No-op kanban adapter. All operations succeed silently."""
-
-    def set_active_task(
-        self,
-        project: str,
-        *,
-        todo_id: int,
-        title: str,
-        phase: str,
-        metadata: dict[str, str] | None = None,
-    ) -> SyncResult:
-        return SyncResult(ok=True)
-
-    def update_phase(
-        self,
-        project: str,
-        *,
-        phase: str,
-        status: PhaseStatus,
-    ) -> SyncResult:
-        return SyncResult(ok=True)
-
-    def clear_active_task(
-        self,
-        project: str,
-        *,
-        outcome: KanbanOutcome,
-    ) -> SyncResult:
-        return SyncResult(ok=True)
 
 
 class ActiveTasksStore:

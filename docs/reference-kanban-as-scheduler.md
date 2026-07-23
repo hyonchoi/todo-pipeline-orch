@@ -86,10 +86,6 @@ Clear the active task. Called after Phase 8/9 or on pipeline failure.
 
 ## Implementations
 
-### `NullKanbanAdapter`
-
-No-op adapter. All operations return `SyncResult(ok=True)`. Used by default in the test harness.
-
 ### `HermesKanbanAdapter`
 
 Real adapter using `hermes kanban` CLI commands. Requires `KanbanOutbox` and `ActiveTasksStore` for persistence.

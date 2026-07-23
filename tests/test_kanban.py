@@ -8,7 +8,6 @@ from pathlib import Path
 from unittest.mock import Mock, patch, MagicMock
 from hermes_pipeline.kanban import (
     KanbanClient,
-    NullKanbanAdapter,
     ActiveTasksStore,
     KanbanOutbox,
     OutboxEntry,
@@ -40,52 +39,7 @@ class TestKanbanClientProtocol:
         assert hasattr(KanbanClient, "clear_active_task")
 
 
-class TestNullKanbanAdapter:
-    """Test NullKanbanAdapter no-op behavior."""
 
-    def test_null_adapter_set_active_task(self):
-        """NullKanbanAdapter.set_active_task should return ok=True."""
-        adapter = NullKanbanAdapter()
-        result = adapter.set_active_task(
-            "myproject",
-            todo_id=1,
-            title="Test TODO",
-            phase="Phase 1",
-        )
-        assert result.ok is True
-        assert result.error is None
-
-    def test_null_adapter_update_phase(self):
-        """NullKanbanAdapter.update_phase should return ok=True."""
-        adapter = NullKanbanAdapter()
-        result = adapter.update_phase(
-            "myproject",
-            phase="Phase 2",
-            status="running",
-        )
-        assert result.ok is True
-        assert result.error is None
-
-    def test_null_adapter_clear_active_task(self):
-        """NullKanbanAdapter.clear_active_task should return ok=True."""
-        adapter = NullKanbanAdapter()
-        result = adapter.clear_active_task(
-            "myproject",
-            outcome="merged",
-        )
-        assert result.ok is True
-        assert result.error is None
-
-    def test_null_adapter_set_active_task_accepts_metadata(self):
-        adapter = NullKanbanAdapter()
-        result = adapter.set_active_task(
-            "project_a",
-            todo_id=1,
-            title="Test TODO",
-            phase="Phase 1",
-            metadata={"tick_id": "abc123", "fixture_name": "happy-path"},
-        )
-        assert result.ok is True
 
 class TestSyncResult:
 
@@ -658,7 +612,8 @@ class TestDrainOutbox:
         """drain_outbox on empty outbox should do nothing."""
         outbox_path = tmp_path / "outbox.jsonl"
         outbox = KanbanOutbox(outbox_path)
-        adapter = NullKanbanAdapter()
+        adapter = Mock(spec=KanbanClient)
+        adapter.set_active_task.return_value = SyncResult(ok=True)
 
         # Should not raise
         drain_outbox(adapter, outbox)
@@ -670,7 +625,8 @@ class TestDrainOutbox:
         store_path = tmp_path / "active_tasks.json"
         outbox = KanbanOutbox(outbox_path)
         store = ActiveTasksStore(store_path)
-        adapter = NullKanbanAdapter()
+        adapter = Mock(spec=KanbanClient)
+        adapter.set_active_task.return_value = SyncResult(ok=True)
 
         entry = OutboxEntry(
             project="project_a",
@@ -690,7 +646,8 @@ class TestDrainOutbox:
         """drain_outbox should dequeue on successful update_phase."""
         outbox_path = tmp_path / "outbox.jsonl"
         outbox = KanbanOutbox(outbox_path)
-        adapter = NullKanbanAdapter()
+        adapter = Mock(spec=KanbanClient)
+        adapter.update_phase.return_value = SyncResult(ok=True)
 
         entry = OutboxEntry(
             project="project_a",
@@ -709,7 +666,8 @@ class TestDrainOutbox:
         """drain_outbox should dequeue on successful clear_active_task."""
         outbox_path = tmp_path / "outbox.jsonl"
         outbox = KanbanOutbox(outbox_path)
-        adapter = NullKanbanAdapter()
+        adapter = Mock(spec=KanbanClient)
+        adapter.clear_active_task.return_value = SyncResult(ok=True)
 
         entry = OutboxEntry(
             project="project_a",
@@ -754,7 +712,9 @@ class TestDrainOutbox:
         """drain_outbox should dequeue entries per project."""
         outbox_path = tmp_path / "outbox.jsonl"
         outbox = KanbanOutbox(outbox_path)
-        adapter = NullKanbanAdapter()
+        adapter = Mock(spec=KanbanClient)
+        adapter.set_active_task.return_value = SyncResult(ok=True)
+        adapter.update_phase.return_value = SyncResult(ok=True)
 
         entry_a = OutboxEntry(
             project="project_a",

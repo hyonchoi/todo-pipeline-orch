@@ -152,26 +152,7 @@ set `enabled = true` or delete the `project.toml` file.
 
 ---
 
-## Step 5: Kill a phase across all projects
-
-If a phase in demo-app gets stuck, kill it without specifying the project:
-
-```bash
-uv run pipeline-watch kill --all
-```
-
-Without a project argument, kill scans all project state directories for
-in-flight phases. To kill a specific TODO across projects:
-
-```bash
-uv run pipeline-watch kill --todo TODO-1
-```
-
-This searches every project's `.hermes/phase_started/` for the TODO.
-
----
-
-## Step 6: Check per-project state
+## Step 5: Check per-project state
 
 Each project now has its own state directory:
 

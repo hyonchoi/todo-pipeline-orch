@@ -99,47 +99,6 @@ append_outcome(
 )
 ```
 
-## Plan-Gate Schemas
-
-The `schema.py` module also defines the plan-gate contract:
-
-### `DecisionSheet`
-
-```python
-@dataclass(frozen=True)
-class DecisionSheet:
-    schema_version: str          # Must be "1.0"
-    todo_id: int                 # Positive integer TODO number
-    tick_id: str                 # Tick that generated the plan
-    questions: list[DecisionQuestion]
-```
-
-Persisted at `.hermes/decisions/<tick_id>-plan.json`. Rewritten with answers when `approve-plan` approves. Rejection sidecars at `.hermes/decisions/<tick_id>-rejected.json` are written on rejection.
-
-### `DecisionQuestion`
-
-```python
-@dataclass(frozen=True)
-class DecisionQuestion:
-    question_id: str                                    # e.g. "q1"
-    classification: Literal["taste", "premise", "user-challenge", "mechanical"]
-    prompt: str                                         # The decision question
-    options: list[_Option]                              # ≥ 2 options
-    recommendation: str                                 # Recommended option label (e.g. "A")
-    rationale: str                                      # Why the recommendation
-    answer: str | None                                  # Set by approve-plan
-```
-
-Validation: classification must be valid, options ≥ 2, recommendation must match an option label, answer must be None or match an option label.
-
-### `validate_decision_sheet()`
-
-```python
-def validate_decision_sheet(data: dict) -> DecisionSheet: ...
-```
-
-Constructs a `DecisionSheet` from a raw dict. Raises `PlanGateError` on any validation failure.
-
 ## Selection Agent
 
 The agent module (`decision/agent.py`) wraps `hermes chat -q`:
