@@ -98,3 +98,12 @@
   - **Context:** phases.yaml phase_6_2_qa already reads `UI Review: required`; TODO-24 (phases.yaml refinement) is where this gap was surfaced.
   - **Depends on:** `TODO-24`
   - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/ui-review-decision-schema`, Test Coverage `not-required`, Security Review `not-required`
+
+- [ ] **TODO-32: Separate `data/profiles` into identity and phase-config contexts** — Split mixed Hermes identity profile and pipeline phase definitions into distinct directories
+  - **What:** Separate `hermes_pipeline/data/profiles` into two distinct directories (or restructure) — one for Hermes' identity/profile data (`pipeline/SOUL.md`) and another for pipeline phase configurations (`gstack/phases.yaml`, `agent-skills/phases.yaml`). The `pipeline/` subdirectory contains persona/identity data, while `gstack/` and `agent-skills/` contain pipeline orchestration metadata. These two contexts currently share a `profiles` namespace but represent completely different domains.
+  - **Why:** The `data/profiles` directory mixes two unrelated contexts: Hermes' core identity profile (`pipeline/SOUL.md`) and phase definition configs for different pipelines (`gstack/phases.yaml`, `agent-skills/phases.yaml`). They share a `profiles` namespace but represent completely different domains — one is persona/identity data, the other is pipeline orchestration metadata. This conflation makes it easy to accidentally load the wrong type of data and obscures the semantic distinction between "who Hermes is" and "how pipelines run."
+  - **Pros:** Clearer directory semantics reduces risk of loading wrong data type; each domain can evolve its own file structure independently; easier to reason about which load paths access identity vs phase config
+  - **Cons:** Requires updating all import/load paths that reference `data/profiles/`; breaks any external tooling that assumes the current layout; migration touches multiple files
+  - **Context:** Current layout: `data/profiles/pipeline/SOUL.md` (identity), `data/profiles/gstack/phases.yaml` (gstack phases), `data/profiles/agent-skills/phases.yaml` (agent-skills phases)
+  - **Assumptions:** The codebase loads these paths by relative routing (`data/profiles/pipeline/`, `data/profiles/gstack/`, `data/profiles/agent-skills/`), so any restructure requires updating import/load paths.
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/separate-profiles-data`, Test Coverage `required`, Security Review `not-required`
