@@ -237,6 +237,106 @@ class TestConvergenceMonitor:
         assert monitor.current_phase_key == "phase_2_autoplan"
 
 
+class TestPollKanbanPhasesConsoleOutput:
+    """Each phase transition must be logged to the console (via log.info), not just
+    written to events.jsonl, so `pipeline-watch test` is no longer silent mid-run."""
+
+    def _run_poll(self, monkeypatch, mocker, status_sequence, tmp_path):
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
+
+        monkeypatch.setattr("hermes_pipeline.harness.time.sleep", lambda *_a, **_kw: None)
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            side_effect=status_sequence,
+        )
+
+        log_path = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(log_path)
+        detector = ConvergenceDetector(threshold=99)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        return _poll_kanban_phases(
+            project_slug="proj",
+            tick_id="tick-1",
+            state_dir=tmp_path,
+            todo_id="TODO-30",
+            project_dir=tmp_path,
+            phases_path=None,
+            monitor=monitor,
+            detector=detector,
+            poll_interval=0.0,
+            max_poll_interval=0.0,
+        )
+
+    def test_none_to_running_logs_phase_start(self, monkeypatch, mocker, tmp_path, caplog):
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch, mocker, tmp_path=tmp_path,
+            status_sequence=[
+                {"p1": "running"},
+                {"p1": "done"},
+                {"p1": "done"},
+            ],
+        )
+        assert any("p1" in r.message and "running" in r.message for r in caplog.records)
+
+    def test_running_to_done_logs_completion(self, monkeypatch, mocker, tmp_path, caplog):
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch, mocker, tmp_path=tmp_path,
+            status_sequence=[
+                {"p1": "running"},
+                {"p1": "done"},
+                {"p1": "done"},
+            ],
+        )
+        assert any("p1" in r.message and "done" in r.message for r in caplog.records)
+
+    def test_running_to_failed_logs_failure(self, monkeypatch, mocker, tmp_path, caplog):
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch, mocker, tmp_path=tmp_path,
+            status_sequence=[
+                {"p1": "running"},
+                {"p1": "failed"},
+                {"p1": "failed"},
+            ],
+        )
+        assert any("p1" in r.message and "failed" in r.message for r in caplog.records)
+
+    def test_fast_phase_none_to_done_still_logs(self, monkeypatch, mocker, tmp_path, caplog):
+        """Phase finishes between polls without ever being observed as 'running'."""
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch, mocker, tmp_path=tmp_path,
+            status_sequence=[
+                {"p1": "done"},
+                {"p1": "done"},
+            ],
+        )
+        assert any("p1" in r.message and "done" in r.message for r in caplog.records)
+
+    def test_fast_phase_none_to_failed_still_logs(self, monkeypatch, mocker, tmp_path, caplog):
+        """Phase fails between polls without ever being observed as 'running'."""
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch, mocker, tmp_path=tmp_path,
+            status_sequence=[
+                {"p1": "failed"},
+                {"p1": "failed"},
+            ],
+        )
+        assert any("p1" in r.message and "failed" in r.message for r in caplog.records)
+
+
 class TestRunHarnessTimeout:
     """Overall --timeout must actually bound a hung phase, not just be accepted and ignored."""
 

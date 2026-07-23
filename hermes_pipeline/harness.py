@@ -323,10 +323,12 @@ def _poll_kanban_phases(
                 prev = previous_status.get(phase_key)
 
                 if prev in (None, "ready", "blocked") and status == "running":
+                    log.info("phase %s: %s -> running", phase_key, prev or "none")
                     monitor.current_phase_key = phase_key
                     monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
 
                 elif prev == "running" and status == "done":
+                    log.info("phase %s: running -> done", phase_key)
                     monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
                     # Auto-complete any gate task whose predecessor just finished
@@ -335,6 +337,7 @@ def _poll_kanban_phases(
                     )
 
                 elif prev == "running" and status == "failed":
+                    log.info("phase %s: running -> failed", phase_key)
                     monitor.current_phase_key = None
                     # monitor() records the failure with the detector and raises
                     # ConvergenceHaltError itself if the threshold is tripped —
@@ -347,6 +350,7 @@ def _poll_kanban_phases(
                     # as "running" (fast phase, coarse poll interval). Still
                     # emit the event and run gate auto-complete so downstream
                     # gates aren't left blocked.
+                    log.info("phase %s: %s -> done", phase_key, prev or "none")
                     monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
                     _auto_complete_gate_tasks(
@@ -354,6 +358,7 @@ def _poll_kanban_phases(
                     )
 
                 elif prev in (None, "ready", "blocked") and status == "failed":
+                    log.info("phase %s: %s -> failed", phase_key, prev or "none")
                     monitor.current_phase_key = None
                     monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
         except ConvergenceHaltError:
