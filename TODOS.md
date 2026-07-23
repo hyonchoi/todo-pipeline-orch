@@ -89,3 +89,12 @@
   - **What:** (1) Add live console output to `_poll_kanban_phases()` in harness.py — print an initial status table after registration, then log each phase status transition (→ running, → done, → failed) as the poll loop detects them. (2) Remove the wall-clock timeout ceiling from `run_harness()` so the poll loop runs to natural completion (all phases terminal) instead of being killed by `--timeout`. The timeout flag remains as an optional safety fallback, defaulting to a large value.
   - **Why:** The `test` command sits silent during the entire poll duration, giving no feedback until timeout or completion. Users can't track which phases are executing or see progress. Additionally, the artificial timeout can kill a running pipeline before phases finish.
   - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `—`, Test Coverage `required`, Security Review `not-required`
+
+- [ ] **TODO-31: Add 'UI Review' decision for phase_6_2 skip signal to TODOS.md schema** — Document `UI Review required/not-required` in schema, auto-research, SKILL.md, and preamble so new TODO entries always carry the skip signal phase_6_2 reads.
+  - **What:** Add `UI Review required/not-required` to the Decisions field definition in sections/schema.md, sections/auto-research.md derivation rules, SKILL.md workflow/preamble, and TODOS.md preamble blockquote. Auto-detect from title/summary keywords: ui, frontend, design, visual, layout, component, css, style, dashboard, artifact, page, screen, modal, form, navigation, button, icon, animation.
+  - **Why:** phase_6_2_qa prompt already checks `UI Review: required` in Decisions, but the sub-field is undocumented in schema, auto-research, SKILL.md, and preamble — new entries omit it, causing phase_6_2 to have no skip signal to check.
+  - **Pros:** All new TODO entries get a UI Review decision; phase_6_2 can skip non-UI work without dispatching a no-op QA task; consistent with Security Review pattern
+  - **Cons:** Adds another Decisions sub-field — revising old entries to backfill UI Review is a manual effort for ~30 existing TODOs
+  - **Context:** phases.yaml phase_6_2_qa already reads `UI Review: required`; TODO-24 (phases.yaml refinement) is where this gap was surfaced.
+  - **Depends on:** `TODO-24`
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/ui-review-decision-schema`, Test Coverage `not-required`, Security Review `not-required`
