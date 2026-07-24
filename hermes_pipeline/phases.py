@@ -29,7 +29,7 @@ def resolve_profile_phases_path(profile: str) -> Path:
 
     from .contract import ContractSchemaError
 
-    profiles_root = files("hermes_pipeline").joinpath("data", "phase-profiles")
+    profiles_root = files("hermes_pipeline").joinpath("data", "profiles")
     candidate = profiles_root.joinpath(profile, "phases.yaml")
     if not candidate.is_file():
         available = sorted(

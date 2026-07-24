@@ -60,8 +60,11 @@
   - **Assumptions:** hatchling build backend (already in use) supports package-data inclusion for non-Python files via `[tool.hatch.build.targets.wheel]` config.
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/embed-todos-manager-skill-install`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
 
-## Completed
-
-- [x] **TODO-32: Separate `data/profiles` into identity and phase-config contexts** — Split mixed Hermes identity profile and pipeline phase definitions into distinct directories
-  - **What:** Separated `hermes_pipeline/data/profiles` into `hermes_pipeline/data/hermes-identity/pipeline/` (SOUL.md) and `hermes_pipeline/data/phase-profiles/` (gstack/phases.yaml, agent-skills/phases.yaml). Updated `bundled_profile_dir()` (contract.py) and `resolve_profile_phases_path()` (phases.py) call sites, added `tests/test_profile_layout_split.py` regression coverage, and updated docs/howto-agent-skills-profile.md and docs/howto-pipeline-contract.md.
-  - **Completed:** v0.5.9 (2026-07-24)
+- [ ] **TODO-32: Separate `data/profiles` into identity and phase-config contexts** — Split mixed Hermes identity profile and pipeline phase definitions into distinct directories
+  - **What:** Separate `hermes_pipeline/data/profiles` into two distinct directories (or restructure) — one for Hermes' identity/profile data (`pipeline/SOUL.md`) and another for pipeline phase configurations (`gstack/phases.yaml`, `agent-skills/phases.yaml`). The `pipeline/` subdirectory contains persona/identity data, while `gstack/` and `agent-skills/` contain pipeline orchestration metadata. These two contexts currently share a `profiles` namespace but represent completely different domains.
+  - **Why:** The `data/profiles` directory mixes two unrelated contexts: Hermes' core identity profile (`pipeline/SOUL.md`) and phase definition configs for different pipelines (`gstack/phases.yaml`, `agent-skills/phases.yaml`). They share a `profiles` namespace but represent completely different domains — one is persona/identity data, the other is pipeline orchestration metadata. This conflation makes it easy to accidentally load the wrong type of data and obscures the semantic distinction between "who Hermes is" and "how pipelines run."
+  - **Pros:** Clearer directory semantics reduces risk of loading wrong data type; each domain can evolve its own file structure independently; easier to reason about which load paths access identity vs phase config
+  - **Cons:** Requires updating all import/load paths that reference `data/profiles/`; breaks any external tooling that assumes the current layout; migration touches multiple files
+  - **Context:** Current layout: `data/profiles/pipeline/SOUL.md` (identity), `data/profiles/gstack/phases.yaml` (gstack phases), `data/profiles/agent-skills/phases.yaml` (agent-skills phases)
+  - **Assumptions:** The codebase loads these paths by relative routing (`data/profiles/pipeline/`, `data/profiles/gstack/`, `data/profiles/agent-skills/`), so any restructure requires updating import/load paths.
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/separate-profiles-data`, Test Coverage `required`, Security Review `not-required`

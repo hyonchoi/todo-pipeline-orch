@@ -179,7 +179,7 @@ def bundled_profile_dir() -> Path:
     filesystem installs, so this works.
     """
     from importlib.resources import files
-    traversable = files("hermes_pipeline").joinpath("data", "hermes-identity", "pipeline")
+    traversable = files("hermes_pipeline").joinpath("data", "profiles", "pipeline")
     return Path(traversable)
 
 
