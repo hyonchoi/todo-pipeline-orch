@@ -297,6 +297,8 @@ def _poll_kanban_phases(
         assignee=assignee,
     )
 
+    # Intentionally unguarded — fail fast before polling begins, matching
+    # register_todo_phases()'s unguarded call above.
     initial_status = get_todo_kanban_status(project_slug, tick_id)
     log.info(
         "initial phase status: %s",
