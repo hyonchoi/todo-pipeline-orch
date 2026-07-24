@@ -1,8 +1,9 @@
 # How to run the Mock Integration Test Harness
 
 Exercise the real pipeline end-to-end against mock project data and get a structured
-findings report. The harness bootstraps a temporary git project, runs the 9-phase
-pipeline through `PipelineRunner`, monitors each phase, and produces `report.json`.
+findings report. The harness bootstraps a temporary git project, registers pipeline
+phases on a real Hermes kanban board, polls for phase transitions, and produces
+`report.json`.
 
 ## Prerequisites
 
@@ -20,18 +21,23 @@ pipeline through `PipelineRunner`, monitors each phase, and produces `report.jso
 uv run hermes-pipeline test --fixture happy-path --timeout 120
 ```
 
-This creates a temporary project with a single TODO entry, runs all 9 phases (minus the deleted plan-gate), and
-cleans up. Expect ~30 seconds with `claude-haiku-4-5` pinned in the fixture config.
+This creates a temporary project with a single TODO entry, registers all pipeline
+phases on the kanban board, and polls until completion. Expect ~30 seconds with
+`claude-haiku-4-5` pinned in the fixture config.
 
 Output:
 ```
-2026-07-15 18:40:23,101 INFO hermes_pipeline.runner Running phase 1/9: Phase 2: Autoplan (key=phase_2_autoplan)
-2026-07-15 18:40:26,916 INFO hermes_pipeline.runner Running phase 2/9: Phase 3: Writing Plan (key=phase_3_writing_plan)
+INFO registering kanban phases for TODO-1 tick 01ARZ3... (assignee=pipeline)
+INFO initial phase status: phase_1 kickoff=running, phase_2_autoplan=blocked, ...
+INFO phase phase_1 kickoff: none -> running
+INFO phase phase_1 kickoff: running -> done
+INFO phase phase_2_autoplan: blocked -> running
+INFO phase phase_2_autoplan: running -> done
 ...
-2026-07-15 18:40:43,782 INFO hermes_pipeline.runner All phases completed successfully; moving to ready_for_review
+[kanban] tenant=mock-project tick_id=01ARZ3... phases={...} report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
 ```
 
-Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the run timed out. Exit code 2 = preflight or setup error (missing dependency, `--kanban hermes` tenant unreachable).
+Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the run timed out. Exit code 2 = preflight or setup error (missing dependency, `mock-project` tenant unreachable).
 
 ### 2. Run a single phase
 
@@ -95,30 +101,30 @@ after each run. Requires `--keep` so the temp directory survives between runs.
 
 ### 6. Run the pytest test suite
 
-The harness includes unit and e2e tests that mock `phases.run` to avoid real API calls:
+The harness includes unit and e2e tests that mock kanban to avoid real API calls:
 
 ```bash
 # Full test suite
-uv run pytest tests/test_harness.py tests/test_harness_e2e.py tests/test_report.py tests/test_runner.py tests/test_cli.py tests/test_cli_entrypoint.py -v
+uv run pytest -v
 
-# E2e only (full orchestration, mocked phases)
-uv run pytest tests/test_harness_e2e.py -v
+# Harness tests (convergence, monitor, phase polling, isolation)
+uv run pytest tests/test_harness.py tests/test_harness_e2e.py -v
 
-# Unit tests only (convergence, monitor, dispatch, isolation)
-uv run pytest tests/test_harness.py -v
+# Report generation
+uv run pytest tests/test_report.py -v
 ```
 
 ## Verification
 
 A successful full run:
 - Exit code 0
-- Log lines showing all 9 phases executed in order
-- Gates (`phase_2b_plan_gate`, `phase_9_ship`) auto-approved in `continue_on_failure` mode
-- Final line: "All phases completed successfully; moving to ready_for_review"
+- Log lines showing phase transitions: `phase phase_X_key: blocked -> running`, `phase phase_X_key: running -> done`
+- Final `[kanban]` summary line with `phases={...}` status map
+- `report.json` in temp directory (use `--keep` to preserve)
 
 A run that hit convergence halt:
 - Exit code 1
-- Log line: "convergence detector: N+ consecutive [error_class] failures, halting run"
+- Log line: "convergence detector: N+ consecutive phase_failure, halting"
 - Partial `report.json` in temp directory (check with `--keep`)
 
 A run that hit the overall timeout:
@@ -158,73 +164,76 @@ LSP-safe `os.kill(pid, 0)` check prevents hitting an unrelated process.
 
 ## Architecture Overview
 
-The harness has four modules:
+The harness is a single-module system: `harness.py`. It registers phases on a real
+kanban board and polls for transitions rather than dispatching phases directly.
 
 | Module | Purpose |
 |--------|---------|
-| `harness.py` | Fixture factory, preflight, convergence detector, monitor wrapper, `run_harness()` orchestrator |
-| `runner.py` | `PipelineRunner` — phase loop, kanban wiring, checkpoint tracking, gate auto-approval |
-| `test_report.py` | JSONL event log → `report.json` + summary + diff |
+| `harness.py` | Fixture factory, preflight, convergence detector, phase registration, poll loop, `run_harness()` orchestrator |
+| `report.py` | JSONL event log → `report.json` + summary + diff |
 | `cli.py` | `test` subcommand — argparse wiring, exit code dispatch |
 
 Key flow:
 1. `preflight_check()` verifies git/hermes/claude on PATH
 2. `create_mock_project()` initializes a temp git repo with TODOS.md + .hermes config
 3. `isolate_config()` sets `PIPELINE_STATE_DIR` / `PIPELINE_LOCK_DIR` env vars
-4. `PipelineRunner.run()` loops through phases, calling `_dispatch_phase()` which
-   invokes the real `phases.run()` entrypoint
-5. Gates are auto-approved when `continue_on_failure=True`
-6. `_ConvergenceMonitor` wraps the event callback, feeds the `ConvergenceDetector`,
+4. `register_todo_phases()` creates kanban tasks for all pipeline phases
+5. Initial phase status is printed via `log.info()` to console
+6. Poll loop calls `get_todo_kanban_status()` on each interval, logging phase transitions
+7. Gate tasks are auto-completed when their parent phase finishes (`_auto_complete_gate_tasks`)
+8. `_ConvergenceMonitor` wraps the event callback, feeds the `ConvergenceDetector`,
    and raises `ConvergenceHaltError` if the threshold is reached
-7. `generate_report()` transforms `events.jsonl` into `report.json`
-8. Temp directory is cleaned up unless `--keep` is set
+9. `observe_outcomes()` writes the final state after all phases reach terminal status
+10. `generate_report()` transforms `events.jsonl` into `report.json`
+11. Temp directory is cleaned up unless `--keep` is set
 
-The entire run is threaded with a `--timeout` watchdog. If the worker thread is
-still alive after the timeout, the subprocess is killed via `killpg` and a
-`phase_timed_out` event is recorded before report generation.
+The entire run is threaded with a `--timeout` watchdog (default 86400s / 24h).
+If the worker thread is still alive after the timeout, the subprocess is killed
+via `killpg` and a `phase_timed_out` event is recorded before report generation.
 
-## Run with real kanban adapter
+## Kanban Integration
 
-By default (`hermes-pipeline test --fixture <name>`, or explicitly `--kanban null`), the harness
-uses a no-op kanban adapter — no network calls, no board changes. Pass `--kanban hermes` to drive
-a real `HermesKanbanAdapter` against a dedicated kanban tenant instead:
-
-```bash
-hermes-pipeline test --fixture happy-path --kanban hermes
-```
+The harness always uses the real `HermesKanbanAdapter` — the `--kanban null` no-network
+mode was removed in v0.5.6. Every run creates a kanban card in the `mock-project` tenant.
 
 **Precondition:** you must be logged in (`hermes login`) with access to the `mock-project`
 tenant. The harness runs a preflight check (`hermes kanban list --tenant mock-project`) before
 starting any phase and fails fast with an actionable error if this doesn't succeed — it will not
 silently exit 0 with no card and no local evidence.
 
-**Tenant is never suffixed.** Every `--kanban hermes` run creates a card in the same
+**Tenant is never suffixed.** Every run creates a card in the same
 `mock-project` tenant; runs are distinguished by a `tick_id` recorded in each card's body, not by
-a separate tenant per run. Running `--kanban hermes` twice in a row produces two distinct cards
-in the same tenant, not two tenants.
+a separate tenant per run.
 
-**Terminal-state table** — what the board looks like after a run ends, depending on how it ended:
+**Phase transition logging** — the poll loop logs each phase state change to console via
+`log.info()`, so you can follow progress without tailing `events.jsonl`:
+
+```
+INFO phase phase_1 kickoff: none -> running
+INFO phase phase_1 kickoff: running -> done
+INFO phase phase_2_autoplan: blocked -> running
+INFO phase phase_2_autoplan: running -> done
+```
+
+Fast phases (ready/None → done between polls) are also logged.
+
+**Terminal-state table** — what the board looks like after a run ends:
 
 | Terminal state | Board state |
 |---|---|
 | Success (ready for review) | Card **live** — not archived; a later `merge`/`abandon` step clears it |
-| Phase failure (with or without `continue_on_failure`) | Card **archived** — inspectable, not deleted |
+| Phase failure | Card **archived** — inspectable, not deleted |
 | Convergence-halt (3+ consecutive same-class failures) | Card **archived** |
-| Overall `--timeout` fires | Card **live** — genuinely orphaned; this is intentional debug signal |
-| Process crash | Card **live** — genuinely orphaned; this is intentional debug signal |
+| Overall `--timeout` fires | Card **live** — genuinely orphaned; intentional debug signal |
+| Process crash | Card **live** — genuinely orphaned; intentional debug signal |
 
-A live card after a run means "the run never got to clean up" (timeout/crash) or "still waiting
-on review/merge" (success). An archived card means "it failed cleanly and the card body has the
-`tick_id`/fixture/state_dir context for why."
-
-**Output.** If the run reaches report generation (preflight succeeded), a `--kanban hermes` run prints:
+**Output.** After report generation, the harness prints:
 
 ```
-[kanban] tenant=mock-project tick_id=01ARZ3ND... task_id=abc123 report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
+[kanban] tenant=mock-project tick_id=01ARZ3ND... phases={phase_1 kickoff: done, phase_2_autoplan: done, ...} report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
 ```
 
-Pass `--keep` to retain the temp directory (which may include `kanban_outbox.jsonl` and
-`active_tasks.json` if a task was created or enqueued) for post-run inspection.
+Pass `--keep` to retain the temp directory for post-run inspection.
 
 **Known limitation:** the outbox retry path (`drain_outbox`) does not currently carry the
 `tick_id`/fixture metadata on a queued-and-later-retried card — only the initial synchronous
