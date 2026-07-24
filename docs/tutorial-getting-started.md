@@ -1,6 +1,6 @@
 # Getting Started with tpo
 
-In this tutorial, you'll set up your first tpoed project and run the core workflows: triggering a tick, reviewing TODOs, and merging one to main. By the end, you'll have a working pipeline — with an optional cron schedule for production.
+In this tutorial, you'll set up your first pipeline-watched project and run the core workflows: triggering a tick, reviewing TODOs, and merging one to main. By the end, you'll have a working pipeline — with an optional cron schedule for production.
 
 **Time: ~10 minutes**
 
