@@ -156,7 +156,7 @@ uv run hermes-pipeline test --fixture happy-path --convergence-threshold 2
 |-----|----------|---------|-------------|
 | `--fixture` | Yes | — | Fixture name. Only `happy-path` is implemented. |
 | `--phase` | No | — | Run only the named phase in isolation (e.g. `phase_2_autoplan`). |
-| `--timeout` | No | `3600` | Overall run timeout in seconds. Kills in-flight phase via `killpg` if exceeded. |
+| `--timeout` | No | `86400` | Overall run timeout in seconds. Kills in-flight phase via `killpg` if exceeded. |
 | `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before circuit breaker halts the run. |
 | `--keep` | No | — | Preserve the temporary directory after the run for inspection. |
 | `--loop` | No | — | Persist numbered report files and diff them across runs. Requires `--keep`. |
