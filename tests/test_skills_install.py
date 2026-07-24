@@ -25,7 +25,6 @@ class FakeArgs:
     def __init__(self, **kwargs):
         kwargs.setdefault("target", "claude")
         kwargs.setdefault("scope", "user")
-        kwargs.setdefault("force", False)
         for k, v in kwargs.items():
             setattr(self, k, v)
 
@@ -36,7 +35,6 @@ class TestSkillsInstallParsing:
         args = parser.parse_args(["skills", "install"])
         assert args.target == "claude"
         assert args.scope == "user"
-        assert args.force is False
         assert hasattr(args, "func")
 
     def test_target_all_scope_project(self):

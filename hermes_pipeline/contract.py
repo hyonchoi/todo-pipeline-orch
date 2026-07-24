@@ -6,7 +6,10 @@ model/tools/skills flags this would otherwise need — see TODO-16).
 """
 from __future__ import annotations
 
+import atexit
 import re
+import shutil
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -167,6 +170,21 @@ def load_contract(project_state: Path) -> PipelineContract:
     )
 
 
+# Cache of (parts_key) → tempdir path, so zip-wheel extracts aren't
+# repeated on every call and get cleaned up at exit.
+_bundled_temp_cache: dict[str, Path] = {}
+
+
+def _cleanup_bundled_temps():
+    """Remove any temp directories created by _copy_traversable_to_tempdir."""
+    for temp_dir in _bundled_temp_cache.values():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    _bundled_temp_cache.clear()
+
+
+atexit.register(_cleanup_bundled_temps)
+
+
 def _bundled_data_root():
     """Return the importlib.resources Traversable for hermes_pipeline.data.
 
@@ -177,14 +195,19 @@ def _bundled_data_root():
     return files("hermes_pipeline.data")
 
 
-def _copy_traversable_to_tempdir(traversable) -> Path:
+def _copy_traversable_to_tempdir(traversable, key: str) -> Path:
     """Recursively copy a non-filesystem Traversable into a real tempdir.
+
+    Results are cached by *key* so repeated calls (e.g. multiple features
+    resolving against the same zip-wheel) reuse a single extraction.  All
+    temp directories are cleaned up at process exit via an atexit handler.
 
     Used when importlib.resources yields a Traversable that isn't backed by
     a plain filesystem path (e.g. a zip-wheel install) — shutil.copytree and
     Path() operations need a real directory to work against.
     """
-    import tempfile
+    if key in _bundled_temp_cache:
+        return _bundled_temp_cache[key]
 
     dest_root = Path(tempfile.mkdtemp(prefix="hermes_pipeline_bundled_"))
 
@@ -197,6 +220,7 @@ def _copy_traversable_to_tempdir(traversable) -> Path:
             dest.write_bytes(node.read_bytes())
 
     _copy_node(traversable, dest_root)
+    _bundled_temp_cache[key] = dest_root
     return dest_root
 
 
@@ -206,14 +230,15 @@ def _resolve_bundled_dir(*parts: str) -> Path:
     Resolves package-relative so it works whether running from a checkout
     or from an installed wheel. For zip-wheel installs, importlib.resources
     returns a Traversable that isn't a real filesystem path — in that case
-    the directory is copied to a temp directory so callers can rely on a
-    plain Path (shutil.copytree, Path.exists, etc.) unconditionally.
+    the directory is copied to a temp directory (cached per path) so callers
+    can rely on a plain Path (shutil.copytree, Path.exists, etc.) unconditionally.
     """
+    key = "/".join(parts)
     traversable = _bundled_data_root().joinpath(*parts)
     try:
         return Path(traversable)
     except (TypeError, NotImplementedError):
-        return _copy_traversable_to_tempdir(traversable)
+        return _copy_traversable_to_tempdir(traversable, key)
 
 
 def bundled_profile_dir() -> Path:

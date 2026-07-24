@@ -344,10 +344,6 @@ def build_parser() -> argparse.ArgumentParser:
         "--scope", choices=["user", "project"], default="user",
         help="Install under the user's home directory or the current project (default: user)",
     )
-    skills_install_parser.add_argument(
-        "--force", action="store_true",
-        help="Scripting/non-interactive marker; install always overwrites regardless of this flag",
-    )
     skills_install_parser.set_defaults(func=_cmd_skills_install)
 
     return parser
@@ -1223,7 +1219,7 @@ def _skills_install_targets(target: str, scope: str) -> list[tuple[str, Path]]:
     return [(name, base / _SKILLS_INSTALL_TARGET_DIRNAMES[name]) for name in names]
 
 
-def _cmd_skills_install(args, config: Config) -> int:
+def _cmd_skills_install(args, config: Config | None) -> int:
     """Handle 'skills install' subcommand — copy the bundled todos-manager skill.
 
     Copies hermes_pipeline/data/skills/todos-manager/ to one or both of
@@ -1248,6 +1244,9 @@ def _cmd_skills_install(args, config: Config) -> int:
         dest = install_dir / "todos-manager"
         try:
             install_dir.mkdir(parents=True, exist_ok=True)
+            # Remove destination if it's a dangling symlink — copytree would fail
+            if dest.is_symlink() and not dest.exists():
+                dest.unlink()
             shutil.copytree(source, dest, dirs_exist_ok=True)
             print(f"OK ({name}): installed todos-manager to {dest}")
         except PermissionError as e:
