@@ -17,19 +17,19 @@ A working TODOS.md with four entries: one added with full fields, one added with
 
 ## Step 1: Install the skill
 
-From the repo root, run the install script:
+From the repo root, run:
 
 ```bash
-bash scripts/install-todos-manager.sh
+tpo skills install --target all
 ```
 
-This creates symlinks in `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/` pointing to `skills/todos-manager/SKILL.md`. The skill source lives at `skills/todos-manager/SKILL.md` in the repo — git-tracked and platform-neutral.
+This installs the todos-manager skill to `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/`. The skill source is packaged at `hermes_pipeline/data/skills/todos-manager/SKILL.md` — git-tracked and platform-neutral.
 
 **Verify:**
 
 ```bash
 ls -la ~/.claude/skills/todos-manager/SKILL.md
-# Should show a symlink to .../skills/todos-manager/SKILL.md
+# Should show the skill installed to the user-level directory
 ```
 
 ---
@@ -223,8 +223,8 @@ A working TODOS.md with:
 - See [How to manage TODOS.md with the todos-manager skill](howto-todos-manager.md) for each subcommand with options, validation rules, and troubleshooting.
 
 **Reference:**
-- [TODOS Manager skill](../skills/todos-manager/SKILL.md) — full schema, ID assignment rules, acceptance scenarios, error messages
-- [Install TODOS Manager](../scripts/install-todos-manager.sh) — symlinks the skill to user-level directories
+- [TODOS Manager skill](../hermes_pipeline/data/skills/todos-manager/SKILL.md) — full schema, ID assignment rules, acceptance scenarios, error messages
+- [Install TODOS Manager](../README.md#todos-manager-skill-v2) — run `tpo skills install --help` to install todos-manager to user-level directories
 
 **Convert an existing TODOS.md:**
 - Run `todos-manager --convert` to add the preamble and validate entries against the enforced schema.

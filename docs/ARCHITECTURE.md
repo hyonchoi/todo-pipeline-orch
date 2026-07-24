@@ -147,7 +147,7 @@ The `todos-manager` skill enforces the canonical TODOS.md schema and provides se
 - `--list`: List active TODO entries (optional `--all` flag shows archived entries)
 - `--revise`: Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions
 
-The skill source lives at `skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `scripts/install-todos-manager.sh`. The skill enforces:
+The skill source lives at `hermes_pipeline/data/skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `tpo skills install --target all`. The skill enforces:
 - Required fields: **What:**, **Why:**, **Decisions:**
 - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
 - Stable TODO-<n> IDs: `max(all IDs in TODOS.md + TODOS-archive.md) + 1`, immutable once committed
