@@ -73,4 +73,13 @@ def test_test_subcommand_phase_flag():
     args = parser.parse_args(["test", "--fixture", "happy-path", "--phase", "phase_2_autoplan"])
     assert args.phase == "phase_2_autoplan"
 
+def test_test_subcommand_timeout_default_is_86400():
+    """--timeout must default large enough that it stops being the de-facto
+    kill switch for healthy long test runs (raised from 3600s / 1h)."""
+    from hermes_pipeline.cli import build_parser
+
+    parser = build_parser()
+    args = parser.parse_args(["test", "--fixture", "happy-path"])
+    assert args.timeout == 86400
+
 

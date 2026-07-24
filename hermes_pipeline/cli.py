@@ -318,8 +318,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Keep temp directory after run for inspection",
     )
     test_parser.add_argument(
-        "--timeout", type=int, default=3600,
-        help="Overall run timeout in seconds (default: 3600 = 60min)",
+        "--timeout", type=int, default=86400,
+        help="Overall run timeout in seconds (default: 86400 = 24h)",
     )
     test_parser.add_argument(
         "--convergence-threshold", type=int, default=3,

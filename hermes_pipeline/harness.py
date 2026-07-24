@@ -297,6 +297,14 @@ def _poll_kanban_phases(
         assignee=assignee,
     )
 
+    # Intentionally unguarded — fail fast before polling begins, matching
+    # register_todo_phases()'s unguarded call above.
+    initial_status = get_todo_kanban_status(project_slug, tick_id)
+    log.info(
+        "initial phase status: %s",
+        ", ".join(f"{k}={v}" for k, v in sorted(initial_status.items())) or "(none)",
+    )
+
     # Gate tasks will be auto-completed when their parent phase finishes,
     # not at registration time — this ensures parent output exists before
     # child phases can start.
@@ -323,10 +331,12 @@ def _poll_kanban_phases(
                 prev = previous_status.get(phase_key)
 
                 if prev in (None, "ready", "blocked") and status == "running":
+                    log.info("phase %s: %s -> running", phase_key, prev or "none")
                     monitor.current_phase_key = phase_key
                     monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
 
                 elif prev == "running" and status == "done":
+                    log.info("phase %s: running -> done", phase_key)
                     monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
                     # Auto-complete any gate task whose predecessor just finished
@@ -335,6 +345,7 @@ def _poll_kanban_phases(
                     )
 
                 elif prev == "running" and status == "failed":
+                    log.info("phase %s: running -> failed", phase_key)
                     monitor.current_phase_key = None
                     # monitor() records the failure with the detector and raises
                     # ConvergenceHaltError itself if the threshold is tripped —
@@ -347,6 +358,7 @@ def _poll_kanban_phases(
                     # as "running" (fast phase, coarse poll interval). Still
                     # emit the event and run gate auto-complete so downstream
                     # gates aren't left blocked.
+                    log.info("phase %s: %s -> done", phase_key, prev or "none")
                     monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
                     _auto_complete_gate_tasks(
@@ -354,6 +366,7 @@ def _poll_kanban_phases(
                     )
 
                 elif prev in (None, "ready", "blocked") and status == "failed":
+                    log.info("phase %s: %s -> failed", phase_key, prev or "none")
                     monitor.current_phase_key = None
                     monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
         except ConvergenceHaltError:
