@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-24
+
+### Changed
+- **BREAKING:** CLI renamed from `pipeline-watch`/`hermes-pipeline` to `tpo`. Reinstall with `uv tool install hermes-pipeline` to get the new name. `pipeline-watch` and `hermes-pipeline` still work for one release — each prints a deprecation warning to stderr before dispatching, and will be removed in the next version bump.
+- The `todos-manager` skill is now bundled as package data (`hermes_pipeline/data/skills/todos-manager/`) instead of living outside the package at `skills/todos-manager/`. `uv tool install` now works end-to-end without a manual clone step.
+
+### Added
+- `tpo skills install [--target {codex|claude|all}] [--scope {user|project}] [--force]` — installs the bundled `todos-manager` skill to `~/.claude/skills/`, `~/.agents/skills/`, or both.
+
+### Removed
+- `scripts/install-todos-manager.sh` — superseded by `tpo skills install`.
+
 ## [0.5.10] - 2026-07-24
 
 ### Added
