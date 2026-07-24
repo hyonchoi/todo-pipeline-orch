@@ -172,7 +172,7 @@ def _parse_todo_id(value: str) -> int:
     except ValueError:
         raise argparse.ArgumentTypeError(
             f"todo_id must be a number (you provided '{value}'). "
-            f"Example: pipeline-watch merge myproject 123"
+            f"Example: tpo merge myproject 123"
         )
 
 
@@ -716,7 +716,7 @@ def _tick_project(
         )
     except (ContractSchemaError, ContractVersionMismatchError) as e:
         log.error(
-            "project %s: pipeline contract invalid: %s — run `pipeline-watch doctor %s` for details",
+            "project %s: pipeline contract invalid: %s — run `tpo doctor %s` for details",
             project_slug, e, project_slug,
         )
         raise
@@ -725,7 +725,7 @@ def _tick_project(
     if missing:
         log.error(
             "project %s: pipeline contract at %s is missing capabilities %s required by "
-            "phases.yaml — edit the contract to add them, or run `pipeline-watch doctor %s` for details",
+            "phases.yaml — edit the contract to add them, or run `tpo doctor %s` for details",
             project_slug, contract_path(project_state), sorted(missing), project_slug,
         )
         raise CapabilityMismatchError(f"contract missing capabilities: {sorted(missing)}")
@@ -1085,7 +1085,7 @@ def _cmd_doctor(args, config: Config) -> int:
                 "Cause: The profile was never installed, or it was removed after install."
             )
             print(
-                f"Fix: Install the bundled profile with `pipeline-watch install-profile`, "
+                f"Fix: Install the bundled profile with `tpo install-profile`, "
                 f"or create a custom profile named '{contract.assignee}' "
                 f"with `hermes profile create {contract.assignee}`."
             )
@@ -1204,9 +1204,9 @@ def _cmd_install_profile(args, config: Config) -> int:
     print("Pipeline profile installed successfully.")
     print()
     print("Next step: set the assignee in your project contract:")
-    print("  pipeline-watch init <project> --assignee pipeline")
+    print("  tpo init <project> --assignee pipeline")
     print("Then verify with:")
-    print("  pipeline-watch doctor <project>")
+    print("  tpo doctor <project>")
     return 0
 
 

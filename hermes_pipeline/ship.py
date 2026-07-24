@@ -491,7 +491,7 @@ def maybe_ship_ready(
             slack_channel,
             f":rocket: {project_slug} TODO-{todo_num} is ready to ship — "
             f"PR #{sidecar.pr_number} passed all phases. "
-            f"Run: pipeline-watch approve {project_slug} --todo TODO-{todo_num}",
+            f"Run: tpo approve {project_slug} --todo TODO-{todo_num}",
         )
     except Exception as e:  # never break the tick
         log.warning("maybe_ship_ready failed for %s tick %s: %s",

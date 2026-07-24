@@ -73,7 +73,7 @@ def _render_default_contract_toml(profile: str = "gstack") -> str:
     caps_toml = ", ".join(f'"{c}"' for c in caps)
     return (
         "# Pipeline execution contract — read at tick start.\n"
-        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         f"schema_version = {CONTRACT_SCHEMA_VERSION}\n"
         'assignee = "default"\n'
         f"capabilities = [{caps_toml}]\n"
@@ -91,7 +91,7 @@ def _render_contract_toml(contract: PipelineContract) -> str:
     caps_toml = ", ".join(f'"{c}"' for c in contract.capabilities)
     return (
         "# Pipeline execution contract — read at tick start.\n"
-        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         f"schema_version = {contract.schema_version}\n"
         f'assignee = "{contract.assignee}"\n'
         f"capabilities = [{caps_toml}]\n"
@@ -125,7 +125,7 @@ def load_contract(project_state: Path) -> PipelineContract:
     path = contract_path(project_state)
     if not path.is_file():
         raise ContractMissingError(
-            f"no pipeline contract at {path} — run `pipeline-watch init <project>` to create one"
+            f"no pipeline contract at {path} — run `tpo init <project>` to create one"
         )
 
     try:
@@ -141,7 +141,7 @@ def load_contract(project_state: Path) -> PipelineContract:
     if schema_version != CONTRACT_SCHEMA_VERSION:
         raise ContractVersionMismatchError(
             f"{path} has schema_version={schema_version}, expected {CONTRACT_SCHEMA_VERSION} — "
-            f"run `pipeline-watch init <project> --force` to regenerate, or edit it by hand"
+            f"run `tpo init <project> --force` to regenerate, or edit it by hand"
         )
 
     assignee = data.get("assignee", "default")
