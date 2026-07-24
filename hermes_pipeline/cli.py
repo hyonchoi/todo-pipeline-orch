@@ -213,7 +213,7 @@ def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
-        prog="pipeline-watch",
+        prog="tpo",
         description="Hermes pipeline orchestrator: merge, approve, status, and kill commands.",
     )
     parser.add_argument(

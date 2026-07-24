@@ -9,8 +9,9 @@ dependencies = [
 ]
 
 [project.scripts]
-pipeline-watch = "hermes_pipeline.cli:main"
-hermes-pipeline = "hermes_pipeline.cli:main"
+tpo = "hermes_pipeline.cli:main"
+pipeline-watch = "hermes_pipeline.deprecated_entry:pipeline_watch_deprecated"
+hermes-pipeline = "hermes_pipeline.deprecated_entry:hermes_pipeline_deprecated"
 
 [project.optional-dependencies]
 dev = [
