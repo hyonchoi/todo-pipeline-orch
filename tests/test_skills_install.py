@@ -135,11 +135,11 @@ class TestCmdSkillsInstall:
         real_copytree = __import__("shutil").copytree
         call_count = {"n": 0}
 
-        def _flaky_copytree(src, dst, **kw):
+        def _flaky_copytree(*args, **kw):
             call_count["n"] += 1
             if call_count["n"] == 2:
                 raise PermissionError("denied on second target")
-            return real_copytree(src, dst, **kw)
+            return real_copytree(*args, **kw)
 
         monkeypatch.setattr("shutil.copytree", _flaky_copytree)
 
