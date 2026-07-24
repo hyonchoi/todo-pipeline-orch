@@ -10,7 +10,7 @@ Pipeline profiles let a project select an independent set of phases — the prom
 
 ## What is a profile?
 
-A profile is a directory under `hermes_pipeline/data/profiles/<name>/` containing a `phases.yaml` file that defines the pipeline's phase sequence. Two profiles are bundled:
+A profile is a directory under `hermes_pipeline/data/phase-profiles/<name>/` containing a `phases.yaml` file that defines the pipeline's phase sequence. Two profiles are bundled:
 
 - **`gstack`** (default) — spec → plan → implement → review → security → document → ship, using gstack skills (`/spec`, `/plan-eng-review`, `/build`, `/review`, `/ship`)
 - **`agent-skills`** — the same shape, using the `agent-skills` plugin's skills instead
@@ -77,14 +77,14 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
 
 ## Adding a new profile
 
-1. Create `hermes_pipeline/data/profiles/<name>/phases.yaml` following the same schema as the bundled profiles (`phase_key`, `name`, `prompt`, `tools`, `turns`, `timeout` per phase; gate phases use `gate: true`).
+1. Create `hermes_pipeline/data/phase-profiles/<name>/phases.yaml` following the same schema as the bundled profiles (`phase_key`, `name`, `prompt`, `tools`, `turns`, `timeout` per phase; gate phases use `gate: true`).
 2. Run `pipeline-watch init <project> --profile <name>` to write a contract selecting it.
 3. Run `pipeline-watch doctor <project>` to confirm the profile resolves and capabilities are computed correctly.
 
 ## Troubleshooting
 
 **"ERROR: unknown profile '<name>'" on init**
-- The `--profile` flag names a profile that doesn't exist under `hermes_pipeline/data/profiles/`.
+- The `--profile` flag names a profile that doesn't exist under `hermes_pipeline/data/phase-profiles/`.
 - **Fix:** Use `gstack` or `agent-skills`, or add a new profile directory first.
 
 **"MISSING: ..." on doctor**

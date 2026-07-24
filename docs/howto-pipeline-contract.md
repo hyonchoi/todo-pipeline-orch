@@ -122,7 +122,7 @@ uv run pipeline-watch tick
 - **Fix:** Run `pipeline-watch init <project>`. Ticks still work without a contract (they fall back to computed defaults), but `doctor` will report the file as missing.
 
 **"MISSING: ... unknown profile"**
-- The contract's `profile` field names a profile that doesn't exist under `hermes_pipeline/data/profiles/`.
+- The contract's `profile` field names a profile that doesn't exist under `hermes_pipeline/data/phase-profiles/`.
 - **Fix:** Correct the `profile` field to a valid name, or run `pipeline-watch init <project> --force --profile <valid-profile>`.
 
 ## Related
