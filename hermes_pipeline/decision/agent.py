@@ -1,10 +1,12 @@
 """Prompt build, SHA pin, Hermes API call, response parse."""
 from __future__ import annotations
+
 import hashlib
 import json
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+
 from .schema import SelectionContext
 
 log = logging.getLogger(__name__)

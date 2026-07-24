@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.10] - 2026-07-24
+
+### Added
+
+- Ruff linting job to GitHub Actions CI (sha-pinned actions) and a `.pre-commit-config.yaml` for local ruff auto-fix on commit.
+
+### Changed
+
+- Applied ruff auto-fixes across the entire codebase: import reordering (isort), `Optional[X]` → `X | None` modernization, `datetime.timezone.utc` → `datetime.UTC`, and dead code removal. No behavioral changes — 704 tests pass unchanged.
+
+### Removed
+
+- Unused imports, unused variables, and redundant type annotations cleaned by ruff.
+
 ## [0.5.9] - 2026-07-24
 
 ### Changed

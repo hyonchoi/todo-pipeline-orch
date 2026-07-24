@@ -1,6 +1,7 @@
-import os
 from pathlib import Path
+
 from hermes_pipeline.config import Config
+
 
 def test_defaults():
     c = Config.default()

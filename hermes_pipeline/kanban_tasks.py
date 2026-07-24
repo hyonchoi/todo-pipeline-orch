@@ -15,12 +15,10 @@ from pathlib import Path
 
 from .outcomes import (
     OUTCOME_ALL_COMPLETE,
-    OUTCOME_FAILED_TO_SPAWN,
     OUTCOME_PHASE_COMPLETE,
     OUTCOME_PICKED_NONE,
-    OUTCOME_TICK_STARTED,
 )
-from .phases import load_phases, _render_phase_prompt
+from .phases import _render_phase_prompt, load_phases
 
 # Sentinel written after successful registration to record expected phases.
 _EXPECTED_PHASES_FILE_SUFFIX = ".expected-phases.json"

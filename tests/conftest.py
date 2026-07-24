@@ -13,6 +13,7 @@ if _skill_test_dir.exists():
 
 import pytest
 
+
 @pytest.fixture
 def tmp_project(tmp_path):
     """A scratch project dir with TODOS.md + .hermes/."""

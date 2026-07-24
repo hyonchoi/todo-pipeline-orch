@@ -2,15 +2,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 
 from hermes_pipeline.decision.context import (
-    build_in_flight,
     _extract_in_flight_ids,
     _fetch_kanban_snapshot,
     _kanban_snapshot,
+    build_in_flight,
 )
 
 

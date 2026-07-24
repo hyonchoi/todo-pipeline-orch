@@ -1,12 +1,18 @@
 from __future__ import annotations
-import json
+
 import hashlib
+import json
 from pathlib import Path
+
 import pytest
+
 from hermes_pipeline.decision import SelectionContext
 from hermes_pipeline.decision.agent import (
-    compute_prompt_sha, build_prompt, call_agent, AgentResult,
+    AgentResult,
     PromptShaMismatch,
+    build_prompt,
+    call_agent,
+    compute_prompt_sha,
 )
 
 PROMPT_BODY = """\

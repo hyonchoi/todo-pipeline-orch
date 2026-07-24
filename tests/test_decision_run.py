@@ -1,12 +1,21 @@
 from __future__ import annotations
-import json
+
 from pathlib import Path
 from unittest.mock import patch
+
+from hermes_pipeline.config import (
+    CircuitBreakerConfig,
+    Config,
+    FullConfig,
+    SelectionConfig,
+)
 from hermes_pipeline.decision import (
-    run_selection, HermesSelectionDecision, SelectionContext,
+    HermesSelectionDecision,
+    SelectionContext,
+    run_selection,
 )
 from hermes_pipeline.decision.agent import AgentResult, PromptShaMismatch
-from hermes_pipeline.config import Config, FullConfig, SelectionConfig, CircuitBreakerConfig
+
 
 def _cfg(state_dir: Path, prompt_path: Path, expected_sha=None) -> FullConfig:
     return FullConfig(

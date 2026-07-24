@@ -6,7 +6,6 @@ actual TODOS.md / TODOS-archive.md content.
 
 import re
 from pathlib import Path
-from typing import Optional
 
 import yaml
 
@@ -34,7 +33,7 @@ def _check_archive_header(text: str) -> bool:
     return "# TODOS Archive" in text and "Completed TODOs" in text
 
 
-def run_structural(golden: dict, todos_text: str, archive_text: Optional[str] = None) -> dict:
+def run_structural(golden: dict, todos_text: str, archive_text: str | None = None) -> dict:
     """Run all structural assertions from a golden file.
 
     Returns {"passed": int, "failed": int, "results": list[dict]}.

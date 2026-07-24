@@ -1,15 +1,13 @@
 """Circuit breaker — N consecutive no-progress ticks -> Slack alert."""
 from __future__ import annotations
+
 import datetime as _dt
 import fcntl
 import json
+import logging
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-
-import logging
-
-log = logging.getLogger(__name__)
 
 from hermes_pipeline.outcomes import (
     OUTCOME_ALL_COMPLETE,
@@ -19,8 +17,11 @@ from hermes_pipeline.outcomes import (
     OUTCOME_TICK_STARTED,
 )
 
+log = logging.getLogger(__name__)
+
+
 def _now() -> _dt.datetime:
-    return _dt.datetime.now(_dt.timezone.utc)
+    return _dt.datetime.now(_dt.UTC)
 
 def _send_slack(*, channel: str, msg: str) -> None:
     try:
@@ -98,7 +99,7 @@ class CircuitBreaker:
             return self.observe(picked=None, counts_as_no_progress=True)
 
         # Read with shared lock to prevent partial reads from concurrent writes
-        with open(phases_file, "r") as f:
+        with open(phases_file) as f:
             fcntl.flock(f, fcntl.LOCK_SH)
             try:
                 content = f.read().strip()

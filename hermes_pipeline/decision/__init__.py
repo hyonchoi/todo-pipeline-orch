@@ -1,12 +1,14 @@
 """Hermes-agent selection sub-package — public API."""
 from __future__ import annotations
+
 import datetime as _dt
 import re as _re
 import subprocess
 from pathlib import Path as _P
-from .schema import HermesSelectionDecision, SelectionContext, Outcome
-from .agent import call_agent, compute_prompt_sha, PromptShaMismatch
+
 from . import store as _store
+from .agent import PromptShaMismatch, call_agent, compute_prompt_sha
+from .schema import HermesSelectionDecision, Outcome, SelectionContext
 
 _TODO_ID_RE = _re.compile(r"^TODO-\d+$")
 # Pulls every `TODO-N` token out of TODOS.md. Header lines, body references,
@@ -17,13 +19,13 @@ _TODOS_ID_RE = _re.compile(r"\bTODO-\d+\b")
 
 __all__ = [
     "HermesSelectionDecision",
-    "SelectionContext",
     "Outcome",
+    "SelectionContext",
     "run_selection",
 ]
 
 def _now_iso() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def _emit_sha_mismatch_alert(*, tick_id: str, expected: str, actual: str) -> None:
     msg = (

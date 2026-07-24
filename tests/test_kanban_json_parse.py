@@ -2,15 +2,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-
-import pytest
 from unittest.mock import MagicMock, patch
 
 from hermes_pipeline.kanban import (
+    ActiveTasksStore,
     HermesKanbanAdapter,
     KanbanOutbox,
-    ActiveTasksStore,
 )
 
 

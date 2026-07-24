@@ -1,9 +1,11 @@
 import json
-import shutil
 from pathlib import Path
 
-from hermes_pipeline.state_migration import _get_project_state_dir, _migrate_global_state
 from hermes_pipeline.config import Config
+from hermes_pipeline.state_migration import (
+    _get_project_state_dir,
+    _migrate_global_state,
+)
 
 
 def test_get_project_state_dir(tmp_path: Path):

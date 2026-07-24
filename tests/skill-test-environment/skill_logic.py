@@ -5,7 +5,6 @@ Serves as both test oracle and golden-file generator.
 
 import re
 from pathlib import Path
-from typing import Optional
 
 
 def scan_ids(text: str) -> set[int]:
@@ -28,7 +27,7 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
 COUNTER_FILE = ".hermes/todo_id_counter"
 
 
-def read_counter_cache(project_dir: Path) -> Optional[int]:
+def read_counter_cache(project_dir: Path) -> int | None:
     """Read the counter cache file. Returns None if not found."""
     counter = project_dir / COUNTER_FILE
     if not counter.exists():
@@ -73,7 +72,7 @@ def parse_entries(text: str) -> list[dict]:
     """
     lines = text.split("\n")
     entries: list[dict] = []
-    current: Optional[dict] = None
+    current: dict | None = None
 
     for line in lines:
         header_match = ENTRY_HEADER_RE.match(line)

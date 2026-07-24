@@ -2,13 +2,12 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 
-from hermes_pipeline.config import Config
 from hermes_pipeline.cli import _cmd_tick, build_parser
+from hermes_pipeline.config import Config
 
 
 def _make_decision(picked=None, **kwargs):

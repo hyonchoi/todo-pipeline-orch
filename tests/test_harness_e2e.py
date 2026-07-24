@@ -9,12 +9,11 @@ report contents) per the design doc's "assertion granularity" decision.
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from hermes_pipeline.harness import run_harness, preflight_check
+from hermes_pipeline.harness import run_harness
 
 
 @pytest.fixture(autouse=True)

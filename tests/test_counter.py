@@ -1,8 +1,10 @@
 """Tests for counter.py — recover_counter and auto-initialize logic."""
 
+
 import pytest
-from pathlib import Path
-from hermes_pipeline.counter import recover_counter, COUNTER_FILE
+
+from hermes_pipeline.counter import COUNTER_FILE, recover_counter
+
 
 class TestRecoverCounter:
     """Test recover_counter() function."""

@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
-import pytest
 import signal
 import subprocess
+from unittest.mock import MagicMock, patch
+
+import pytest
 
 from hermes_pipeline.hermes_adapter import (
-    hermes_call,
-    HermesCallError,
-    hermes_agent_call,
-    HermesAgentResult,
-    check_hermes,
-    HermesDependencyError,
     HERMES_RETRY_ATTEMPTS,
+    HermesAgentResult,
+    HermesCallError,
+    HermesDependencyError,
+    check_hermes,
+    hermes_agent_call,
+    hermes_call,
 )
 
 
@@ -416,9 +417,8 @@ def test_hermes_call_retry_succeeds_on_second():
 def test_hermes_call_timeout_clamping():
     """_api_call should clamp timeout to [MIN_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS]."""
     from hermes_pipeline.decision.agent import (
-        TOKENS_PER_SECOND,
-        MIN_TIMEOUT_SECONDS,
         MAX_TIMEOUT_SECONDS,
+        MIN_TIMEOUT_SECONDS,
     )
 
     captured_timeout = []
@@ -499,7 +499,6 @@ def test_check_hermes_raises_on_nonzero_exit():
 
 def test_hermes_agent_call_timeout_kills_process_group():
     """On timeout, hermes_agent_call kills the entire process group, not just the process."""
-    import os
     fake_proc = MagicMock()
     fake_proc.pid = 99999
 
@@ -524,7 +523,6 @@ def test_hermes_agent_call_timeout_kills_process_group():
 
 def test_hermes_agent_call_timeout_communicate_has_timeout():
     """Post-kill communicate must have a timeout to prevent hanging."""
-    import os
     fake_proc = MagicMock()
     fake_proc.pid = 99999
 
@@ -799,7 +797,7 @@ def test_check_claude_returns_version():
     fake_result.stderr = ""
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
-        from hermes_pipeline.hermes_adapter import check_claude, ClaudeDependencyError
+        from hermes_pipeline.hermes_adapter import check_claude
         version = check_claude()
 
     assert "2.1.183" in version

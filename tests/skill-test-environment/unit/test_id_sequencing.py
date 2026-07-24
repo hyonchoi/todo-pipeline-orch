@@ -1,8 +1,15 @@
 """Tests for ID sequencing logic — scanning, next-ID computation, counter cache."""
 
-import pytest
 from pathlib import Path
-from tests.skill_test_environment.skill_logic import scan_ids, compute_next_id, read_counter_cache, counter_matches_scan
+
+import pytest
+
+from tests.skill_test_environment.skill_logic import (
+    compute_next_id,
+    counter_matches_scan,
+    read_counter_cache,
+    scan_ids,
+)
 
 
 class TestScanIds:

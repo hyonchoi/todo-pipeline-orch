@@ -1,5 +1,7 @@
 from __future__ import annotations
+
 import json
+
 import pytest
 
 from hermes_pipeline.decision import HermesSelectionDecision, SelectionContext
@@ -10,7 +12,6 @@ from hermes_pipeline.decision.schema import (
     _Option,
     validate_decision_sheet,
 )
-
 
 # ---------------------------------------------------------------------------
 # Legacy tests (HermesSelectionDecision, SelectionContext)

@@ -1,6 +1,7 @@
 """Counter recovery — scan TODOS.md for max TODO-N and initialize .hermes/todo_id_counter."""
 
 from __future__ import annotations
+
 import os
 import re
 import tempfile

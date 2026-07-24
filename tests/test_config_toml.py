@@ -1,6 +1,9 @@
 from __future__ import annotations
+
 from pathlib import Path
+
 from hermes_pipeline.config import Config, load_toml_overlay
+
 
 def _write(p: Path, body: str) -> Path:
     p.write_text(body)

@@ -2,16 +2,14 @@
 from __future__ import annotations
 
 import json
-import subprocess
-from pathlib import Path
 
 import pytest
 
 from hermes_pipeline.kanban_tasks import (
-    register_todo_phases,
-    get_todo_kanban_status,
-    all_phases_complete,
     _archive_tasks,
+    all_phases_complete,
+    get_todo_kanban_status,
+    register_todo_phases,
 )
 
 
@@ -283,7 +281,6 @@ class TestGetTodoKanbanStatusEdgeCases:
         mock_result.stderr = "error"
         mocker.patch("subprocess.run", return_value=mock_result)
 
-        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {}
 
@@ -298,7 +295,6 @@ class TestGetTodoKanbanStatusEdgeCases:
         mock_result.stdout = json.dumps(mock_data)
         mocker.patch("subprocess.run", return_value=mock_result)
 
-        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {}
 
@@ -306,6 +302,5 @@ class TestGetTodoKanbanStatusEdgeCases:
         """hermes not found -> empty dict."""
         mocker.patch("subprocess.run", side_effect=FileNotFoundError("hermes not found"))
 
-        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {}

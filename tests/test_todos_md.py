@@ -1,6 +1,8 @@
 """Tests for hermes_pipeline.todos_md.find_todo_fields."""
 from __future__ import annotations
+
 from pathlib import Path
+
 from hermes_pipeline.todos_md import find_todo_fields
 
 

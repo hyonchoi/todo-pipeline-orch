@@ -1,12 +1,11 @@
 """State management for pipeline execution: locks and checkpoints."""
 
 from __future__ import annotations
+
 import json
 import os
-import hashlib
 import uuid as _uuid
 from pathlib import Path
-from typing import Optional
 
 
 def _atomic_write_text(path: Path, payload: str) -> None:
@@ -65,7 +64,7 @@ class State:
         if self.lock_path.exists():
             self.lock_path.unlink()
 
-    def get_saved_hash(self) -> Optional[str]:
+    def get_saved_hash(self) -> str | None:
         """
         Get the last saved TODOS.md hash for change detection.
 

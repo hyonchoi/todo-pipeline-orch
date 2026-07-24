@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 import json
-import pytest
-from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import MagicMock, Mock, patch
+
 from hermes_pipeline.kanban import (
-    KanbanClient,
     ActiveTasksStore,
+    HermesKanbanAdapter,
+    KanbanClient,
     KanbanOutbox,
     OutboxEntry,
-    HermesKanbanAdapter,
     SyncResult,
     drain_outbox,
-    PhaseStatus,
-    KanbanOutcome,
 )
-
 
 # ============================================================================
 # TC.1: KanbanClient Protocol + NullKanbanAdapter

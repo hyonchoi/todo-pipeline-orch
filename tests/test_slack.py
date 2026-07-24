@@ -1,6 +1,8 @@
 import subprocess
 from unittest.mock import patch
+
 from hermes_pipeline.slack import notify
+
 
 def test_notify_calls_hermes_chan_message():
     with patch("subprocess.run") as run:

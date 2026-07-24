@@ -1,10 +1,10 @@
 """Tests for format validation — schema compliance checks."""
 
 from tests.skill_test_environment.skill_logic import (
-    validate_entry,
+    REQUIRED_FIELDS,
     validate_all_entries,
     validate_dependency_refs,
-    REQUIRED_FIELDS,
+    validate_entry,
 )
 
 
