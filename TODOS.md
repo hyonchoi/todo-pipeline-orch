@@ -52,6 +52,12 @@
 
 ## Completed
 
+- [x] **TODO-30: Add live status monitoring to `pipeline-watch test` poll loop** — Replace silent timeout wait with real-time kanban phase status table and transitions
+  - **What:** (1) Add live console output to `_poll_kanban_phases()` in harness.py — print an initial status table after registration, then log each phase status transition (→ running, → done, → failed) as the poll loop detects them. (2) Raise the `--timeout` default for `pipeline-watch test` from 3600s (1h) to 86400s (24h) so healthy long test runs are no longer killed by the default.
+  - **Why:** The `test` command sits silent during the entire poll duration, giving no feedback until timeout or completion. Users can't track which phases are executing or see progress. Additionally, the artificial timeout can kill a running pipeline before phases finish.
+  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `worktree-todo-30-live-status-monitoring`, Test Coverage `required`, Security Review `not-required`
+  - **Completed:** v0.5.8 (2026-07-23)
+
 - [x] **TODO-31: Add 'UI Review' decision for phase_6_2 skip signal to TODOS.md schema** — Document `UI Review required/not-required` in schema, auto-research, SKILL.md, and preamble so new TODO entries always carry the skip signal phase_6_2 reads.
   - **What:** Add `UI Review required/not-required` to the Decisions field definition in sections/schema.md, sections/auto-research.md derivation rules, SKILL.md workflow/preamble, and TODOS.md preamble blockquote. Auto-detect from title/summary keywords: ui, frontend, design, visual, layout, component, css, style, dashboard, artifact, page, screen, modal, form, navigation, button, icon, animation.
   - **Why:** phase_6_2_qa prompt already checks `UI Review: required` in Decisions, but the sub-field is undocumented in schema, auto-research, SKILL.md, and preamble — new entries omit it, causing phase_6_2 to have no skip signal to check.
@@ -94,11 +100,6 @@
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/remove-dead-post-phases-run-cleanup`, Test Coverage `required`, Security Review `not-required`
   - **Completed:** v0.5.6 (2026-07-22)
 
-
-- [ ] **TODO-30: Add live status monitoring to `pipeline-watch test` poll loop** — Replace silent timeout wait with real-time kanban phase status table and transitions
-  - **What:** (1) Add live console output to `_poll_kanban_phases()` in harness.py — print an initial status table after registration, then log each phase status transition (→ running, → done, → failed) as the poll loop detects them. (2) Remove the wall-clock timeout ceiling from `run_harness()` so the poll loop runs to natural completion (all phases terminal) instead of being killed by `--timeout`. The timeout flag remains as an optional safety fallback, defaulting to a large value.
-  - **Why:** The `test` command sits silent during the entire poll duration, giving no feedback until timeout or completion. Users can't track which phases are executing or see progress. Additionally, the artificial timeout can kill a running pipeline before phases finish.
-  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `—`, Test Coverage `required`, Security Review `not-required`
 
 - [ ] **TODO-32: Separate `data/profiles` into identity and phase-config contexts** — Split mixed Hermes identity profile and pipeline phase definitions into distinct directories
   - **What:** Separate `hermes_pipeline/data/profiles` into two distinct directories (or restructure) — one for Hermes' identity/profile data (`pipeline/SOUL.md`) and another for pipeline phase configurations (`gstack/phases.yaml`, `agent-skills/phases.yaml`). The `pipeline/` subdirectory contains persona/identity data, while `gstack/` and `agent-skills/` contain pipeline orchestration metadata. These two contexts currently share a `profiles` namespace but represent completely different domains.

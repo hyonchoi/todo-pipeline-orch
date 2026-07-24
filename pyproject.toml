@@ -1,6 +1,6 @@
 [project]
 name = "hermes-pipeline"
-version = "0.5.7"
+version = "0.5.8"
 description = "Autonomous TODOS.md pipeline orchestrator (Hermes-agent selection, kanban, merge-gating)"
 requires-python = ">=3.12"
 dependencies = [
