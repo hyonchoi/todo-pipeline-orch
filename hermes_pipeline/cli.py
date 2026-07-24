@@ -1252,13 +1252,13 @@ def _cmd_skills_install(args, config: Config) -> int:
             print(f"OK ({name}): installed todos-manager to {dest}")
         except PermissionError as e:
             any_failed = True
-            print(f"Problem: ({name}) permission denied writing to {dest}.")
+            print(f"Problem ({name}): permission denied writing to {dest}.")
             print(f"Details: {e}")
             print(f"Cause: the current user lacks write access to {install_dir}.")
             print(f"Fix: check permissions on {install_dir}, or rerun with --scope project.")
         except OSError as e:
             any_failed = True
-            print(f"Problem: ({name}) failed to install todos-manager to {dest}.")
+            print(f"Problem ({name}): failed to install todos-manager to {dest}.")
             print(f"Details: {e}")
             print("Cause: an OS-level error occurred during copy.")
             print(f"Fix: inspect {install_dir} and retry.")

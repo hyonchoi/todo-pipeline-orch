@@ -124,7 +124,7 @@ class TestCmdSkillsInstall:
 
         out = capsys.readouterr().out
         assert result == 1
-        assert "Problem:" in out
+        assert "Problem (" in out
         assert "Cause:" in out
         assert "Fix:" in out
 
