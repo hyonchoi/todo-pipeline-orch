@@ -96,7 +96,7 @@ tpo skills install --target all
 
 This installs `todos-manager` to `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/`.
 
-The skill enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment (scanning both TODOS.md and TODOS-archive.md), and a preview/confirm gate before writing. See [skills/todos-manager/SKILL.md](skills/todos-manager/SKILL.md) for the full schema and workflows.
+The skill enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment (scanning both TODOS.md and TODOS-archive.md), and a preview/confirm gate before writing. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
 
 ---
 
