@@ -167,20 +167,62 @@ def load_contract(project_state: Path) -> PipelineContract:
     )
 
 
+def _bundled_data_root():
+    """Return the importlib.resources Traversable for hermes_pipeline.data.
+
+    Isolated as its own function so tests can mock it to simulate a
+    non-filesystem (zip-wheel) install without patching importlib itself.
+    """
+    from importlib.resources import files
+    return files("hermes_pipeline.data")
+
+
+def _copy_traversable_to_tempdir(traversable) -> Path:
+    """Recursively copy a non-filesystem Traversable into a real tempdir.
+
+    Used when importlib.resources yields a Traversable that isn't backed by
+    a plain filesystem path (e.g. a zip-wheel install) — shutil.copytree and
+    Path() operations need a real directory to work against.
+    """
+    import tempfile
+
+    dest_root = Path(tempfile.mkdtemp(prefix="hermes_pipeline_bundled_"))
+
+    def _copy_node(node, dest: Path) -> None:
+        if node.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+            for child in node.iterdir():
+                _copy_node(child, dest / child.name)
+        else:
+            dest.write_bytes(node.read_bytes())
+
+    _copy_node(traversable, dest_root)
+    return dest_root
+
+
+def _resolve_bundled_dir(*parts: str) -> Path:
+    """Resolve a directory under hermes_pipeline/data/ to a real filesystem Path.
+
+    Resolves package-relative so it works whether running from a checkout
+    or from an installed wheel. For zip-wheel installs, importlib.resources
+    returns a Traversable that isn't a real filesystem path — in that case
+    the directory is copied to a temp directory so callers can rely on a
+    plain Path (shutil.copytree, Path.exists, etc.) unconditionally.
+    """
+    traversable = _bundled_data_root().joinpath(*parts)
+    try:
+        return Path(traversable)
+    except (TypeError, NotImplementedError):
+        return _copy_traversable_to_tempdir(traversable)
+
+
 def bundled_profile_dir() -> Path:
     """Return the path to the directory containing the bundled pipeline SOUL.md.
 
     Resolves package-relative so it works whether running from a checkout
     or from an installed wheel.
-
-    Limitation: For zip-wheel installs, importlib.resources returns a
-    Traversable that is not a real filesystem path, not a plain
-    ``shutil.copy``-able path. In practice, hatchling + uv always produce
-    filesystem installs, so this works.
     """
-    from importlib.resources import files
-    traversable = files("hermes_pipeline").joinpath("data", "hermes-identity", "pipeline")
-    return Path(traversable)
+    return _resolve_bundled_dir("hermes-identity", "pipeline")
 
 
 def required_capabilities(phases: list[Phase]) -> set[str]:
