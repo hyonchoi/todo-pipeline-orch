@@ -24,7 +24,7 @@ Look for the TODO's kanban card with all phases except ship in completion status
 ### 2. Run the approve command
 
 ```bash
-uv run pipeline-watch approve myproject --todo TODO-5
+uv run tpo approve myproject --todo TODO-5
 ```
 
 This runs an all-deterministic guard set, then ships:
@@ -55,7 +55,7 @@ approve refused: PR head SHA changed since review (reviewed=abc123, live=def456)
 
 Two options:
 - **Re-review**: manually check the new diff, then approve again. The bump commit is not pushed on refusal, so the sidecar SHA is still the reviewed value.
-- **Force bypass**: `uv run pipeline-watch approve myproject --todo TODO-5 --force --force`. This is audited to `.hermes/approve_audit.log` with both SHAs.
+- **Force bypass**: `uv run tpo approve myproject --todo TODO-5 --force --force`. This is audited to `.hermes/approve_audit.log` with both SHAs.
 
 ### 4. Handle a CI-red refusal
 
@@ -68,7 +68,7 @@ approve refused: CI is not green yet; re-run approve once checks pass (the bump 
 The bump commit is already on the branch. Once CI turns green:
 
 ```bash
-uv run pipeline-watch approve myproject --todo TODO-5
+uv run tpo approve myproject --todo TODO-5
 ```
 
 The SHA staleness guard is skipped because the sidecar was re-baselined with the bump SHA.

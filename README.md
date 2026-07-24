@@ -36,13 +36,13 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 | Doc | Quadrant | When to read |
 |---|---|---|
-| [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `pipeline-watch` end-to-end |
+| [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `tpo` end-to-end |
 | [Architecture overview](docs/ARCHITECTURE.md) | Explanation | Understanding lane structure, data flow, phase execution |
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
-| [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `pipeline-watch tick` uses kanban for phase state and ordering |
-| [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `pipeline-watch tick` for iterative development |
+| [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `tpo tick` uses kanban for phase state and ordering |
+| [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `tpo tick` for iterative development |
 | [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
 | [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
 | [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
@@ -65,10 +65,10 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [Skill test environment quickstart](docs/howto-skill-test-environment.md) | How-to | Adding and maintaining tests in the skill test harness |
 | [Skill test harness API](docs/reference-skill-test-harness.md) | Reference | Complete API for the todos-manager skill test environment |
 | [Why the skill test harness is pure-Python](docs/explanation-skill-test-harness-design.md) | Explanation | Design rationale: golden-file architecture, Phase 1 vs Phase 2 |
-| [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `hermes-pipeline test` against mock project data end-to-end |
+| [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `tpo test` against mock project data end-to-end |
 | [Harness production-code coverage checklist](docs/checklist-harness-production-coverage.md) | Reference | Acceptance criteria for maximal harness reuse of production code paths |
 
-| [Approve and ship a TODO](docs/howto-approve-and-ship.md) | How-to | Running `pipeline-watch approve` — full ship workflow |
+| [Approve and ship a TODO](docs/howto-approve-and-ship.md) | How-to | Running `tpo approve` — full ship workflow |
 | [CLI reference](docs/reference-cli.md) | Reference | All subcommands, arguments, exit codes, environment variables |
 | [Circuit breaker](docs/explanation-circuit-breaker.md) | Explanation | How no-progress tracking works and why it alerts |
 | [Decision module API](docs/reference-decision-api.md) | Reference | Selection schemas, outcome sidecars, plan-gate types |
@@ -102,7 +102,7 @@ The skill enforces the canonical schema (What/Why/Decisions + optional fields), 
 
 ## Getting Started
 
-👉 **New to pipeline-watch?** Start with the [getting-started tutorial](docs/tutorial-getting-started.md) — walk through discovery, review, and merge in ~15 minutes.
+👉 **New to tpo?** Start with the [getting-started tutorial](docs/tutorial-getting-started.md) — walk through discovery, review, and merge in ~15 minutes.
 
 ### Installation
 
@@ -116,42 +116,42 @@ uv sync
 
 Run a single pipeline tick (scans all active projects, select a TODO, register kanban phases, observe the circuit breaker):
 ```bash
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 Approve and ship a ready TODO (runs deterministic guards, bumps version, squash-merges to main, completes the ship gate):
 ```bash
-uv run pipeline-watch approve myproject --todo TODO-5
+uv run tpo approve myproject --todo TODO-5
 ```
 
 Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful when bootstrapping a project with hand-written TODOs but no counter file):
 ```bash
-uv run pipeline-watch recover-counter <project>
+uv run tpo recover-counter <project>
 ```
 
 Write the default pipeline execution contract for a project (idempotent — run again with `--force` to regenerate after editing `phases.yaml`). Use `--assignee` to set the Hermes profile for kanban tasks, and `--profile` to choose a pipeline skill-set (default: `gstack`):
 ```bash
-uv run pipeline-watch init <project>
-uv run pipeline-watch init <project> --force
-uv run pipeline-watch init <project> --assignee pipeline
-uv run pipeline-watch init <project> --profile agent-skills
+uv run tpo init <project>
+uv run tpo init <project> --force
+uv run tpo init <project> --assignee pipeline
+uv run tpo init <project> --profile agent-skills
 ```
 
 Install the bundled pipeline Hermes profile for unattended kanban execution:
 ```bash
-uv run pipeline-watch install-profile
-uv run pipeline-watch install-profile --force  # reinstall after SOUL.md changes
+uv run tpo install-profile
+uv run tpo install-profile --force  # reinstall after SOUL.md changes
 ```
 
 Verify a project's pipeline execution contract against its configured profile's phases (exit 0 clean, 1 drift, 2 missing/invalid contract or profile):
 ```bash
-uv run pipeline-watch doctor <project>
+uv run tpo doctor <project>
 ```
 
 Global flags available on all subcommands:
 ```bash
-uv run pipeline-watch --verbose tick   # increased log detail (selection results, lock state)
-uv run pipeline-watch --debug tick     # full debug logging (agent call summaries, circuit breaker transitions)
+uv run tpo --verbose tick   # increased log detail (selection results, lock state)
+uv run tpo --debug tick     # full debug logging (agent call summaries, circuit breaker transitions)
 ```
 
 ### Automated Ticks
@@ -218,7 +218,7 @@ list.
 ### Pipeline execution contract (`.hermes/pipeline.toml`)
 
 Each project declares the assignee and tool capabilities its phases require in
-a versioned contract at `.hermes/pipeline.toml`. Run `pipeline-watch init
+a versioned contract at `.hermes/pipeline.toml`. Run `tpo init
 <project>` once to write the default:
 
 ```toml
@@ -231,7 +231,7 @@ capabilities = ["Bash", "Edit", "Read", "Write"]
   against a stale version fails closed with a remediation message instead of
   silently running with mismatched settings.
 - `assignee` — passed as `--assignee` when registering each phase's kanban task.
-- `capabilities` — the tool set phases are allowed to use. `pipeline-watch
+- `capabilities` — the tool set phases are allowed to use. `tpo
   doctor <project>` cross-checks this against the `tools` each phase in
   `phases.yaml` declares and reports drift.
 

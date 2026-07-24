@@ -1,6 +1,6 @@
-# Getting Started with pipeline-watch
+# Getting Started with tpo
 
-In this tutorial, you'll set up your first pipeline-watched project and run the core workflows: triggering a tick, reviewing TODOs, and merging one to main. By the end, you'll have a working pipeline — with an optional cron schedule for production.
+In this tutorial, you'll set up your first tpoed project and run the core workflows: triggering a tick, reviewing TODOs, and merging one to main. By the end, you'll have a working pipeline — with an optional cron schedule for production.
 
 **Time: ~10 minutes**
 
@@ -18,15 +18,15 @@ If you don't have a test project yet, the setup section below will guide you thr
 
 ## Step 1: Verify installation
 
-First, confirm that `pipeline-watch` is installed and working:
+First, confirm that `tpo` is installed and working:
 
 ```bash
-uv run pipeline-watch --version
+uv run tpo --version
 ```
 
 Expected output:
 ```
-pipeline-watch 0.4.1
+tpo 0.5.10
 ```
 
 If you see "command not found," run:
@@ -74,11 +74,11 @@ git add .
 git commit -m "init: create project with TODOS"
 ```
 
-You now have a project that pipeline-watch can discover. Next, tell pipeline-watch where to find it.
+You now have a project that tpo can discover. Next, tell tpo where to find it.
 
 ---
 
-## Step 3: Configure pipeline-watch
+## Step 3: Configure tpo
 
 Pipeline-watch discovers projects by scanning a directory you specify via `PIPELINE_PROJECTS_DIR`. The default is `~/projects`. Tell it where your projects are:
 
@@ -104,7 +104,7 @@ capabilities = ["Bash", "Edit", "Read", "Write"]
 Write the pipeline execution contract for this project — a small TOML file declaring which assignee and tool capabilities its phases require:
 
 ```bash
-uv run pipeline-watch init demo-app
+uv run tpo init demo-app
 ```
 
 Expected output:
@@ -115,7 +115,7 @@ Wrote pipeline execution contract: /path/to/demo-app/.hermes/pipeline.toml
 Verify it's consistent with `phases.yaml`:
 
 ```bash
-uv run pipeline-watch doctor demo-app
+uv run tpo doctor demo-app
 ```
 
 Expected output:
@@ -130,7 +130,7 @@ OK: schema_version=1 assignee=default capabilities=['Bash', 'Edit', 'Read', 'Wri
 The `tick` command runs one pipeline tick immediately: it scans all active projects in your `projects_dir`, checks for in-flight work from a previous tick, observes outcomes, acquires a tick lock, runs selection via the Hermes agent, and registers phases as kanban tasks. This is the fastest way to see the pipeline in action.
 
 ```bash
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 You'll see log output as the tick runs through each active project. The Hermes agent evaluates TODOS.md files and picks a TODO (or returns `picked=None` if nothing is ready yet).
@@ -151,7 +151,7 @@ cd ~/my-projects/demo-app
 git add TODOS.md
 git commit -m "TODO-1: mark in progress"
 
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 Run the tick a second time. This tick scans all active projects, observes outcomes from the prior tick (if any), and then runs selection again.
@@ -208,7 +208,7 @@ You'll see all phases as kanban tasks with their statuses (blocked, ready, runni
 Once all phases are complete and the TODO is ready for review, ship it with the approve command. The approve command runs Phase 9 of the pipeline: it confirms the merge, bumps the version, and commits to main.
 
 ```bash
-uv run pipeline-watch approve demo-app --todo TODO-1
+uv run tpo approve demo-app --todo TODO-1
 ```
 
 The command will:
@@ -227,7 +227,7 @@ For a full end-to-end test, make sure you have:
 
 ## Step 7: Automate with Hermes cron (optional)
 
-So far you've been running `pipeline-watch tick` manually. For production, set up the Hermes cron schedule:
+So far you've been running `tpo tick` manually. For production, set up the Hermes cron schedule:
 
 ```bash
 hermes cron set pipeline-tick '*/5 * * * *'
@@ -245,7 +245,7 @@ You should see an entry for `pipeline-tick` with the `*/5` schedule. The circuit
 
 ## What you built
 
-You now have a working pipeline-watch setup that:
+You now have a working tpo setup that:
 
 ✅ Discovers projects with TODOS.md files via Hermes agent  
 ✅ Selects TODOs and registers phases as kanban tasks with dependency chains  
@@ -264,7 +264,7 @@ You now have a working pipeline-watch setup that:
 
 **Understand the architecture:**
 - Read [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) to understand how phases map to kanban tasks
-- Read [Architecture](../README.md#architecture) to see how pipeline-watch orchestrates the phases and ships
+- Read [Architecture](../README.md#architecture) to see how tpo orchestrates the phases and ships
 - Check [docs/pipeline-modularization-plan.md](pipeline-modularization-plan.md) for the full design
 
 **When things break:**

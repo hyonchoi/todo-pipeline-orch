@@ -1,6 +1,6 @@
 # Kanban-as-Scheduler
 
-`pipeline-watch tick` uses the Hermes kanban board as the source of truth for
+`tpo tick` uses the Hermes kanban board as the source of truth for
 pipeline phase state. Instead of writing internal state files tracking which
 phase is active, phases are registered as kanban tasks with `--parent`
 dependency chains. Kanban status queries (`get_todo_kanban_status`,
@@ -327,6 +327,6 @@ cb.observe_from_outcomes(
 
 ## Related
 
-- [How to run pipeline-watch tick](howto-pipeline-tick.md) — practical guide
+- [How to run tpo tick](howto-pipeline-tick.md) — practical guide
 - [Pipeline State Machine](hermes-state-machine.md) — full tick lifecycle
 - [How to configure via .hermes/config.toml](howto-config-toml.md) — circuit breaker settings

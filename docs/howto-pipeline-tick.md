@@ -2,7 +2,7 @@
 
 A tick is one pass of the pipeline: select a TODO via the Hermes agent,
 register phases as kanban tasks, and observe the circuit breaker. The
-`pipeline-watch tick` command fires a single scan-loop tick immediately so you can
+`tpo tick` command fires a single scan-loop tick immediately so you can
 iterate without waiting for the cron schedule.
 
 By the end of this guide, you'll have run a tick, inspected the kanban
@@ -22,7 +22,7 @@ board, and verified the outcome files.
 ### 1. Run a tick
 
 ```bash
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 This runs the full scan-loop tick:

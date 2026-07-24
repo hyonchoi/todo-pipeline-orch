@@ -4,7 +4,7 @@ Each project declares the assignee and tool capabilities its phases require in a
 
 ## Prerequisites
 
-- `todo-pipeline-orchestrator` installed and `uv run pipeline-watch` working
+- `todo-pipeline-orchestrator` installed and `uv run tpo` working
 - A project with a `TODOS.md` file in your `PIPELINE_PROJECTS_DIR`
 - Hermes CLI installed and authenticated (`hermes login`)
 
@@ -15,7 +15,7 @@ Each project declares the assignee and tool capabilities its phases require in a
 Run `init` once per project. It computes capabilities from the selected profile's `phases.yaml` and writes `.hermes/pipeline.toml`:
 
 ```bash
-uv run pipeline-watch init <project>
+uv run tpo init <project>
 ```
 
 Expected output:
@@ -35,13 +35,13 @@ profile = "gstack"
 If a contract already exists, `init` is a no-op. Use `--force` to regenerate:
 
 ```bash
-uv run pipeline-watch init <project> --force
+uv run tpo init <project> --force
 ```
 
 Use `--profile` to select a pipeline skill-set profile other than the default `gstack`:
 
 ```bash
-uv run pipeline-watch init <project> --profile agent-skills
+uv run tpo init <project> --profile agent-skills
 ```
 
 See [How to use the agent-skills profile](howto-agent-skills-profile.md) for details on the bundled profiles and how to add your own.
@@ -51,7 +51,7 @@ See [How to use the agent-skills profile](howto-agent-skills-profile.md) for det
 Run `doctor` to check the contract against the selected profile's `phases.yaml`:
 
 ```bash
-uv run pipeline-watch doctor <project>
+uv run tpo doctor <project>
 ```
 
 Four possible outcomes:
@@ -90,7 +90,7 @@ capabilities = ["Bash", "Edit", "Agent", "Read", "Write"]
 
 **Regenerate the default contract:**
 ```bash
-uv run pipeline-watch init <project> --force
+uv run tpo init <project> --force
 ```
 
 This overwrites the file with capabilities computed from the current profile's phases.yaml. Any custom assignee or capabilities will be lost.
@@ -100,10 +100,10 @@ This overwrites the file with capabilities computed from the current profile's p
 Confirm the contract is valid and the assignee is used by ticks:
 
 ```bash
-uv run pipeline-watch doctor <project>
+uv run tpo doctor <project>
 # Should print: OK: schema_version=2 assignee=... profile=... capabilities=[...]
 
-uv run pipeline-watch tick
+uv run tpo tick
 # Run a tick, check logs for: "registered N kanban tasks for TODO-X"
 ```
 
@@ -111,19 +111,19 @@ uv run pipeline-watch tick
 
 **"CapabilityMismatchError: contract missing capabilities"**
 - The contract exists but is missing tools phases.yaml requires.
-- **Fix:** Run `pipeline-watch doctor <project>` to see which capabilities are missing, then add them to `.hermes/pipeline.toml` or regenerate with `init --force`.
+- **Fix:** Run `tpo doctor <project>` to see which capabilities are missing, then add them to `.hermes/pipeline.toml` or regenerate with `init --force`.
 
 **"ContractVersionMismatchError: schema_version=99, expected 2"**
 - The contract file has a `schema_version` the code doesn't recognize.
-- **Fix:** Run `pipeline-watch init <project> --force` to regenerate with the current schema version. This resets `profile` to `gstack` unless you also pass `--profile <name>` — if the project was previously running a non-default profile, re-specify it explicitly or the regenerated contract will silently switch phase sets.
+- **Fix:** Run `tpo init <project> --force` to regenerate with the current schema version. This resets `profile` to `gstack` unless you also pass `--profile <name>` — if the project was previously running a non-default profile, re-specify it explicitly or the regenerated contract will silently switch phase sets.
 
 **"ContractMissingError"**
 - No `.hermes/pipeline.toml` exists for this project.
-- **Fix:** Run `pipeline-watch init <project>`. Ticks still work without a contract (they fall back to computed defaults), but `doctor` will report the file as missing.
+- **Fix:** Run `tpo init <project>`. Ticks still work without a contract (they fall back to computed defaults), but `doctor` will report the file as missing.
 
 **"MISSING: ... unknown profile"**
 - The contract's `profile` field names a profile that doesn't exist under `hermes_pipeline/data/phase-profiles/`.
-- **Fix:** Correct the `profile` field to a valid name, or run `pipeline-watch init <project> --force --profile <valid-profile>`.
+- **Fix:** Correct the `profile` field to a valid name, or run `tpo init <project> --force --profile <valid-profile>`.
 
 ## Related
 

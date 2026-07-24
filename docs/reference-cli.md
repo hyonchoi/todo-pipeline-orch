@@ -1,11 +1,11 @@
 # CLI Reference
 
-Complete reference for `pipeline-watch` and `hermes-pipeline` subcommands.
+Complete reference for `tpo` subcommands.
 
-- `uv run pipeline-watch <command> [args]` — Production pipeline orchestration (tick, merge, approve, ...)
-- `uv run hermes-pipeline test [args]` — Mock integration test harness
+- `uv run tpo <command> [args]` — Production pipeline orchestration (tick, merge, approve, ...)
+- `uv run tpo test [args]` — Mock integration test harness
 
-## pipeline-watch Global Flags
+## tpo Global Flags
 
 | Flag | Description |
 |------|-------------|
@@ -13,7 +13,7 @@ Complete reference for `pipeline-watch` and `hermes-pipeline` subcommands.
 | `--verbose` | Increased log detail: selection results, lock state, agent call summaries |
 | `--debug` | Full debug logging: circuit breaker transitions, subprocess output |
 
-Global flags apply before the subcommand: `uv run pipeline-watch --verbose tick`.
+Global flags apply before the subcommand: `uv run tpo --verbose tick`.
 
 ## Subcommands
 
@@ -22,8 +22,8 @@ Global flags apply before the subcommand: `uv run pipeline-watch --verbose tick`
 Run one pipeline tick: discover active projects, select TODOs, register kanban phases.
 
 ```bash
-uv run pipeline-watch tick              # scan all active projects
-uv run pipeline-watch tick myproject    # tick one project
+uv run tpo tick              # scan all active projects
+uv run tpo tick myproject    # tick one project
 ```
 
 **Flow per project:**
@@ -42,8 +42,8 @@ Without a project argument, scans all subdirectories of `PIPELINE_PROJECTS_DIR` 
 Ship a ready TODO: bump version in PR, squash-merge to main, complete the ship gate.
 
 ```bash
-uv run pipeline-watch approve myproject --todo TODO-5
-uv run pipeline-watch approve myproject --todo TODO-5 --force --force
+uv run tpo approve myproject --todo TODO-5
+uv run tpo approve myproject --todo TODO-5 --force --force
 ```
 
 **Arguments:**
@@ -73,7 +73,7 @@ uv run pipeline-watch approve myproject --todo TODO-5 --force --force
 Scan TODOS.md and initialize `.hermes/todo_id_counter` by finding the highest TODO-N.
 
 ```bash
-uv run pipeline-watch recover-counter myproject
+uv run tpo recover-counter myproject
 ```
 
 Useful when bootstrapping a project with hand-written TODOs but no counter file.
@@ -85,10 +85,10 @@ Useful when bootstrapping a project with hand-written TODOs but no counter file.
 Write the default pipeline execution contract (`.hermes/pipeline.toml`) for a project.
 
 ```bash
-uv run pipeline-watch init myproject
-uv run pipeline-watch init myproject --force
-uv run pipeline-watch init myproject --assignee pipeline
-uv run pipeline-watch init myproject --profile agent-skills
+uv run tpo init myproject
+uv run tpo init myproject --force
+uv run tpo init myproject --assignee pipeline
+uv run tpo init myproject --profile agent-skills
 ```
 
 **Arguments:**
@@ -108,7 +108,7 @@ Capabilities are computed from `phases.yaml` at write time, not hardcoded.
 Verify a project's pipeline execution contract against `phases.yaml`.
 
 ```bash
-uv run pipeline-watch doctor myproject
+uv run tpo doctor myproject
 ```
 
 **Exit codes:**
@@ -127,17 +127,17 @@ If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes p
 Install the bundled pipeline Hermes profile for unattended kanban execution.
 
 ```bash
-uv run pipeline-watch install-profile
-uv run pipeline-watch install-profile --force
+uv run tpo install-profile
+uv run tpo install-profile --force
 ```
 
 Creates a `pipeline` profile cloned from the active Hermes profile, then overlays the bundled `SOUL.md`. With `--force`, deletes an existing `pipeline` profile first.
 
-After install, set the assignee: `uv run pipeline-watch init myproject --assignee pipeline`.
+After install, set the assignee: `uv run tpo init myproject --assignee pipeline`.
 
 ---
 
-## hermes-pipeline test
+## tpo test
 
 Run the mock integration test harness: bootstraps a temporary git project, executes
 pipeline phases, and generates a structured findings report. Runs against the real
@@ -146,9 +146,9 @@ was removed along with `runner.py`/`watcher.py` in v0.5.6; the harness now alway
 requires `hermes login` and access to the `mock-project` tenant.
 
 ```bash
-uv run hermes-pipeline test --fixture happy-path
-uv run hermes-pipeline test --fixture happy-path --phase phase_2_autoplan
-uv run hermes-pipeline test --fixture happy-path --convergence-threshold 2
+uv run tpo test --fixture happy-path
+uv run tpo test --fixture happy-path --phase phase_2_autoplan
+uv run tpo test --fixture happy-path --convergence-threshold 2
 ```
 
 **Arguments:**

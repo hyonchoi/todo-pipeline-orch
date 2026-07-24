@@ -1,6 +1,6 @@
 # Multi-Project Setup
 
-`pipeline-watch tick` scans your projects directory and runs selection for
+`tpo tick` scans your projects directory and runs selection for
 every active project in one cron execution. This howto covers setting up
 multiple projects for the scan loop.
 
@@ -68,12 +68,12 @@ Replace the per-project cron entry with a single global entry. Use Hermes cron
 hermes cron set pipeline-tick '*/5 * * * *'
 ```
 
-The old `scripts/install-cron.sh` is deprecated — it still registers `pipeline-watch auto`
+The old `scripts/install-cron.sh` is deprecated — it still registers `tpo auto`
 (which was removed in v0.2.0). Use Hermes cron instead.
 
 ## State Migration
 
-On the first run of `pipeline-watch tick` (no project argument), state files
+On the first run of `tpo tick` (no project argument), state files
 in `~/.hermes/` (`current_tick_id.txt`, `circuit.json`, `outcomes/`) are
 migrated to `<project>/.hermes/`. This is a one-time operation.
 
@@ -86,7 +86,7 @@ each project starts with a fresh state directory.
 
 To debug a specific project's selection:
 1. Set all other projects to `enabled = false` in their `.hermes/project.toml`
-2. Run `pipeline-watch tick --debug`
+2. Run `tpo tick --debug`
 3. Restore other projects' `enabled = true`
 
 ## Error Isolation

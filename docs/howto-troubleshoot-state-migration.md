@@ -11,11 +11,11 @@ handle it or fixed it manually.
 ## Prerequisites
 
 - You have at least one project under `PIPELINE_PROJECTS_DIR`.
-- You've run `pipeline-watch tick` without a project argument at least once.
+- You've run `tpo tick` without a project argument at least once.
 
 ## Understanding the migration
 
-The migration runs automatically on the first `pipeline-watch tick` (no project
+The migration runs automatically on the first `tpo tick` (no project
 argument). **Important:** auto-migration only runs when exactly one project is
 discovered. With multiple projects, the tick warns and skips — it can't know
 which project owned the old global state.
@@ -32,7 +32,7 @@ Two+ projects: skipped with warning; migrate manually
 Run a tick and look at the log output:
 
 ```bash
-uv run pipeline-watch tick --debug
+uv run tpo tick --debug
 ```
 
 Three outcomes:
@@ -73,7 +73,7 @@ mv ~/.hermes/outcomes ~/projects/project-a/.hermes/
 
 # Now run the tick — the global state is gone, migration is skipped,
 # and project-a has the right state.
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 **Option B: Delete the global state if it's stale**
@@ -105,7 +105,7 @@ If the tick_id is old (from before the migration), clear it:
 
 ```bash
 rm ~/projects/<project>/.hermes/current_tick_id.txt
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 The next tick treats the project as having no prior tick and runs selection
@@ -137,7 +137,7 @@ The next tick resumes with a clean circuit breaker.
 After fixing the issue, run a tick and check the logs:
 
 ```bash
-uv run pipeline-watch tick --debug 2>&1 | grep -i "migrat\|project\|selection"
+uv run tpo tick --debug 2>&1 | grep -i "migrat\|project\|selection"
 ```
 
 You should see:

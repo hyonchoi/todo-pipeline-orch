@@ -9,9 +9,9 @@ built this way and what was traded off.
 Before multi-project scanning, each project needed its own cron entry:
 
 ```bash
-0 * * * * pipeline-watch tick project-a
-0 * * * * pipeline-watch tick project-b
-0 * * * * pipeline-watch tick project-c
+0 * * * * tpo tick project-a
+0 * * * * tpo tick project-b
+0 * * * * tpo tick project-c
 ```
 
 Three problems:
@@ -64,7 +64,7 @@ lock via the kanban adapter.
 directories that pass three filters:
 
 1. **Has a `TODOS.md`** — the presence of `TODOS.md` is the canonical signal
-   that a directory is a pipeline-watched project.
+   that a directory is a tpoed project.
 2. **Valid slug** — the directory name must pass `_validate_project_slug()`.
    Rejects `..`, `.` and single-character names to prevent path traversal.
 3. **Not archived** — `enabled = true` (default if `project.toml` is missing).

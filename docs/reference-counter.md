@@ -37,10 +37,10 @@ Module-level compiled regex: `\bTODO-(\d+)\b`. Matches TODO-N patterns anywhere 
 
 ## How it's used
 
-The `recover_counter()` function is exposed via the `pipeline-watch recover-counter` CLI subcommand:
+The `recover_counter()` function is exposed via the `tpo recover-counter` CLI subcommand:
 
 ```bash
-uv run pipeline-watch recover-counter my-project
+uv run tpo recover-counter my-project
 ```
 
 The CLI handler (`_cmd_recover_counter` in cli.py) resolves the project directory from `PIPELINE_PROJECTS_DIR / project`, validates the slug, calls `recover_counter()`, and prints the result.
@@ -66,5 +66,5 @@ Unlike the counter reader (which assumes `.hermes/` exists), `recover_counter()`
 ## Related
 
 - [How to debug pipeline ticks and recover TODO counters](howto-debugging-and-recovery.md) — CLI usage for `--verbose`, `--debug`, and `recover-counter`
-- [Run a manual tick](howto-pipeline-tick.md) — Running `pipeline-watch tick`
+- [Run a manual tick](howto-pipeline-tick.md) — Running `tpo tick`
 - [Pipeline state machine](hermes-state-machine.md) — State transitions and file layout under `.hermes/`
