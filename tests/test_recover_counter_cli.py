@@ -8,7 +8,7 @@ from hermes_pipeline.counter import COUNTER_FILE
 
 
 class TestRecoverCounterSubcommand:
-    """Tests for pipeline-watch recover-counter <project>."""
+    """Tests for tpo recover-counter <project>."""
 
     def test_subcommand_parses(self):
         """recover-counter subcommand registers and parses project arg."""

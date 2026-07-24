@@ -5,8 +5,8 @@ import subprocess
 import sys
 
 
-def test_hermes_pipeline_entrypoint_exists():
-    """Verify hermes-pipeline CLI entry point is registered."""
+def test_cli_entrypoint_module_runs():
+    """Verify the hermes_pipeline.cli module is runnable as a CLI entry point."""
     result = subprocess.run(
         [sys.executable, "-m", "hermes_pipeline.cli", "--version"],
         capture_output=True, text=True

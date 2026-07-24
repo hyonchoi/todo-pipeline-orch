@@ -243,7 +243,7 @@ class TestConvergenceMonitor:
 
 class TestPollKanbanPhasesConsoleOutput:
     """Each phase transition must be logged to the console (via log.info), not just
-    written to events.jsonl, so `pipeline-watch test` is no longer silent mid-run."""
+    written to events.jsonl, so `tpo test` is no longer silent mid-run."""
 
     def _run_poll(self, monkeypatch, mocker, status_sequence, tmp_path):
         from hermes_pipeline.harness import (

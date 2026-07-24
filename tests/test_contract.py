@@ -51,7 +51,7 @@ def test_write_default_contract_idempotent(tmp_path):
 
 def test_load_contract_missing_raises(tmp_path):
     project_state = tmp_path / ".hermes"
-    with pytest.raises(ContractMissingError, match="pipeline-watch init"):
+    with pytest.raises(ContractMissingError, match="tpo init"):
         load_contract(project_state)
 
 
