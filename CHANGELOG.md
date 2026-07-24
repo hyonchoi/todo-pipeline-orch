@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- `pipeline-watch test` now logs each phase transition (running/done/failed) and an
+  initial phase status table to the console via `log.info()`, instead of writing
+  silently to `events.jsonl` only. (TODO-30)
+- Raised the `--timeout` default for `pipeline-watch test` from 3600s (1h) to 86400s
+  (24h) so healthy long test runs are no longer killed by the default. The flag still
+  works as an explicit override. (TODO-30)
+
 ## [0.5.7] - 2026-07-23
 
 ### Added
