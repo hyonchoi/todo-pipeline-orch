@@ -325,6 +325,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test_parser.set_defaults(func=_cmd_test)
 
+    # skills: bootstrap bundled skills into user/project skill directories
+    skills_parser = subparsers.add_parser(
+        "skills",
+        help="Manage bundled agent skills (e.g. todos-manager)",
+    )
+    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
+
+    skills_install_parser = skills_subparsers.add_parser(
+        "install",
+        help="Install the bundled todos-manager skill",
+    )
+    skills_install_parser.add_argument(
+        "--target", choices=["codex", "claude", "all"], default="claude",
+        help="Which skill directory convention to install into (default: claude)",
+    )
+    skills_install_parser.add_argument(
+        "--scope", choices=["user", "project"], default="user",
+        help="Install under the user's home directory or the current project (default: user)",
+    )
+    skills_install_parser.add_argument(
+        "--force", action="store_true",
+        help="Scripting/non-interactive marker; install always overwrites regardless of this flag",
+    )
+    skills_install_parser.set_defaults(func=_cmd_skills_install)
+
     return parser
 
 
@@ -1185,6 +1210,62 @@ def _cmd_install_profile(args, config: Config) -> int:
     return 0
 
 
+_SKILLS_INSTALL_TARGET_DIRNAMES = {
+    "claude": ".claude/skills",
+    "codex": ".agents/skills",
+}
+
+
+def _skills_install_targets(target: str, scope: str) -> list[tuple[str, Path]]:
+    """Resolve (target_name, install_dir) pairs for --target/--scope."""
+    base = Path.home() if scope == "user" else Path.cwd()
+    names = ["claude", "codex"] if target == "all" else [target]
+    return [(name, base / _SKILLS_INSTALL_TARGET_DIRNAMES[name]) for name in names]
+
+
+def _cmd_skills_install(args, config: Config) -> int:
+    """Handle 'skills install' subcommand — copy the bundled todos-manager skill.
+
+    Copies hermes_pipeline/data/skills/todos-manager/ to one or both of
+    ~/.claude/skills/todos-manager/ and ~/.agents/skills/todos-manager/
+    (or their project-scoped equivalents), always overwriting existing
+    files (idempotent reinstall).
+
+    Exit codes: 0 all targets installed, 1 source missing / any target failed.
+    """
+    from .contract import _resolve_bundled_dir
+
+    source = _resolve_bundled_dir("skills", "todos-manager")
+    if not source.is_dir():
+        print(f"Problem: bundled todos-manager skill not found at {source}.")
+        print("Cause: the installed package is missing its bundled skill data.")
+        print("Fix: reinstall with `uv tool install hermes-pipeline` (or `uv sync` in a checkout).")
+        return 1
+
+    targets = _skills_install_targets(args.target, args.scope)
+    any_failed = False
+    for name, install_dir in targets:
+        dest = install_dir / "todos-manager"
+        try:
+            install_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source, dest, dirs_exist_ok=True)
+            print(f"OK ({name}): installed todos-manager to {dest}")
+        except PermissionError as e:
+            any_failed = True
+            print(f"Problem: ({name}) permission denied writing to {dest}.")
+            print(f"Details: {e}")
+            print(f"Cause: the current user lacks write access to {install_dir}.")
+            print(f"Fix: check permissions on {install_dir}, or rerun with --scope project.")
+        except OSError as e:
+            any_failed = True
+            print(f"Problem: ({name}) failed to install todos-manager to {dest}.")
+            print(f"Details: {e}")
+            print("Cause: an OS-level error occurred during copy.")
+            print(f"Fix: inspect {install_dir} and retry.")
+
+    return 1 if any_failed else 0
+
+
 def _cmd_test(args, config: Config) -> int:
     """Handle 'test' subcommand — mock integration test harness."""
     from .harness import run_harness
@@ -1216,14 +1297,22 @@ def main(argv: list[str] | None = None) -> int:
     Returns:
         Exit code (0 on success, 2 on error).
     """
-    # Strip --verbose/--debug before argparse to avoid the subparser namespace
-    # overwrite issue (subparser defaults overwrite root-level True values).
     verbose, debug, remaining = _strip_global_flags(argv)
 
-    # Load config
+    parser = build_parser()
+    args = parser.parse_args(remaining)
+
+    # Bootstrap subcommands (file-copy only) don't need pipeline runtime
+    # config (state dir, lock dir, projects dir) — skip Config.from_env()
+    # so they work even when that env isn't configured yet.
+    if getattr(args, "command", None) == "skills":
+        if hasattr(args, "func"):
+            return args.func(args, None)
+        parser.parse_args([*remaining, "--help"])
+        return 0
+
     config = Config.from_env()
 
-    # Configure logging based on flags
     log_path = config.state_dir / config.log_file_subpath
     if debug:
         configure_logging(log_path, config.log_retention_days, level=logging.DEBUG)
@@ -1234,10 +1323,6 @@ def main(argv: list[str] | None = None) -> int:
     else:
         configure_logging(log_path, config.log_retention_days)
 
-    parser = build_parser()
-    args = parser.parse_args(remaining)
-
-    # Dispatch to subcommand
     if hasattr(args, "func"):
         return args.func(args, config)
     else:
