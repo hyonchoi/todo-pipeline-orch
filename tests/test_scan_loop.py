@@ -1,9 +1,8 @@
-import json
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+from hermes_pipeline.cli import _cmd_tick
 from hermes_pipeline.config import Config
-from hermes_pipeline.cli import _cmd_tick, build_parser
 
 
 class FakeArgs:

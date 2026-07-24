@@ -1,11 +1,13 @@
 """Tick-level lock — closes overlapping-cron and spawn-failure-orphan races."""
 from __future__ import annotations
+
 import contextlib
 import datetime as _dt
 import json
 import os
 import time
 from pathlib import Path
+
 
 class TickLockHeld(Exception):
     """Raised when the lock is held and the holder is not stale."""
@@ -58,7 +60,7 @@ class TickLock:
                 raise TickLockHeld(f"tick.lock held; tick_id={tick_id} skipped") from e
         self._holder_path().write_text(json.dumps({
             "tick_id": tick_id,
-            "acquired_at": _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "acquired_at": _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "pid": os.getpid(),
         }, sort_keys=True))
         try:

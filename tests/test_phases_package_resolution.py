@@ -1,5 +1,6 @@
 """Verify load_phases() resolves phases.yaml from in-package data, not repo root."""
 from __future__ import annotations
+
 import os
 from pathlib import Path
 

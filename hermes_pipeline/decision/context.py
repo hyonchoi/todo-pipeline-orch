@@ -1,12 +1,14 @@
 """Build SelectionContext per tick. Owns stale-marker sweep."""
 from __future__ import annotations
+
 import json
 import os
 import subprocess
-import time
 from pathlib import Path
-from .schema import SelectionContext
+
 from . import store as _store
+from .schema import SelectionContext
+
 
 def _pid_alive(pid: int) -> bool:
     """True iff `pid` is a live process this user can see."""

@@ -1,13 +1,17 @@
 """Tests for the init/doctor subcommands (pipeline execution contract)."""
 from __future__ import annotations
 
-from pathlib import Path
+import subprocess as _test_sp
 from unittest.mock import MagicMock
 
 import pytest
-import subprocess as _test_sp
 
-from hermes_pipeline.cli import build_parser, _cmd_init, _cmd_doctor, _cmd_install_profile
+from hermes_pipeline.cli import (
+    _cmd_doctor,
+    _cmd_init,
+    _cmd_install_profile,
+    build_parser,
+)
 from hermes_pipeline.config import Config
 from hermes_pipeline.contract import (
     PipelineContract,

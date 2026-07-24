@@ -1,11 +1,17 @@
 from __future__ import annotations
+
 import json
-from pathlib import Path
+
 import pytest
+
 from hermes_pipeline.decision import HermesSelectionDecision
 from hermes_pipeline.decision.store import (
-    persist, append_outcome, load_recent, rotate_if_needed,
+    append_outcome,
+    load_recent,
+    persist,
+    rotate_if_needed,
 )
+
 
 def _mk(tid: str, picked: str | None = "TODO-1") -> HermesSelectionDecision:
     return HermesSelectionDecision(

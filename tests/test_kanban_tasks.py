@@ -6,8 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from hermes_pipeline.phases import load_phases
-
 
 class FakeGatePhase:
     def __init__(self, phase_key, name="P", prompt="", tools="", turns=0, gate=False):
@@ -826,9 +824,9 @@ class TestObserveOutcomes:
 
     def test_get_todo_kanban_status_timeout(self, mocker):
         """get_todo_kanban_status handles subprocess timeout."""
-        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
-
         import subprocess
+
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
 
         mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("hermes", 10))
 

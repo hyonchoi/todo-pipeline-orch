@@ -1,10 +1,10 @@
 """Tests for archive logic — finding completed entries and simulating archive movement."""
 
 from tests.skill_test_environment.skill_logic import (
-    find_completed_entries,
     extract_entry_blocks,
-    simulate_archive,
+    find_completed_entries,
     scan_ids,
+    simulate_archive,
 )
 
 

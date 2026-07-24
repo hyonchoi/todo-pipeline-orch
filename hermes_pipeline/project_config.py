@@ -6,9 +6,8 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
-
 import tomllib
+from pathlib import Path
 
 log = logging.getLogger(__name__)
 

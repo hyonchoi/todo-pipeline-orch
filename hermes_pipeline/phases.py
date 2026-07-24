@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 import datetime as _dt
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+
 import yaml
 
 log = logging.getLogger(__name__)
@@ -53,7 +55,7 @@ def load_phases(config_path: Path | str | None = None) -> list[Phase]:
 
 
 def _now_iso() -> str:
-    return _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def _run_hermes_subprocess(
     *,

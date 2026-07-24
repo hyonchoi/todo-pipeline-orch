@@ -9,11 +9,12 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ class HarnessMonitor:
 
     def __call__(self, event_type: str, data: dict[str, Any] | None = None) -> None:
         event = {
-            "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "timestamp": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "event_type": event_type,
         }
         if data:
@@ -145,7 +146,7 @@ class HarnessMonitor:
             f.write(_json.dumps(event, sort_keys=True) + "\n")
 
 
-from .phases import Phase
+from .phases import Phase  # noqa: E402
 
 
 class ConvergenceHaltError(Exception):
@@ -272,14 +273,13 @@ def _poll_kanban_phases(
 
     Returns True if all phases completed successfully (all done), False otherwise.
     """
+    from .contract import load_contract as _load_contract
     from .kanban_tasks import (
         TERMINAL_STATUSES,
         get_todo_kanban_status,
         observe_outcomes,
         register_todo_phases,
     )
-
-    from .contract import load_contract as _load_contract
 
     # Resolve assignee from project contract (same path as pipeline-watch tick)
     assignee = "default"
@@ -421,7 +421,7 @@ class _ConvergenceMonitor:
     def __init__(
         self,
         inner: Callable[[str, dict[str, Any] | None], None],
-        detector: "ConvergenceDetector",
+        detector: ConvergenceDetector,
         error_holder: dict[str, Any],
     ) -> None:
         self._inner = inner
@@ -522,7 +522,7 @@ def _run_with_timeout(
             result_box["success"] = fn()
         except ConvergenceHaltError as e:
             result_box["convergence_error"] = e
-        except Exception as e:  # noqa: BLE001 - surfaced via result_box
+        except Exception as e:
             result_box["exception"] = e
 
     worker = threading.Thread(target=_run_and_capture, daemon=True)
@@ -550,10 +550,15 @@ def run_harness(
     config: Any,
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
-    from .phases import load_phases
-    from .test_report import generate_report, summarize_report, diff_reports, summarize_diff
     from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .logging_setup import new_tick_id
+    from .phases import load_phases
+    from .test_report import (
+        diff_reports,
+        generate_report,
+        summarize_diff,
+        summarize_report,
+    )
 
     preflight_check()
 
@@ -645,7 +650,7 @@ def run_harness(
             base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
 
         output_dir = temp_dir / "reports"
-        report = generate_report(events_log, output_dir)
+        generate_report(events_log, output_dir)
         report_json = output_dir / "report.json"
         summary = summarize_report(report_json)
         if timed_out:
@@ -681,7 +686,7 @@ def run_harness(
             summary=summary,
         )
 
-    except Exception as e:
+    except Exception:
         raise
 
     finally:

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import os
 import re
+import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
-import tomllib
 
 KanbanAdapterName = Literal["null", "hermes"]
 
@@ -26,11 +26,11 @@ class Config:
     slack_channel: str = ""
 
     @classmethod
-    def default(cls) -> "Config":
+    def default(cls) -> Config:
         return cls()
 
     @classmethod
-    def from_env(cls) -> "Config":
+    def from_env(cls) -> Config:
         c = cls.default()
         env_map = {
             "PIPELINE_LOCK_DIR": ("lock_dir", Path),

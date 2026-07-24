@@ -1,19 +1,18 @@
-from pathlib import Path
 
 import pytest
 
 from hermes_pipeline.ship import (
-    ShipSidecar,
-    write_sidecar,
-    read_sidecar,
-    find_ship_sidecar,
-    delete_sidecar,
     ShipError,
-    gh_pr_view,
-    gh_pr_merge_squash,
-    git_tree_clean,
-    ci_is_green,
+    ShipSidecar,
     bump_in_pr,
+    ci_is_green,
+    delete_sidecar,
+    find_ship_sidecar,
+    gh_pr_merge_squash,
+    gh_pr_view,
+    git_tree_clean,
+    read_sidecar,
+    write_sidecar,
 )
 
 
@@ -194,8 +193,8 @@ def test_bump_in_pr_restores_original_branch_on_failure(mocker, tmp_path):
 
 # --- Task 8: resolve_ship_task ---
 
-from hermes_pipeline.ship import resolve_ship_task, GATE_PHASE_KEY
 from hermes_pipeline.kanban_tasks import KanbanTaskInfo
+from hermes_pipeline.ship import GATE_PHASE_KEY, resolve_ship_task
 
 
 def test_resolve_ship_task_returns_gate(mocker):
@@ -216,7 +215,7 @@ def test_resolve_ship_task_none_when_absent(mocker):
 
 # --- Task 9: approve_lock ---
 
-from hermes_pipeline.ship import approve_lock, ApproveRefused
+from hermes_pipeline.ship import ApproveRefused, approve_lock
 
 
 def test_approve_lock_excludes_second_holder(tmp_path):
@@ -343,7 +342,7 @@ def test_retry_skips_bump_and_merges_when_green(mocker, tmp_path):
 
 # --- Task 12: approve_ship ---
 
-from hermes_pipeline.ship import approve_ship, write_sidecar, maybe_ship_ready
+from hermes_pipeline.ship import approve_ship, maybe_ship_ready
 
 
 def _ready_tasks():

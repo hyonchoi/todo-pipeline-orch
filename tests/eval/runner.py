@@ -2,12 +2,14 @@
 Skipped only when neither backend is available.
 """
 from __future__ import annotations
-import json
+
 import os
 from pathlib import Path
+
 import pytest
-from hermes_pipeline.decision.schema import SelectionContext
+
 from hermes_pipeline.decision.agent import call_agent
+from hermes_pipeline.decision.schema import SelectionContext
 
 FIXTURE_DIR = Path(__file__).parent / "selection"
 PROMPT_PATH = Path(os.environ.get("SELECTION_PROMPT_PATH", ".hermes/prompts/selection.md"))

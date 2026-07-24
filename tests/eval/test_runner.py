@@ -1,5 +1,6 @@
 """Tests for _detect_backend in the eval runner (no real subprocesses)."""
 from __future__ import annotations
+
 from unittest.mock import patch
 
 from hermes_pipeline.hermes_adapter import (

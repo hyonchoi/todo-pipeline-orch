@@ -1,10 +1,13 @@
 """Decision + outcome storage. Decisions are immutable; outcomes are a sidecar."""
 from __future__ import annotations
+
 import json
 import os as _os
 import uuid as _uuid
 from pathlib import Path
+
 from .schema import HermesSelectionDecision
+
 
 def _decisions_dir(state_dir: Path) -> Path:
     p = state_dir / "decisions"

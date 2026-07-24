@@ -1,8 +1,9 @@
 """Tests for state.py — State class, locks, checkpoints."""
 
 import json
+
 import pytest
-from pathlib import Path
+
 from hermes_pipeline.state import State
 
 

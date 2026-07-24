@@ -5,15 +5,13 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
-import pytest
-
-from hermes_pipeline.config import Config
 from hermes_pipeline.cli import (
     _cmd_tick,
     _load_toml_overlay,
     _make_circuit_breaker,
     _persist_tick_id,
 )
+from hermes_pipeline.config import Config
 
 
 def _make_decision(picked=None, **kwargs):
@@ -72,7 +70,11 @@ class TestLoadTomlOverlay:
 
     def test_valid_config_file(self, tmp_path, mocker):
         """Valid config.toml returns (FullConfig, CircuitBreakerConfig)."""
-        from hermes_pipeline.config import FullConfig, SelectionConfig, CircuitBreakerConfig
+        from hermes_pipeline.config import (
+            CircuitBreakerConfig,
+            FullConfig,
+            SelectionConfig,
+        )
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
@@ -504,7 +506,10 @@ class TestSecurityHardening:
 
     def test_resolve_slack_channel_falls_back_on_invalid(self, tmp_path, mocker):
         """Invalid slack_channel in project.toml falls back to default."""
-        from hermes_pipeline.project_config import _resolve_slack_channel, DEFAULT_SLACK_CHANNEL
+        from hermes_pipeline.project_config import (
+            DEFAULT_SLACK_CHANNEL,
+            _resolve_slack_channel,
+        )
 
         project_dir = tmp_path / "project"
         project_dir.mkdir()

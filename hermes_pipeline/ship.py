@@ -16,11 +16,16 @@ import re
 import subprocess
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from . import slack
-from .kanban_tasks import BLOCKED, COMPLETION_STATUSES, KanbanTaskInfo, get_todo_kanban_tasks
+from .kanban_tasks import (
+    BLOCKED,
+    COMPLETION_STATUSES,
+    KanbanTaskInfo,
+    get_todo_kanban_tasks,
+)
 
 log = logging.getLogger(__name__)
 
@@ -249,7 +254,7 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
         pyproject.write_text(new_text)
 
         changelog = project_dir / "CHANGELOG.md"
-        timestamp = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+        timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
         entry = (
             f"\n## [{new_version}] - {timestamp}\n"
             f"- Ship TODO-{todo_id}: bump to {new_version}\n"
@@ -284,7 +289,7 @@ def _audit(state_dir: Path | str, message: str) -> None:
     """Append a timestamped audit line; also log at WARNING."""
     state_dir = Path(state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
-    ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    ts = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     line = f"{ts} {message}\n"
     with open(state_dir / "approve_audit.log", "a") as f:
         f.write(line)

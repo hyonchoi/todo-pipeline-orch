@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import os
-import pytest
 
 from hermes_pipeline.cli import build_parser, main
 from hermes_pipeline.counter import COUNTER_FILE

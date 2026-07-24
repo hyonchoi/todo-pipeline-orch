@@ -2,8 +2,9 @@
 
 All fixtures prefixed with 'skill_' to avoid collisions with parent tests/conftest.py.
 """
-import pytest
 from pathlib import Path
+
+import pytest
 
 
 @pytest.fixture

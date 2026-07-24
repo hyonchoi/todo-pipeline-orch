@@ -1,8 +1,6 @@
 """Tests for contract.py — pipeline execution contract schema and validation."""
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from hermes_pipeline.contract import (

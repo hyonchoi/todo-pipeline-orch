@@ -1,7 +1,8 @@
 import logging
 import re
-from pathlib import Path
+
 from hermes_pipeline.logging_setup import configure, new_tick_id, set_tick_id
+
 
 def test_configure_with_debug_level(tmp_path):
     """configure() with level=DEBUG allows DEBUG messages through stderr."""

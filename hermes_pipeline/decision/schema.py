@@ -7,7 +7,7 @@ separate markdown contract — keep the docstrings authoritative.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import asdict, dataclass
 from typing import Literal
 
 # ---------------------------------------------------------------------------
@@ -45,7 +45,7 @@ class HermesSelectionDecision:
         return json.dumps(asdict(self), indent=2, sort_keys=True)
 
     @classmethod
-    def from_json(cls, data: str) -> "HermesSelectionDecision":
+    def from_json(cls, data: str) -> HermesSelectionDecision:
         return cls(**json.loads(data))
 
 
@@ -144,7 +144,7 @@ class DecisionSheet:
         return json.dumps(_serialize_sheet(self), indent=2, sort_keys=True)
 
     @classmethod
-    def from_json(cls, data: str) -> "DecisionSheet":
+    def from_json(cls, data: str) -> DecisionSheet:
         return validate_decision_sheet(json.loads(data))
 
 

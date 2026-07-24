@@ -1,9 +1,12 @@
 from __future__ import annotations
+
 import os
 import time
-from pathlib import Path
+
 import pytest
+
 from hermes_pipeline.tick import TickLock, TickLockHeld
+
 
 def test_acquire_release(tmp_path):
     lk = TickLock(tmp_path, max_age_min=10)

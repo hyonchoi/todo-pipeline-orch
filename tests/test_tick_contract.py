@@ -1,10 +1,7 @@
 """Tests for the pipeline execution contract wired into the tick flow."""
 from __future__ import annotations
 
-import json
 from unittest.mock import MagicMock
-
-import pytest
 
 from hermes_pipeline.cli import _cmd_tick
 from hermes_pipeline.config import Config

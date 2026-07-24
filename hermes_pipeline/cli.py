@@ -13,24 +13,22 @@ import logging
 import os
 import shutil
 import signal
-import sys
-import tomllib
-from hermes_pipeline import __version__
-import time
-from pathlib import Path
-from typing import Optional
-
 import subprocess as _cli_sp
+import sys
+import time
+import tomllib
+from pathlib import Path
+
+from hermes_pipeline import __version__
 
 from .circuit import CircuitBreaker
-from .config import Config, CircuitBreakerConfig, _validate_project_slug
-from .decision import run_selection, store as _cli_dec_store
+from .config import CircuitBreakerConfig, Config, _validate_project_slug
+from .decision import run_selection
 from .decision.context import build_context
-from .kanban import HermesKanbanAdapter
 from .kanban_tasks import all_phases_complete, observe_outcomes, register_todo_phases
 from .logging_setup import configure as configure_logging
-from .outcomes import CURRENT_TICK_ID_FILE, OUTCOME_PICKED_NONE
 from .logging_setup import new_tick_id as _new_tick_id
+from .outcomes import CURRENT_TICK_ID_FILE, OUTCOME_PICKED_NONE
 from .phases import load_phases
 from .tick import TickLock, TickLockHeld
 
@@ -43,7 +41,7 @@ vlog = logging.getLogger("pipeline.verbose")
 _SELECTION_TIMEOUT_RESERVE_S = 30
 
 
-def _resolve_project_dir(config: Config, slug: str) -> Optional[Path]:
+def _resolve_project_dir(config: Config, slug: str) -> Path | None:
     """Validate *slug* and resolve it to an existing project directory.
 
     Returns the resolved Path, or None if the slug is invalid or the directory
@@ -190,7 +188,7 @@ def _parse_todo_id_flag(value: str) -> int:
         )
 
 
-def _strip_global_flags(argv: Optional[list[str]]) -> tuple[bool, bool, list[str]]:
+def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
     """Strip --verbose/--debug from argv, returning (verbose, debug, remaining).
 
     This avoids the argparse subparser namespace overwrite: if --verbose lives
@@ -383,7 +381,7 @@ def _generate_tick_id() -> str:
     except Exception:
         import datetime as _dt
         import secrets as _secrets
-        ts = _dt.datetime.now(_dt.timezone.utc).strftime("%Y%m%d%H%M%S")
+        ts = _dt.datetime.now(_dt.UTC).strftime("%Y%m%d%H%M%S")
         rand = format(_secrets.randbelow(900000) + 100000, "06d")
         return f"{ts}{rand}"
 
@@ -395,7 +393,8 @@ def _load_toml_overlay(state_dir: Path, config: Config):
     CircuitBreakerConfig is extracted for early use (before lock acquisition).
     On TOML error the overlay falls back to defaults with a warning.
     """
-    from .config import FullConfig, load_toml_overlay as _load_toml
+    from .config import FullConfig
+    from .config import load_toml_overlay as _load_toml
 
     toml_path = state_dir / "config.toml"
     try:
@@ -513,7 +512,6 @@ def _cmd_tick(args, config: Config) -> int:
     """
     from .project_config import _discover_projects
     from .state_migration import _get_project_state_dir, _migrate_global_state
-    from .tick import TickLock, TickLockHeld
 
     state_dir = config.state_dir
 
@@ -665,18 +663,17 @@ def _tick_project(
         The caller holds this project's TickLock for the duration of this call.
     """
     from .contract import (
+        CONTRACT_SCHEMA_VERSION,
         CapabilityMismatchError,
         ContractMissingError,
         ContractSchemaError,
         ContractVersionMismatchError,
-        CONTRACT_SCHEMA_VERSION,
         PipelineContract,
         contract_path,
         load_contract,
         missing_capabilities,
         required_capabilities,
     )
-
     from .phases import resolve_profile_phases_path
 
     try:
@@ -915,9 +912,14 @@ def _cmd_init(args, config: Config) -> int:
     if project_dir is None:
         return 2
 
-    from .state_migration import _get_project_state_dir
-    from .contract import PROFILE_NAME_RE, ContractSchemaError, contract_path, write_default_contract
+    from .contract import (
+        PROFILE_NAME_RE,
+        ContractSchemaError,
+        contract_path,
+        write_default_contract,
+    )
     from .phases import resolve_profile_phases_path
+    from .state_migration import _get_project_state_dir
 
     profile = getattr(args, "profile", "gstack") or "gstack"
     if not PROFILE_NAME_RE.match(profile):
@@ -953,7 +955,11 @@ def _cmd_init(args, config: Config) -> int:
     if assignee is not None and path.exists():
         try:
             data = tomllib.loads(path.read_text())
-            from .contract import DEFAULT_CAPABILITIES, PipelineContract, _render_contract_toml
+            from .contract import (
+                DEFAULT_CAPABILITIES,
+                PipelineContract,
+                _render_contract_toml,
+            )
 
             contract = PipelineContract(
                 schema_version=data["schema_version"],
@@ -983,7 +989,6 @@ def _cmd_doctor(args, config: Config) -> int:
     if project_dir is None:
         return 2
 
-    from .state_migration import _get_project_state_dir
     from .contract import (
         ContractMissingError,
         ContractSchemaError,
@@ -992,6 +997,7 @@ def _cmd_doctor(args, config: Config) -> int:
         load_contract,
         missing_capabilities,
     )
+    from .state_migration import _get_project_state_dir
 
     project_state = _get_project_state_dir(project_dir)
 
@@ -1102,11 +1108,11 @@ def _cmd_install_profile(args, config: Config) -> int:
             return 2
         if delete_result.returncode != 0:
             detail = delete_result.stderr.strip() if delete_result.stderr else f"exit {delete_result.returncode}"
-            print(f"Problem: `hermes profile delete` failed. Profile was removed but may not be recreated.")
+            print("Problem: `hermes profile delete` failed. Profile was removed but may not be recreated.")
             print(f"Details: {detail}")
-            print(f"Cause: The delete succeeded in removing the old profile, but the delete command")
-            print(f"         itself reported an error — the profile may still exist, or it may be gone.")
-            print(f"Fix: Run `hermes profile list` to check the current state, then retry.")
+            print("Cause: The delete succeeded in removing the old profile, but the delete command")
+            print("         itself reported an error — the profile may still exist, or it may be gone.")
+            print("Fix: Run `hermes profile list` to check the current state, then retry.")
             return 2
 
     print(f"Creating '{profile_name}' profile cloned from the active profile...")
@@ -1146,7 +1152,7 @@ def _cmd_install_profile(args, config: Config) -> int:
         if show.stderr:
             print(f"Details: {show.stderr.strip()}")
         print(f"Cause: Profile name '{profile_name}' may not match what Hermes expects, or caching issue.")
-        print(f"Fix: Run `hermes profile list` to check installed profiles.")
+        print("Fix: Run `hermes profile list` to check installed profiles.")
         return 1
 
     profile_path = None
@@ -1200,7 +1206,7 @@ def _cmd_test(args, config: Config) -> int:
         return 2
 
 
-def main(argv: Optional[list[str]] = None) -> int:
+def main(argv: list[str] | None = None) -> int:
     """
     Main entry point for the CLI.
 

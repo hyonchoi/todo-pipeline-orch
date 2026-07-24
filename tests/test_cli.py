@@ -1,6 +1,5 @@
 """Tests for cli.py — test subcommand."""
 
-import pytest
 
 from hermes_pipeline.cli import build_parser, main
 

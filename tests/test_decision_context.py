@@ -1,19 +1,8 @@
 from __future__ import annotations
+
 import json
-import time
-from pathlib import Path
-from hermes_pipeline.decision.context import build_in_flight, build_context
 
-
-
-
-
-
-
-
-
-
-
+from hermes_pipeline.decision.context import build_context, build_in_flight
 
 
 class TestKanbanInFlight:
@@ -84,7 +73,6 @@ class TestKanbanInFlight:
 
     def test_build_in_flight_uses_kanban(self, state_dir, mocker):
         """build_in_flight uses kanban when available."""
-        from hermes_pipeline.decision.context import build_in_flight
 
         mocker.patch(
             "hermes_pipeline.decision.context._kanban_in_flight_ids",
@@ -114,9 +102,9 @@ class TestKanbanInFlight:
 
     def test_kanban_in_flight_timeout(self, tmp_path, mocker):
         """_kanban_in_flight_ids handles subprocess timeout."""
-        from hermes_pipeline.decision.context import _kanban_in_flight_ids
-
         import subprocess
+
+        from hermes_pipeline.decision.context import _kanban_in_flight_ids
         mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("hermes", 10))
 
         result = _kanban_in_flight_ids("demo")

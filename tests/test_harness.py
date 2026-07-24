@@ -14,8 +14,8 @@ from hermes_pipeline.harness import (
     ConvergenceHaltError,
     HarnessMonitor,
     HarnessResult,
-    _ConvergenceMonitor,
     _classify_error_class,
+    _ConvergenceMonitor,
     create_mock_project,
     filter_phases,
     isolate_config,
@@ -56,6 +56,7 @@ class TestPreflightCheck:
 
     def test_preflight_check_hermes_not_found(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         import shutil
+
         from hermes_pipeline.hermes_adapter import HermesDependencyError
 
         git_dir = Path(shutil.which("git")).parent
@@ -181,7 +182,10 @@ class TestHarnessResult:
 
 class TestClassifyErrorClass:
     def test_dependency_errors(self):
-        from hermes_pipeline.hermes_adapter import ClaudeDependencyError, HermesDependencyError
+        from hermes_pipeline.hermes_adapter import (
+            ClaudeDependencyError,
+            HermesDependencyError,
+        )
 
         assert _classify_error_class(HermesDependencyError("x")) == "dependency_error"
         assert _classify_error_class(ClaudeDependencyError("x")) == "dependency_error"
@@ -533,8 +537,9 @@ class TestKanbanModeHermes:
 
     @patch("hermes_pipeline.harness.subprocess.run")
     def test_kanban_preflight_timeout_raises_actionable_error(self, mock_run, monkeypatch):
-        from hermes_pipeline.harness import KanbanPreflightError
         import subprocess
+
+        from hermes_pipeline.harness import KanbanPreflightError
 
         def _run_side_effect(*args, **kwargs):
             cmd = args[0]
@@ -613,8 +618,9 @@ class TestAutoCompleteGateTasks:
     """Tests for _auto_complete_gate_tasks()."""
 
     def test_completes_blocked_gate_tasks(self, mocker):
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
         import json as _json
+
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
 
         header_gate = _json.dumps(
             {"tick_id": "01TICK", "phase_key": "phase_9_ship",
@@ -641,8 +647,9 @@ class TestAutoCompleteGateTasks:
         mock_complete.assert_called_once_with("demo", "t_gate")
 
     def test_does_not_log_success_when_completion_fails(self, mocker, caplog):
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
         import json as _json
+
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
 
         header_gate = _json.dumps(
             {"tick_id": "01TICK", "phase_key": "phase_9_ship",
@@ -663,8 +670,9 @@ class TestAutoCompleteGateTasks:
         assert "auto-completed gate task" not in caplog.text
 
     def test_warns_when_completion_fails(self, mocker, caplog):
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
         import json as _json
+
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
 
         header_gate = _json.dumps(
             {"tick_id": "01TICK", "phase_key": "phase_9_ship",
@@ -687,8 +695,9 @@ class TestAutoCompleteGateTasks:
         assert "remains blocked" in caplog.text
 
     def test_skips_non_blocked_tasks(self, mocker):
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
         import json as _json
+
+        from hermes_pipeline.harness import _auto_complete_gate_tasks
 
         header = _json.dumps(
             {"tick_id": "01TICK", "phase_key": "phase_2_autoplan",
@@ -725,10 +734,14 @@ class TestPollKanbanPhases:
     """Tests for _poll_kanban_phases()."""
 
     def test_registers_phases_and_polls_to_completion(self, tmp_path, mocker):
-        from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
-        )
         import json as _json
+
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
 
         events_log = tmp_path / "events.jsonl"
         base_monitor = HarnessMonitor(events_log)
@@ -766,10 +779,14 @@ class TestPollKanbanPhases:
         assert "phase_completed" in event_types
 
     def test_emits_phase_failed_event_on_kanban_failure(self, tmp_path, mocker):
-        from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
-        )
         import json as _json
+
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
 
         events_log = tmp_path / "events.jsonl"
         base_monitor = HarnessMonitor(events_log)
@@ -800,10 +817,13 @@ class TestPollKanbanPhases:
         assert failed[0]["phase_key"] == "phase_2_autoplan"
 
     def test_convergence_halt_stops_polling(self, tmp_path, mocker):
+
         from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
         )
-        import json as _json
 
         events_log = tmp_path / "events.jsonl"
         base_monitor = HarnessMonitor(events_log)
@@ -840,7 +860,10 @@ class TestPollKanbanPhases:
 
     def test_auto_completes_blocked_gates(self, tmp_path, mocker):
         from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
         )
 
         events_log = tmp_path / "events.jsonl"
@@ -877,10 +900,14 @@ class TestPollKanbanPhases:
         without ever passing through running. Prior to this fix, such a
         transition was silently absorbed by the terminal-status check without
         emitting phase_failed or being seen by the convergence detector."""
-        from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
-        )
         import json as _json
+
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
 
         events_log = tmp_path / "events.jsonl"
         base_monitor = HarnessMonitor(events_log)
@@ -913,7 +940,10 @@ class TestPollKanbanPhases:
         long-running phases. Interval should grow while status is unchanged
         and reset when a transition occurs."""
         from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
         )
 
         events_log = tmp_path / "events.jsonl"
@@ -956,7 +986,10 @@ class TestPollKanbanPhases:
     def test_assignee_resolved_from_contract(self, tmp_path, mocker):
         """register_todo_phases' assignee comes from contract.load_contract."""
         from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
         )
 
         mock_register = mocker.patch(
@@ -989,7 +1022,10 @@ class TestPollKanbanPhases:
     def test_assignee_defaults_when_contract_load_fails(self, tmp_path, mocker, caplog):
         """If load_contract raises, assignee falls back to 'default' and warns."""
         from hermes_pipeline.harness import (
-            _poll_kanban_phases, HarnessMonitor, ConvergenceDetector, _ConvergenceMonitor,
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
         )
 
         mock_register = mocker.patch(
