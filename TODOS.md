@@ -65,3 +65,11 @@
 - [x] **TODO-32: Separate `data/profiles` into identity and phase-config contexts** — Split mixed Hermes identity profile and pipeline phase definitions into distinct directories
   - **What:** Separated `hermes_pipeline/data/profiles` into `hermes_pipeline/data/hermes-identity/pipeline/` (SOUL.md) and `hermes_pipeline/data/phase-profiles/` (gstack/phases.yaml, agent-skills/phases.yaml). Updated `bundled_profile_dir()` (contract.py) and `resolve_profile_phases_path()` (phases.py) call sites, added `tests/test_profile_layout_split.py` regression coverage, and updated docs/howto-agent-skills-profile.md and docs/howto-pipeline-contract.md.
   - **Completed:** v0.5.9 (2026-07-24)
+
+- [ ] **TODO-35: Add --reinstall flag, default-on-exists fail, and uninstall subcommand to skills install CLI** — Make `tpo skills install` fail when dest exists, add explicit `--reinstall` opt-in, and create `tpo skills uninstall` with confirmation
+  - **What:** Add --reinstall flag to `tpo skills install` (removes existing dest before copying), make default install fail when dest exists, and add `tpo skills uninstall` subcommand with confirmation prompt.
+  - **Why:** `shutil.copytree(dest, dirs_exist_ok=True)` fails on structural mismatches (file vs dir conflicts) and silently overwrites. Users need explicit opt-in to reinstall and a way to remove skills.
+  - **Pros:** Prevents accidental silent overwrites; gives users clean reinstall path; adds symmetry with uninstall
+  - **Cons:** Breaking change — existing scripts/aliases that double-run install without --reinstall will get errors
+  - **Context:** CLI in hermes_pipeline/cli.py:1222-1265, tests in tests/test_skills_install.py
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feat/skills-install-reinstall`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
