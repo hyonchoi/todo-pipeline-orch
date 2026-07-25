@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Breaking
+- Removed `PIPELINE_PROJECTS_DIR` environment variable. Use `tpo config set projects_dir <path>` instead.
+
+### Migration
+- If you set `PIPELINE_PROJECTS_DIR` in your shell profile, remove it and run `tpo config set projects_dir <your-path>` once.
+
+### Added
+- `tpo config` subcommand: `init`, `get`, `set`, `path`
+- Global config file at `${XDG_CONFIG_DIR:-~/.config}/tpo/config.yaml`
+
 ## [0.6.0] - 2026-07-24
 
 ### Changed
