@@ -121,7 +121,14 @@ def test_config_get_broken_config_recovery(monkeypatch, tmp_path, capsys):
     exit_code = main(["config", "get", "claude_cmd"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "claude" in captured.out or "error" in captured.out.lower()
+    # Verify the default value is shown (recovery succeeded)
+    assert "claude_cmd:" in captured.out and "claude" in captured.out
+    # Verify the warning/fallback message appeared (recovery path exercised)
+    assert (
+        "warning" in captured.out.lower()
+        or "fallback" in captured.out.lower()
+        or "error" in captured.out.lower()
+    )
 
 
 # -- set --
@@ -151,6 +158,7 @@ def test_config_set_overrides_value(monkeypatch, tmp_path):
 def test_config_set_uncomments_existing(monkeypatch, tmp_path):
     """tpo config set uncomments an existing commented key."""
     from hermes_pipeline.config_loader import SKELETON
+
     f = tmp_path / "config.yaml"
     f.write_text(SKELETON)
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
@@ -192,6 +200,7 @@ def test_config_set_path_type_coercion(monkeypatch, tmp_path):
     from pathlib import Path
 
     from hermes_pipeline.config_loader import load_global_config
+
     f = tmp_path / "config.yaml"
     f.write_text("")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
@@ -204,6 +213,7 @@ def test_config_set_path_type_coercion(monkeypatch, tmp_path):
 def test_config_set_int_type_coercion(monkeypatch, tmp_path):
     """tpo config set coerces string to int type."""
     from hermes_pipeline.config_loader import load_global_config
+
     f = tmp_path / "config.yaml"
     f.write_text("")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
