@@ -390,3 +390,79 @@ def test_format_float():
 
 def test_format_path():
     assert _format_value(Path("/opt/data"), "k") == "/opt/data"
+
+
+# ============================================================
+# Integration tests — end-to-end config workflow
+# ============================================================
+
+def test_integration_init_set_get_load(monkeypatch, tmp_path):
+    """Full workflow: init creates file, set modifies, get reads, from_env loads."""
+    from hermes_pipeline.cli import main
+    from hermes_pipeline.config import Config
+    from hermes_pipeline.config_loader import default_config_path
+
+    monkeypatch.setenv("XDG_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("PIPELINE_CLAUDE_CMD", raising=False)
+
+    # Init
+    assert main(["config", "init"]) == 0
+    assert default_config_path().exists()
+
+    # Set
+    assert main(["config", "set", "claude_cmd", "claude-code"]) == 0
+
+    # Get through Config.from_env()
+    cfg = Config.from_env()
+    assert cfg.claude_cmd == "claude-code"
+
+    # Set path type
+    assert main(["config", "set", "projects_dir", "/opt/projects"]) == 0
+    cfg2 = Config.from_env()
+    assert cfg2.projects_dir == Path("/opt/projects")
+
+    # Set int type
+    assert main(["config", "set", "default_timeout", "3600"]) == 0
+    cfg3 = Config.from_env()
+    assert cfg3.default_timeout == 3600
+
+
+def test_integration_env_overrides_config_file(monkeypatch, tmp_path):
+    """Env var layers on top of config file."""
+    from hermes_pipeline.config import Config
+
+    monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
+    f = tmp_path / "config.yaml"
+    f.write_text("claude_cmd: claude-code\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
+
+    # Without env override
+    cfg = Config.from_env()
+    assert cfg.claude_cmd == "claude-code"
+
+    # With env override
+    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "env-wins")
+    cfg2 = Config.from_env()
+    assert cfg2.claude_cmd == "env-wins"
+
+
+def test_integration_config_set_preserves_skeleton(monkeypatch, tmp_path):
+    """Config set preserves skeleton structure and comments."""
+    from hermes_pipeline.cli import main
+
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
+    monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
+
+    main(["config", "init"])
+    f = xdg / "tpo" / "config.yaml"
+
+    # Set one value
+    main(["config", "set", "claude_cmd", "claude-code"])
+
+    content = f.read_text()
+    # Original comments should be preserved
+    assert "global configuration" in content
+    # The set value should be active
+    assert "claude_cmd: claude-code" in content
