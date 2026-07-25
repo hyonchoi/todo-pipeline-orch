@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import json
 import logging
 import os
@@ -1518,41 +1519,41 @@ def _cmd_config_set(args, config: Config | None) -> int:
         )
         return 2
 
-    import fcntl
-
-    text = config_file.read_text()
-    lines = text.split("\n")
-
-    # Find line with this key (commented or active)
-    found_idx = None
-    for i, line in enumerate(lines):
-        stripped = line.strip()
-        if stripped.startswith("#") and f"{key}:" in stripped:
-            uncommented = stripped.lstrip("#").lstrip()
-            if uncommented.startswith(f"{key}:"):
-                found_idx = i
-                break
-        elif stripped.startswith(f"{key}:"):
-            found_idx = i
-            break
-
-    formatted = _format_value(coerced, key)
-    new_line = f"{key}: {formatted}"
-
-    if found_idx is not None:
-        lines[found_idx] = new_line
-    else:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(new_line)
-        lines.append("")
-
-    new_text = "\n".join(lines)
-
-    # Atomic write with lock
+    # Read-modify-write under file lock to prevent concurrent `tpo config set`
+    # from clobbering each other's changes.
     fd = os.open(str(config_file), os.O_RDWR | os.O_CREAT)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
+        file_size = os.fstat(fd).st_size
+        text = os.read(fd, max(file_size, 1)).decode() if file_size > 0 else ""
+        lines = text.split("\n")
+
+        # Find line with this key (commented or active)
+        found_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#") and f"{key}:" in stripped:
+                uncommented = stripped.lstrip("#").lstrip()
+                if uncommented.startswith(f"{key}:"):
+                    found_idx = i
+                    break
+            elif stripped.startswith(f"{key}:"):
+                found_idx = i
+                break
+
+        formatted = _format_value(coerced, key)
+        new_line = f"{key}: {formatted}"
+
+        if found_idx is not None:
+            lines[found_idx] = new_line
+        else:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(new_line)
+            lines.append("")
+
+        new_text = "\n".join(lines)
+        os.lseek(fd, 0, os.SEEK_SET)
         os.write(fd, new_text.encode())
         os.ftruncate(fd, len(new_text.encode()))
     finally:
