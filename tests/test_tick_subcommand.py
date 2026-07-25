@@ -37,7 +37,7 @@ class FakeArgs:
 
 
 class TestTickSubcommand:
-    """Tests for pipeline-watch tick (scan loop)."""
+    """Tests for tpo tick (scan loop)."""
 
     def test_tick_help(self):
         """tick subcommand shows in help."""

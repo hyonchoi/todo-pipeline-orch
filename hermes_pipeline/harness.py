@@ -40,7 +40,7 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     # Create pipeline.toml contract for assignee configuration
     pipeline_toml = (
         "# Pipeline execution contract — read at tick start.\n"
-        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         "schema_version = 2\n"
         'assignee = "pipeline"\n'
         'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
@@ -281,7 +281,7 @@ def _poll_kanban_phases(
         register_todo_phases,
     )
 
-    # Resolve assignee from project contract (same path as pipeline-watch tick)
+    # Resolve assignee from project contract (same path as tpo tick)
     assignee = "default"
     try:
         assignee = _load_contract(state_dir).assignee

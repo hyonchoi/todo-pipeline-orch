@@ -6,10 +6,10 @@ This guide walks through setting up the dedicated pipeline agent profile for una
 
 ```bash
 # 1. Initialize the project contract with the pipeline assignee
-pipeline-watch init <project> --assignee pipeline
+tpo init <project> --assignee pipeline
 
 # 2. Install the bundled Hermes profile
-pipeline-watch install-profile
+tpo install-profile
 ```
 
 ## Step-by-Step Walkthrough
@@ -17,7 +17,7 @@ pipeline-watch install-profile
 ### Step 1: Initialize the Project Contract
 
 ```bash
-pipeline-watch init myproject --assignee pipeline
+tpo init myproject --assignee pipeline
 ```
 
 Output:
@@ -30,7 +30,7 @@ This creates a `pipeline.toml` with `assignee = "pipeline"` and capabilities der
 ### Step 2: Install the Pipeline Profile
 
 ```bash
-pipeline-watch install-profile
+tpo install-profile
 ```
 
 This clones your currently-active Hermes profile (`hermes profile create pipeline --clone`)
@@ -44,15 +44,15 @@ Locating profile directory...
 Pipeline profile installed successfully.
 
 Next step: set the assignee in your project contract:
-  pipeline-watch init <project> --assignee pipeline
+  tpo init <project> --assignee pipeline
 Then verify with:
-  pipeline-watch doctor <project>
+  tpo doctor <project>
 ```
 
 ### Step 3: Verify Everything is Wired
 
 ```bash
-pipeline-watch doctor myproject
+tpo doctor myproject
 ```
 
 Output (success):
@@ -64,13 +64,13 @@ Output (missing profile):
 ```
 MISSING: Hermes profile 'pipeline' is not installed, but contract assignee is set to 'pipeline'
 Cause: The profile was never installed, or it was removed after install.
-Fix: Install the bundled profile with `pipeline-watch install-profile`, or create a custom profile named 'pipeline' with `hermes profile create pipeline`.
+Fix: Install the bundled profile with `tpo install-profile`, or create a custom profile named 'pipeline' with `hermes profile create pipeline`.
 ```
 
 ### Step 4: Run a Tick
 
 ```bash
-pipeline-watch tick myproject
+tpo tick myproject
 ```
 
 The pipeline tick registers kanban phases with `--assignee pipeline`. Hermes routes the tasks to the installed profile, which runs with SOUL.md in context.
@@ -80,7 +80,7 @@ The pipeline tick registers kanban phases with `--assignee pipeline`. Hermes rou
 If you've edited the bundled SOUL.md and want to reinstall:
 
 ```bash
-pipeline-watch install-profile --force
+tpo install-profile --force
 ```
 
 `--force` deletes the existing `pipeline` profile first, then re-clones from the
@@ -94,7 +94,7 @@ The bundled profile is a default. To create a custom profile:
 ```bash
 hermes profile create my-custom-profile --description "My custom pipeline agent"
 # Edit SOUL.md at ~/.hermes/profiles/my-custom-profile/SOUL.md
-pipeline-watch init myproject --assignee my-custom-profile
+tpo init myproject --assignee my-custom-profile
 ```
 
 **Important:** SOUL.md is advisory — it shapes agent behavior through instructions, not enforcement. The pipeline execution contract's `capabilities` field gates tool access at tick start; `doctor` also hard-fails (exit 2) if a non-default `assignee`'s Hermes profile isn't installed or Hermes itself isn't on PATH.
@@ -119,8 +119,8 @@ pipeline-watch init myproject --assignee my-custom-profile
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
-| `doctor` reports MISSING profile | Profile not installed | `pipeline-watch install-profile` |
+| `doctor` reports MISSING profile | Profile not installed | `tpo install-profile` |
 | `doctor` reports MISSING (Hermes not on PATH) | Hermes CLI not installed | Install Hermes (https://hermos.dev) and ensure it's on PATH |
-| `doctor` reports DRIFT | phases.yaml added a tool | Edit `pipeline.toml` capabilities, or `pipeline-watch init <project> --force` |
+| `doctor` reports DRIFT | phases.yaml added a tool | Edit `pipeline.toml` capabilities, or `tpo init <project> --force` |
 | Tasks not being picked up | Assignee doesn't match profile name | Ensure `assignee` in `pipeline.toml` matches `hermes profile list` name exactly |
 | Profile installed but agent doesn't behave correctly | SOUL.md is advisory; model may not follow all instructions | Edit SOUL.md and reinstall with `--force` |

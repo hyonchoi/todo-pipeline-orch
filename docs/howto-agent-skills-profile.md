@@ -4,7 +4,7 @@ Pipeline profiles let a project select an independent set of phases — the prom
 
 ## Prerequisites
 
-- `todo-pipeline-orchestrator` installed and `uv run pipeline-watch` working
+- `todo-pipeline-orchestrator` installed and `uv run tpo` working
 - A project with a `TODOS.md` file in your `PIPELINE_PROJECTS_DIR`
 - The `agent-skills` plugin's skills (spec-driven-development, planning-and-task-breakdown, incremental-implementation, test-driven-development, code-review-and-quality, security-and-hardening, ship) available in the environment that runs the pipeline
 
@@ -22,7 +22,7 @@ A project's `.hermes/pipeline.toml` contract records which profile it runs via t
 ### 1. Initialize a project with the agent-skills profile
 
 ```bash
-uv run pipeline-watch init <project> --profile agent-skills
+uv run tpo init <project> --profile agent-skills
 ```
 
 Expected output:
@@ -41,13 +41,13 @@ profile = "agent-skills"
 If the project already has a contract, `init` is a no-op unless you pass `--force`:
 
 ```bash
-uv run pipeline-watch init <project> --force --profile agent-skills
+uv run tpo init <project> --force --profile agent-skills
 ```
 
 ### 2. Verify the contract
 
 ```bash
-uv run pipeline-watch doctor <project>
+uv run tpo doctor <project>
 ```
 
 Expected output:
@@ -70,7 +70,7 @@ profile = "agent-skills"
 ```
 
 ```bash
-uv run pipeline-watch doctor <project>
+uv run tpo doctor <project>
 ```
 
 If `doctor` reports drift, regenerate the contract with `init --force --profile agent-skills` (this recomputes capabilities but discards any custom assignee/capabilities), or manually add the missing capabilities.
@@ -78,8 +78,8 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
 ## Adding a new profile
 
 1. Create `hermes_pipeline/data/phase-profiles/<name>/phases.yaml` following the same schema as the bundled profiles (`phase_key`, `name`, `prompt`, `tools`, `turns`, `timeout` per phase; gate phases use `gate: true`).
-2. Run `pipeline-watch init <project> --profile <name>` to write a contract selecting it.
-3. Run `pipeline-watch doctor <project>` to confirm the profile resolves and capabilities are computed correctly.
+2. Run `tpo init <project> --profile <name>` to write a contract selecting it.
+3. Run `tpo doctor <project>` to confirm the profile resolves and capabilities are computed correctly.
 
 ## Troubleshooting
 

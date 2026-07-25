@@ -51,9 +51,9 @@ _tick_project(project)
 
 **Contract file vs config.toml section.** The contract could have been a section in `.hermes/config.toml`, which already exists for selection and circuit breaker settings. It was placed in a separate file because contract validation has different semantics: a config overlay is optional (unset keys fall back to defaults), but a contract is a gate. Mixing optional overlay with mandatory validation in one file would make the error surface confusing.
 
-**Fail-closed on capability mismatch.** If a project's contract declares fewer capabilities than phases.yaml requires, the tick fails. It could instead warn and proceed, but that risks the same late-stage failures the contract was designed to prevent. The operator sees the gap at tick time, with a message that names the missing capabilities and points to `pipeline-watch doctor` for details.
+**Fail-closed on capability mismatch.** If a project's contract declares fewer capabilities than phases.yaml requires, the tick fails. It could instead warn and proceed, but that risks the same late-stage failures the contract was designed to prevent. The operator sees the gap at tick time, with a message that names the missing capabilities and points to `tpo doctor` for details.
 
-**Computed defaults vs hardcoded defaults.** `pipeline-watch init` writes a contract whose capabilities are computed from `phases.yaml`, not the hardcoded `DEFAULT_CAPABILITIES` tuple. This means the init output matches the current phase definitions. If a future phase adds a new tool, `init --force` regenerates the contract with the new capability.
+**Computed defaults vs hardcoded defaults.** `tpo init` writes a contract whose capabilities are computed from `phases.yaml`, not the hardcoded `DEFAULT_CAPABILITIES` tuple. This means the init output matches the current phase definitions. If a future phase adds a new tool, `init --force` regenerates the contract with the new capability.
 
 ## Alternatives Considered
 

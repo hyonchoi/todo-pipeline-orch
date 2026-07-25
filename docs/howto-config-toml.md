@@ -59,7 +59,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 | `model` | `auto` | Model id passed to `hermes chat -q -m <model>`. `"auto"` lets Hermes resolve the current best model. Pin a specific snapshot to keep eval results stable; bumping this is a real change — re-run the eval suite. |
 | `max_tokens` | `4000` | Cap on the model's response. The selection JSON is small (<1KB typical); raising this rarely helps and costs more. |
 | `auto_execute` | `false` | When `false`, decisions are persisted but the phase does not run (shadow mode). Set `true` only after the eval suite passes against the current prompt. |
-| `prompt_path` | `.hermes/prompts/selection.md` | File the agent loads and hashes. Path is resolved relative to the working directory of `pipeline-watch`, not the state dir. |
+| `prompt_path` | `.hermes/prompts/selection.md` | File the agent loads and hashes. Path is resolved relative to the working directory of `tpo`, not the state dir. |
 | `expected_prompt_sha` | `None` | If set, mismatch with the file's actual SHA-256 aborts the tick (rationale `prompt_sha_mismatch:...`) without counting as no-progress. Leave unset only in dev. |
 
 ### `[circuit_breaker]`
@@ -68,7 +68,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 |---|---|---|
 | `no_progress_threshold` | `3` | Consecutive `picked=null` decisions before a Slack alert is sent (the gateway service manages tick scheduling — the circuit breaker no longer adjusts cron). |
 | `alert_dedup_hours` | `24` | Identical alert bodies inside this window are suppressed by the sink. |
-| `max_phase_timeout_min` | `120` | Upper bound on a single phase invocation. A phase that exceeds this is killable by `pipeline-watch kill` and surfaces as orphaned. |
+| `max_phase_timeout_min` | `120` | Upper bound on a single phase invocation. A phase that exceeds this is killable by `tpo kill` and surfaces as orphaned. |
 | `max_tick_duration_min` | `10` | Upper bound on one tick (selection + phase invocation). Beyond this, the stale-marker sweep treats the tick lock as abandoned. |
 
 ## Tasks

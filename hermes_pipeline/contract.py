@@ -6,7 +6,10 @@ model/tools/skills flags this would otherwise need — see TODO-16).
 """
 from __future__ import annotations
 
+import atexit
 import re
+import shutil
+import tempfile
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,7 +76,7 @@ def _render_default_contract_toml(profile: str = "gstack") -> str:
     caps_toml = ", ".join(f'"{c}"' for c in caps)
     return (
         "# Pipeline execution contract — read at tick start.\n"
-        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         f"schema_version = {CONTRACT_SCHEMA_VERSION}\n"
         'assignee = "default"\n'
         f"capabilities = [{caps_toml}]\n"
@@ -91,7 +94,7 @@ def _render_contract_toml(contract: PipelineContract) -> str:
     caps_toml = ", ".join(f'"{c}"' for c in contract.capabilities)
     return (
         "# Pipeline execution contract — read at tick start.\n"
-        "# See docs/tutorial-getting-started.md and `pipeline-watch doctor --help`.\n"
+        "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         f"schema_version = {contract.schema_version}\n"
         f'assignee = "{contract.assignee}"\n'
         f"capabilities = [{caps_toml}]\n"
@@ -125,7 +128,7 @@ def load_contract(project_state: Path) -> PipelineContract:
     path = contract_path(project_state)
     if not path.is_file():
         raise ContractMissingError(
-            f"no pipeline contract at {path} — run `pipeline-watch init <project>` to create one"
+            f"no pipeline contract at {path} — run `tpo init <project>` to create one"
         )
 
     try:
@@ -141,7 +144,7 @@ def load_contract(project_state: Path) -> PipelineContract:
     if schema_version != CONTRACT_SCHEMA_VERSION:
         raise ContractVersionMismatchError(
             f"{path} has schema_version={schema_version}, expected {CONTRACT_SCHEMA_VERSION} — "
-            f"run `pipeline-watch init <project> --force` to regenerate, or edit it by hand"
+            f"run `tpo init <project> --force` to regenerate, or edit it by hand"
         )
 
     assignee = data.get("assignee", "default")
@@ -167,20 +170,84 @@ def load_contract(project_state: Path) -> PipelineContract:
     )
 
 
+# Cache of (parts_key) → tempdir path, so zip-wheel extracts aren't
+# repeated on every call and get cleaned up at exit.
+_bundled_temp_cache: dict[str, Path] = {}
+
+
+def _cleanup_bundled_temps():
+    """Remove any temp directories created by _copy_traversable_to_tempdir."""
+    for temp_dir in _bundled_temp_cache.values():
+        shutil.rmtree(temp_dir, ignore_errors=True)
+    _bundled_temp_cache.clear()
+
+
+atexit.register(_cleanup_bundled_temps)
+
+
+def _bundled_data_root():
+    """Return the importlib.resources Traversable for hermes_pipeline.data.
+
+    Isolated as its own function so tests can mock it to simulate a
+    non-filesystem (zip-wheel) install without patching importlib itself.
+    """
+    from importlib.resources import files
+    return files("hermes_pipeline.data")
+
+
+def _copy_traversable_to_tempdir(traversable, key: str) -> Path:
+    """Recursively copy a non-filesystem Traversable into a real tempdir.
+
+    Results are cached by *key* so repeated calls (e.g. multiple features
+    resolving against the same zip-wheel) reuse a single extraction.  All
+    temp directories are cleaned up at process exit via an atexit handler.
+
+    Used when importlib.resources yields a Traversable that isn't backed by
+    a plain filesystem path (e.g. a zip-wheel install) — shutil.copytree and
+    Path() operations need a real directory to work against.
+    """
+    if key in _bundled_temp_cache:
+        return _bundled_temp_cache[key]
+
+    dest_root = Path(tempfile.mkdtemp(prefix="hermes_pipeline_bundled_"))
+
+    def _copy_node(node, dest: Path) -> None:
+        if node.is_dir():
+            dest.mkdir(parents=True, exist_ok=True)
+            for child in node.iterdir():
+                _copy_node(child, dest / child.name)
+        else:
+            dest.write_bytes(node.read_bytes())
+
+    _copy_node(traversable, dest_root)
+    _bundled_temp_cache[key] = dest_root
+    return dest_root
+
+
+def _resolve_bundled_dir(*parts: str) -> Path:
+    """Resolve a directory under hermes_pipeline/data/ to a real filesystem Path.
+
+    Resolves package-relative so it works whether running from a checkout
+    or from an installed wheel. For zip-wheel installs, importlib.resources
+    returns a Traversable that isn't a real filesystem path — in that case
+    the directory is copied to a temp directory (cached per path) so callers
+    can rely on a plain Path (shutil.copytree, Path.exists, etc.) unconditionally.
+    """
+    key = "/".join(parts)
+    traversable = _bundled_data_root().joinpath(*parts)
+    try:
+        return Path(traversable)
+    except (TypeError, NotImplementedError):
+        return _copy_traversable_to_tempdir(traversable, key)
+
+
 def bundled_profile_dir() -> Path:
     """Return the path to the directory containing the bundled pipeline SOUL.md.
 
     Resolves package-relative so it works whether running from a checkout
     or from an installed wheel.
-
-    Limitation: For zip-wheel installs, importlib.resources returns a
-    Traversable that is not a real filesystem path, not a plain
-    ``shutil.copy``-able path. In practice, hatchling + uv always produce
-    filesystem installs, so this works.
     """
-    from importlib.resources import files
-    traversable = files("hermes_pipeline").joinpath("data", "hermes-identity", "pipeline")
-    return Path(traversable)
+    return _resolve_bundled_dir("hermes-identity", "pipeline")
 
 
 def required_capabilities(phases: list[Phase]) -> set[str]:

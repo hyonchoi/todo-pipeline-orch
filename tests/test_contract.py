@@ -51,7 +51,7 @@ def test_write_default_contract_idempotent(tmp_path):
 
 def test_load_contract_missing_raises(tmp_path):
     project_state = tmp_path / ".hermes"
-    with pytest.raises(ContractMissingError, match="pipeline-watch init"):
+    with pytest.raises(ContractMissingError, match="tpo init"):
         load_contract(project_state)
 
 
@@ -222,3 +222,41 @@ def test_missing_capabilities_empty_when_satisfied():
     contract = PipelineContract(schema_version=2, capabilities=("Read", "Write", "Bash"))
     phases = [Phase(phase_key="p1", name="P1", tools="Read,Write")]
     assert missing_capabilities(contract, phases) == set()
+
+
+
+class TestResolveBundledDir:
+    def test_resolves_real_filesystem_path(self):
+        """Normal (non-zip) install: returns a real, existing directory."""
+        from hermes_pipeline.contract import _resolve_bundled_dir
+
+        result = _resolve_bundled_dir("skills", "todos-manager")
+        assert result.is_dir()
+        assert (result / "SKILL.md").is_file()
+
+    def test_falls_back_to_tempdir_for_non_filesystem_traversable(self, mocker):
+        """Zip-wheel install: Path(traversable) raises, falls back to a real temp copy."""
+        import hermes_pipeline.contract as contract_mod
+        from hermes_pipeline.contract import _resolve_bundled_dir
+
+        class FakeTraversable:
+            def __fspath__(self):
+                raise NotImplementedError("not a real filesystem path")
+
+            def joinpath(self, *parts):
+                return self
+
+            def iterdir(self):
+                return iter([])
+
+            def is_dir(self):
+                return True
+
+            name = "todos-manager"
+
+        mocker.patch.object(
+            contract_mod, "_bundled_data_root",
+            return_value=FakeTraversable(),
+        )
+        result = _resolve_bundled_dir("skills", "todos-manager")
+        assert result.is_dir()

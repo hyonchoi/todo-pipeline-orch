@@ -8,7 +8,7 @@ This guide covers the three tools you use when a tick doesn't behave the way you
 
 ## Prerequisites
 
-- `pipeline-watch` installed and configured (see the [getting-started tutorial](tutorial-getting-started.md))
+- `tpo` installed and configured (see the [getting-started tutorial](tutorial-getting-started.md))
 - `PIPELINE_PROJECTS_DIR` set to a directory containing projects with TODOS.md files
 
 ## Using `--verbose` for targeted log detail
@@ -16,7 +16,7 @@ This guide covers the three tools you use when a tick doesn't behave the way you
 The `--verbose` flag enables the `pipeline.verbose` logger, which outputs informational details at key points in the tick flow. Use this when you want to know what the pipeline is doing without the noise of full debug output.
 
 ```bash
-uv run pipeline-watch --verbose tick my-project
+uv run tpo --verbose tick my-project
 ```
 
 **What you'll see (in addition to default INFO output):**
@@ -36,7 +36,7 @@ These messages come from the `pipeline.verbose` logger, which is off by default 
 The `--debug` flag lowers the root log level from INFO to DEBUG, surfacing internal state at multiple strategic points across the pipeline.
 
 ```bash
-uv run pipeline-watch --debug tick my-project
+uv run tpo --debug tick my-project
 ```
 
 **What you'll see (in addition to --verbose output):**
@@ -62,7 +62,7 @@ uv run pipeline-watch --debug tick my-project
 When you start a project with hand-written TODOs in TODOS.md but no `.hermes/todo_id_counter` file, the pipeline doesn't know what ID to assign next. The `recover-counter` subcommand scans TODOS.md for the highest TODO-N and initializes the counter.
 
 ```bash
-uv run pipeline-watch recover-counter my-project
+uv run tpo recover-counter my-project
 ```
 
 Output:
@@ -106,7 +106,7 @@ cat: .hermes/todo_id_counter: No such file or directory
 
 After:
 ```
-$ uv run pipeline-watch recover-counter my-project
+$ uv run tpo recover-counter my-project
 Counter set to 5 for project my-project
 
 $ cat .hermes/todo_id_counter
@@ -117,19 +117,19 @@ $ cat .hermes/todo_id_counter
 
 After using any of these tools, verify the result:
 
-- **`--verbose`/`--debug`:** Check the log output includes the expected detail level. Run `uv run pipeline-watch tick my-project` (no flag) and confirm no verbose or debug output appears.
+- **`--verbose`/`--debug`:** Check the log output includes the expected detail level. Run `uv run tpo tick my-project` (no flag) and confirm no verbose or debug output appears.
 - **`recover-counter`:** Check `.hermes/todo_id_counter` contains the expected value.
 
 ## Troubleshooting
 
 **"verbose output not showing up"**
 
-- Make sure you pass `--verbose` before the subcommand: `uv run pipeline-watch --verbose tick my-project`
+- Make sure you pass `--verbose` before the subcommand: `uv run tpo --verbose tick my-project`
 - The flags are global root-level arguments, positioned before the subcommand.
 
 **"debug output not showing up"**
 
-- Same as `--verbose`: use `uv run pipeline-watch --debug tick my-project`
+- Same as `--verbose`: use `uv run tpo --debug tick my-project`
 - Debug logging is only available in the `tick` subcommand (the only subcommand that logs at DEBUG level)
 
 **"recover-counter returns error 2"**

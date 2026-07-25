@@ -18,7 +18,7 @@ phases on a real Hermes kanban board, polls for phase transitions, and produces
 ### 1. Run the full pipeline (happy-path fixture)
 
 ```bash
-uv run hermes-pipeline test --fixture happy-path --timeout 120
+uv run tpo test --fixture happy-path --timeout 120
 ```
 
 This creates a temporary project with a single TODO entry, registers all pipeline
@@ -42,7 +42,7 @@ Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the 
 ### 2. Run a single phase
 
 ```bash
-uv run hermes-pipeline test --fixture happy-path --phase phase_2_autoplan
+uv run tpo test --fixture happy-path --phase phase_2_autoplan
 ```
 
 Runs only the named phase in isolation. Useful for debugging a phase dispatch or
@@ -51,7 +51,7 @@ checking that a specific step works with a real Hermes subprocess call.
 ### 3. Run with a custom convergence threshold
 
 ```bash
-uv run hermes-pipeline test --fixture happy-path --convergence-threshold 2
+uv run tpo test --fixture happy-path --convergence-threshold 2
 ```
 
 The convergence detector halts the run if N consecutive phases fail with the same
@@ -63,7 +63,7 @@ Error classes: `dependency_error`, `hermes_error`, `claude_error`, `timeout`, `p
 ### 4. Run with --keep to inspect temp artifacts
 
 ```bash
-uv run hermes-pipeline test --fixture happy-path --keep --timeout 120
+uv run tpo test --fixture happy-path --keep --timeout 120
 
 # Find the temp directory the harness left behind
 find /tmp -maxdepth 1 -name 'harness-*' -type d
@@ -89,10 +89,10 @@ harness-xxxxxxxx/
 
 ```bash
 # First run
-uv run hermes-pipeline test --fixture happy-path --loop --keep --timeout 120
+uv run tpo test --fixture happy-path --loop --keep --timeout 120
 
 # Second run (auto-diffs against first run report)
-uv run hermes-pipeline test --fixture happy-path --loop --keep --timeout 120
+uv run tpo test --fixture happy-path --loop --keep --timeout 120
 ```
 
 The `--loop` flag persists numbered report files (`happy-path-report.1.json`,

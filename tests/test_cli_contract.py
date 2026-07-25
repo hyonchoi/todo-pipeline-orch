@@ -255,7 +255,7 @@ class TestCmdDoctor:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 2
-        assert "pipeline-watch init" in capsys.readouterr().out
+        assert "tpo init" in capsys.readouterr().out
 
     def test_doctor_invalid_contract_returns_2(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"

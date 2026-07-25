@@ -1,6 +1,6 @@
 # Set up multi-project scanning
 
-In this tutorial, you'll create two test projects and run a single `pipeline-watch tick` that
+In this tutorial, you'll create two test projects and run a single `tpo tick` that
 selects a TODO in each project. You'll see how the scan loop discovers projects,
 configures per-project Slack channels, and archives projects without deleting them.
 
@@ -69,7 +69,7 @@ git add .
 git commit -m "init: create project with TODOS"
 ```
 
-You now have two projects that pipeline-watch can discover.
+You now have two projects that tpo can discover.
 
 ---
 
@@ -78,7 +78,7 @@ You now have two projects that pipeline-watch can discover.
 Run a single tick without specifying a project:
 
 ```bash
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 You'll see output like:
@@ -115,7 +115,7 @@ back to the global `PIPELINE_SLACK_CHANNEL` or `#alert`.
 Run another tick to verify:
 
 ```bash
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 The scan loop should still discover both projects. The second project now uses
@@ -137,7 +137,7 @@ EOF
 Run the tick again:
 
 ```bash
-uv run pipeline-watch tick
+uv run tpo tick
 ```
 
 You should see:

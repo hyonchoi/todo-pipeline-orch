@@ -12,7 +12,7 @@ This guide covers the seven subcommands of the `todos-manager` skill for adding,
 
 ## Prerequisites
 
-- The todos-manager skill installed via `scripts/install-todos-manager.sh`
+- The todos-manager skill installed via `tpo skills install --target all`
 - A project with write access to the repo root
 
 ## Initialize a new project
@@ -311,5 +311,5 @@ After any subcommand, verify the result:
 ## Related
 
 - [Getting started with todos-manager](tutorial-todos-manager.md) — step-by-step walkthrough for first-time users
-- [TODOS Manager skill reference](../skills/todos-manager/SKILL.md) — full schema, ID rules, and acceptance scenarios
+- [TODOS Manager skill reference](../hermes_pipeline/data/skills/todos-manager/SKILL.md) — full schema, ID rules, and acceptance scenarios
 - [Architecture overview](ARCHITECTURE.md) — how the skill fits into the project structure

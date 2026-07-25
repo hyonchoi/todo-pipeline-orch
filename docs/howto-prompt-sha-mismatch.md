@@ -23,12 +23,12 @@ actual=789ghi012jkl. Selection skipped (NOT counted as no-progress).
 Check Hermes config repo for prompt drift.
 ```
 
-`pipeline-watch status` continues to show no new in-flight phase; ticks keep
+`tpo status` continues to show no new in-flight phase; ticks keep
 firing and keep producing the same mismatch until you intervene.
 
 ## Prerequisites
 
-- Shell access to the host running `pipeline-watch`.
+- Shell access to the host running `tpo`.
 - `sha256sum` (Linux) or `shasum -a 256` (macOS) on PATH.
 - Read access to `.hermes/config.toml` and `.hermes/prompts/selection.md`.
 - Hermes CLI installed and authenticated (as of v0.3, selection routes through

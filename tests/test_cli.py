@@ -11,7 +11,7 @@ class TestBuildParser:
         """Parser shows help for main command."""
         parser = build_parser()
         # Parser should have subcommands
-        assert parser.prog == "pipeline-watch"
+        assert parser.prog == "tpo"
 
 
 def test_main_no_command(tmp_path):
@@ -35,7 +35,7 @@ def test_main_no_command(tmp_path):
         old_stdout = sys.stdout
         old_argv = sys.argv
         sys.stdout = io.StringIO()
-        sys.argv = ['pipeline-watch']
+        sys.argv = ['tpo']
         try:
             result = main(None)
         finally:

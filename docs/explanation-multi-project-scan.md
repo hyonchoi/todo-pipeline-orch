@@ -9,9 +9,9 @@ built this way and what was traded off.
 Before multi-project scanning, each project needed its own cron entry:
 
 ```bash
-0 * * * * pipeline-watch tick project-a
-0 * * * * pipeline-watch tick project-b
-0 * * * * pipeline-watch tick project-c
+0 * * * * tpo tick project-a
+0 * * * * tpo tick project-b
+0 * * * * tpo tick project-c
 ```
 
 Three problems:
