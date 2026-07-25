@@ -466,3 +466,43 @@ def test_integration_config_set_preserves_skeleton(monkeypatch, tmp_path):
     assert "global configuration" in content
     # The set value should be active
     assert "claude_cmd: claude-code" in content
+
+
+# ============================================================
+# Regression tests — backward compatibility
+# ============================================================
+
+def test_regression_no_config_file_unchanged(monkeypatch):
+    """Users without config file see same defaults as before."""
+    monkeypatch.setenv("TPO_CONFIG_FILE", "/nonexistent")
+    monkeypatch.delenv("PIPELINE_LOCK_DIR", raising=False)
+    monkeypatch.delenv("PIPELINE_STATE_DIR", raising=False)
+    monkeypatch.delenv("PIPELINE_CLAUDE_CMD", raising=False)
+    monkeypatch.delenv("PIPELINE_KANBAN_ADAPTER", raising=False)
+    monkeypatch.delenv("PIPELINE_SLACK_CHANNEL", raising=False)
+    from hermes_pipeline.config import Config
+    cfg = Config.from_env()
+    default = Config.default()
+    assert cfg.lock_dir == default.lock_dir
+    assert cfg.projects_dir == default.projects_dir
+    assert cfg.claude_cmd == default.claude_cmd
+    assert cfg.kanban_adapter == default.kanban_adapter
+
+def test_regression_env_vars_still_work(monkeypatch, tmp_path):
+    """Remaining PIPELINE_* env vars still work without config file."""
+    monkeypatch.setenv("TPO_CONFIG_FILE", "/nonexistent")
+    monkeypatch.setenv("PIPELINE_LOCK_DIR", str(tmp_path / "locks"))
+    monkeypatch.setenv("PIPELINE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "custom-claude")
+    from hermes_pipeline.config import Config
+    cfg = Config.from_env()
+    assert cfg.lock_dir == tmp_path / "locks"
+    assert cfg.state_dir == tmp_path / "state"
+    assert cfg.claude_cmd == "custom-claude"
+
+def test_regression_frozen_config_unchanged():
+    """Config dataclass is still frozen."""
+    from hermes_pipeline.config import Config
+    cfg = Config.default()
+    with pytest.raises(Exception):  # FrozenInstanceError
+        cfg.projects_dir = Path("/changed")
