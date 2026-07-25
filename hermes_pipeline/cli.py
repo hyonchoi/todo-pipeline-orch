@@ -346,6 +346,44 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skills_install_parser.set_defaults(func=_cmd_skills_install)
 
+    # config: read/write global tpo configuration
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Read and write global tpo configuration",
+    )
+    config_subparsers = config_parser.add_subparsers(dest="config_command", required=True)
+
+    config_init_parser = config_subparsers.add_parser(
+        "init",
+        help="Create a global config file with documented defaults",
+    )
+    config_init_parser.add_argument(
+        "--force", action="store_true",
+        help="Overwrite an existing config file",
+    )
+    config_init_parser.set_defaults(func=_cmd_config_init)
+
+    config_get_parser = config_subparsers.add_parser(
+        "get",
+        help="Get the effective value of a config key",
+    )
+    config_get_parser.add_argument("key", help="Config key name")
+    config_get_parser.set_defaults(func=_cmd_config_get)
+
+    config_set_parser = config_subparsers.add_parser(
+        "set",
+        help="Set a config key in the global config file",
+    )
+    config_set_parser.add_argument("key", help="Config key name")
+    config_set_parser.add_argument("value", help="New value")
+    config_set_parser.set_defaults(func=_cmd_config_set)
+
+    config_path_parser = config_subparsers.add_parser(
+        "path",
+        help="Show the path to the global config file",
+    )
+    config_path_parser.set_defaults(func=_cmd_config_path)
+
     return parser
 
 
@@ -1265,6 +1303,149 @@ def _cmd_skills_install(args, config: Config | None) -> int:
     return 1 if any_failed else 0
 
 
+def _cmd_config_init(args, config: Config | None) -> int:
+    """Handle 'config init' — create a skeleton config file at the default path."""
+    from .config_loader import SKELETON, default_config_path
+    path = default_config_path()
+    if path.is_file() and not args.force:
+        print(f"Config file already exists at {path}")
+        print("Use --force to overwrite.")
+        return 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(SKELETON)
+    print(f"OK: created {path}")
+    return 0
+
+
+def _cmd_config_path(args, config: Config | None) -> int:
+    """Handle 'config path' — show the effective config file location."""
+    from .config_loader import default_config_path, find_config_file
+    existing = find_config_file()
+    if existing:
+        print(f"Using: {existing}")
+    else:
+        print("No config file found.")
+        print(f"Default path: {default_config_path()}")
+        print("Run `tpo config init` to create one.")
+    return 0
+
+
+def _cmd_config_get(args, config: Config | None) -> int:
+    """Handle 'config get <key>' — show effective value with source attribution."""
+    import os as _os
+
+    from .config import Config
+    from .config_loader import find_config_file, validate_config_key
+
+    try:
+        key = validate_config_key(args.key)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        cfg = Config.from_env()
+    except ValueError as e:
+        print(f"Warning: config file has errors: {e}")
+        print("Falling back to defaults.")
+        cfg = Config.default()
+
+    value = getattr(cfg, key)
+
+    # Determine source attribution
+    env_name = f"PIPELINE_{key.upper()}"
+    default_cfg = Config.default()
+    if _os.environ.get(env_name) is not None and key != "projects_dir":
+        source = f" (from env: {env_name})"
+    elif value != getattr(default_cfg, key):
+        cfg_file = find_config_file()
+        source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
+    else:
+        source = " (from default)"
+
+    print(f"{key}: {value}{source}")
+    return 0
+
+
+def _cmd_config_set(args, config: Config | None) -> int:
+    """Handle 'config set <key> <value>' — write a key to the config file."""
+    from .config_loader import (
+        _format_value,
+        default_config_path,
+        find_config_file,
+        validate_config_key,
+        validate_config_value,
+    )
+
+    try:
+        key = validate_config_key(args.key)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        coerced = validate_config_value(args.value, key)
+    except (TypeError, ValueError) as e:
+        print(f"Error: invalid value for {args.key!r}: {e}", file=sys.stderr)
+        return 2
+
+    config_file = find_config_file()
+    if config_file is None:
+        config_file = default_config_path()
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        config_file.write_text("# tpo global configuration\n\n")
+
+    if config_file.is_symlink():
+        print(f"Error: config file {config_file} is a symlink — refused for security.",
+              file=sys.stderr)
+        return 2
+
+    import fcntl
+
+    text = config_file.read_text()
+    lines = text.split("\n")
+
+    # Find line with this key (commented or active)
+    found_idx = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("#") and f"{key}:" in stripped:
+            uncommented = stripped.lstrip("#").lstrip()
+            if uncommented.startswith(f"{key}:"):
+                found_idx = i
+                break
+        elif stripped.startswith(f"{key}:"):
+            found_idx = i
+            break
+
+    formatted = _format_value(coerced, key)
+    new_line = f"{key}: {formatted}"
+
+    if found_idx is not None:
+        lines[found_idx] = new_line
+    else:
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append(new_line)
+        lines.append("")
+
+    new_text = "\n".join(lines)
+
+    # Atomic write with lock
+    fd = os.open(str(config_file), os.O_RDWR | os.O_CREAT)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        os.write(fd, new_text.encode())
+        os.ftruncate(fd, len(new_text.encode()))
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    print(f"OK: set {key} = {coerced}")
+    print(f"File: {config_file}")
+    return 0
+
+
 def _cmd_test(args, config: Config) -> int:
     """Handle 'test' subcommand — mock integration test harness."""
     from .harness import run_harness
@@ -1304,7 +1485,7 @@ def main(argv: list[str] | None = None) -> int:
     # Bootstrap subcommands (file-copy only) don't need pipeline runtime
     # config (state dir, lock dir, projects dir) — skip Config.from_env()
     # so they work even when that env isn't configured yet.
-    if getattr(args, "command", None) == "skills":
+    if getattr(args, "command", None) in ("skills", "config"):
         if hasattr(args, "func"):
             return args.func(args, None)
         parser.parse_args([*remaining, "--help"])
