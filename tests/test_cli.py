@@ -23,9 +23,11 @@ def test_main_no_command(tmp_path):
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
-    # Set env vars for Config
+    # Set config file for projects_dir; env vars for other dirs
     import os
-    os.environ["PIPELINE_PROJECTS_DIR"] = str(projects_dir)
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+    os.environ["TPO_CONFIG_FILE"] = str(config_file)
     os.environ["PIPELINE_LOCK_DIR"] = str(lock_dir)
     os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
 
@@ -44,7 +46,7 @@ def test_main_no_command(tmp_path):
         # Should return 0 (help is not an error)
         assert result == 0
     finally:
-        for key in ["PIPELINE_PROJECTS_DIR", "PIPELINE_LOCK_DIR", "PIPELINE_STATE_DIR"]:
+        for key in ["TPO_CONFIG_FILE", "PIPELINE_LOCK_DIR", "PIPELINE_STATE_DIR"]:
             os.environ.pop(key, None)
 
 
