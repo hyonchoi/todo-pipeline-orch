@@ -176,7 +176,7 @@ SKELETON = """\
 # Uncomment and edit any field to override the built-in default.
 # Run `tpo config get <key>` to see the effective value with source attribution.
 
-# projects_dir: ~/.hermes/pipeline_projects
+# projects_dir: ~/projects
 # lock_dir: ~/.hermes/pipeline_locks
 # state_dir: ~/.hermes
 # claude_cmd: claude
