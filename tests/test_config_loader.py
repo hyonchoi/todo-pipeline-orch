@@ -38,11 +38,24 @@ def test_search_paths_default(monkeypatch):
     assert paths[0] == Path.home() / ".config" / "tpo" / "config.yaml"
 
 
-def test_search_paths_two_paths_only(monkeypatch):
+def test_search_paths_includes_legacy_hermes_fallback(monkeypatch):
     monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
+    monkeypatch.delenv("HERMES_HOME", raising=False)
     paths = _search_paths()
-    assert len(paths) == 2
+    assert paths == [
+        Path.home() / ".config" / "tpo" / "config.yaml",
+        Path.home() / ".tpo" / "config.yaml",
+        Path.home() / ".hermes" / "tpo.yaml",
+    ]
+
+
+def test_search_paths_uses_hermes_home_for_legacy_fallback(monkeypatch, tmp_path):
+    monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
+    paths = _search_paths()
+    assert paths[2] == tmp_path / "hermes" / "tpo.yaml"
 
 
 def test_tpo_config_file_override(monkeypatch, tmp_path):
