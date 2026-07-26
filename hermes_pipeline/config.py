@@ -47,8 +47,6 @@ class Config:
         env_map = {}
         for f in _fields(cls):
             env_name = f"PIPELINE_{f.name.upper()}"
-            if f.name == "projects_dir":
-                continue  # Removed — use config file instead
             env_map[env_name] = (f.name, field_hints[f.name])
 
         overrides = {}

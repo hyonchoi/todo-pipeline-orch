@@ -55,6 +55,8 @@ def _get_literal_values(target_type, key: str) -> set[str] | None:
 
 def _coerce_value(value, target_type, key: str, source: Path):
     if target_type is Path:
+        if value is None:
+            raise ValueError("YAML `null` is not a valid path value")
         return Path(str(value)).expanduser()
     elif target_type is int:
         return int(value)
@@ -115,8 +117,13 @@ def load_global_config() -> Config:
     except yaml.YAMLError as e:
         raise ValueError(f"YAML parse error in {config_file}: {e}")
 
-    if raw is None or not isinstance(raw, dict):
+    if raw is None:
         return Config.default()
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f"Config file {config_file} must contain a YAML mapping. "
+            f"Run 'tpo config path' to locate and fix the file."
+        )
 
     return _coerce_config(raw, config_file)
 
@@ -158,16 +165,15 @@ def _coerce_config(raw: dict, source: Path) -> Config:
 def _format_value(value, key: str) -> str:
     if isinstance(value, bool):
         return "true" if value else "false"
-    elif isinstance(value, str):
-        if (value.lower() in ("null", "true", "false", "yes", "no") or
-                value == "" or value.startswith("~") or
-                any(c in value for c in ":#{}[]%&*!|>'\"@`")):
-            escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+    elif isinstance(value, str | Path):
+        text = str(value)
+        if (text.lower() in ("null", "true", "false", "yes", "no") or
+                text == "" or text.startswith("~") or
+                any(c in text for c in ":#{}[]%&*!|>'\"@`")):
+            escaped = text.replace("\\", "\\\\").replace('"', '\\"')
             return f'"{escaped}"'
-        return value
+        return text
     elif isinstance(value, int | float):
-        return str(value)
-    elif isinstance(value, Path):
         return str(value)
     return str(value)
 

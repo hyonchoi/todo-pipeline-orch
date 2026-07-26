@@ -7,11 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.1] - 2026-07-26
 
-### Breaking
-- Removed `PIPELINE_PROJECTS_DIR` environment variable. Use `tpo config set projects_dir <path>` instead.
+### Deprecated
+- `PIPELINE_PROJECTS_DIR` remains supported as an environment override for compatibility, but users should migrate to `tpo config set projects_dir <path>`.
 
 ### Migration
-- If you set `PIPELINE_PROJECTS_DIR` in your shell profile, remove it and run `tpo config set projects_dir <your-path>` once.
+- If you set `PIPELINE_PROJECTS_DIR` in your shell profile, run `tpo config set projects_dir <your-path>` once, then remove the shell export when convenient.
 
 ### Added
 - `tpo config` subcommand: `init`, `get`, `set`, `path`

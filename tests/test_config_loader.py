@@ -135,6 +135,11 @@ def test_coerce_path_plain_string():
     assert result == Path("/opt/data")
 
 
+def test_coerce_path_null_raises():
+    with pytest.raises(ValueError, match="null"):
+        _coerce_value(None, Path, "projects_dir", Path("<test>"))
+
+
 def test_coerce_int_from_string():
     assert _coerce_value("42", int, "default_timeout", Path("<test>")) == 42
 
@@ -266,6 +271,14 @@ def test_load_global_config_null_yaml_returns_default(monkeypatch, tmp_path):
     monkeypatch.setenv("TPO_CONFIG_FILE", str(cfg))
     config = load_global_config()
     assert config == Config.default()
+
+
+def test_load_global_config_non_dict_raises(monkeypatch, tmp_path):
+    cfg = tmp_path / "list.yaml"
+    cfg.write_text("- projects_dir\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(cfg))
+    with pytest.raises(ValueError, match="must contain a YAML mapping"):
+        load_global_config()
 
 
 def test_load_global_config_valid_override(monkeypatch, tmp_path):
@@ -416,6 +429,10 @@ def test_format_float():
 
 def test_format_path():
     assert _format_value(Path("/opt/data"), "k") == "/opt/data"
+
+
+def test_format_path_with_special_chars_quoted():
+    assert _format_value(Path("/tmp/foo #bar"), "projects_dir") == '"/tmp/foo #bar"'
 
 
 # ============================================================

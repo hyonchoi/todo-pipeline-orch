@@ -26,18 +26,19 @@ def test_from_env_layer3_env_overrides_file(monkeypatch, tmp_path):
     assert cfg.claude_cmd == "claude-override"
 
 
-def test_from_env_no_projects_dir_env_var():
-    """PIPELINE_PROJECTS_DIR should not be in env_map."""
+def test_from_env_no_projects_dir_env_var(monkeypatch):
+    """Without PIPELINE_PROJECTS_DIR, projects_dir keeps its default."""
+    monkeypatch.delenv("PIPELINE_PROJECTS_DIR", raising=False)
     cfg = Config.from_env()
     assert cfg.projects_dir == Path.home() / "projects"
 
 
-def test_from_env_pipeline_projects_dir_ignored(monkeypatch, tmp_path):
-    """PIPELINE_PROJECTS_DIR env var should be ignored."""
-    monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "ignored"))
+def test_from_env_pipeline_projects_dir_deprecated_alias(monkeypatch, tmp_path):
+    """PIPELINE_PROJECTS_DIR remains a deprecated env override for patch compatibility."""
+    monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     cfg = Config.from_env()
-    assert cfg.projects_dir == Path.home() / "projects"
+    assert cfg.projects_dir == tmp_path / "projects"
 
 
 def test_from_env_kanban_literal_validation_env(monkeypatch, tmp_path):

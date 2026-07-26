@@ -16,6 +16,7 @@ import shutil
 import signal
 import subprocess as _cli_sp
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -1423,12 +1424,18 @@ def _cmd_config_init(args, config: Config | None) -> int:
     from .config_loader import SKELETON, default_config_path
 
     path = default_config_path()
+    if path.is_symlink():
+        print(
+            f"Error: config file {path} is a symlink — refused for security.",
+            file=sys.stderr,
+        )
+        return 2
     if path.is_file() and not args.force:
         print(f"Config file already exists at {path}")
         print("Use --force to overwrite.")
         return 1
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(SKELETON)
+    _atomic_write_config(path, SKELETON)
     print(f"OK: created {path}")
     return 0
 
@@ -1452,7 +1459,7 @@ def _cmd_config_get(args, config: Config | None) -> int:
     import os as _os
 
     from .config import Config
-    from .config_loader import find_config_file, validate_config_key
+    from .config_loader import _coerce_value, find_config_file, validate_config_key
 
     try:
         key = validate_config_key(args.key)
@@ -1466,13 +1473,31 @@ def _cmd_config_get(args, config: Config | None) -> int:
         print(f"Warning: config file has errors: {e}")
         print("Falling back to defaults.")
         cfg = Config.default()
+        env_name = f"PIPELINE_{key.upper()}"
+        env_value = _os.environ.get(env_name)
+        if env_value is not None:
+            import typing
+            from dataclasses import replace
+
+            field_hints = typing.get_type_hints(Config)
+            cfg = replace(
+                cfg,
+                **{
+                    key: _coerce_value(
+                        env_value,
+                        field_hints[key],
+                        key,
+                        Path(f"<env:{env_name}>"),
+                    )
+                },
+            )
 
     value = getattr(cfg, key)
 
     # Determine source attribution
     env_name = f"PIPELINE_{key.upper()}"
     default_cfg = Config.default()
-    if _os.environ.get(env_name) is not None and key != "projects_dir":
+    if _os.environ.get(env_name) is not None:
         source = f" (from env: {env_name})"
     elif value != getattr(default_cfg, key):
         cfg_file = find_config_file()
@@ -1510,7 +1535,6 @@ def _cmd_config_set(args, config: Config | None) -> int:
     if config_file is None:
         config_file = default_config_path()
         config_file.parent.mkdir(parents=True, exist_ok=True)
-        config_file.write_text("# tpo global configuration\n\n")
 
     if config_file.is_symlink():
         print(
@@ -1519,27 +1543,31 @@ def _cmd_config_set(args, config: Config | None) -> int:
         )
         return 2
 
-    # Read-modify-write under file lock to prevent concurrent `tpo config set`
-    # from clobbering each other's changes.
-    fd = os.open(str(config_file), os.O_RDWR | os.O_CREAT)
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = config_file.with_name(f"{config_file.name}.lock")
+    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX)
-        file_size = os.fstat(fd).st_size
-        text = os.read(fd, max(file_size, 1)).decode() if file_size > 0 else ""
+        text = (
+            config_file.read_text()
+            if config_file.is_file()
+            else "# tpo global configuration\n\n"
+        )
         lines = text.split("\n")
 
-        # Find line with this key (commented or active)
-        found_idx = None
+        # Prefer the effective active key. YAML parsers keep the last duplicate,
+        # so update that before falling back to a commented skeleton placeholder.
+        active_idx = None
+        commented_idx = None
         for i, line in enumerate(lines):
             stripped = line.strip()
             if stripped.startswith("#") and f"{key}:" in stripped:
                 uncommented = stripped.lstrip("#").lstrip()
-                if uncommented.startswith(f"{key}:"):
-                    found_idx = i
-                    break
+                if uncommented.startswith(f"{key}:") and commented_idx is None:
+                    commented_idx = i
             elif stripped.startswith(f"{key}:"):
-                found_idx = i
-                break
+                active_idx = i
+        found_idx = active_idx if active_idx is not None else commented_idx
 
         formatted = _format_value(coerced, key)
         new_line = f"{key}: {formatted}"
@@ -1553,9 +1581,7 @@ def _cmd_config_set(args, config: Config | None) -> int:
             lines.append("")
 
         new_text = "\n".join(lines)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, new_text.encode())
-        os.ftruncate(fd, len(new_text.encode()))
+        _atomic_write_config(config_file, new_text)
     finally:
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -1563,6 +1589,28 @@ def _cmd_config_set(args, config: Config | None) -> int:
     print(f"OK: set {key} = {coerced}")
     print(f"File: {config_file}")
     return 0
+
+
+def _atomic_write_config(path: Path, text: str) -> None:
+    """Atomically write config text without following symlink targets."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
 
 def _cmd_test(args, config: Config) -> int:
