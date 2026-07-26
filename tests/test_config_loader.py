@@ -23,18 +23,18 @@ from hermes_pipeline.config_loader import (
 # ============================================================
 
 
-def test_search_paths_uses_xdg(monkeypatch, tmp_path):
+def test_search_paths_uses_xdg_config_dir(monkeypatch, tmp_path):
     xdg = tmp_path / "xdg"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
-    monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     paths = _search_paths()
     assert paths[0] == xdg / "tpo" / "config.yaml"
 
 
-def test_search_paths_supports_legacy_xdg_config_dir(monkeypatch, tmp_path):
+def test_search_paths_ignores_xdg_config_home(monkeypatch, tmp_path):
     xdg = tmp_path / "xdg"
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    xdg_home = tmp_path / "xdg-home"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
     monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     paths = _search_paths()
@@ -42,7 +42,6 @@ def test_search_paths_supports_legacy_xdg_config_dir(monkeypatch, tmp_path):
 
 
 def test_search_paths_default(monkeypatch):
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     paths = _search_paths()
@@ -50,7 +49,6 @@ def test_search_paths_default(monkeypatch):
 
 
 def test_search_paths_includes_legacy_hermes_fallback(monkeypatch):
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     monkeypatch.delenv("HERMES_HOME", raising=False)
@@ -63,7 +61,6 @@ def test_search_paths_includes_legacy_hermes_fallback(monkeypatch):
 
 
 def test_search_paths_uses_hermes_home_for_legacy_fallback(monkeypatch, tmp_path):
-    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
