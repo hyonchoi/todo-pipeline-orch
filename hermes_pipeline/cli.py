@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import fcntl
 import json
 import logging
 import os
@@ -15,6 +16,7 @@ import shutil
 import signal
 import subprocess as _cli_sp
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -68,6 +70,7 @@ def _hermes_run_kill(job_id: str) -> int:
     except (_cli_sp.TimeoutExpired, FileNotFoundError):
         return 1
 
+
 def _signal_pid(pid: int) -> bool:
     """SIGTERM a phase subprocess. Returns True if signal delivered (or already gone)."""
     try:
@@ -77,6 +80,7 @@ def _signal_pid(pid: int) -> bool:
         return True  # already exited
     except (PermissionError, OSError):
         return False
+
 
 def _process_alive(pid: int) -> bool:
     """Return True iff pid names a live process this user can signal."""
@@ -94,6 +98,7 @@ def _process_alive(pid: int) -> bool:
             return False
         return True
 
+
 def _kill_session_group(pid: int, sig: int) -> bool:
     """Signal the entire session group rooted at pid (phases.py uses start_new_session)."""
     try:
@@ -110,7 +115,10 @@ def _kill_session_group(pid: int, sig: int) -> bool:
     except (PermissionError, OSError):
         return False
 
-def _confirm_pid_exited(pid: int, *, term_grace_s: float = 5.0, kill_grace_s: float = 2.0) -> bool:
+
+def _confirm_pid_exited(
+    pid: int, *, term_grace_s: float = 5.0, kill_grace_s: float = 2.0
+) -> bool:
     """SIGTERM → poll → SIGKILL → poll. Return True iff the pid is gone afterwards.
 
     Targets the session group so children spawned by Claude don't survive the
@@ -140,6 +148,7 @@ def _confirm_pid_exited(pid: int, *, term_grace_s: float = 5.0, kill_grace_s: fl
         time.sleep(0.1)
     return not _process_alive(pid)
 
+
 def _release_tick_lock_if_owned_by(state_dir: Path, tick_ids: set[str]) -> None:
     """Release tick.lock only if its holder's tick_id is in tick_ids.
 
@@ -164,6 +173,7 @@ def _release_tick_lock_if_owned_by(state_dir: Path, tick_ids: set[str]) -> None:
         lock_dir.rmdir()
     except OSError:
         pass
+
 
 def _parse_todo_id(value: str) -> int:
     """Parse todo_id argument with helpful error message."""
@@ -201,7 +211,7 @@ def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
     verbose = False
     debug = False
     remaining = []
-    for arg in (argv if argv is not None else sys.argv[1:]):
+    for arg in argv if argv is not None else sys.argv[1:]:
         if arg in ("--verbose",):
             verbose = True
         elif arg in ("--debug",):
@@ -209,6 +219,7 @@ def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
         else:
             remaining.append(arg)
     return verbose, debug, remaining
+
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
@@ -229,11 +240,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     approve_parser.add_argument("project", help="Project name")
     approve_parser.add_argument(
-        "--todo", required=True, type=_parse_todo_id_flag,
+        "--todo",
+        required=True,
+        type=_parse_todo_id_flag,
         help="TODO to ship (e.g. TODO-5)",
     )
     approve_parser.add_argument(
-        "--force", action="count", default=0,
+        "--force",
+        action="count",
+        default=0,
         help="Pass twice (--force --force) to bypass ONLY the SHA-staleness guard (audited)",
     )
     approve_parser.set_defaults(func=_cmd_approve)
@@ -243,7 +258,12 @@ def build_parser() -> argparse.ArgumentParser:
         "tick",
         help="Run one pipeline tick: scan all projects and select TODOs",
     )
-    tick_parser.add_argument("project", nargs="?", default=None, help="Project name (optional — omit to scan all projects)")
+    tick_parser.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        help="Project name (optional — omit to scan all projects)",
+    )
     tick_parser.set_defaults(func=_cmd_tick)
 
     # recover-counter: Scan TODOS.md and initialize counter file
@@ -261,17 +281,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument("project", help="Project name")
     init_parser.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Overwrite an existing contract with the current default",
     )
     init_parser.add_argument(
-        "--assignee", default=None,
+        "--assignee",
+        default=None,
         help="Set the assignee field (e.g., --assignee pipeline)",
     )
     init_parser.add_argument(
-        "--profile", default="gstack",
+        "--profile",
+        default="gstack",
         help="Pipeline skill-set profile (e.g., gstack, agent-skills). Default: gstack. "
-             "Each profile defines a different set of phases and required capabilities.",
+        "Each profile defines a different set of phases and required capabilities.",
     )
     init_parser.set_defaults(func=_cmd_init)
 
@@ -289,7 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="Install the bundled pipeline Hermes profile",
     )
     install_profile_parser.add_argument(
-        "--force", action="store_true",
+        "--force",
+        action="store_true",
         help="Force reinstall even if the profile already exists",
     )
     install_profile_parser.set_defaults(func=_cmd_install_profile)
@@ -300,27 +324,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run mock integration test harness against mock project data",
     )
     test_parser.add_argument(
-        "--fixture", required=True,
+        "--fixture",
+        required=True,
         help="Fixture name to use (e.g., happy-path)",
     )
     test_parser.add_argument(
-        "--loop", action="store_true",
+        "--loop",
+        action="store_true",
         help="Re-run from scratch and diff report against previous run",
     )
     test_parser.add_argument(
-        "--phase", default=None,
+        "--phase",
+        default=None,
         help="Run only a single phase by key (e.g., phase_2_autoplan)",
     )
     test_parser.add_argument(
-        "--keep", action="store_true",
+        "--keep",
+        action="store_true",
         help="Keep temp directory after run for inspection",
     )
     test_parser.add_argument(
-        "--timeout", type=int, default=86400,
+        "--timeout",
+        type=int,
+        default=86400,
         help="Overall run timeout in seconds (default: 86400 = 24h)",
     )
     test_parser.add_argument(
-        "--convergence-threshold", type=int, default=3,
+        "--convergence-threshold",
+        type=int,
+        default=3,
         help="Consecutive same-class failures to halt run (default: 3)",
     )
     test_parser.set_defaults(func=_cmd_test)
@@ -330,21 +362,68 @@ def build_parser() -> argparse.ArgumentParser:
         "skills",
         help="Manage bundled agent skills (e.g. todos-manager)",
     )
-    skills_subparsers = skills_parser.add_subparsers(dest="skills_command", required=True)
+    skills_subparsers = skills_parser.add_subparsers(
+        dest="skills_command", required=True
+    )
 
     skills_install_parser = skills_subparsers.add_parser(
         "install",
         help="Install the bundled todos-manager skill",
     )
     skills_install_parser.add_argument(
-        "--target", choices=["codex", "claude", "all"], default="claude",
+        "--target",
+        choices=["codex", "claude", "all"],
+        default="claude",
         help="Which skill directory convention to install into (default: claude)",
     )
     skills_install_parser.add_argument(
-        "--scope", choices=["user", "project"], default="user",
+        "--scope",
+        choices=["user", "project"],
+        default="user",
         help="Install under the user's home directory or the current project (default: user)",
     )
     skills_install_parser.set_defaults(func=_cmd_skills_install)
+
+    # config: read/write global tpo configuration
+    config_parser = subparsers.add_parser(
+        "config",
+        help="Read and write global tpo configuration",
+    )
+    config_subparsers = config_parser.add_subparsers(
+        dest="config_command", required=True
+    )
+
+    config_init_parser = config_subparsers.add_parser(
+        "init",
+        help="Create a global config file with documented defaults",
+    )
+    config_init_parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing config file",
+    )
+    config_init_parser.set_defaults(func=_cmd_config_init)
+
+    config_get_parser = config_subparsers.add_parser(
+        "get",
+        help="Get the effective value of a config key",
+    )
+    config_get_parser.add_argument("key", help="Config key name")
+    config_get_parser.set_defaults(func=_cmd_config_get)
+
+    config_set_parser = config_subparsers.add_parser(
+        "set",
+        help="Set a config key in the global config file",
+    )
+    config_set_parser.add_argument("key", help="Config key name")
+    config_set_parser.add_argument("value", help="New value")
+    config_set_parser.set_defaults(func=_cmd_config_set)
+
+    config_path_parser = config_subparsers.add_parser(
+        "path",
+        help="Show the path to the global config file",
+    )
+    config_path_parser.set_defaults(func=_cmd_config_path)
 
     return parser
 
@@ -395,6 +474,7 @@ def _read_prior_tick_id(state_dir: Path) -> str | None:
         log.error("can't read %s: %s — aborting tick (prior state unreadable)", path, e)
         raise
 
+
 def _generate_tick_id() -> str:
     """Generate a new tick ID."""
     try:
@@ -402,9 +482,11 @@ def _generate_tick_id() -> str:
     except Exception:
         import datetime as _dt
         import secrets as _secrets
+
         ts = _dt.datetime.now(_dt.UTC).strftime("%Y%m%d%H%M%S")
         rand = format(_secrets.randbelow(900000) + 100000, "06d")
         return f"{ts}{rand}"
+
 
 def _load_toml_overlay(state_dir: Path, config: Config):
     """Load circuit breaker + selection config from .hermes/config.toml.
@@ -428,6 +510,7 @@ def _load_toml_overlay(state_dir: Path, config: Config):
         log.warning("failed to load %s: %s — using defaults", toml_path, e)
         return (None, CircuitBreakerConfig())
 
+
 def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
     """Create a CircuitBreaker instance from config."""
     return CircuitBreaker(
@@ -437,7 +520,10 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
         slack_channel=slack_channel,
     )
 
-def _persist_tick_id(state_dir: Path, tick_id: str, *, write_sentinel: bool = True) -> None:
+
+def _persist_tick_id(
+    state_dir: Path, tick_id: str, *, write_sentinel: bool = True
+) -> None:
     """Persist tick_id atomically for the next tick's prior check.
 
     Uses tmp+rename so a crash mid-write doesn't leave a partial file.
@@ -476,6 +562,7 @@ def _persist_tick_id(state_dir: Path, tick_id: str, *, write_sentinel: bool = Tr
     except OSError as e:
         log.warning("failed to write tick_started sentinel: %s", e)
 
+
 def _rotate_projects(
     projects: list[tuple[Path, dict | None]],
     state_dir: Path,
@@ -509,6 +596,7 @@ def _rotate_projects(
     except OSError as e:
         log.warning("failed to persist scan cursor: %s — scan order may repeat", e)
     return projects[offset:] + projects[:offset]
+
 
 def _cmd_tick(args, config: Config) -> int:
     """Handle 'tick' subcommand — kanban-as-scheduler pipeline scan tick.
@@ -544,6 +632,7 @@ def _cmd_tick(args, config: Config) -> int:
     except Exception as e:
         log.warning("failed to load config overlay: %s — using defaults", e)
         from .config import CircuitBreakerConfig
+
         cb_cfg = CircuitBreakerConfig()
 
     scan_id = _generate_tick_id()  # scan-level id, for log correlation only
@@ -558,8 +647,12 @@ def _cmd_tick(args, config: Config) -> int:
             log.error("no TODOS.md in project: %s", args.project)
             return 2
         from .project_config import _is_enabled, _read_project_toml
+
         if not _is_enabled(project_dir):
-            log.error("project is disabled: %s — remove .hermes/project.toml or set enabled = true", args.project)
+            log.error(
+                "project is disabled: %s — remove .hermes/project.toml or set enabled = true",
+                args.project,
+            )
             return 2
         explicit_toml = _read_project_toml(project_dir)
         projects = [(project_dir, explicit_toml)]
@@ -568,8 +661,9 @@ def _cmd_tick(args, config: Config) -> int:
         # process".  Distinguish so the cron doesn't silently run forever on a
         # misconfigured setup.
         if not config.projects_dir.is_dir():
-            log.error("projects_dir %s does not exist — check config",
-                      config.projects_dir)
+            log.error(
+                "projects_dir %s does not exist — check config", config.projects_dir
+            )
             return 2
         projects = _discover_projects(config)
         if not projects:
@@ -593,8 +687,7 @@ def _cmd_tick(args, config: Config) -> int:
         try:
             _migrate_global_state(first_project, config)
         except Exception as e:
-            log.warning("one-time state migration to %s: %s",
-                        first_project.name, e)
+            log.warning("one-time state migration to %s: %s", first_project.name, e)
     else:
         global_src = config.state_dir / "current_tick_id.txt"
         if global_src.is_file():
@@ -641,14 +734,16 @@ def _cmd_tick(args, config: Config) -> int:
                     tick_id=project_tick_id,
                 )
         except TickLockHeld:
-            log.info("project %s: tick already in flight (lock held), skipping",
-                     project_slug)
+            log.info(
+                "project %s: tick already in flight (lock held), skipping", project_slug
+            )
         except Exception as e:
             log.error("project %s: %s", project_slug, e, exc_info=True)
             # Continue to next project
 
     vlog.info("scan complete: scan_id=%s", scan_id)
     return 0
+
 
 def _tick_project(
     *,
@@ -713,7 +808,9 @@ def _tick_project(
     except (ContractSchemaError, ContractVersionMismatchError) as e:
         log.error(
             "project %s: pipeline contract invalid: %s — run `tpo doctor %s` for details",
-            project_slug, e, project_slug,
+            project_slug,
+            e,
+            project_slug,
         )
         raise
 
@@ -722,14 +819,21 @@ def _tick_project(
         log.error(
             "project %s: pipeline contract at %s is missing capabilities %s required by "
             "phases.yaml — edit the contract to add them, or run `tpo doctor %s` for details",
-            project_slug, contract_path(project_state), sorted(missing), project_slug,
+            project_slug,
+            contract_path(project_state),
+            sorted(missing),
+            project_slug,
         )
-        raise CapabilityMismatchError(f"contract missing capabilities: {sorted(missing)}")
+        raise CapabilityMismatchError(
+            f"contract missing capabilities: {sorted(missing)}"
+        )
 
     from .project_config import _resolve_slack_channel
 
     # Resolve per-project Slack channel
-    slack_channel = _resolve_slack_channel(project_dir, env_channel=config.slack_channel, toml_data=project_toml)
+    slack_channel = _resolve_slack_channel(
+        project_dir, env_channel=config.slack_channel, toml_data=project_toml
+    )
 
     # Step 1: Check prior tick
     prior_tick_id = _read_prior_tick_id(project_state)
@@ -740,6 +844,7 @@ def _tick_project(
         # Ship-gate: a blocked phase_9_ship makes all_phases_complete return
         # False, so detect/alert "ready to ship" BEFORE the early-return below.
         from . import ship
+
         ship.maybe_ship_ready(
             project_dir=project_dir,
             project_slug=project_slug,
@@ -748,14 +853,20 @@ def _tick_project(
             slack_channel=slack_channel,
         )
 
-        if not all_phases_complete(project_slug, prior_tick_id, state_dir=project_state):
-            log.info("project %s: prior tick %s still in-flight, skipping",
-                     project_slug, prior_tick_id)
+        if not all_phases_complete(
+            project_slug, prior_tick_id, state_dir=project_state
+        ):
+            log.info(
+                "project %s: prior tick %s still in-flight, skipping",
+                project_slug,
+                prior_tick_id,
+            )
             return
 
         # Prior tick complete — observe outcomes before new selection
         try:
             from .kanban_tasks import get_todo_kanban_status
+
             status_map = get_todo_kanban_status(project_slug, prior_tick_id)
             observe_outcomes(
                 state_dir=project_state,
@@ -767,8 +878,12 @@ def _tick_project(
                 prior_tick_id=prior_tick_id,
             )
         except Exception as e:
-            log.warning("project %s: observe_outcomes for prior tick %s failed: %s",
-                        project_slug, prior_tick_id, e)
+            log.warning(
+                "project %s: observe_outcomes for prior tick %s failed: %s",
+                project_slug,
+                prior_tick_id,
+                e,
+            )
 
     # Step 3: Build context & run selection
     todos_path = project_dir / "TODOS.md"
@@ -823,12 +938,17 @@ def _tick_project(
     )
     picked = decision.picked
 
-    vlog.info("project %s: selection result: picked=%s rationale=%s",
-              project_slug, picked, decision.rationale[:200])
+    vlog.info(
+        "project %s: selection result: picked=%s rationale=%s",
+        project_slug,
+        picked,
+        decision.rationale[:200],
+    )
 
     if picked is None:
-        log.info("project %s: selection picked None, observing circuit breaker",
-                 project_slug)
+        log.info(
+            "project %s: selection picked None, observing circuit breaker", project_slug
+        )
         cb.observe(picked=None, counts_as_no_progress=True)
 
         # Write the picked_none sentinel BEFORE persisting the tick_id.
@@ -846,14 +966,16 @@ def _tick_project(
             outcomes_dir.mkdir(exist_ok=True)
             sentinel = outcomes_dir / f"{tick_id}-phases.json"
             from .state import _atomic_write_text
+
             _atomic_write_text(
                 sentinel,
                 json.dumps({"outcome": OUTCOME_PICKED_NONE}) + "\n",
             )
             sentinel_written = True
         except Exception as se:
-            log.warning("project %s: failed to write picked_none sentinel: %s",
-                        project_slug, se)
+            log.warning(
+                "project %s: failed to write picked_none sentinel: %s", project_slug, se
+            )
 
         # Only persist tick_id if the sentinel was actually written.
         # Persisting without the sentinel would permanently stall the
@@ -882,13 +1004,19 @@ def _tick_project(
             project_dir=project_dir,
             assignee=contract.assignee,
         )
-        log.info("project %s: registered %d kanban tasks for %s: %s",
-                 project_slug, len(task_ids), picked, task_ids)
+        log.info(
+            "project %s: registered %d kanban tasks for %s: %s",
+            project_slug,
+            len(task_ids),
+            picked,
+            task_ids,
+        )
     except RuntimeError as e:
         log.error("project %s: kanban registration failed: %s", project_slug, e)
         # Write failure outcome so the circuit breaker knows
         try:
             from .decision.store import append_outcome
+
             append_outcome(
                 project_state,
                 tick_id,
@@ -901,6 +1029,7 @@ def _tick_project(
 
     # Observe circuit breaker
     cb.observe(picked=picked, counts_as_no_progress=False)
+
 
 def _cmd_recover_counter(args, config: Config) -> int:
     """Handle 'recover-counter' subcommand."""
@@ -985,7 +1114,9 @@ def _cmd_init(args, config: Config) -> int:
             contract = PipelineContract(
                 schema_version=data["schema_version"],
                 assignee=assignee,
-                capabilities=tuple(data.get("capabilities", list(DEFAULT_CAPABILITIES))),
+                capabilities=tuple(
+                    data.get("capabilities", list(DEFAULT_CAPABILITIES))
+                ),
                 profile=data.get("profile", "gstack"),
             )
             path.write_text(_render_contract_toml(contract))
@@ -996,7 +1127,9 @@ def _cmd_init(args, config: Config) -> int:
     if written:
         print(f"Wrote pipeline execution contract: {path}")
     else:
-        print(f"Pipeline execution contract already exists: {path} (use --force to regenerate)")
+        print(
+            f"Pipeline execution contract already exists: {path} (use --force to regenerate)"
+        )
     return 0
 
 
@@ -1058,19 +1191,16 @@ def _cmd_doctor(args, config: Config) -> int:
         try:
             verify_result = _cli_sp.run(
                 ["hermes", "profile", "show", contract.assignee],
-                text=True, capture_output=True,
+                text=True,
+                capture_output=True,
             )
         except FileNotFoundError:
             print(
                 f"MISSING: Hermes is not on PATH, but contract assignee is set to "
                 f"'{contract.assignee}'"
             )
-            print(
-                "Cause: Hermes is not installed or not on PATH."
-            )
-            print(
-                "Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH."
-            )
+            print("Cause: Hermes is not installed or not on PATH.")
+            print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
             return 2
         if verify_result.returncode != 0:
             print(
@@ -1128,12 +1258,24 @@ def _cmd_install_profile(args, config: Config) -> int:
             print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
             return 2
         if delete_result.returncode != 0:
-            detail = delete_result.stderr.strip() if delete_result.stderr else f"exit {delete_result.returncode}"
-            print("Problem: `hermes profile delete` failed. Profile was removed but may not be recreated.")
+            detail = (
+                delete_result.stderr.strip()
+                if delete_result.stderr
+                else f"exit {delete_result.returncode}"
+            )
+            print(
+                "Problem: `hermes profile delete` failed. Profile was removed but may not be recreated."
+            )
             print(f"Details: {detail}")
-            print("Cause: The delete succeeded in removing the old profile, but the delete command")
-            print("         itself reported an error — the profile may still exist, or it may be gone.")
-            print("Fix: Run `hermes profile list` to check the current state, then retry.")
+            print(
+                "Cause: The delete succeeded in removing the old profile, but the delete command"
+            )
+            print(
+                "         itself reported an error — the profile may still exist, or it may be gone."
+            )
+            print(
+                "Fix: Run `hermes profile list` to check the current state, then retry."
+            )
             return 2
 
     print(f"Creating '{profile_name}' profile cloned from the active profile...")
@@ -1169,10 +1311,14 @@ def _cmd_install_profile(args, config: Config) -> int:
         print("Fix: Install Hermes (https://hermos.dev) and ensure it is on PATH.")
         return 2
     if show.returncode != 0:
-        print(f"Problem: Profile created but `hermes profile show {profile_name}` failed.")
+        print(
+            f"Problem: Profile created but `hermes profile show {profile_name}` failed."
+        )
         if show.stderr:
             print(f"Details: {show.stderr.strip()}")
-        print(f"Cause: Profile name '{profile_name}' may not match what Hermes expects, or caching issue.")
+        print(
+            f"Cause: Profile name '{profile_name}' may not match what Hermes expects, or caching issue."
+        )
         print("Fix: Run `hermes profile list` to check installed profiles.")
         return 1
 
@@ -1182,9 +1328,13 @@ def _cmd_install_profile(args, config: Config) -> int:
             profile_path = line.split(":", 1)[1].strip()
             break
     if not profile_path or not Path(profile_path).is_dir():
-        print(f"Problem: Could not determine the profile path from `hermes profile show {profile_name}` output.")
+        print(
+            f"Problem: Could not determine the profile path from `hermes profile show {profile_name}` output."
+        )
         print("Cause: Hermes CLI output format may have changed.")
-        print("Fix: Run `hermes profile show pipeline` manually to inspect the profile.")
+        print(
+            "Fix: Run `hermes profile show pipeline` manually to inspect the profile."
+        )
         return 1
 
     soul_dst = Path(profile_path) / "SOUL.md"
@@ -1235,7 +1385,9 @@ def _cmd_skills_install(args, config: Config | None) -> int:
     if not source.is_dir():
         print(f"Problem: bundled todos-manager skill not found at {source}.")
         print("Cause: the installed package is missing its bundled skill data.")
-        print("Fix: reinstall with `uv tool install hermes-pipeline` (or `uv sync` in a checkout).")
+        print(
+            "Fix: reinstall with `uv tool install hermes-pipeline` (or `uv sync` in a checkout)."
+        )
         return 1
 
     targets = _skills_install_targets(args.target, args.scope)
@@ -1254,7 +1406,9 @@ def _cmd_skills_install(args, config: Config | None) -> int:
             print(f"Problem ({name}): permission denied writing to {dest}.")
             print(f"Details: {e}")
             print(f"Cause: the current user lacks write access to {install_dir}.")
-            print(f"Fix: check permissions on {install_dir}, or rerun with --scope project.")
+            print(
+                f"Fix: check permissions on {install_dir}, or rerun with --scope project."
+            )
         except OSError as e:
             any_failed = True
             print(f"Problem ({name}): failed to install todos-manager to {dest}.")
@@ -1265,9 +1419,204 @@ def _cmd_skills_install(args, config: Config | None) -> int:
     return 1 if any_failed else 0
 
 
+def _cmd_config_init(args, config: Config | None) -> int:
+    """Handle 'config init' — create a skeleton config file at the default path."""
+    from .config_loader import SKELETON, default_config_path
+
+    path = default_config_path()
+    if path.is_symlink():
+        print(
+            f"Error: config file {path} is a symlink — refused for security.",
+            file=sys.stderr,
+        )
+        return 2
+    if path.is_file() and not args.force:
+        print(f"Config file already exists at {path}")
+        print("Use --force to overwrite.")
+        return 1
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_config(path, SKELETON)
+    print(f"OK: created {path}")
+    return 0
+
+
+def _cmd_config_path(args, config: Config | None) -> int:
+    """Handle 'config path' — show the effective config file location."""
+    from .config_loader import default_config_path, find_config_file
+
+    existing = find_config_file()
+    if existing:
+        print(f"Using: {existing}")
+    else:
+        print("No config file found.")
+        print(f"Default path: {default_config_path()}")
+        print("Run `tpo config init` to create one.")
+    return 0
+
+
+def _cmd_config_get(args, config: Config | None) -> int:
+    """Handle 'config get <key>' — show effective value with source attribution."""
+    import os as _os
+
+    from .config import Config
+    from .config_loader import _coerce_value, find_config_file, validate_config_key
+
+    try:
+        key = validate_config_key(args.key)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        cfg = Config.from_env()
+    except ValueError as e:
+        print(f"Warning: config file has errors: {e}")
+        print("Falling back to defaults.")
+        cfg = Config.default()
+        env_name = f"PIPELINE_{key.upper()}"
+        env_value = _os.environ.get(env_name)
+        if env_value is not None:
+            import typing
+            from dataclasses import replace
+
+            field_hints = typing.get_type_hints(Config)
+            cfg = replace(
+                cfg,
+                **{
+                    key: _coerce_value(
+                        env_value,
+                        field_hints[key],
+                        key,
+                        Path(f"<env:{env_name}>"),
+                    )
+                },
+            )
+
+    value = getattr(cfg, key)
+
+    # Determine source attribution
+    env_name = f"PIPELINE_{key.upper()}"
+    default_cfg = Config.default()
+    if _os.environ.get(env_name) is not None:
+        source = f" (from env: {env_name})"
+    elif value != getattr(default_cfg, key):
+        cfg_file = find_config_file()
+        source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
+    else:
+        source = " (from default)"
+
+    print(f"{key}: {value}{source}")
+    return 0
+
+
+def _cmd_config_set(args, config: Config | None) -> int:
+    """Handle 'config set <key> <value>' — write a key to the config file."""
+    from .config_loader import (
+        _format_value,
+        default_config_path,
+        find_config_file,
+        validate_config_key,
+        validate_config_value,
+    )
+
+    try:
+        key = validate_config_key(args.key)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 2
+
+    try:
+        coerced = validate_config_value(args.value, key)
+    except (TypeError, ValueError) as e:
+        print(f"Error: invalid value for {args.key!r}: {e}", file=sys.stderr)
+        return 2
+
+    config_file = find_config_file()
+    if config_file is None:
+        config_file = default_config_path()
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+
+    if config_file.is_symlink():
+        print(
+            f"Error: config file {config_file} is a symlink — refused for security.",
+            file=sys.stderr,
+        )
+        return 2
+
+    config_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = config_file.with_name(f"{config_file.name}.lock")
+    fd = os.open(str(lock_file), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        text = (
+            config_file.read_text()
+            if config_file.is_file()
+            else "# tpo global configuration\n\n"
+        )
+        lines = text.split("\n")
+
+        # Prefer the effective active key. YAML parsers keep the last duplicate,
+        # so update that before falling back to a commented skeleton placeholder.
+        active_idx = None
+        commented_idx = None
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped.startswith("#") and f"{key}:" in stripped:
+                uncommented = stripped.lstrip("#").lstrip()
+                if uncommented.startswith(f"{key}:") and commented_idx is None:
+                    commented_idx = i
+            elif stripped.startswith(f"{key}:"):
+                active_idx = i
+        found_idx = active_idx if active_idx is not None else commented_idx
+
+        formatted = _format_value(coerced, key)
+        new_line = f"{key}: {formatted}"
+
+        if found_idx is not None:
+            lines[found_idx] = new_line
+        else:
+            if lines and lines[-1].strip():
+                lines.append("")
+            lines.append(new_line)
+            lines.append("")
+
+        new_text = "\n".join(lines)
+        _atomic_write_config(config_file, new_text)
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+    print(f"OK: set {key} = {coerced}")
+    print(f"File: {config_file}")
+    return 0
+
+
+def _atomic_write_config(path: Path, text: str) -> None:
+    """Atomically write config text without following symlink targets."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, path)
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
+
+
 def _cmd_test(args, config: Config) -> int:
     """Handle 'test' subcommand — mock integration test harness."""
     from .harness import run_harness
+
     try:
         result = run_harness(
             fixture_name=args.fixture,
@@ -1304,7 +1653,7 @@ def main(argv: list[str] | None = None) -> int:
     # Bootstrap subcommands (file-copy only) don't need pipeline runtime
     # config (state dir, lock dir, projects dir) — skip Config.from_env()
     # so they work even when that env isn't configured yet.
-    if getattr(args, "command", None) == "skills":
+    if getattr(args, "command", None) in ("skills", "config"):
         if hasattr(args, "func"):
             return args.func(args, None)
         parser.parse_args([*remaining, "--help"])

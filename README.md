@@ -170,12 +170,25 @@ tick lifecycle.
 
 ## Configuration
 
-Set these environment variables to customize behavior:
+Use the global config file for machine-level defaults, including the project
+scan directory:
+
+```bash
+tpo config set projects_dir ~/my-projects
+tpo config get projects_dir
+tpo config path
+```
+
+The default config path is `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`.
+For isolated tests or one-off runs, `TPO_CONFIG_FILE=/path/to/config.yaml`
+points `tpo` at a specific config file.
+
+These environment variables still override the config file for runtime behavior:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `PIPELINE_PROJECTS_DIR` | `~/projects` | Deprecated compatibility alias for `projects_dir`; prefer `tpo config set projects_dir <path>` |
 | `PIPELINE_LOCK_DIR` | `~/.hermes/pipeline_locks` | Directory for merge operation locks |
-| `PIPELINE_PROJECTS_DIR` | `~/projects` | Path to scan for `TODOS.md` files |
 | `PIPELINE_STATE_DIR` | `~/.hermes` | Global state directory (tick lock, config) |
 | `PIPELINE_SLACK_CHANNEL` | `#alert` | Default Slack channel for alerts (overridden by per-project config) |
 | `PIPELINE_CLAUDE_CMD` | `claude` | Command to invoke Claude Code (deprecated in v0.3 — phases now use `hermes chat -q` instead) |
@@ -183,7 +196,7 @@ Set these environment variables to customize behavior:
 
 Example:
 ```bash
-export PIPELINE_PROJECTS_DIR=~/my-projects
+tpo config set projects_dir ~/my-projects
 export PIPELINE_LOCK_DIR=~/.hermes/pipeline_locks
 hermes login  # authenticate with your provider
 hermes cron set pipeline-tick '*/5 * * * *'  # start the tick loop
@@ -247,7 +260,7 @@ blocks when a contract *exists* but is stale or under-declares capabilities.
 
 **"No pending records"**
 - No TODOs are ready for review yet
-- Check `PIPELINE_PROJECTS_DIR` is set and contains `TODOS.md` files
+- Check `tpo config get projects_dir` points at a directory containing projects with `TODOS.md` files
 - Ensure the Hermes cron tick is running: `hermes cron list`
 
 ## Architecture

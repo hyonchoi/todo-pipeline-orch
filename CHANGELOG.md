@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.1] - 2026-07-26
+
+### Deprecated
+- `PIPELINE_PROJECTS_DIR` remains supported as an environment override for compatibility, but users should migrate to `tpo config set projects_dir <path>`.
+
+### Migration
+- If you set `PIPELINE_PROJECTS_DIR` in your shell profile, run `tpo config set projects_dir <your-path>` once, then remove the shell export when convenient.
+
+### Added
+- `tpo config` subcommand: `init`, `get`, `set`, `path`
+- Global config loading from `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`, `~/.tpo/config.yaml`, and the legacy `${HERMES_HOME:-~/.hermes}/tpo.yaml` fallback.
+- `_validate_project_slug()` — rejects path traversal (`..`), leading dashes, and CLI flag injection
+
 ## [0.6.0] - 2026-07-24
 
 ### Changed

@@ -27,7 +27,9 @@ class TestRecoverCounterSubcommand:
         )
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-        os.environ["PIPELINE_PROJECTS_DIR"] = str(projects_dir)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        os.environ["TPO_CONFIG_FILE"] = str(config_file)
         os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
         try:
             result = main(["recover-counter", "myproject"])
@@ -35,7 +37,7 @@ class TestRecoverCounterSubcommand:
             counter_file = projects_dir / "myproject" / COUNTER_FILE
             assert counter_file.read_text() == "3"
         finally:
-            for k in ("PIPELINE_PROJECTS_DIR", "PIPELINE_STATE_DIR"):
+            for k in ("TPO_CONFIG_FILE", "PIPELINE_STATE_DIR"):
                 os.environ.pop(k, None)
 
     def test_recover_counter_invalid_slug(self, tmp_path):
@@ -44,14 +46,16 @@ class TestRecoverCounterSubcommand:
         projects_dir.mkdir()
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-        os.environ["PIPELINE_PROJECTS_DIR"] = str(projects_dir)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        os.environ["TPO_CONFIG_FILE"] = str(config_file)
         os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
         try:
             # Use -- to separate flags from positional arg (slug starting with dash)
             result = main(["recover-counter", "--", "-invalid"])
             assert result == 2
         finally:
-            for k in ("PIPELINE_PROJECTS_DIR", "PIPELINE_STATE_DIR"):
+            for k in ("TPO_CONFIG_FILE", "PIPELINE_STATE_DIR"):
                 os.environ.pop(k, None)
 
     def test_recover_counter_missing_project(self, tmp_path):
@@ -60,13 +64,15 @@ class TestRecoverCounterSubcommand:
         projects_dir.mkdir()
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-        os.environ["PIPELINE_PROJECTS_DIR"] = str(projects_dir)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        os.environ["TPO_CONFIG_FILE"] = str(config_file)
         os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
         try:
             result = main(["recover-counter", "nonexistent"])
             assert result == 2
         finally:
-            for k in ("PIPELINE_PROJECTS_DIR", "PIPELINE_STATE_DIR"):
+            for k in ("TPO_CONFIG_FILE", "PIPELINE_STATE_DIR"):
                 os.environ.pop(k, None)
 
     def test_recover_counter_no_todos_md(self, tmp_path):
@@ -76,13 +82,15 @@ class TestRecoverCounterSubcommand:
         # No TODOS.md
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-        os.environ["PIPELINE_PROJECTS_DIR"] = str(projects_dir)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        os.environ["TPO_CONFIG_FILE"] = str(config_file)
         os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
         try:
             result = main(["recover-counter", "myproject"])
             assert result == 2
         finally:
-            for k in ("PIPELINE_PROJECTS_DIR", "PIPELINE_STATE_DIR"):
+            for k in ("TPO_CONFIG_FILE", "PIPELINE_STATE_DIR"):
                 os.environ.pop(k, None)
 
     def test_recover_counter_oserror(self, tmp_path):
@@ -95,14 +103,16 @@ class TestRecoverCounterSubcommand:
         )
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-        os.environ["PIPELINE_PROJECTS_DIR"] = str(projects_dir)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        os.environ["TPO_CONFIG_FILE"] = str(config_file)
         os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
         try:
             with patch("hermes_pipeline.counter.recover_counter", side_effect=OSError("disk full")):
                 result = main(["recover-counter", "myproject"])
                 assert result == 2
         finally:
-            for k in ("PIPELINE_PROJECTS_DIR", "PIPELINE_STATE_DIR"):
+            for k in ("TPO_CONFIG_FILE", "PIPELINE_STATE_DIR"):
                 os.environ.pop(k, None)
 
 
@@ -160,7 +170,9 @@ class TestVerboseDebugFlags:
         proj = projects_dir / "test-proj"
         proj.mkdir()
         (proj / "TODOS.md").write_text("# TODOs\n")
-        monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        monkeypatch.setenv("TPO_CONFIG_FILE", str(config_file))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
         # Use recover-counter instead of deleted 'status' subcommand
         result = main(["--verbose", "recover-counter", "test-proj"])
@@ -179,7 +191,9 @@ class TestVerboseDebugFlags:
         proj = projects_dir / "test-proj"
         proj.mkdir()
         (proj / "TODOS.md").write_text("# TODOs\n")
-        monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        monkeypatch.setenv("TPO_CONFIG_FILE", str(config_file))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
         # Use recover-counter instead of deleted 'status' subcommand
         result = main(["recover-counter", "test-proj", "--debug"])
@@ -198,7 +212,9 @@ class TestVerboseDebugFlags:
         proj = projects_dir / "test-proj"
         proj.mkdir()
         (proj / "TODOS.md").write_text("# TODOs\n")
-        monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        monkeypatch.setenv("TPO_CONFIG_FILE", str(config_file))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
         # Use recover-counter instead of deleted 'status' subcommand
         result = main(["recover-counter", "test-proj", "--verbose"])
@@ -217,7 +233,9 @@ class TestVerboseDebugFlags:
         proj = projects_dir / "test-proj"
         proj.mkdir()
         (proj / "TODOS.md").write_text("# TODOs\n")
-        monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        monkeypatch.setenv("TPO_CONFIG_FILE", str(config_file))
         monkeypatch.setenv("PIPELINE_STATE_DIR", str(state_dir))
         # Use recover-counter instead of deleted 'status' subcommand
         result = main(["--debug", "recover-counter", "test-proj"])
