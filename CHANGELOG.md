@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - `tpo config` subcommand: `init`, `get`, `set`, `path`
-- Global config loading from `${XDG_CONFIG_DIR:-~/.config}/tpo/config.yaml`, `~/.tpo/config.yaml`, and the legacy `${HERMES_HOME:-~/.hermes}/tpo.yaml` fallback.
+- Global config loading from `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`, `~/.tpo/config.yaml`, and the legacy `${HERMES_HOME:-~/.hermes}/tpo.yaml` fallback.
 - `_validate_project_slug()` — rejects path traversal (`..`), leading dashes, and CLI flag injection
 
 ## [0.6.0] - 2026-07-24
