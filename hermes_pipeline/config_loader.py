@@ -20,7 +20,10 @@ _config_field_hints = typing.get_type_hints(Config)
 def _search_paths() -> list[Path]:
     if "TPO_CONFIG_FILE" in os.environ:
         return [Path(os.environ["TPO_CONFIG_FILE"])]
-    xdg = os.environ.get("XDG_CONFIG_DIR", str(Path.home() / ".config"))
+    xdg = os.environ.get(
+        "XDG_CONFIG_HOME",
+        os.environ.get("XDG_CONFIG_DIR", str(Path.home() / ".config")),
+    )
     hermes_home = os.environ.get("HERMES_HOME", str(Path.home() / ".hermes"))
     return [
         Path(xdg) / "tpo" / "config.yaml",
