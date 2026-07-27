@@ -190,10 +190,7 @@ uv run tpo test --fixture happy-path --convergence-threshold 2
 |----------|---------|-------------|
 | `PIPELINE_PROJECTS_DIR` | `~/projects` | Directory to scan for project `TODOS.md` files |
 | `PIPELINE_STATE_DIR` | `~/.hermes` | Global state directory |
-| `PIPELINE_LOCK_DIR` | `~/.hermes/pipeline_locks` | Directory for merge operation locks |
 | `PIPELINE_SLACK_CHANNEL` | `#alert` | Default Slack channel (overridden by per-project config) |
-| `PIPELINE_CLAUDE_CMD` | `claude` | Claude Code command (deprecated in v0.3) |
-| `PIPELINE_KANBAN_ADAPTER` | `null` | Kanban adapter: `hermes` or `null` |
 
 ## See Also
 

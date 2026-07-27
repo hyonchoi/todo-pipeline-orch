@@ -185,15 +185,7 @@ SKELETON = """\
 # Run `tpo config get <key>` to see the effective value with source attribution.
 
 # projects_dir: ~/projects
-# lock_dir: ~/.hermes/pipeline_locks
 # state_dir: ~/.hermes
-# claude_cmd: claude
-# checkpoint_subdir: .hermes/pipeline_checkpoints
-# ready_for_review_subdir: .hermes/ready_for_review
-# counter_file_subpath: .hermes/todo_id_counter
-# default_timeout: 1800
-# kanban_adapter: "null"
-# kanban_outbox_cap: 500
 # log_file_subpath: pipeline.log
 # log_retention_days: 7
 # slack_channel: ""

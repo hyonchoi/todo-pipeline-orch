@@ -18,8 +18,6 @@ def test_main_no_command(tmp_path):
     """main() with no command shows help."""
     projects_dir = tmp_path / "projects"
     projects_dir.mkdir()
-    lock_dir = tmp_path / "locks"
-    lock_dir.mkdir()
     state_dir = tmp_path / "state"
     state_dir.mkdir()
 
@@ -28,7 +26,6 @@ def test_main_no_command(tmp_path):
     config_file = tmp_path / "config.yaml"
     config_file.write_text(f"projects_dir: {projects_dir!s}\n")
     os.environ["TPO_CONFIG_FILE"] = str(config_file)
-    os.environ["PIPELINE_LOCK_DIR"] = str(lock_dir)
     os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
 
     try:
@@ -46,7 +43,7 @@ def test_main_no_command(tmp_path):
         # Should return 0 (help is not an error)
         assert result == 0
     finally:
-        for key in ["TPO_CONFIG_FILE", "PIPELINE_LOCK_DIR", "PIPELINE_STATE_DIR"]:
+        for key in ["TPO_CONFIG_FILE", "PIPELINE_STATE_DIR"]:
             os.environ.pop(key, None)
 
 
@@ -82,5 +79,4 @@ def test_test_subcommand_timeout_default_is_86400():
     parser = build_parser()
     args = parser.parse_args(["test", "--fixture", "happy-path"])
     assert args.timeout == 86400
-
 

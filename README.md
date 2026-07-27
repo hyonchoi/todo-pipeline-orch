@@ -188,16 +188,12 @@ These environment variables still override the config file for runtime behavior:
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PIPELINE_PROJECTS_DIR` | `~/projects` | Deprecated compatibility alias for `projects_dir`; prefer `tpo config set projects_dir <path>` |
-| `PIPELINE_LOCK_DIR` | `~/.hermes/pipeline_locks` | Directory for merge operation locks |
 | `PIPELINE_STATE_DIR` | `~/.hermes` | Global state directory (tick lock, config) |
 | `PIPELINE_SLACK_CHANNEL` | `#alert` | Default Slack channel for alerts (overridden by per-project config) |
-| `PIPELINE_CLAUDE_CMD` | `claude` | Command to invoke Claude Code (deprecated in v0.3 — phases now use `hermes chat -q` instead) |
-| `PIPELINE_KANBAN_ADAPTER` | `null` | Kanban adapter: `hermes` or `null` |
 
 Example:
 ```bash
 tpo config set projects_dir ~/my-projects
-export PIPELINE_LOCK_DIR=~/.hermes/pipeline_locks
 hermes login  # authenticate with your provider
 hermes cron set pipeline-tick '*/5 * * * *'  # start the tick loop
 ```

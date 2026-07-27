@@ -256,7 +256,7 @@ You now have a working tpo setup that:
 ### Next steps
 
 **Explore the full feature set:**
-- Read [Configuration](../README.md#configuration) to customize `PIPELINE_LOCK_DIR`, `PIPELINE_STATE_DIR`, etc.
+- Read [Configuration](../README.md#configuration) to customize `PIPELINE_STATE_DIR`, `PIPELINE_SLACK_CHANNEL`, etc.
 - See [Troubleshooting](../README.md#troubleshooting) for common issues and fixes
 
 **Run ticks iteratively during development:**

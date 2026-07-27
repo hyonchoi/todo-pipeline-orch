@@ -2,28 +2,26 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from hermes_pipeline.config import Config
 
 
 def test_from_env_layer2_config_file(monkeypatch, tmp_path):
     """Config file overrides default, env overrides file."""
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude-code\n")
+    f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
     cfg = Config.from_env()
-    assert cfg.claude_cmd == "claude-code"
+    assert cfg.slack_channel == "#config-alerts"
 
 
 def test_from_env_layer3_env_overrides_file(monkeypatch, tmp_path):
     """Env var overrides config file value."""
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude-code\n")
+    f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "claude-override")
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
     cfg = Config.from_env()
-    assert cfg.claude_cmd == "claude-override"
+    assert cfg.slack_channel == "#env-alerts"
 
 
 def test_from_env_no_projects_dir_env_var(monkeypatch):
@@ -39,16 +37,6 @@ def test_from_env_pipeline_projects_dir_deprecated_alias(monkeypatch, tmp_path):
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     cfg = Config.from_env()
     assert cfg.projects_dir == tmp_path / "projects"
-
-
-def test_from_env_kanban_literal_validation_env(monkeypatch, tmp_path):
-    """Env var with invalid kanban_adapter value should raise."""
-    f = tmp_path / "config.yaml"
-    f.write_text("")
-    monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    monkeypatch.setenv("PIPELINE_KANBAN_ADAPTER", "banana")
-    with pytest.raises(ValueError, match="must be one of"):
-        Config.from_env()
 
 
 def test_from_env_no_config_file_uses_default(monkeypatch):
@@ -68,9 +56,9 @@ def test_from_env_env_var_path_expansion(monkeypatch, tmp_path):
         f = tmp_path / "config.yaml"
         f.write_text("")
         monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-        monkeypatch.setenv("PIPELINE_LOCK_DIR", "~/locks")
+        monkeypatch.setenv("PIPELINE_STATE_DIR", "~/state")
         cfg = Config.from_env()
-        assert cfg.lock_dir == tmp_path / "locks"
+        assert cfg.state_dir == tmp_path / "state"
     finally:
         if orig_home:
             os.environ["HOME"] = orig_home

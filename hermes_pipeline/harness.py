@@ -469,24 +469,23 @@ def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
 
 
 @contextmanager
-def isolate_config(*, state_dir: Path, lock_dir: Path):
+def isolate_config(*, state_dir: Path):
     """Context manager that sets PIPELINE_* env vars for config isolation.
 
     HOME is left untouched — the harness invokes real hermes/claude CLI
     subprocesses, which need the real $HOME to read auth credentials.
     """
     saved = {}
-    for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR"):
+    for key in ("PIPELINE_STATE_DIR",):
         if key in os.environ:
             saved[key] = os.environ[key]
 
     os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
-    os.environ["PIPELINE_LOCK_DIR"] = str(lock_dir)
 
     try:
         yield
     finally:
-        for key in ("PIPELINE_STATE_DIR", "PIPELINE_LOCK_DIR"):
+        for key in ("PIPELINE_STATE_DIR",):
             if key in saved:
                 os.environ[key] = saved[key]
             else:
@@ -574,8 +573,6 @@ def run_harness(
         fixture = create_mock_project(temp_dir, fixture_name)
 
         state_dir = temp_dir / ".hermes"
-        lock_dir = temp_dir / ".hermes" / "locks"
-        lock_dir.mkdir(parents=True, exist_ok=True)
 
         events_log = temp_dir / "events.jsonl"
         base_monitor = HarnessMonitor(events_log)
@@ -607,7 +604,7 @@ def run_harness(
         ready_dir.mkdir(parents=True, exist_ok=True)
 
         timed_out = False
-        with isolate_config(state_dir=state_dir, lock_dir=lock_dir):
+        with isolate_config(state_dir=state_dir):
             # Emit initial event so the events log file exists for report generation
             base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
 

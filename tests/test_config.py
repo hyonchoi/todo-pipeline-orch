@@ -5,16 +5,17 @@ from hermes_pipeline.config import Config
 
 def test_defaults():
     c = Config.default()
-    assert c.lock_dir == Path.home() / ".hermes" / "pipeline_locks"
     assert c.projects_dir == Path.home() / "projects"
-    assert c.claude_cmd == "claude"
-    assert c.kanban_adapter == "null"
+    assert c.state_dir == Path.home() / ".hermes"
+    assert c.log_file_subpath == "pipeline.log"
+    assert c.log_retention_days == 7
+    assert c.slack_channel == ""
 
 def test_env_overrides(monkeypatch, tmp_path):
-    monkeypatch.setenv("PIPELINE_LOCK_DIR", str(tmp_path / "locks"))
-    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "/usr/bin/claude")
-    monkeypatch.setenv("PIPELINE_KANBAN_ADAPTER", "hermes")
+    monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
+    monkeypatch.setenv("PIPELINE_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#alerts")
     c = Config.from_env()
-    assert c.lock_dir == tmp_path / "locks"
-    assert c.claude_cmd == "/usr/bin/claude"
-    assert c.kanban_adapter == "hermes"
+    assert c.projects_dir == tmp_path / "projects"
+    assert c.state_dir == tmp_path / "state"
+    assert c.slack_channel == "#alerts"

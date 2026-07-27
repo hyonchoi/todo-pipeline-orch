@@ -29,7 +29,7 @@ Scan TODOS.md for TODO-N entries and initialize/update the counter file.
 
 ### `COUNTER_FILE`
 
-Module-level constant set from `Config().counter_file_subpath`. Default value: `.hermes/todo_id_counter`.
+Module-level constant for the per-project counter path: `.hermes/todo_id_counter`.
 
 ### `TODO_ID_RE`
 

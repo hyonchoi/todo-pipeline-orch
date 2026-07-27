@@ -7,9 +7,7 @@ import re
 import tempfile
 from pathlib import Path
 
-from .config import Config
-
-COUNTER_FILE = Config().counter_file_subpath
+COUNTER_FILE = ".hermes/todo_id_counter"
 TODO_ID_RE = re.compile(r"\bTODO-(\d+)\b")
 
 
