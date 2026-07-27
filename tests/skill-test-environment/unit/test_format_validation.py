@@ -26,6 +26,31 @@ class TestTrackedNextTodoIdFormat:
             assert value is None
             assert any("NEXT_TODO_ID" in issue for issue in issues)
 
+    def test_read_next_todo_id_rejects_empty_and_whitespace_values(self):
+        for raw in ("", "   ", "\t"):
+            text = f"# TODOS\n\n> - NEXT_TODO_ID:{raw}\n- [ ] TODO-1: Preserved\n"
+
+            value, issues = read_next_todo_id(text)
+
+            assert value is None
+            assert any("positive base-10 integer" in issue for issue in issues)
+
+    def test_replace_empty_metadata_value_does_not_consume_following_entry(self):
+        text = "# TODOS\n\n> - NEXT_TODO_ID:\n- [ ] TODO-1: Preserved\n"
+
+        updated = replace_next_todo_id_line(text, 2)
+
+        assert "> - NEXT_TODO_ID: 2\n" in updated
+        assert "- [ ] TODO-1: Preserved\n" in updated
+
+    def test_read_next_todo_id_rejects_mixed_value(self):
+        text = "# TODOS\n\n> - NEXT_TODO_ID: 8 trailing\n"
+
+        value, issues = read_next_todo_id(text)
+
+        assert value is None
+        assert any("positive base-10 integer" in issue for issue in issues)
+
     def test_read_next_todo_id_rejects_duplicate_lines(self):
         text = "# TODOS\n\n> - NEXT_TODO_ID: 8\n> - NEXT_TODO_ID: 9\n"
 
@@ -33,6 +58,25 @@ class TestTrackedNextTodoIdFormat:
 
         assert value is None
         assert any("duplicated" in issue.lower() for issue in issues)
+
+    def test_read_next_todo_id_rejects_valid_and_malformed_duplicates(self):
+        text = "# TODOS\n\n> - NEXT_TODO_ID: 8\n> - NEXT_TODO_ID: invalid\n"
+
+        value, issues = read_next_todo_id(text)
+
+        assert value is None
+        assert any("duplicated" in issue.lower() for issue in issues)
+
+    def test_read_next_todo_id_ignores_metadata_outside_preamble(self):
+        text = (
+            "# TODOS\n\n> **Format rules:**\n> - NEXT_TODO_ID: 8\n\n"
+            "- [ ] TODO-1: A\n\n> - NEXT_TODO_ID: 99\n"
+        )
+
+        value, issues = read_next_todo_id(text)
+
+        assert value == 8
+        assert issues == []
 
     def test_replace_next_todo_id_line_preserves_preamble(self):
         text = (

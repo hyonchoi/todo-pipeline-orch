@@ -118,24 +118,62 @@ class TestTrackedNextTodoId:
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
 
-        assigned, messages = assign_next_todo_id(tmp_path)
+        assigned, messages = assign_next_todo_id(
+            tmp_path, lambda todo_id: f"- [ ] TODO-{todo_id}: Added"
+        )
 
         assert assigned == 8
         assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert "TODO-8: Added" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID" in message for message in messages)
 
-    def test_assign_next_todo_id_repairs_stale_high_value_before_returning(self, tmp_path):
+    def test_assign_next_todo_id_uses_unconflicted_tracked_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n> - NEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
 
-        assigned, messages = assign_next_todo_id(tmp_path)
+        assigned, messages = assign_next_todo_id(
+            tmp_path, lambda todo_id: f"- [ ] TODO-{todo_id}: Added"
+        )
+
+        assert assigned == 50
+        assert "> - NEXT_TODO_ID: 51" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert messages == []
+
+    def test_assign_next_todo_id_uses_valid_metadata_without_scanning(self, tmp_path, monkeypatch):
+        from tests.skill_test_environment import skill_logic
+
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-7: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+        monkeypatch.setattr(
+            skill_logic,
+            "compute_scan_next_id",
+            lambda *_args: pytest.fail("valid tracked state must not scan"),
+        )
+
+        assigned, _ = assign_next_todo_id(
+            tmp_path, lambda todo_id: f"- [ ] TODO-{todo_id}: Added"
+        )
 
         assert assigned == 8
-        assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
-        assert any("corrected NEXT_TODO_ID from 50 to 8" in message for message in messages)
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert "> - NEXT_TODO_ID: 9" in updated
+        assert "TODO-8: Added" in updated
+
+    def test_assign_next_todo_id_requires_entry_builder(self, tmp_path):
+        todos = tmp_path / "TODOS.md"
+        original = "# TODOS\n\n> - NEXT_TODO_ID: 1\n"
+        todos.write_text(original, encoding="utf-8")
+
+        with pytest.raises(TypeError):
+            assign_next_todo_id(tmp_path)  # type: ignore[call-arg]
+
+        assert todos.read_text(encoding="utf-8") == original
 
     def test_assign_next_todo_id_serializes_a_forced_stale_writer(self, tmp_path, monkeypatch):
         from tests.skill_test_environment import skill_logic
@@ -214,7 +252,9 @@ class TestTrackedNextTodoId:
         monkeypatch.setattr(skill_logic.os, "replace", fail_replace)
 
         with pytest.raises(OSError):
-            skill_logic.assign_next_todo_id(tmp_path)
+            skill_logic.assign_next_todo_id(
+                tmp_path, lambda todo_id: f"- [ ] TODO-{todo_id}: Added"
+            )
 
         assert todos.read_text(encoding="utf-8") == original
         assert not list(tmp_path.glob(".TODOS.*"))

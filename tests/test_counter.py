@@ -43,6 +43,34 @@ class TestRecoverCounter:
 
         assert result == 4
 
+    def test_recover_counter_fallback_scans_active_and_archive(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n- [ ] TODO-3: Active\n", encoding="utf-8"
+        )
+        (tmp_path / "TODOS-archive.md").write_text(
+            "# TODOS Archive\n\n- [x] TODO-9: Archived\n", encoding="utf-8"
+        )
+
+        result = recover_counter(tmp_path)
+
+        assert result == 9
+
+    def test_recover_counter_fallback_rejects_valid_and_malformed_metadata(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "> - NEXT_TODO_ID: 12\n"
+            "> - NEXT_TODO_ID: malformed\n\n"
+            "- [ ] TODO-3: Active\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text(
+            "- [x] TODO-9: Archived\n", encoding="utf-8"
+        )
+
+        result = recover_counter(tmp_path)
+
+        assert result == 9
+
     def test_happy_path(self, tmp_path):
         """TODO-1..5 in TODOS.md -> writes 5 to counter."""
         project_dir = tmp_path / "demo"

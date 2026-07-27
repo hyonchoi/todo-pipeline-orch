@@ -29,17 +29,55 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
     return max(all_ids) + 1
 
 
-NEXT_TODO_ID_LINE_RE = re.compile(r"^>\s+-\s+NEXT_TODO_ID:\s+(.+?)\s*$", re.MULTILINE)
+NEXT_TODO_ID_LINE_RE = re.compile(
+    r"^>[ \t]+-[ \t]+NEXT_TODO_ID:(?P<value>[^\r\n]*)$"
+)
+
+
+def _preamble_line_indexes(lines: list[str]) -> range:
+    """Return the contiguous blockquote preamble immediately after ``# TODOS``."""
+    heading = next(
+        (index for index, line in enumerate(lines) if line.rstrip("\r\n") == "# TODOS"),
+        None,
+    )
+    if heading is None:
+        return range(0)
+
+    start = heading + 1
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start == len(lines) or not lines[start].startswith(">"):
+        return range(0)
+
+    end = start
+    while end < len(lines):
+        line = lines[end]
+        if line.startswith(">") or not line.strip():
+            end += 1
+            continue
+        break
+    return range(start, end)
+
+
+def _metadata_line_indexes(lines: list[str]) -> list[int]:
+    return [
+        index
+        for index in _preamble_line_indexes(lines)
+        if NEXT_TODO_ID_LINE_RE.fullmatch(lines[index].rstrip("\r\n"))
+    ]
 
 
 def read_next_todo_id(text: str) -> tuple[int | None, list[str]]:
     """Read and validate the tracked next TODO ID from the preamble."""
-    matches = list(NEXT_TODO_ID_LINE_RE.finditer(text))
-    if not matches:
+    lines = text.splitlines(keepends=True)
+    metadata_indexes = _metadata_line_indexes(lines)
+    if not metadata_indexes:
         return None, ["NEXT_TODO_ID is missing from the TODOS.md preamble"]
-    if len(matches) > 1:
+    if len(metadata_indexes) > 1:
         return None, ["NEXT_TODO_ID is duplicated in the TODOS.md preamble"]
-    raw = matches[0].group(1)
+    match = NEXT_TODO_ID_LINE_RE.fullmatch(lines[metadata_indexes[0]].rstrip("\r\n"))
+    assert match is not None
+    raw = match.group("value").strip(" \t")
     if not re.fullmatch(r"[1-9][0-9]*", raw):
         return None, [f"NEXT_TODO_ID must be a positive base-10 integer, got {raw!r}"]
     return int(raw), []
@@ -53,21 +91,27 @@ def compute_scan_next_id(todos_path: Path, archive_path: Path) -> int:
 def replace_next_todo_id_line(text: str, next_id: int) -> str:
     """Replace or insert the tracked next TODO ID preamble line."""
     replacement = f"> - NEXT_TODO_ID: {next_id}"
-    if NEXT_TODO_ID_LINE_RE.search(text):
-        first_match = True
+    lines = text.splitlines(keepends=True)
+    metadata_indexes = _metadata_line_indexes(lines)
+    if metadata_indexes:
+        first_index, *duplicate_indexes = metadata_indexes
+        original = lines[first_index]
+        ending = "\r\n" if original.endswith("\r\n") else "\n" if original.endswith("\n") else ""
+        lines[first_index] = replacement + ending
+        for index in reversed(duplicate_indexes):
+            del lines[index]
+        return "".join(lines)
 
-        def replace_match(match: re.Match[str]) -> str:
-            nonlocal first_match
-            if first_match:
-                first_match = False
-                return replacement
-            return ""
-
-        return NEXT_TODO_ID_LINE_RE.sub(replace_match, text)
     marker = "> **Format rules (enforced by `todos-manager` skill):**"
-    if marker in text:
-        return text.replace(marker, marker + "\n" + replacement, 1)
-    return text.replace("# TODOS\n", "# TODOS\n\n" + replacement + "\n", 1)
+    for index in _preamble_line_indexes(lines):
+        if lines[index].rstrip("\r\n") == marker:
+            lines.insert(index + 1, replacement + "\n")
+            return "".join(lines)
+    for index, line in enumerate(lines):
+        if line.rstrip("\r\n") == "# TODOS":
+            lines.insert(index + 1, "\n" + replacement + "\n")
+            return "".join(lines)
+    return text
 
 
 @contextmanager
@@ -115,9 +159,9 @@ def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> No
 
 
 def assign_next_todo_id(
-    project_dir: Path, entry_builder: Callable[[int], str] | None = None
+    project_dir: Path, entry_builder: Callable[[int], str]
 ) -> tuple[int, list[str]]:
-    """Assign the next TODO ID and optionally append its entry atomically."""
+    """Assign the next TODO ID and append its entry in one atomic update."""
     todos_path = project_dir / "TODOS.md"
     archive_path = project_dir / "TODOS-archive.md"
     messages: list[str] = []
@@ -126,16 +170,26 @@ def assign_next_todo_id(
     def transform(text: str) -> str:
         nonlocal assigned, messages
         tracked, issues = read_next_todo_id(text)
-        scanned_next = compute_scan_next_id(todos_path, archive_path)
-        if tracked != scanned_next:
+        tracked_id_is_used = tracked is not None and (
+            bool(re.search(rf"\bTODO-{tracked}\b", text))
+            or (
+                archive_path.exists()
+                and bool(
+                    re.search(
+                        rf"\bTODO-{tracked}\b",
+                        archive_path.read_text(encoding="utf-8"),
+                    )
+                )
+            )
+        )
+        if tracked is None or issues or tracked_id_is_used:
+            scanned_next = compute_scan_next_id(todos_path, archive_path)
             assigned = scanned_next
             messages.append(f"add: corrected NEXT_TODO_ID from {tracked} to {scanned_next}")
         else:
             assigned = tracked
         messages.extend(issues)
         updated = replace_next_todo_id_line(text, assigned + 1)
-        if entry_builder is None:
-            return updated
         return updated.rstrip() + "\n\n" + entry_builder(assigned).rstrip() + "\n"
 
     atomic_update_todos(todos_path, transform)

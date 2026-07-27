@@ -68,6 +68,11 @@ def test_uninstall_parser_accepts_scope_target_and_yes():
     assert args.yes is True
 
 
+def test_uninstall_parser_accepts_short_yes_alias():
+    args = build_parser().parse_args(["skills", "uninstall", "-y"])
+    assert args.yes is True
+
+
 def test_uninstall_refuses_without_yes(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     dest = tmp_path / ".claude" / "skills" / "todos-manager"
@@ -94,6 +99,30 @@ def test_uninstall_yes_removes_existing_destination(tmp_path, monkeypatch):
     assert not dest.exists()
 
 
+def test_uninstall_yes_is_a_noop_for_absent_destination(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+
+    result = _cmd_skills_uninstall(FakeArgs(target="claude", scope="user", yes=True), None)
+
+    assert result == 0
+    assert "todos-manager is not installed" in capsys.readouterr().out
+
+
+def test_uninstall_rejects_symlink_destination(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    target = tmp_path / "target"
+    target.mkdir()
+    dest = tmp_path / ".claude" / "skills" / "todos-manager"
+    dest.parent.mkdir(parents=True)
+    dest.symlink_to(target, target_is_directory=True)
+
+    result = _cmd_skills_uninstall(FakeArgs(target="claude", scope="user", yes=True), None)
+
+    assert result == 1
+    assert dest.is_symlink()
+    assert "destination is a symlink" in capsys.readouterr().out
+
+
 def test_uninstall_all_preflights_before_removing_first(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
@@ -109,6 +138,57 @@ def test_uninstall_all_preflights_before_removing_first(tmp_path, monkeypatch, c
     assert result == 1
     assert claude_dest.exists()
     assert "Problem (codex): cannot replace todos-manager" in out
+
+
+def test_uninstall_rolls_back_all_staged_destinations_when_later_rename_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
+    codex_dest = tmp_path / ".agents" / "skills" / "todos-manager"
+    for dest, content in ((claude_dest, "claude"), (codex_dest, "codex")):
+        dest.mkdir(parents=True)
+        (dest / "SKILL.md").write_text(content, encoding="utf-8")
+
+    real_rename = Path.rename
+
+    def fail_codex_stage(self, destination):
+        if self == codex_dest:
+            raise OSError("second stage failed")
+        return real_rename(self, destination)
+
+    monkeypatch.setattr(Path, "rename", fail_codex_stage)
+
+    result = _cmd_skills_uninstall(FakeArgs(target="all", scope="user", yes=True), None)
+
+    assert result == 1
+    assert (claude_dest / "SKILL.md").read_text(encoding="utf-8") == "claude"
+    assert (codex_dest / "SKILL.md").read_text(encoding="utf-8") == "codex"
+    assert not list(tmp_path.glob("**/.tpo-skill-backup-*"))
+
+
+def test_uninstall_preserves_staged_backup_when_nested_cleanup_fails(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    dest = tmp_path / ".claude" / "skills" / "todos-manager"
+    nested = dest / "nested"
+    nested.mkdir(parents=True)
+    (nested / "locked.txt").write_text("keep", encoding="utf-8")
+
+    def fail_nested_cleanup(path, *args, **kwargs):
+        assert (Path(path) / "nested" / "locked.txt").read_text(encoding="utf-8") == "keep"
+        raise PermissionError("nested directory is not writable")
+
+    monkeypatch.setattr("shutil.rmtree", fail_nested_cleanup)
+
+    result = _cmd_skills_uninstall(FakeArgs(target="claude", scope="user", yes=True), None)
+
+    backups = list(dest.parent.glob(".tpo-skill-backup-*"))
+    assert result == 1
+    assert not dest.exists()
+    assert len(backups) == 1
+    assert (backups[0] / "nested" / "locked.txt").read_text(encoding="utf-8") == "keep"
 
 
 class TestCmdSkillsInstall:

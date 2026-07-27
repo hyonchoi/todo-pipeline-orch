@@ -1412,6 +1412,13 @@ def _preflight_skill_replacement(name: str, dest: Path) -> str | None:
     return None
 
 
+def _skill_backup_path(dest: Path) -> Path:
+    """Reserve a same-directory backup name without leaving a directory behind."""
+    backup = Path(tempfile.mkdtemp(prefix=".tpo-skill-backup-", dir=dest.parent))
+    backup.rmdir()
+    return backup
+
+
 def _cmd_skills_uninstall(args, config: Config | None) -> int:
     targets = _skills_install_targets(args.target, args.scope)
     if not bool(getattr(args, "yes", False)):
@@ -1439,14 +1446,54 @@ def _cmd_skills_uninstall(args, config: Config | None) -> int:
             print("Fix: make the destination removable, or uninstall it manually after reviewing local changes.")
         return 1
 
+    existing_targets = [
+        (name, install_dir / "todos-manager")
+        for name, install_dir in targets
+        if (install_dir / "todos-manager").exists()
+    ]
+    staged: list[tuple[str, Path, Path]] = []
+    try:
+        for name, dest in existing_targets:
+            backup = _skill_backup_path(dest)
+            dest.rename(backup)
+            staged.append((name, dest, backup))
+    except OSError as e:
+        rollback_failures: list[tuple[str, Path, Path, OSError]] = []
+        for name, dest, backup in reversed(staged):
+            try:
+                backup.rename(dest)
+            except OSError as rollback_error:
+                rollback_failures.append((name, dest, backup, rollback_error))
+        print("Problem: could not stage every todos-manager destination for removal.")
+        print(f"Cause: {e}")
+        for name, dest, backup, rollback_error in rollback_failures:
+            print(f"Problem ({name}): rollback could not restore {dest}.")
+            print(f"Details: preserved backup at {backup}: {rollback_error}")
+        print("Fix: inspect the listed destinations and preserved backups, then retry.")
+        return 1
+
+    cleanup_failures: list[tuple[str, Path, OSError]] = []
+    for name, _dest, backup in staged:
+        try:
+            shutil.rmtree(backup)
+        except OSError as e:
+            cleanup_failures.append((name, backup, e))
+
+    staged_destinations = {(name, dest) for name, dest, _backup in staged}
+    cleanup_failed_names = {name for name, _backup, _error in cleanup_failures}
     for name, install_dir in targets:
         dest = install_dir / "todos-manager"
-        if dest.exists():
-            shutil.rmtree(dest)
-            print(f"OK ({name}): removed todos-manager from {dest}")
+        if (name, dest) in staged_destinations:
+            if name not in cleanup_failed_names:
+                print(f"OK ({name}): removed todos-manager from {dest}")
         else:
             print(f"OK ({name}): todos-manager is not installed at {dest}")
-    return 0
+
+    for name, backup, e in cleanup_failures:
+        print(f"Problem ({name}): removal could not clean the preserved backup at {backup}.")
+        print(f"Details: {e}")
+        print("Fix: review the backup and remove it manually when its contents are safe to delete.")
+    return 1 if cleanup_failures else 0
 
 
 def _cmd_skills_install(args, config: Config | None) -> int:
@@ -1520,10 +1567,7 @@ def _cmd_skills_install(args, config: Config | None) -> int:
                     tempfile.mkdtemp(prefix=".tpo-skill-stage-", dir=install_dir)
                 )
                 staged.rmdir()
-                backup = Path(
-                    tempfile.mkdtemp(prefix=".tpo-skill-backup-", dir=install_dir)
-                )
-                backup.rmdir()
+                backup = _skill_backup_path(dest)
                 preserve_backup = False
                 try:
                     shutil.copytree(source, staged)

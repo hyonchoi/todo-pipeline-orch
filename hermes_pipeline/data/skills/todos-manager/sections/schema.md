@@ -67,7 +67,7 @@ When creating or converting TODOS.md, insert this blockquote as the file header:
 > - Required fields: **What:**, **Why:**, **Decisions:**
 > - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
 > - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
-> - NEXT_TODO_ID: 8
+> - NEXT_TODO_ID: 1
 > - ID: sequential, immutable. Use `NEXT_TODO_ID` for the common path; reconcile by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicts.
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 ```

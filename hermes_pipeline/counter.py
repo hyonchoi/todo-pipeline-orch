@@ -9,14 +9,18 @@ from pathlib import Path
 
 COUNTER_FILE = ".hermes/todo_id_counter"
 TODO_ID_RE = re.compile(r"\bTODO-(\d+)\b")
+NEXT_TODO_ID_METADATA_RE = re.compile(
+    r"^>[ \t]+-[ \t]+NEXT_TODO_ID:[^\r\n]*$", re.MULTILINE
+)
 NEXT_TODO_ID_RE = re.compile(
-    r"^>\s+-\s+NEXT_TODO_ID:\s+([1-9][0-9]*)\s*$", re.MULTILINE
+    r"^>[ \t]+-[ \t]+NEXT_TODO_ID:[ \t]*([1-9][0-9]*)[ \t]*$", re.MULTILINE
 )
 
 
 def _read_tracked_next_todo_id(todos_text: str) -> int | None:
+    metadata_lines = NEXT_TODO_ID_METADATA_RE.findall(todos_text)
     matches = NEXT_TODO_ID_RE.findall(todos_text)
-    if len(matches) != 1:
+    if len(metadata_lines) != 1 or len(matches) != 1:
         return None
     return int(matches[0])
 
@@ -54,7 +58,15 @@ def recover_counter(project_dir: Path) -> int:
     else:
         # Legacy files without tracked state use the scan and never decrease
         # an existing counter, preventing ID resurrection.
-        scanned_ids = [int(m) for m in TODO_ID_RE.findall(todos_content)]
+        archive_path = project_dir / "TODOS-archive.md"
+        archive_content = (
+            archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
+        )
+        scanned_ids = [
+            int(m)
+            for m in TODO_ID_RE.findall(todos_content)
+            + TODO_ID_RE.findall(archive_content)
+        ]
         scanned_max = max(scanned_ids) if scanned_ids else 0
         existing_value = 0
         if counter_path.exists():

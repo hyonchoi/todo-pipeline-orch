@@ -24,7 +24,7 @@ Initialize or update the counter cache from tracked TODO metadata, with a legacy
 
 1. Reads `project_dir / "TODOS.md"` and its tracked `NEXT_TODO_ID` value.
 2. When exactly one valid tracked value exists, writes `NEXT_TODO_ID - 1` to the counter cache.
-3. Otherwise, scans TODO-N patterns using `\bTODO-(\d+)\b` and determines `scanned_max` (0 if no TODO-N entries).
+3. Otherwise, scans TODO-N patterns in both `TODOS.md` and `TODOS-archive.md` using `\bTODO-(\d+)\b` and determines `scanned_max` (0 if no TODO-N entries).
 4. In that legacy fallback only, reads the existing counter (0 if missing or corrupt) and writes `max(existing_value, scanned_max)`.
 
 ### `COUNTER_FILE`
@@ -59,9 +59,9 @@ For legacy TODO files without valid tracked state, the counter is set to `max(ex
 
 The regex `\bTODO-(\d+)\b` matches TODO-N patterns anywhere in TODOS.md, not just as list entries. If TODO-6 appears in a "Depends on" note within a TODO-1 entry, the counter is set to 6. This is intentional — it ensures the counter never collides with referenced IDs, even if they aren't active entries.
 
-### Direct file writes
+### Atomic file writes
 
-The counter is written via `counter_path.write_text()`, not an atomic temp+rename. If the process crashes mid-write, the counter file may be corrupt. The reader treats a corrupt file as 0 (see `ValueError`/`OSError` handling at counter.py:51), so a crash doesn't corrupt the pipeline.
+The counter is written through a same-directory temporary file and `os.replace()`. A crash before replacement leaves the prior counter intact; temporary files are cleaned up when the write raises.
 
 ### Creates `.hermes/` directory if needed
 
