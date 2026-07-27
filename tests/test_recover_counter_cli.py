@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 
 from hermes_pipeline.cli import build_parser, main
+from hermes_pipeline.config import Config
 from hermes_pipeline.counter import COUNTER_FILE
 
 
@@ -36,6 +37,23 @@ class TestRecoverCounterSubcommand:
         finally:
             for k in ("TPO_CONFIG_FILE",):
                 os.environ.pop(k, None)
+
+    def test_recover_counter_cli_reports_tracked_value(self, tmp_path, monkeypatch, capsys):
+        projects = tmp_path / "projects"
+        project = projects / "myproject"
+        project.mkdir(parents=True)
+        (project / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 8\n",
+            encoding="utf-8",
+        )
+        config = Config(projects_dir=projects)
+        monkeypatch.setattr("hermes_pipeline.cli.Config.from_env", lambda: config)
+
+        result = main(["recover-counter", "myproject"])
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "Counter set to 7 for project myproject" in out
 
     def test_recover_counter_invalid_slug(self, tmp_path):
         """Invalid project slug (leading dash) returns 2."""

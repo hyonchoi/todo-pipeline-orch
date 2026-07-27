@@ -9,6 +9,40 @@ from hermes_pipeline.counter import COUNTER_FILE, recover_counter
 class TestRecoverCounter:
     """Test recover_counter() function."""
 
+    def test_recover_counter_uses_tracked_next_todo_id_minus_one(self, tmp_path):
+        project_dir = tmp_path
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-3: Active\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(project_dir)
+
+        assert result == 7
+        assert (project_dir / COUNTER_FILE).read_text(encoding="utf-8") == "7"
+
+    def test_recover_counter_falls_back_to_scan_when_tracked_state_missing(self, tmp_path):
+        project_dir = tmp_path
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n- [ ] TODO-3: Active\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(project_dir)
+
+        assert result == 3
+
+    def test_recover_counter_falls_back_to_scan_when_tracked_state_malformed(self, tmp_path):
+        project_dir = tmp_path
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: abc\n\n- [ ] TODO-4: Active\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(project_dir)
+
+        assert result == 4
+
     def test_happy_path(self, tmp_path):
         """TODO-1..5 in TODOS.md -> writes 5 to counter."""
         project_dir = tmp_path / "demo"

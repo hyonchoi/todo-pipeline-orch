@@ -9,14 +9,25 @@ from pathlib import Path
 
 COUNTER_FILE = ".hermes/todo_id_counter"
 TODO_ID_RE = re.compile(r"\bTODO-(\d+)\b")
+NEXT_TODO_ID_RE = re.compile(
+    r"^>\s+-\s+NEXT_TODO_ID:\s+([1-9][0-9]*)\s*$", re.MULTILINE
+)
+
+
+def _read_tracked_next_todo_id(todos_text: str) -> int | None:
+    matches = NEXT_TODO_ID_RE.findall(todos_text)
+    if len(matches) != 1:
+        return None
+    return int(matches[0])
 
 
 def recover_counter(project_dir: Path) -> int:
     """Scan TODOS.md for TODO-N entries and initialize/update the counter file.
 
-    Reads project_dir / "TODOS.md", finds the maximum N in TODO-N patterns,
-    and writes max(existing_counter, scanned_max) to
-    project_dir / ".hermes" / "todo_id_counter".
+    Reads project_dir / "TODOS.md" and uses its tracked NEXT_TODO_ID when
+    available, writing NEXT_TODO_ID - 1 to project_dir / ".hermes" /
+    "todo_id_counter". Legacy files without valid tracked state fall back to
+    the maximum N in TODO-N patterns and preserve a higher existing counter.
 
     If the counter file exists and has a higher value than the scanned max
     (e.g., completed TODOs were removed), the existing counter is preserved.
@@ -35,24 +46,24 @@ def recover_counter(project_dir: Path) -> int:
     if not todos_path.exists():
         raise FileNotFoundError(f"TODOS.md not found in {project_dir}")
 
-    # Scan TODOS.md for TODO-N patterns
-    todos_content = todos_path.read_text()
-    scanned_ids = [int(m) for m in TODO_ID_RE.findall(todos_content)]
-    scanned_max = max(scanned_ids) if scanned_ids else 0
-
-    # Read existing counter (if any) — use config for the subpath so there's
-    # a single source of truth.
     counter_path = project_dir / COUNTER_FILE
-    existing_value = 0
-    if counter_path.exists():
-        try:
-            existing_value = int(counter_path.read_text().strip())
-        except (ValueError, OSError):
-            # Corrupt or unreadable counter — treat as 0
-            existing_value = 0
-
-    # Use the maximum of existing and scanned (never decrease)
-    result = max(existing_value, scanned_max)
+    todos_content = todos_path.read_text()
+    tracked_next = _read_tracked_next_todo_id(todos_content)
+    if tracked_next is not None:
+        result = tracked_next - 1
+    else:
+        # Legacy files without tracked state use the scan and never decrease
+        # an existing counter, preventing ID resurrection.
+        scanned_ids = [int(m) for m in TODO_ID_RE.findall(todos_content)]
+        scanned_max = max(scanned_ids) if scanned_ids else 0
+        existing_value = 0
+        if counter_path.exists():
+            try:
+                existing_value = int(counter_path.read_text().strip())
+            except (ValueError, OSError):
+                # Corrupt or unreadable counter — treat as 0
+                existing_value = 0
+        result = max(existing_value, scanned_max)
 
     # Write the counter file atomically (create .hermes/ if needed)
     counter_path.parent.mkdir(parents=True, exist_ok=True)
