@@ -14,10 +14,11 @@ Issues found: K
 - TODO-Y: Invalid dependency reference `TODO-Z` (not found)
 - TODO-W: Status marker `[->]` — expected `[→]`
 
-ID gap check: OK (max=23, counter=23)
+NEXT_TODO_ID: 24 (valid)
+ID gap check: OK (max=23)
 ```
 
-Report only — no automatic fixes.
+`--audit` repairs missing, malformed, duplicated, stale, or conflicting `NEXT_TODO_ID` metadata before reporting. The report states whether the value was valid, inserted, or corrected.
 
 ---
 
@@ -48,6 +49,9 @@ Remediation: Check the list of valid IDs or remove TODO-99 from the depends_on l
 
 Error: Status marker "[->]" is not recognized.
 Remediation: Use one of: [ ] pending, [→] in progress, [x] done, [~] on hold.
+
+Error: NEXT_TODO_ID must be a positive base-10 integer.
+Remediation: Run `todos-manager --audit` to repair the tracked metadata.
 ```
 
 ### Error & Rescue Map
@@ -61,6 +65,7 @@ Remediation: Use one of: [ ] pending, [→] in progress, [x] done, [~] on hold.
 | **Decisions:** is missing | Missing required field | Provide key decisions with backtick-delimited values |
 | Dependency TODO-<n> does not exist | Invalid reference | Verify TODO-<n> exists in TODOS.md or archive |
 | Invalid status marker | Typo in marker | Use one of: [ ], [→], [x], [~] |
+| Invalid NEXT_TODO_ID | Missing, malformed, duplicated, stale, or conflicting tracked metadata | Run `todos-manager --audit` or continue with `--add` to reconcile it |
 
 ---
 
@@ -70,7 +75,7 @@ The skill logs the following to `.claude/gstack/todos-manager.log`:
 
 ```
 [2026-06-11T10:30:45Z] todos-manager: start
-[2026-06-11T10:30:45Z] todos-manager: bootstrap - scanned 8 existing IDs
+[2026-06-11T10:30:45Z] todos-manager: next_todo_id - read 9 from preamble
 [2026-06-11T10:30:45Z] todos-manager: next_id = TODO-9
 [2026-06-11T10:30:50Z] todos-manager: user_input - title="Refactor state module"
 [2026-06-11T10:30:55Z] todos-manager: auto-research - derived Why from design doc
@@ -80,6 +85,6 @@ The skill logs the following to `.claude/gstack/todos-manager.log`:
 [2026-06-11T10:31:05Z] todos-manager: user_input - title="Refactor state module (v2)"
 [2026-06-11T10:31:15Z] todos-manager: preview - gate reached (retry 2)
 [2026-06-11T10:31:17Z] todos-manager: user_action - confirm="y"
-[2026-06-11T10:31:17Z] todos-manager: write - inserted at line 42
+[2026-06-11T10:31:17Z] todos-manager: write - inserted at line 42 and advanced NEXT_TODO_ID to 10
 [2026-06-11T10:31:17Z] todos-manager: done - TODO-9 committed
 ```

@@ -75,7 +75,7 @@ The skill supports seven subcommands. Each has its own workflow below.
 ### `--add`: Add new entry with schema enforcement
 
 1. **Validate context:** Does TODOS.md exist? If not, prompt to run `--init` first.
-2. **Compute next TODO-<n>:** Read `sections/id-assignment.md` and scan TODOS.md + TODOS-archive.md.
+2. **Compute next TODO-<n>:** Read `sections/id-assignment.md`, then read `NEXT_TODO_ID` from the TODOS.md preamble. Reconcile it by scanning TODOS.md plus TODOS-archive.md only when it is missing, malformed, stale, duplicated, or conflicts with an active TODO.
    - **Output to user:** "Next ID will be `TODO-<n>`."
 3. **Prompt for title:** "Enter the TODO title (required):"
    - Validation: 10–200 characters, non-empty.
@@ -114,8 +114,8 @@ The skill supports seven subcommands. Each has its own workflow below.
    - `y` → proceed to step 9
    - `edit` → return to step 6 (no ID burned, no files written)
    - `cancel` → print "Entry discarded." and exit
-9. **Write to TODOS.md:** Insert formatted entry at end of file (after last entry, before trailing blank lines).
-10. **Update counter cache:** Write next_id to `.hermes/todo_id_counter` if `.hermes/` exists.
+9. **Write to TODOS.md:** Under the TODO write lock, insert the formatted entry at end of file (after last entry, before trailing blank lines) and increment `NEXT_TODO_ID` in the same atomic replacement. If the replacement fails, leave TODOS.md byte-for-byte unchanged.
+10. **Update counter cache:** Only after the TODO write succeeds, `.hermes/todo_id_counter` may be updated as compatibility/cache state. It does not decide the next ID.
 11. **Confirm:** "✓ Entry added as TODO-<n>."
 
 ---
@@ -134,7 +134,7 @@ The skill supports seven subcommands. Each has its own workflow below.
     - Required fields present: **What:**, **Why:**, **Decisions:**
     - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
     - ID matches `TODO-<digits>` pattern
-5a. **Report findings:** Output structured report (see `sections/error-messages.md`). Report only — no automatic fixes.
+5a. **Report findings:** Reconcile missing or malformed `NEXT_TODO_ID` before outputting the structured report (see `sections/error-messages.md`). Do not rewrite entry bodies.
 
 ---
 
@@ -147,11 +147,11 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Status marker valid?
    - ID format correct?
    - Dependency references (if any) exist in TODOS.md or TODOS-archive.md?
-4. **Cross-entry checks:**
+4. **Reconcile tracked state:** Read `NEXT_TODO_ID`. If it is missing, malformed, stale, duplicated, or conflicts with an active TODO, scan active and archived IDs, atomically repair the preamble line, and report the correction.
+5. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
-   - Counter cache (`.hermes/todo_id_counter`) matches max scanned ID?
-5. **Output report** per `sections/error-messages.md`.
-   Report only — no automatic fixes.
+   - Counter cache (`.hermes/todo_id_counter`) is compatibility/cache state only.
+6. **Output report** per `sections/error-messages.md`, including the `NEXT_TODO_ID` reconciliation result.
 
 ---
 
@@ -206,7 +206,7 @@ Issues found: K
 ID gap check: OK (max=23, counter=23)
 ```
 
-Report only — no automatic fixes.
+`--audit` reports schema findings and repairs only missing, malformed, duplicated, stale, or conflicting `NEXT_TODO_ID` metadata before reporting.
 
 ---
 

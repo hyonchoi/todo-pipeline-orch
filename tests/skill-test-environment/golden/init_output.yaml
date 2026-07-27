@@ -12,3 +12,4 @@ assertions:
       pattern: "^- \\[.\\] TODO-\\d+:"
       count: 0
   - archive_header_present: true
+  - regex_present: "^> - NEXT_TODO_ID: 1$"

@@ -56,13 +56,14 @@
 
 **Walkthrough:**
 1. User invokes `todos-manager --init`.
-2. Skill creates TODOS.md with preamble blockquote.
+2. Skill creates TODOS.md with preamble blockquote containing `> - NEXT_TODO_ID: 1`.
 3. Skill creates TODOS-archive.md with minimal header.
 4. Skill initializes `.hermes/todo_id_counter` to 0 (if `.hermes/` exists).
 5. Skill prints "✓ TODOS.md initialized."
 
 **Expected outcome:**
 - TODOS.md exists with preamble blockquote at repo root.
+- The preamble contains exactly one `> - NEXT_TODO_ID: 1` line.
 - TODOS-archive.md exists with minimal header.
 
 ---
@@ -105,7 +106,7 @@
 7. Skill creates `TODOS.md.backup.2026-07-13`.
 8. Skill shows preview gate with entry mapping, field transformations, status summary, and non-convertible list.
 9. User types `y`.
-10. Skill writes preamble + converted entries to TODOS.md, removes section headers.
+10. Skill writes preamble + converted entries to TODOS.md, sets `NEXT_TODO_ID` to one greater than the highest assigned ID, and removes section headers.
 11. Skill writes non-convertible entry to `TODOS-reference.md`.
 12. Skill prints "✓ Converted N entries. 1 entry saved to TODOS-reference.md. Z entries need user review for <<USER-REVIEW>> markers."
 
@@ -149,9 +150,17 @@
 **Walkthrough:**
 1. User invokes `todos-manager --audit`.
 2. Skill scans all entries, checks required fields, validates dependencies.
-3. Skill outputs structured report listing issues.
-4. Skill does not modify any files.
+3. Skill reconciles missing, malformed, stale, duplicated, or conflicting `NEXT_TODO_ID` metadata before reporting.
+4. Skill outputs structured report listing issues and the `NEXT_TODO_ID` reconciliation result.
 
 **Expected outcome:**
 - Report lists all issues (missing fields, invalid deps, marker issues).
-- No files modified.
+- Missing or invalid tracked metadata is repaired; entry bodies are not modified.
+
+### Tracked ID scenarios
+
+- Legacy migration: a file without `NEXT_TODO_ID` is repaired by `--audit` and before first `--add`.
+- Stale low value: `NEXT_TODO_ID: 3` with existing `TODO-7` is corrected to `8`.
+- Archive-only max: archived `TODO-9` with active max `TODO-4` is corrected to `10`.
+- Failed write: if replacement fails, `TODOS.md` remains byte-for-byte unchanged and `.hermes/todo_id_counter` is not advanced.
+- Conflict: if `NEXT_TODO_ID` points to an active TODO, reconciliation scans active plus archive IDs, writes the corrected value, and continues.

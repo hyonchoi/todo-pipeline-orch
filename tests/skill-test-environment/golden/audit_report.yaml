@@ -14,3 +14,5 @@ assertions:
   - all_required_fields_present: true
   - all_valid_status_markers: true
   - no_broken_dependency_refs: true
+  - regex_present: "NEXT_TODO_ID"
+  - regex_present: "corrected|inserted|valid"
