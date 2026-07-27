@@ -127,6 +127,36 @@ class TestCmdSkillsInstall:
         assert skill_md.read_text(encoding="utf-8") == "local edit"
         assert not (target_dir / "partial-file").exists()
 
+    def test_reinstall_preserves_backup_when_rollback_fails(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        target_dir = tmp_path / ".claude" / "skills" / "todos-manager"
+        target_dir.mkdir(parents=True)
+        (target_dir / "SKILL.md").write_text("local edit", encoding="utf-8")
+
+        real_rename = Path.rename
+        rename_calls = {"count": 0}
+
+        def _fail_replacement_and_rollback(self, destination):
+            rename_calls["count"] += 1
+            if rename_calls["count"] >= 2:
+                raise OSError("rename failed")
+            return real_rename(self, destination)
+
+        monkeypatch.setattr(Path, "rename", _fail_replacement_and_rollback)
+
+        result = _cmd_skills_install(
+            FakeArgs(target="claude", scope="user", reinstall=True), config
+        )
+
+        backups = list(target_dir.parent.glob(".tpo-skill-backup-*"))
+        assert result == 1
+        assert not target_dir.exists()
+        assert len(backups) == 1
+        assert (backups[0] / "SKILL.md").read_text(encoding="utf-8") == "local edit"
+
     def test_creates_target_directory_if_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         config = Config(projects_dir=tmp_path / "projects")

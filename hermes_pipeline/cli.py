@@ -1454,19 +1454,25 @@ def _cmd_skills_install(args, config: Config | None) -> int:
                     tempfile.mkdtemp(prefix=".tpo-skill-backup-", dir=install_dir)
                 )
                 backup.rmdir()
+                preserve_backup = False
                 try:
                     shutil.copytree(source, staged)
                     dest.rename(backup)
                     try:
                         staged.rename(dest)
                     except OSError:
-                        backup.rename(dest)
+                        try:
+                            backup.rename(dest)
+                        except OSError:
+                            preserve_backup = True
+                            raise
                         raise
                 except OSError:
                     shutil.rmtree(staged, ignore_errors=True)
                     raise
                 finally:
-                    shutil.rmtree(backup, ignore_errors=True)
+                    if not preserve_backup:
+                        shutil.rmtree(backup, ignore_errors=True)
             else:
                 shutil.copytree(source, dest, dirs_exist_ok=True)
             print(f"OK ({name}): installed todos-manager to {dest}")
