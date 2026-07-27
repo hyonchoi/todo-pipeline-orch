@@ -382,6 +382,11 @@ def build_parser() -> argparse.ArgumentParser:
         default="user",
         help="Install under the user's home directory or the current project (default: user)",
     )
+    skills_install_parser.add_argument(
+        "--reinstall",
+        action="store_true",
+        help="Replace an existing installed todos-manager skill after explicit review",
+    )
     skills_install_parser.set_defaults(func=_cmd_skills_install)
 
     # config: read/write global tpo configuration
@@ -1369,13 +1374,36 @@ def _skills_install_targets(target: str, scope: str) -> list[tuple[str, Path]]:
     return [(name, base / _SKILLS_INSTALL_TARGET_DIRNAMES[name]) for name in names]
 
 
+def _preflight_skill_replacement(name: str, dest: Path) -> str | None:
+    if dest.is_symlink():
+        return "the destination is a symlink"
+    if dest.exists() and not dest.is_dir():
+        return "the destination exists but is not a directory"
+    if dest.exists():
+        try:
+            probe = dest / ".tpo-delete-probe"
+            probe.write_text("", encoding="utf-8")
+            probe.unlink()
+        except OSError as e:
+            return f"the destination is not writable ({e})"
+    parent = dest.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        probe = parent / ".tpo-install-probe"
+        probe.write_text("", encoding="utf-8")
+        probe.unlink()
+    except OSError as e:
+        return f"the install directory is not writable ({e})"
+    return None
+
+
 def _cmd_skills_install(args, config: Config | None) -> int:
     """Handle 'skills install' subcommand — copy the bundled todos-manager skill.
 
     Copies hermes_pipeline/data/skills/todos-manager/ to one or both of
     ~/.claude/skills/todos-manager/ and ~/.agents/skills/todos-manager/
-    (or their project-scoped equivalents), always overwriting existing
-    files (idempotent reinstall).
+    (or their project-scoped equivalents). Existing destinations require
+    explicit --reinstall.
 
     Exit codes: 0 all targets installed, 1 source missing / any target failed.
     """
@@ -1392,13 +1420,33 @@ def _cmd_skills_install(args, config: Config | None) -> int:
 
     targets = _skills_install_targets(args.target, args.scope)
     any_failed = False
+    reinstall = bool(getattr(args, "reinstall", False))
     for name, install_dir in targets:
         dest = install_dir / "todos-manager"
+        if dest.exists() or dest.is_symlink():
+            if not reinstall:
+                any_failed = True
+                print(f"Problem ({name}): todos-manager is already installed at {dest}.")
+                print("Cause: reinstalling without --reinstall would overwrite local changes.")
+                print(
+                    f"Fix: rerun with `tpo skills install --target {name} --scope {args.scope} --reinstall` "
+                    "after reviewing the destination."
+                )
+                continue
+            reason = _preflight_skill_replacement(name, dest)
+            if reason is not None:
+                any_failed = True
+                print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
+                print(f"Cause: {reason}")
+                print(
+                    "Fix: make the destination removable, or uninstall it manually "
+                    "after reviewing local changes."
+                )
+                continue
         try:
             install_dir.mkdir(parents=True, exist_ok=True)
-            # Remove destination if it's a dangling symlink — copytree would fail
-            if dest.is_symlink() and not dest.exists():
-                dest.unlink()
+            if reinstall and dest.exists():
+                shutil.rmtree(dest)
             shutil.copytree(source, dest, dirs_exist_ok=True)
             print(f"OK ({name}): installed todos-manager to {dest}")
         except PermissionError as e:

@@ -43,6 +43,16 @@ class TestSkillsInstallParsing:
         assert args.target == "all"
         assert args.scope == "project"
 
+    def test_install_accepts_reinstall_flag(self):
+        parser = build_parser()
+        args = parser.parse_args(["skills", "install", "--reinstall"])
+        assert args.reinstall is True
+
+    def test_install_does_not_accept_force_alias(self):
+        parser = build_parser()
+        with pytest.raises(SystemExit):
+            parser.parse_args(["skills", "install", "--force"])
+
     def test_invalid_target_rejected(self):
         parser = build_parser()
         with pytest.raises(SystemExit):
@@ -58,17 +68,39 @@ class TestCmdSkillsInstall:
         installed = tmp_path / ".claude" / "skills" / "todos-manager" / "SKILL.md"
         assert installed.is_file()
 
-    def test_reinstall_overwrites_without_error(self, tmp_path, monkeypatch):
+    def test_install_existing_destination_fails_without_reinstall(
+        self, tmp_path, monkeypatch, capsys
+    ):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         config = Config(projects_dir=tmp_path / "projects")
         target_dir = tmp_path / ".claude" / "skills" / "todos-manager"
         target_dir.mkdir(parents=True)
-        (target_dir / "SKILL.md").write_text("stale content")
+        (target_dir / "SKILL.md").write_text("local edit", encoding="utf-8")
 
-        result = _cmd_skills_install(FakeArgs(target="claude", scope="user"), config)
+        result = _cmd_skills_install(
+            FakeArgs(target="claude", scope="user", reinstall=False), config
+        )
+
+        out = capsys.readouterr().out
+        assert result == 1
+        assert (target_dir / "SKILL.md").read_text(encoding="utf-8") == "local edit"
+        assert "Problem (claude): todos-manager is already installed" in out
+        assert "Cause: reinstalling without --reinstall would overwrite local changes." in out
+        assert "Fix: rerun with `tpo skills install --target claude --scope user --reinstall`" in out
+
+    def test_reinstall_overwrites_with_explicit_flag(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        target_dir = tmp_path / ".claude" / "skills" / "todos-manager"
+        target_dir.mkdir(parents=True)
+        (target_dir / "SKILL.md").write_text("stale content", encoding="utf-8")
+
+        result = _cmd_skills_install(
+            FakeArgs(target="claude", scope="user", reinstall=True), config
+        )
 
         assert result == 0
-        content = (target_dir / "SKILL.md").read_text()
+        content = (target_dir / "SKILL.md").read_text(encoding="utf-8")
         assert content != "stale content"
 
     def test_creates_target_directory_if_missing(self, tmp_path, monkeypatch):
