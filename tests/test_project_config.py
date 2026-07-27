@@ -71,7 +71,7 @@ def test_is_enabled_returns_true_on_parse_error(tmp_path: Path):
 
 
 def test_resolve_channel_project_toml_priority(tmp_path: Path):
-    """project.toml slack_channel takes priority over env var."""
+    """project.toml slack_channel takes priority over global config."""
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
     project_toml = project_dir / ".hermes" / "project.toml"
@@ -82,7 +82,7 @@ def test_resolve_channel_project_toml_priority(tmp_path: Path):
 
 
 def test_resolve_channel_env_fallback(tmp_path: Path):
-    """PIPELINE_SLACK_CHANNEL env var is used when project.toml has none."""
+    """Global config slack_channel is used when project.toml has none."""
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
     result = _resolve_slack_channel(project_dir, env_channel="env_channel")
@@ -98,7 +98,7 @@ def test_resolve_channel_default_fallback(tmp_path: Path):
 
 
 def test_resolve_channel_empty_project_toml_channel_uses_env(tmp_path: Path):
-    """Empty slack_channel in project.toml falls through to env var."""
+    """Empty slack_channel in project.toml falls through to global config."""
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
     project_toml = project_dir / ".hermes" / "project.toml"

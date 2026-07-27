@@ -82,38 +82,61 @@ def test_config_path_with_file(monkeypatch, tmp_path, capsys):
 def test_config_get_default(monkeypatch, tmp_path, capsys):
     """tpo config get shows default when no config file."""
     monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "missing.yaml"))
-    monkeypatch.delenv("PIPELINE_CLAUDE_CMD", raising=False)
-    exit_code = main(["config", "get", "claude_cmd"])
+    monkeypatch.delenv("PIPELINE_SLACK_CHANNEL", raising=False)
+    exit_code = main(["config", "get", "slack_channel"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "claude_cmd:" in captured.out
-    assert "claude" in captured.out
+    assert "slack_channel:" in captured.out
     assert "default" in captured.out.lower()
 
 
 def test_config_get_from_file(monkeypatch, tmp_path, capsys):
     """tpo config get shows value from config file."""
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude-code\n")
+    f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    monkeypatch.delenv("PIPELINE_CLAUDE_CMD", raising=False)
-    exit_code = main(["config", "get", "claude_cmd"])
+    monkeypatch.delenv("PIPELINE_SLACK_CHANNEL", raising=False)
+    exit_code = main(["config", "get", "slack_channel"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "claude-code" in captured.out
+    assert "#config-alerts" in captured.out
+
+
+def test_config_get_initialized_default_from_file(monkeypatch, tmp_path, capsys):
+    """Active default-valued entries are still attributed to the config file."""
+    f = tmp_path / "config.yaml"
+    f.write_text("projects_dir: ~/projects\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
+    exit_code = main(["config", "get", "projects_dir"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "projects_dir:" in captured.out
+    assert "from file" in captured.out
+
+
+def test_config_get_pipeline_projects_dir_compat_alias(monkeypatch, tmp_path, capsys):
+    """tpo config get reports the deprecated projects_dir env fallback."""
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
+    exit_code = main(["config", "get", "projects_dir"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert str(tmp_path / "projects") in captured.out
+    assert "PIPELINE_PROJECTS_DIR" in captured.out
 
 
 def test_config_get_env_override(monkeypatch, tmp_path, capsys):
-    """tpo config get shows env var override with attribution."""
+    """tpo config get ignores PIPELINE_* env vars for config entries."""
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude-code\n")
+    f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "env-override")
-    exit_code = main(["config", "get", "claude_cmd"])
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
+    exit_code = main(["config", "get", "slack_channel"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "env-override" in captured.out
-    assert "PIPELINE_CLAUDE_CMD" in captured.out or "env" in captured.out
+    assert "#config-alerts" in captured.out
+    assert "from file" in captured.out
+    assert "PIPELINE_SLACK_CHANNEL" not in captured.out
 
 
 def test_config_get_invalid_key(monkeypatch, tmp_path):
@@ -128,11 +151,11 @@ def test_config_get_broken_config_recovery(monkeypatch, tmp_path, capsys):
     f = tmp_path / "config.yaml"
     f.write_text("badkey: value\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    exit_code = main(["config", "get", "claude_cmd"])
+    exit_code = main(["config", "get", "slack_channel"])
     assert exit_code == 0
     captured = capsys.readouterr()
     # Verify the default value is shown (recovery succeeded)
-    assert "claude_cmd:" in captured.out and "claude" in captured.out
+    assert "slack_channel:" in captured.out
     # Verify the warning/fallback message appeared (recovery path exercised)
     assert (
         "warning" in captured.out.lower()
@@ -142,16 +165,17 @@ def test_config_get_broken_config_recovery(monkeypatch, tmp_path, capsys):
 
 
 def test_config_get_broken_config_still_applies_env(monkeypatch, tmp_path, capsys):
-    """tpo config get reports env values even when the config file is broken."""
+    """tpo config get falls back to defaults when the config file is broken."""
     f = tmp_path / "config.yaml"
     f.write_text("badkey: value\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "env-override")
-    exit_code = main(["config", "get", "claude_cmd"])
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
+    exit_code = main(["config", "get", "slack_channel"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "env-override" in captured.out
-    assert "PIPELINE_CLAUDE_CMD" in captured.out
+    assert "slack_channel:" in captured.out
+    assert "#env-alerts" not in captured.out
+    assert "from default" in captured.out
 
 
 # -- set --
@@ -160,22 +184,22 @@ def test_config_get_broken_config_still_applies_env(monkeypatch, tmp_path, capsy
 def test_config_set_creates_file(monkeypatch, tmp_path, capsys):
     """tpo config set auto-creates config file if missing."""
     monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "config.yaml"))
-    exit_code = main(["config", "set", "claude_cmd", "claude-code"])
+    exit_code = main(["config", "set", "slack_channel", "#config-alerts"])
     assert exit_code == 0
     assert (tmp_path / "config.yaml").exists()
     captured = capsys.readouterr()
-    assert "claude-code" in captured.out
+    assert "#config-alerts" in captured.out
 
 
 def test_config_set_overrides_value(monkeypatch, tmp_path):
     """tpo config set writes value to existing file."""
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude\n")
+    f.write_text("slack_channel: '#old-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    exit_code = main(["config", "set", "claude_cmd", "claude-code"])
+    exit_code = main(["config", "set", "slack_channel", "#config-alerts"])
     assert exit_code == 0
     raw = yaml.safe_load(f.read_text())
-    assert raw["claude_cmd"] == "claude-code"
+    assert raw["slack_channel"] == "#config-alerts"
 
 
 def test_config_set_uncomments_existing(monkeypatch, tmp_path):
@@ -195,9 +219,9 @@ def test_config_set_uncomments_existing(monkeypatch, tmp_path):
 def test_config_set_preserves_comments(monkeypatch, tmp_path):
     """tpo config set preserves unrelated comments."""
     f = tmp_path / "config.yaml"
-    f.write_text("# my comment\nclaude_cmd: claude\n")
+    f.write_text("# my comment\nslack_channel: '#old-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    exit_code = main(["config", "set", "claude_cmd", "claude-code"])
+    exit_code = main(["config", "set", "slack_channel", "#config-alerts"])
     assert exit_code == 0
     assert "# my comment" in f.read_text()
 
@@ -208,26 +232,17 @@ def test_config_set_updates_active_duplicate_after_skeleton(monkeypatch, tmp_pat
     from hermes_pipeline.config_loader import SKELETON
 
     f = tmp_path / "config.yaml"
-    f.write_text(SKELETON + "\nclaude_cmd: old\n")
+    f.write_text(SKELETON + "\nslack_channel: '#old-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    exit_code = main(["config", "set", "claude_cmd", "new"])
+    exit_code = main(["config", "set", "slack_channel", "#new-alerts"])
     assert exit_code == 0
-    assert Config.from_env().claude_cmd == "new"
+    assert Config.from_env().slack_channel == "#new-alerts"
 
 
 def test_config_set_invalid_key(monkeypatch, tmp_path):
     """tpo config set rejects unknown key."""
     monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "config.yaml"))
     exit_code = main(["config", "set", "nonexistent", "value"])
-    assert exit_code != 0
-
-
-def test_config_set_kanban_adapter_validation(monkeypatch, tmp_path):
-    """tpo config set validates kanban_adapter literal values."""
-    f = tmp_path / "config.yaml"
-    f.write_text("")
-    monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    exit_code = main(["config", "set", "kanban_adapter", "banana"])
     assert exit_code != 0
 
 
@@ -253,10 +268,10 @@ def test_config_set_int_type_coercion(monkeypatch, tmp_path):
     f = tmp_path / "config.yaml"
     f.write_text("")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    exit_code = main(["config", "set", "default_timeout", "3600"])
+    exit_code = main(["config", "set", "log_retention_days", "14"])
     assert exit_code == 0
     cfg = load_global_config()
-    assert cfg.default_timeout == 3600
+    assert cfg.log_retention_days == 14
 
 
 def test_config_set_symlink_rejected(monkeypatch, tmp_path):
@@ -266,7 +281,7 @@ def test_config_set_symlink_rejected(monkeypatch, tmp_path):
     link = tmp_path / "link.yaml"
     link.symlink_to(real)
     monkeypatch.setenv("TPO_CONFIG_FILE", str(link))
-    exit_code = main(["config", "set", "claude_cmd", "test"])
+    exit_code = main(["config", "set", "slack_channel", "#test"])
     assert exit_code != 0
 
 
@@ -276,7 +291,7 @@ def test_config_set_dangling_symlink_rejected_before_write(monkeypatch, tmp_path
     target = tmp_path / "missing-target.yaml"
     link.symlink_to(target)
     monkeypatch.setenv("TPO_CONFIG_FILE", str(link))
-    exit_code = main(["config", "set", "claude_cmd", "test"])
+    exit_code = main(["config", "set", "slack_channel", "#test"])
     assert exit_code == 2
     assert not target.exists()
 

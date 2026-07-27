@@ -14,13 +14,16 @@ multiple projects for the scan loop.
 
 ### Setting the Projects Directory
 
-If your projects live outside `~/projects`, set the environment variable:
+If your projects live outside `~/projects`, set `projects_dir` in the global
+config file:
 
 ```bash
-export PIPELINE_PROJECTS_DIR=/path/to/your/projects
+tpo config init
+tpo config set projects_dir /path/to/your/projects
 ```
 
-This cannot be configured via `.hermes/config.toml` — it must be set as an environment variable.
+For one-off runs, point `TPO_CONFIG_FILE` at an alternate complete config file.
+`.hermes/config.toml` is per-project and does not set the global scan directory.
 
 ### Per-Project Configuration
 
@@ -55,7 +58,7 @@ The next tick will skip this project.
 
 Alerts for each project go to the Slack channel determined by:
 1. `project.toml`'s `[notifications] slack_channel`
-2. `PIPELINE_SLACK_CHANNEL` environment variable
+2. Global config `slack_channel`
 3. `#alert` (hardcoded fallback)
 
 ## Cron Setup

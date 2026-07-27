@@ -80,13 +80,15 @@ You now have a project that tpo can discover. Next, tell tpo where to find it.
 
 ## Step 3: Configure tpo
 
-Pipeline-watch discovers projects by scanning a directory you specify via `PIPELINE_PROJECTS_DIR`. The default is `~/projects`. Tell it where your projects are:
+Pipeline-watch discovers projects by scanning the `projects_dir` from the global
+tpo config file. The default is `~/projects`. Tell it where your projects are:
 
 ```bash
-export PIPELINE_PROJECTS_DIR=~/my-projects
+tpo config init
+tpo config set projects_dir ~/my-projects
 ```
 
-(In production, you'd add this to your shell profile or systemd environment file.)
+For one-off runs, point `TPO_CONFIG_FILE` at an alternate complete config file.
 
 Verify the configuration by checking that the default pipeline contract was written:
 
@@ -186,7 +188,7 @@ If the file doesn't exist, the project is active by default. To archive a projec
 
 **Slack channel resolution (priority):**
 1. `project.toml`'s `slack_channel`
-2. `PIPELINE_SLACK_CHANNEL` environment variable
+2. Global config `slack_channel`
 3. `#alert` (hardcoded fallback)
 
 ---
@@ -256,7 +258,7 @@ You now have a working tpo setup that:
 ### Next steps
 
 **Explore the full feature set:**
-- Read [Configuration](../README.md#configuration) to customize `PIPELINE_LOCK_DIR`, `PIPELINE_STATE_DIR`, etc.
+- Read [Configuration](../README.md#configuration) to customize `state_dir`, `slack_channel`, etc.
 - See [Troubleshooting](../README.md#troubleshooting) for common issues and fixes
 
 **Run ticks iteratively during development:**

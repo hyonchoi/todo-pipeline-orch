@@ -5,7 +5,7 @@ Each project declares the assignee and tool capabilities its phases require in a
 ## Prerequisites
 
 - `todo-pipeline-orchestrator` installed and `uv run tpo` working
-- A project with a `TODOS.md` file in your `PIPELINE_PROJECTS_DIR`
+- A project with a `TODOS.md` file under `tpo config get projects_dir`
 - Hermes CLI installed and authenticated (`hermes login`)
 
 ## Steps

@@ -2,53 +2,51 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from hermes_pipeline.config import Config
 
 
 def test_from_env_layer2_config_file(monkeypatch, tmp_path):
     """Config file overrides default, env overrides file."""
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude-code\n")
+    f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
     cfg = Config.from_env()
-    assert cfg.claude_cmd == "claude-code"
+    assert cfg.slack_channel == "#config-alerts"
 
 
-def test_from_env_layer3_env_overrides_file(monkeypatch, tmp_path):
-    """Env var overrides config file value."""
+def test_from_env_pipeline_env_does_not_override_file(monkeypatch, tmp_path):
+    """PIPELINE_* env vars do not override global config file entries."""
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude-code\n")
+    f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "claude-override")
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
     cfg = Config.from_env()
-    assert cfg.claude_cmd == "claude-override"
+    assert cfg.slack_channel == "#config-alerts"
 
 
-def test_from_env_no_projects_dir_env_var(monkeypatch):
-    """Without PIPELINE_PROJECTS_DIR, projects_dir keeps its default."""
+def test_from_env_projects_dir_default(monkeypatch):
+    """Without config file, projects_dir keeps its default."""
     monkeypatch.delenv("PIPELINE_PROJECTS_DIR", raising=False)
     cfg = Config.from_env()
     assert cfg.projects_dir == Path.home() / "projects"
 
 
-def test_from_env_pipeline_projects_dir_deprecated_alias(monkeypatch, tmp_path):
-    """PIPELINE_PROJECTS_DIR remains a deprecated env override for patch compatibility."""
+def test_from_env_pipeline_projects_dir_compat_alias(monkeypatch, tmp_path):
+    """PIPELINE_PROJECTS_DIR remains a deprecated fallback when no file sets it."""
     monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     cfg = Config.from_env()
     assert cfg.projects_dir == tmp_path / "projects"
 
 
-def test_from_env_kanban_literal_validation_env(monkeypatch, tmp_path):
-    """Env var with invalid kanban_adapter value should raise."""
+def test_from_env_config_projects_dir_beats_compat_alias(monkeypatch, tmp_path):
+    """File config wins over the deprecated PIPELINE_PROJECTS_DIR alias."""
     f = tmp_path / "config.yaml"
-    f.write_text("")
+    f.write_text(f"projects_dir: {tmp_path / 'from-file'}\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-    monkeypatch.setenv("PIPELINE_KANBAN_ADAPTER", "banana")
-    with pytest.raises(ValueError, match="must be one of"):
-        Config.from_env()
+    monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "from-env"))
+    cfg = Config.from_env()
+    assert cfg.projects_dir == tmp_path / "from-file"
 
 
 def test_from_env_no_config_file_uses_default(monkeypatch):
@@ -58,19 +56,19 @@ def test_from_env_no_config_file_uses_default(monkeypatch):
     assert cfg == Config.default()
 
 
-def test_from_env_env_var_path_expansion(monkeypatch, tmp_path):
-    """Path env vars should expand ~ correctly."""
+def test_from_env_config_file_path_expansion(monkeypatch, tmp_path):
+    """Path config values should expand ~ correctly."""
     import os
     orig_home = os.environ.get("HOME")
     try:
         os.environ["HOME"] = str(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         f = tmp_path / "config.yaml"
-        f.write_text("")
+        f.write_text("state_dir: ~/state\n")
         monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
-        monkeypatch.setenv("PIPELINE_LOCK_DIR", "~/locks")
+        monkeypatch.setenv("PIPELINE_STATE_DIR", "~/state")
         cfg = Config.from_env()
-        assert cfg.lock_dir == tmp_path / "locks"
+        assert cfg.state_dir == tmp_path / "state"
     finally:
         if orig_home:
             os.environ["HOME"] = orig_home

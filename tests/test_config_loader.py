@@ -106,7 +106,7 @@ class FakeField:
 
 
 def test_get_literal_values_returns_set():
-    result = _get_literal_values("Literal['null', 'hermes']", "kanban_adapter")
+    result = _get_literal_values("Literal['a', 'b']", "example")
     # typing.get_args on a string returns empty, so None
     # The real caller passes actual types; this just exercises the path
     assert result is None  # string has no get_args
@@ -138,11 +138,11 @@ def test_coerce_path_null_raises():
 
 
 def test_coerce_int_from_string():
-    assert _coerce_value("42", int, "default_timeout", Path("<test>")) == 42
+    assert _coerce_value("42", int, "log_retention_days", Path("<test>")) == 42
 
 
 def test_coerce_int_from_int():
-    assert _coerce_value(1800, int, "default_timeout", Path("<test>")) == 1800
+    assert _coerce_value(7, int, "log_retention_days", Path("<test>")) == 7
 
 
 def test_coerce_float():
@@ -180,25 +180,25 @@ def test_coerce_literal_valid():
     # _get_literal_values won't find args on this mock, so falls through
     # Let's test the Literal path properly:
     import typing
-    KanbanAdapterName = typing.Literal["null", "hermes"]
-    field_type = KanbanAdapterName
+    ExampleLiteral = typing.Literal["one", "two"]
+    field_type = ExampleLiteral
     # _coerce_value's else branch handles Literals
-    result = _coerce_value("hermes", field_type, "kanban_adapter", Path("<t>"))
-    assert result == "hermes"
+    result = _coerce_value("one", field_type, "example", Path("<t>"))
+    assert result == "one"
 
 
 def test_coerce_literal_null_quoted():
     import typing
-    KanbanAdapterName = typing.Literal["null", "hermes"]
-    result = _coerce_value("null", KanbanAdapterName, "kanban_adapter", Path("<t>"))
+    ExampleLiteral = typing.Literal["null", "other"]
+    result = _coerce_value("null", ExampleLiteral, "example", Path("<t>"))
     assert result == "null"
 
 
 def test_coerce_literal_invalid():
     import typing
-    KanbanAdapterName = typing.Literal["null", "hermes"]
+    ExampleLiteral = typing.Literal["one", "two"]
     with pytest.raises(ValueError, match="must be one of"):
-        _coerce_value("jira", KanbanAdapterName, "kanban_adapter", Path("<t>"))
+        _coerce_value("three", ExampleLiteral, "example", Path("<t>"))
 
 
 # ============================================================
@@ -226,21 +226,11 @@ def test_validate_config_value_path():
 
 
 def test_validate_config_value_int():
-    assert validate_config_value("3600", "default_timeout") == 3600
+    assert validate_config_value("14", "log_retention_days") == 14
 
 
 def test_validate_config_value_string():
     assert validate_config_value("#general", "slack_channel") == "#general"
-
-
-def test_validate_config_value_kanban_adapter():
-    result = validate_config_value("hermes", "kanban_adapter")
-    assert result == "hermes"
-
-
-def test_validate_config_value_kanban_null():
-    result = validate_config_value("null", "kanban_adapter")
-    assert result == "null"
 
 
 # ============================================================
@@ -290,13 +280,13 @@ def test_load_global_config_multiple_overrides(monkeypatch, tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text(
         "projects_dir: /opt/projects\n"
-        "default_timeout: 3600\n"
+        "log_retention_days: 14\n"
         "slack_channel: '#deployments'\n"
     )
     monkeypatch.setenv("TPO_CONFIG_FILE", str(cfg))
     config = load_global_config()
     assert config.projects_dir == Path("/opt/projects")
-    assert config.default_timeout == 3600
+    assert config.log_retention_days == 14
     assert config.slack_channel == "#deployments"
 
 
@@ -306,6 +296,19 @@ def test_load_global_config_unknown_key_raises(monkeypatch, tmp_path):
     monkeypatch.setenv("TPO_CONFIG_FILE", str(cfg))
     with pytest.raises(ValueError, match="unknown config key 'bad_key'"):
         load_global_config()
+
+
+def test_load_global_config_legacy_removed_keys_are_ignored(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "projects_dir: /opt\n"
+        "claude_cmd: claude-code\n"
+        "lock_dir: /tmp/locks\n"
+        "kanban_adapter: hermes\n"
+    )
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(cfg))
+    config = load_global_config()
+    assert config.projects_dir == Path("/opt")
 
 
 def test_load_global_config_underscore_key_skipped(monkeypatch, tmp_path):
@@ -336,9 +339,9 @@ def test_load_global_config_yaml_parse_error(monkeypatch, tmp_path):
 
 def test_load_global_config_invalid_int(monkeypatch, tmp_path):
     cfg = tmp_path / "config.yaml"
-    cfg.write_text("default_timeout: not_a_number\n")
+    cfg.write_text("log_retention_days: not_a_number\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(cfg))
-    with pytest.raises(ValueError, match="invalid value for 'default_timeout'"):
+    with pytest.raises(ValueError, match="invalid value for 'log_retention_days'"):
         load_global_config()
 
 
@@ -364,7 +367,7 @@ def test_skeleton_has_header():
     assert "# tpo global configuration" in SKELETON
 
 
-def test_skeleton_all_fields_commented():
+def test_skeleton_includes_all_fields():
     for field in dataclasses.fields(Config):
         assert field.name in SKELETON
 
@@ -372,11 +375,17 @@ def test_skeleton_all_fields_commented():
 import dataclasses
 
 
-def test_skeleton_no_uncommented_fields():
-    for line in SKELETON.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            pytest.fail(f"SKELETON should have no uncommented lines, got: {stripped}")
+def test_skeleton_has_active_default_fields():
+    import yaml
+
+    raw = yaml.safe_load(SKELETON)
+    assert raw == {
+        "projects_dir": "~/projects",
+        "state_dir": "~/.hermes",
+        "log_file_subpath": "pipeline.log",
+        "log_retention_days": 7,
+        "slack_channel": "",
+    }
 
 
 # ============================================================
@@ -444,18 +453,20 @@ def test_integration_init_set_get_load(monkeypatch, tmp_path):
 
     monkeypatch.setenv("XDG_CONFIG_DIR", str(tmp_path))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
-    monkeypatch.delenv("PIPELINE_CLAUDE_CMD", raising=False)
+    monkeypatch.delenv("PIPELINE_SLACK_CHANNEL", raising=False)
 
     # Init
     assert main(["config", "init"]) == 0
     assert default_config_path().exists()
+    cfg0 = Config.from_env()
+    assert cfg0 == Config.default()
 
     # Set
-    assert main(["config", "set", "claude_cmd", "claude-code"]) == 0
+    assert main(["config", "set", "slack_channel", "#config-alerts"]) == 0
 
     # Get through Config.from_env()
     cfg = Config.from_env()
-    assert cfg.claude_cmd == "claude-code"
+    assert cfg.slack_channel == "#config-alerts"
 
     # Set path type
     assert main(["config", "set", "projects_dir", "/opt/projects"]) == 0
@@ -463,28 +474,28 @@ def test_integration_init_set_get_load(monkeypatch, tmp_path):
     assert cfg2.projects_dir == Path("/opt/projects")
 
     # Set int type
-    assert main(["config", "set", "default_timeout", "3600"]) == 0
+    assert main(["config", "set", "log_retention_days", "14"]) == 0
     cfg3 = Config.from_env()
-    assert cfg3.default_timeout == 3600
+    assert cfg3.log_retention_days == 14
 
 
 def test_integration_env_overrides_config_file(monkeypatch, tmp_path):
-    """Env var layers on top of config file."""
+    """PIPELINE_* env vars do not layer on top of config file."""
     from hermes_pipeline.config import Config
 
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     f = tmp_path / "config.yaml"
-    f.write_text("claude_cmd: claude-code\n")
+    f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
 
     # Without env override
     cfg = Config.from_env()
-    assert cfg.claude_cmd == "claude-code"
+    assert cfg.slack_channel == "#config-alerts"
 
-    # With env override
-    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "env-wins")
+    # PIPELINE_* env var does not override config file
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
     cfg2 = Config.from_env()
-    assert cfg2.claude_cmd == "env-wins"
+    assert cfg2.slack_channel == "#config-alerts"
 
 
 def test_integration_config_set_preserves_skeleton(monkeypatch, tmp_path):
@@ -499,13 +510,13 @@ def test_integration_config_set_preserves_skeleton(monkeypatch, tmp_path):
     f = xdg / "tpo" / "config.yaml"
 
     # Set one value
-    main(["config", "set", "claude_cmd", "claude-code"])
+    main(["config", "set", "slack_channel", "#config-alerts"])
 
     content = f.read_text()
     # Original comments should be preserved
     assert "global configuration" in content
     # The set value should be active
-    assert "claude_cmd: claude-code" in content
+    assert 'slack_channel: "#config-alerts"' in content
 
 
 # ============================================================
@@ -515,30 +526,24 @@ def test_integration_config_set_preserves_skeleton(monkeypatch, tmp_path):
 def test_regression_no_config_file_unchanged(monkeypatch):
     """Users without config file see same defaults as before."""
     monkeypatch.setenv("TPO_CONFIG_FILE", "/nonexistent")
-    monkeypatch.delenv("PIPELINE_LOCK_DIR", raising=False)
     monkeypatch.delenv("PIPELINE_STATE_DIR", raising=False)
-    monkeypatch.delenv("PIPELINE_CLAUDE_CMD", raising=False)
-    monkeypatch.delenv("PIPELINE_KANBAN_ADAPTER", raising=False)
     monkeypatch.delenv("PIPELINE_SLACK_CHANNEL", raising=False)
     from hermes_pipeline.config import Config
     cfg = Config.from_env()
     default = Config.default()
-    assert cfg.lock_dir == default.lock_dir
     assert cfg.projects_dir == default.projects_dir
-    assert cfg.claude_cmd == default.claude_cmd
-    assert cfg.kanban_adapter == default.kanban_adapter
+    assert cfg.state_dir == default.state_dir
+    assert cfg.slack_channel == default.slack_channel
 
 def test_regression_env_vars_still_work(monkeypatch, tmp_path):
-    """Remaining PIPELINE_* env vars still work without config file."""
+    """PIPELINE_* env vars do not override defaults without a config file."""
     monkeypatch.setenv("TPO_CONFIG_FILE", "/nonexistent")
-    monkeypatch.setenv("PIPELINE_LOCK_DIR", str(tmp_path / "locks"))
     monkeypatch.setenv("PIPELINE_STATE_DIR", str(tmp_path / "state"))
-    monkeypatch.setenv("PIPELINE_CLAUDE_CMD", "custom-claude")
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
     from hermes_pipeline.config import Config
     cfg = Config.from_env()
-    assert cfg.lock_dir == tmp_path / "locks"
-    assert cfg.state_dir == tmp_path / "state"
-    assert cfg.claude_cmd == "custom-claude"
+    assert cfg.state_dir == Config.default().state_dir
+    assert cfg.slack_channel == Config.default().slack_channel
 
 def test_regression_frozen_config_unchanged():
     """Config dataclass is still frozen."""

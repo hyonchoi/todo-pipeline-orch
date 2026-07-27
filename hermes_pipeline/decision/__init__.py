@@ -87,13 +87,13 @@ def run_selection(
         }
         prompt_sha = e.actual
     except KeyError as e:
-        # Config fault — missing env var. Persist a
+        # Config fault — missing required setting. Persist a
         # decision so the next tick's `recent_decisions` carries the cause,
         # but do not crash the cron entrypoint.
         parsed = {
             "candidates_considered": [],
             "picked": None,
-            "rationale": f"config_error: missing env var {e.args[0]!r}",
+            "rationale": f"config_error: missing setting {e.args[0]!r}",
             "blocked_reasons": {},
             "in_flight": ctx.in_flight,
         }

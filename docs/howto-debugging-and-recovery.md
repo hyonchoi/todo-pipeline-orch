@@ -9,7 +9,7 @@ This guide covers the three tools you use when a tick doesn't behave the way you
 ## Prerequisites
 
 - `tpo` installed and configured (see the [getting-started tutorial](tutorial-getting-started.md))
-- `PIPELINE_PROJECTS_DIR` set to a directory containing projects with TODOS.md files
+- `tpo config get projects_dir` points at a directory containing projects with TODOS.md files
 
 ## Using `--verbose` for targeted log detail
 
@@ -134,5 +134,5 @@ After using any of these tools, verify the result:
 
 **"recover-counter returns error 2"**
 
-- Check that `PIPELINE_PROJECTS_DIR/my-project/TODOS.md` exists
+- Run `tpo config get projects_dir`, then check that the reported directory contains `my-project/TODOS.md`
 - Check that the project slug is valid (alphanumeric, dot, dash, underscore — no spaces or special characters)

@@ -139,7 +139,7 @@ on a config typo. The `no-progress definition` in
 
 **The mismatch repeats even after I updated the pin.**
 You edited `.hermes/config.toml` in a different state dir than the one the
-tick reads. Check `PIPELINE_STATE_DIR` (default `~/.hermes`) — config lookup
+tick reads. Check `tpo config get state_dir` (default `~/.hermes`) — config lookup
 follows the same root.
 
 **My alert is firing every 5 minutes, not deduped.**

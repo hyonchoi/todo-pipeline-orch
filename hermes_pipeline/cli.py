@@ -1420,7 +1420,7 @@ def _cmd_skills_install(args, config: Config | None) -> int:
 
 
 def _cmd_config_init(args, config: Config | None) -> int:
-    """Handle 'config init' — create a skeleton config file at the default path."""
+    """Handle 'config init' — create a default config file at the default path."""
     from .config_loader import SKELETON, default_config_path
 
     path = default_config_path()
@@ -1456,10 +1456,12 @@ def _cmd_config_path(args, config: Config | None) -> int:
 
 def _cmd_config_get(args, config: Config | None) -> int:
     """Handle 'config get <key>' — show effective value with source attribution."""
-    import os as _os
-
     from .config import Config
-    from .config_loader import _coerce_value, find_config_file, validate_config_key
+    from .config_loader import (
+        find_config_file,
+        load_global_config_with_active_keys,
+        validate_config_key,
+    )
 
     try:
         key = validate_config_key(args.key)
@@ -1468,37 +1470,23 @@ def _cmd_config_get(args, config: Config | None) -> int:
         return 2
 
     try:
-        cfg = Config.from_env()
+        cfg, active_keys = load_global_config_with_active_keys()
     except ValueError as e:
         print(f"Warning: config file has errors: {e}")
         print("Falling back to defaults.")
         cfg = Config.default()
-        env_name = f"PIPELINE_{key.upper()}"
-        env_value = _os.environ.get(env_name)
-        if env_value is not None:
-            import typing
-            from dataclasses import replace
-
-            field_hints = typing.get_type_hints(Config)
-            cfg = replace(
-                cfg,
-                **{
-                    key: _coerce_value(
-                        env_value,
-                        field_hints[key],
-                        key,
-                        Path(f"<env:{env_name}>"),
-                    )
-                },
-            )
+        active_keys = set()
 
     value = getattr(cfg, key)
 
     # Determine source attribution
-    env_name = f"PIPELINE_{key.upper()}"
     default_cfg = Config.default()
-    if _os.environ.get(env_name) is not None:
-        source = f" (from env: {env_name})"
+    if key in active_keys:
+        cfg_file = find_config_file()
+        source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
+    elif key == "projects_dir" and "PIPELINE_PROJECTS_DIR" in os.environ:
+        source = " (from env: PIPELINE_PROJECTS_DIR)"
+        value = Config.from_env().projects_dir
     elif value != getattr(default_cfg, key):
         cfg_file = find_config_file()
         source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
@@ -1651,7 +1639,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(remaining)
 
     # Bootstrap subcommands (file-copy only) don't need pipeline runtime
-    # config (state dir, lock dir, projects dir) — skip Config.from_env()
+    # config (state dir, projects dir) — skip Config.from_env()
     # so they work even when that env isn't configured yet.
     if getattr(args, "command", None) in ("skills", "config"):
         if hasattr(args, "func"):

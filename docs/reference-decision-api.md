@@ -32,7 +32,7 @@ Build prompt → call agent → persist immutable decision → return.
 
 **Error handling:**
 - `PromptShaMismatch` → returns `picked=None`, fires Slack alert. Rationale prefixed with `prompt_sha_mismatch:`
-- Config error (missing env var) → returns `picked=None`, rationale prefixed with `config_error:`
+- Config error (missing required setting) → returns `picked=None`, rationale prefixed with `config_error:`
 - API error (401/429/5xx/timeout) → returns `picked=None`, rationale prefixed with `api_error:`
 - All error paths persist a decision record so the next tick's `recent_decisions` carries the cause.
 

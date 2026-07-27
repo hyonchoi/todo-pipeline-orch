@@ -152,23 +152,19 @@ class TestIsolateConfig:
     def test_sets_env_vars(self, tmp_path: Path):
         state_dir = tmp_path / "state"
         state_dir.mkdir()
-        lock_dir = tmp_path / "locks"
-        lock_dir.mkdir()
 
-        with isolate_config(state_dir=state_dir, lock_dir=lock_dir):
-            assert os.environ.get("PIPELINE_STATE_DIR") == str(state_dir)
-            assert os.environ.get("PIPELINE_LOCK_DIR") == str(lock_dir)
+        with isolate_config(state_dir=state_dir):
+            assert os.environ.get("TPO_CONFIG_FILE") == str(state_dir / "tpo-config.yaml")
 
-        assert "PIPELINE_STATE_DIR" not in os.environ
-        assert "PIPELINE_LOCK_DIR" not in os.environ
+        assert "TPO_CONFIG_FILE" not in os.environ
 
     def test_saves_and_restores(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv("PIPELINE_STATE_DIR", "/original/state")
+        monkeypatch.setenv("TPO_CONFIG_FILE", "/original/config.yaml")
 
-        with isolate_config(state_dir=Path("/tmp"), lock_dir=Path("/tmp")):
-            assert os.environ["PIPELINE_STATE_DIR"] == "/tmp"
+        with isolate_config(state_dir=Path("/tmp")):
+            assert os.environ["TPO_CONFIG_FILE"] == "/tmp/tpo-config.yaml"
 
-        assert os.environ["PIPELINE_STATE_DIR"] == "/original/state"
+        assert os.environ["TPO_CONFIG_FILE"] == "/original/config.yaml"
 
 
 class TestHarnessResult:
@@ -1057,4 +1053,3 @@ class TestPollKanbanPhases:
 
         assert mock_register.call_args.kwargs["assignee"] == "default"
         assert "failed to load pipeline contract" in caplog.text
-

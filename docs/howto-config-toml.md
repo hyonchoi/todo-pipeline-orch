@@ -8,7 +8,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 ## Prerequisites
 
 - The state dir exists (`~/.hermes` by default, or whatever
-  `PIPELINE_STATE_DIR` points to).
+  the configured `state_dir` points to).
 - Python 3.12+ — the loader uses stdlib `tomllib`.
 - Hermes installed and authenticated (`hermes login`) if you're enabling `auto_execute = true`.
 

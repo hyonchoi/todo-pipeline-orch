@@ -29,7 +29,7 @@ Scan TODOS.md for TODO-N entries and initialize/update the counter file.
 
 ### `COUNTER_FILE`
 
-Module-level constant set from `Config().counter_file_subpath`. Default value: `.hermes/todo_id_counter`.
+Module-level constant for the per-project counter path: `.hermes/todo_id_counter`.
 
 ### `TODO_ID_RE`
 
@@ -43,7 +43,7 @@ The `recover_counter()` function is exposed via the `tpo recover-counter` CLI su
 uv run tpo recover-counter my-project
 ```
 
-The CLI handler (`_cmd_recover_counter` in cli.py) resolves the project directory from `PIPELINE_PROJECTS_DIR / project`, validates the slug, calls `recover_counter()`, and prints the result.
+The CLI handler (`_cmd_recover_counter` in cli.py) resolves the project directory from the configured `projects_dir`, validates the slug, calls `recover_counter()`, and prints the result.
 
 ## Design decisions
 

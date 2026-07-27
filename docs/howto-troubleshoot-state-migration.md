@@ -10,7 +10,7 @@ handle it or fixed it manually.
 
 ## Prerequisites
 
-- You have at least one project under `PIPELINE_PROJECTS_DIR`.
+- You have at least one project under `projects_dir` from `tpo config get projects_dir`.
 - You've run `tpo tick` without a project argument at least once.
 
 ## Understanding the migration
@@ -38,7 +38,7 @@ uv run tpo tick --debug
 Three outcomes:
 
 - **"Copying current_tick_id.txt"** — migration is in progress. Let it finish.
-- **"no active projects found"** — nothing to migrate. Check `PIPELINE_PROJECTS_DIR`.
+- **"no active projects found"** — nothing to migrate. Check `tpo config get projects_dir`.
 - **"global state exists at ... but N projects were discovered"** — migration
   was skipped because there are multiple projects.
 
