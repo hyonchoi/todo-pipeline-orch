@@ -9,6 +9,7 @@ import re
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -32,6 +33,18 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
 NEXT_TODO_ID_LINE_RE = re.compile(
     r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:(?P<value>[^\r\n]*)$"
 )
+
+SECTION_HEADINGS = ("## Metadata", "## Entry Schema", "## Entries")
+
+
+@dataclass(frozen=True)
+class TodoDocumentSections:
+    metadata: str
+    schema: str
+    entries: str
+    diagnostics: list[str]
+    newline: str
+    has_canonical_layout: bool
 
 
 def _preamble_line_indexes(lines: list[str]) -> range:
@@ -63,12 +76,83 @@ def _preamble_line_indexes(lines: list[str]) -> range:
     return range(start, end)
 
 
+def _detect_newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _line_without_ending(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
 def _metadata_line_indexes(lines: list[str]) -> list[int]:
     return [
         index
         for index, line in enumerate(lines)
-        if NEXT_TODO_ID_LINE_RE.fullmatch(lines[index].rstrip("\r\n"))
+        if NEXT_TODO_ID_LINE_RE.fullmatch(_line_without_ending(line))
     ]
+
+
+def _section_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
+    headings: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        stripped = _line_without_ending(line)
+        if stripped in SECTION_HEADINGS:
+            headings.append((stripped, index))
+    spans: dict[str, tuple[int, int]] = {}
+    for position, (heading, index) in enumerate(headings):
+        end = headings[position + 1][1] if position + 1 < len(headings) else len(lines)
+        spans[heading] = (index + 1, end)
+    return spans
+
+
+def parse_todos_document_sections(text: str) -> TodoDocumentSections:
+    lines = text.splitlines(keepends=True)
+    newline = _detect_newline(text)
+    spans = _section_spans(lines)
+    diagnostics: list[str] = []
+    heading_positions = [
+        _line_without_ending(line)
+        for line in lines
+        if _line_without_ending(line) in SECTION_HEADINGS
+    ]
+    has_canonical_layout = heading_positions == list(SECTION_HEADINGS)
+    if not has_canonical_layout:
+        diagnostics.append("TODOS.md must contain ## Metadata, ## Entry Schema, and ## Entries in that order")
+
+    def section_text(heading: str) -> str:
+        if heading not in spans:
+            return ""
+        start, end = spans[heading]
+        chunk = lines[start:end]
+        while chunk and not chunk[0].strip():
+            chunk = chunk[1:]
+        while chunk and not chunk[-1].strip():
+            chunk = chunk[:-1]
+        return "".join(chunk)
+
+    metadata_indexes = _metadata_line_indexes(lines)
+    metadata_span = spans.get("## Metadata")
+    misplaced_indexes = []
+    if metadata_span is not None:
+        start, end = metadata_span
+        misplaced_indexes = [
+            index for index in metadata_indexes if not (start <= index < end)
+        ]
+    elif metadata_indexes:
+        misplaced_indexes = metadata_indexes
+    if misplaced_indexes:
+        diagnostics.append("NEXT_TODO_ID appears outside ## Metadata")
+    if len(metadata_indexes) > 1:
+        diagnostics.append("NEXT_TODO_ID is duplicated")
+
+    return TodoDocumentSections(
+        metadata=section_text("## Metadata"),
+        schema=section_text("## Entry Schema"),
+        entries=section_text("## Entries"),
+        diagnostics=diagnostics,
+        newline=newline,
+        has_canonical_layout=has_canonical_layout,
+    )
 
 
 def _repair_embedded_metadata(lines: list[str]) -> None:
@@ -82,14 +166,25 @@ def _repair_embedded_metadata(lines: list[str]) -> None:
 
 
 def read_next_todo_id(text: str) -> tuple[int | None, list[str]]:
-    """Read and validate the tracked next TODO ID from the preamble."""
+    """Read and validate the tracked next TODO ID from the metadata section."""
     lines = text.splitlines(keepends=True)
+    sections = parse_todos_document_sections(text)
     metadata_indexes = _metadata_line_indexes(lines)
+    issues = list(sections.diagnostics)
     if not metadata_indexes:
-        return None, ["NEXT_TODO_ID is missing from the TODOS.md preamble"]
+        issues.append("NEXT_TODO_ID is missing from ## Metadata")
+        return None, issues
     if len(metadata_indexes) > 1:
-        return None, ["NEXT_TODO_ID is duplicated in the TODOS.md preamble"]
-    match = NEXT_TODO_ID_LINE_RE.fullmatch(lines[metadata_indexes[0]].rstrip("\r\n"))
+        return None, issues
+    metadata_lines = sections.metadata.splitlines()
+    metadata_matches = [
+        line
+        for line in metadata_lines
+        if NEXT_TODO_ID_LINE_RE.fullmatch(line.rstrip("\r\n"))
+    ]
+    if len(metadata_matches) != 1 or issues:
+        return None, issues
+    match = NEXT_TODO_ID_LINE_RE.fullmatch(metadata_matches[0].rstrip("\r\n"))
     assert match is not None
     raw = match.group("value").strip(" \t")
     if not re.fullmatch(r"[1-9][0-9]*", raw):
@@ -102,22 +197,85 @@ def compute_scan_next_id(todos_path: Path, archive_path: Path) -> int:
     return compute_next_id(todos_path, archive_path)
 
 
+def _sectioned_schema_from_legacy(lines: list[str]) -> list[str]:
+    preamble_indexes = set(_preamble_line_indexes(lines))
+    return [
+        line
+        for index, line in enumerate(lines)
+        if index in preamble_indexes
+        and not NEXT_TODO_ID_LINE_RE.fullmatch(_line_without_ending(line))
+    ]
+
+
+def _sectioned_entries_from_legacy(lines: list[str]) -> list[str]:
+    preamble_indexes = set(_preamble_line_indexes(lines))
+    entry_lines: list[str] = []
+    in_entries = False
+    for index, line in enumerate(lines):
+        stripped = _line_without_ending(line)
+        if stripped == "# TODOS" or index in preamble_indexes:
+            continue
+        if NEXT_TODO_ID_LINE_RE.fullmatch(stripped):
+            continue
+        if ENTRY_HEADER_RE.match(stripped):
+            in_entries = True
+        if in_entries:
+            entry_lines.append(line)
+    while entry_lines and not entry_lines[0].strip():
+        entry_lines = entry_lines[1:]
+    while entry_lines and not entry_lines[-1].strip():
+        entry_lines = entry_lines[:-1]
+    return entry_lines
+
+
+def _ensure_heading(lines: list[str], newline: str) -> list[str]:
+    if any(_line_without_ending(line) == "# TODOS" for line in lines):
+        return ["# TODOS" + newline]
+    return ["# TODOS" + newline]
+
+
 def replace_next_todo_id_line(text: str, next_id: int) -> str:
-    """Replace or insert the tracked next TODO ID metadata line."""
-    replacement = f"NEXT_TODO_ID: {next_id}"
+    """Replace tracked metadata and normalize the document to three sections."""
+    newline = _detect_newline(text)
     lines = text.splitlines(keepends=True)
     _repair_embedded_metadata(lines)
-    metadata_indexes = _metadata_line_indexes(lines)
-    if metadata_indexes:
-        for index in reversed(metadata_indexes):
-            del lines[index]
-        metadata_indexes = []
+    sections = parse_todos_document_sections("".join(lines))
+    if sections.has_canonical_layout:
+        schema_lines = sections.schema.splitlines(keepends=True)
+        entries_lines = sections.entries.splitlines(keepends=True)
+    else:
+        schema_lines = _sectioned_schema_from_legacy(lines)
+        entries_lines = _sectioned_entries_from_legacy(lines)
 
-    for index, line in enumerate(lines):
-        if line.rstrip("\r\n") == "# TODOS":
-            lines.insert(index + 1, "\n" + replacement + "\n")
-            return "".join(lines)
-    return text
+    def clean(lines_to_clean: list[str]) -> list[str]:
+        return [
+            line
+            for line in lines_to_clean
+            if not NEXT_TODO_ID_LINE_RE.fullmatch(_line_without_ending(line))
+        ]
+
+    schema_lines = clean(schema_lines)
+    entries_lines = clean(entries_lines)
+    output: list[str] = [
+        "# TODOS" + newline,
+        newline,
+        "## Metadata" + newline,
+        newline,
+        f"NEXT_TODO_ID: {next_id}" + newline,
+        newline,
+        "## Entry Schema" + newline,
+        newline,
+    ]
+    output.extend(schema_lines)
+    if output[-1].strip():
+        output.append(newline)
+    output.extend([newline, "## Entries" + newline])
+    if entries_lines:
+        output.append(newline)
+        output.extend(entries_lines)
+        if not output[-1].endswith(("\n", "\r\n")):
+            output.append(newline)
+    return "".join(output)
 
 
 @contextmanager

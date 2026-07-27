@@ -2,6 +2,7 @@
 
 from tests.skill_test_environment.skill_logic import (
     REQUIRED_FIELDS,
+    parse_todos_document_sections,
     read_next_todo_id,
     replace_next_todo_id_line,
     validate_all_entries,
@@ -11,24 +12,146 @@ from tests.skill_test_environment.skill_logic import (
 
 
 class TestTrackedNextTodoIdFormat:
-    def test_read_next_todo_id_from_global_metadata(self):
-        text = "# TODOS\n\nNEXT_TODO_ID: 8\n\n> **Format rules:**\n\n- [ ] TODO-1: A\n"
+    def test_parse_sections_returns_three_ranges(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n"
+            "> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Existing** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n"
+        )
+
+        sections = parse_todos_document_sections(text)
+
+        assert sections.metadata == "NEXT_TODO_ID: 8\n"
+        assert "> **Format rules:**" in sections.schema
+        assert "TODO-7: Existing" in sections.entries
+        assert sections.diagnostics == []
+        assert sections.has_canonical_layout is True
+
+    def test_read_next_todo_id_from_metadata_section(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Existing** — Summary\n"
+        )
 
         value, issues = read_next_todo_id(text)
 
         assert value == 8
         assert issues == []
 
+    def test_read_next_todo_id_rejects_metadata_under_entries(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Existing** — Summary\n"
+            "NEXT_TODO_ID: 8\n"
+        )
+
+        value, issues = read_next_todo_id(text)
+
+        assert value is None
+        assert any("outside ## Metadata" in issue for issue in issues)
+
+    def test_read_next_todo_id_rejects_metadata_under_schema(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "\n"
+            "## Entry Schema\n\n"
+            "NEXT_TODO_ID: 8\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n"
+        )
+
+        value, issues = read_next_todo_id(text)
+
+        assert value is None
+        assert any("outside ## Metadata" in issue for issue in issues)
+
+    def test_read_next_todo_id_rejects_duplicate_across_sections(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "NEXT_TODO_ID: 99\n"
+        )
+
+        value, issues = read_next_todo_id(text)
+
+        assert value is None
+        assert any("duplicated" in issue.lower() for issue in issues)
+
+    def test_replace_next_todo_id_line_migrates_legacy_layout(self):
+        text = (
+            "# TODOS\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "> **Format rules:**\n"
+            "> - Entry header: example\n\n"
+            "- [ ] **TODO-7: Existing** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n"
+        )
+
+        updated = replace_next_todo_id_line(text, 9)
+
+        assert updated.startswith("# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 9\n\n")
+        assert "\n## Entry Schema\n\n> **Format rules:**" in updated
+        assert "\n## Entries\n\n- [ ] **TODO-7: Existing**" in updated
+        assert updated.count("NEXT_TODO_ID:") == 1
+
+    def test_replace_next_todo_id_line_preserves_crlf(self):
+        text = (
+            "# TODOS\r\n\r\n"
+            "## Metadata\r\n\r\n"
+            "NEXT_TODO_ID: 8\r\n\r\n"
+            "## Entry Schema\r\n\r\n"
+            "> **Format rules:**\r\n\r\n"
+            "## Entries\r\n"
+        )
+
+        updated = replace_next_todo_id_line(text, 9)
+
+        assert "NEXT_TODO_ID: 9\r\n" in updated
+        assert "\n" not in updated.replace("\r\n", "")
+
+    def test_read_next_todo_id_rejects_global_metadata(self):
+        text = "# TODOS\n\nNEXT_TODO_ID: 8\n\n> **Format rules:**\n\n- [ ] TODO-1: A\n"
+
+        value, issues = read_next_todo_id(text)
+
+        assert value is None
+        assert any("outside ## Metadata" in issue for issue in issues)
+
     def test_read_next_todo_id_rejects_zero_negative_and_non_integer(self):
         for raw in ("0", "-1", "1.5", "abc"):
-            text = f"# TODOS\n\nNEXT_TODO_ID: {raw}\n"
+            text = f"# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: {raw}\n\n## Entry Schema\n\n## Entries\n"
             value, issues = read_next_todo_id(text)
             assert value is None
             assert any("NEXT_TODO_ID" in issue for issue in issues)
 
     def test_read_next_todo_id_rejects_empty_and_whitespace_values(self):
         for raw in ("", "   ", "\t"):
-            text = f"# TODOS\n\nNEXT_TODO_ID:{raw}\n- [ ] TODO-1: Preserved\n"
+            text = f"# TODOS\n\n## Metadata\n\nNEXT_TODO_ID:{raw}\n\n## Entry Schema\n\n## Entries\n\n- [ ] TODO-1: Preserved\n"
 
             value, issues = read_next_todo_id(text)
 
@@ -44,7 +167,7 @@ class TestTrackedNextTodoIdFormat:
         assert "- [ ] TODO-1: Preserved\n" in updated
 
     def test_read_next_todo_id_rejects_mixed_value(self):
-        text = "# TODOS\n\nNEXT_TODO_ID: 8 trailing\n"
+        text = "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 8 trailing\n\n## Entry Schema\n\n## Entries\n"
 
         value, issues = read_next_todo_id(text)
 
