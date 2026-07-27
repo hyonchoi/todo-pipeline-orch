@@ -1,6 +1,6 @@
 """Tests for ID sequencing logic — scanning, next-ID computation, counter cache."""
 
-import threading
+import multiprocessing as mp
 from pathlib import Path
 
 import pytest
@@ -14,6 +14,11 @@ from tests.skill_test_environment.skill_logic import (
     reconcile_next_todo_id,
     scan_ids,
 )
+
+
+def _assign_todo_id_in_process(project_dir: str, results) -> None:
+    """Reserve an ID in a worker that inherits the test synchronization hooks."""
+    results.put(assign_next_todo_id(Path(project_dir))[0])
 
 
 class TestScanIds:
@@ -122,59 +127,58 @@ class TestTrackedNextTodoId:
             "# TODOS\n\n> - NEXT_TODO_ID: 1\n", encoding="utf-8"
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+        context = mp.get_context("fork")
+        lock_attempts = context.Value("i", 0)
+        replacements = context.Value("i", 0)
+        flock_calls = context.Value("i", 0)
+        second_attempted = context.Event()
+        first_ready_to_replace = context.Event()
+        original_flock = skill_logic.fcntl.flock
 
-        class ObservedLock:
-            def __init__(self):
-                self._lock = threading.Lock()
-                self._state_lock = threading.Lock()
-                self.acquisitions = 0
-                self.second_attempted = threading.Event()
+        def before_lock():
+            with lock_attempts.get_lock():
+                lock_attempts.value += 1
+                if lock_attempts.value == 2:
+                    second_attempted.set()
 
-            def __enter__(self):
-                with self._state_lock:
-                    self.acquisitions += 1
-                    if self.acquisitions == 2:
-                        self.second_attempted.set()
-                self._lock.acquire()
-                return self
+        def before_replace():
+            with replacements.get_lock():
+                replacements.value += 1
+                is_first_replacement = replacements.value == 1
+            if is_first_replacement:
+                first_ready_to_replace.set()
+                assert second_attempted.wait(timeout=3)
 
-            def __exit__(self, exc_type, exc_value, traceback):
-                self._lock.release()
+        def trace_flock(fd, operation):
+            with flock_calls.get_lock():
+                flock_calls.value += 1
+            return original_flock(fd, operation)
 
-        observed_lock = ObservedLock()
-        original_read = skill_logic.read_next_todo_id
-        first_transform_entered = threading.Event()
-
-        def pause_after_first_read(text):
-            if not first_transform_entered.is_set():
-                first_transform_entered.set()
-                assert observed_lock.second_attempted.wait(timeout=1)
-            return original_read(text)
-
-        monkeypatch.setattr(skill_logic, "_todo_lock", lambda lock_path: observed_lock)
-        monkeypatch.setattr(skill_logic, "read_next_todo_id", pause_after_first_read)
-        results: list[int] = []
-        errors: list[BaseException] = []
-
-        def reserve_id():
-            try:
-                results.append(assign_next_todo_id(tmp_path)[0])
-            except BaseException as error:
-                errors.append(error)
-
-        first_worker = threading.Thread(target=reserve_id)
-        second_worker = threading.Thread(target=reserve_id)
+        monkeypatch.setattr(skill_logic, "_before_todo_lock", before_lock)
+        monkeypatch.setattr(skill_logic, "_before_todos_replace", before_replace)
+        monkeypatch.setattr(skill_logic.fcntl, "flock", trace_flock)
+        results = context.Queue()
+        first_worker = context.Process(
+            target=_assign_todo_id_in_process,
+            args=(str(tmp_path), results),
+        )
+        second_worker = context.Process(
+            target=_assign_todo_id_in_process,
+            args=(str(tmp_path), results),
+        )
         first_worker.start()
-        assert first_transform_entered.wait(timeout=1)
+        assert first_ready_to_replace.wait(timeout=3)
         second_worker.start()
-        first_worker.join(timeout=1)
-        second_worker.join(timeout=1)
 
-        assert not errors
-        assert not first_worker.is_alive()
-        assert not second_worker.is_alive()
-        assert observed_lock.acquisitions == 2
-        assert sorted(results) == [1, 2]
+        assigned = sorted(results.get(timeout=3) for _ in range(2))
+        for worker in (first_worker, second_worker):
+            worker.join(timeout=3)
+            assert worker.exitcode == 0
+
+        assert lock_attempts.value == 2
+        assert replacements.value == 2
+        assert flock_calls.value == 4
+        assert assigned == [1, 2]
         assert "> - NEXT_TODO_ID: 3" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
 
     def test_assign_next_todo_id_removes_temporary_file_when_replace_fails(

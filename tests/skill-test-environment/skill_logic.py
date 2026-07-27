@@ -82,9 +82,18 @@ def _todo_lock(lock_path: Path) -> Iterator[None]:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
+def _before_todo_lock() -> None:
+    """Test synchronization point before an update attempts the sidecar lock."""
+
+
+def _before_todos_replace() -> None:
+    """Test synchronization point before committing an updated TODO file."""
+
+
 def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> None:
     """Apply a TODO transform under an exclusive lock using atomic replacement."""
     lock_path = todos_path.with_suffix(todos_path.suffix + ".lock")
+    _before_todo_lock()
     with _todo_lock(lock_path):
         original = todos_path.read_text(encoding="utf-8")
         updated = transform(original)
@@ -95,6 +104,7 @@ def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> No
                 tmp.write(updated)
                 tmp.flush()
                 os.fsync(tmp.fileno())
+            _before_todos_replace()
             os.replace(tmp_path, todos_path)
         except BaseException:
             try:
