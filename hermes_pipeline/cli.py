@@ -1421,6 +1421,24 @@ def _cmd_skills_install(args, config: Config | None) -> int:
     targets = _skills_install_targets(args.target, args.scope)
     any_failed = False
     reinstall = bool(getattr(args, "reinstall", False))
+    if reinstall:
+        preflight_errors: list[tuple[str, Path, str]] = []
+        for name, install_dir in targets:
+            dest = install_dir / "todos-manager"
+            if dest.exists() or dest.is_symlink():
+                reason = _preflight_skill_replacement(name, dest)
+                if reason is not None:
+                    preflight_errors.append((name, dest, reason))
+        if preflight_errors:
+            for name, dest, reason in preflight_errors:
+                print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
+                print(f"Cause: {reason}.")
+                print(
+                    "Fix: make the destination removable, or uninstall it manually "
+                    "after reviewing local changes."
+                )
+            return 1
+
     for name, install_dir in targets:
         dest = install_dir / "todos-manager"
         if dest.exists() or dest.is_symlink():

@@ -88,7 +88,7 @@ class TestCmdSkillsInstall:
         assert "Cause: reinstalling without --reinstall would overwrite local changes." in out
         assert "Fix: rerun with `tpo skills install --target claude --scope user --reinstall`" in out
 
-    def test_reinstall_overwrites_with_explicit_flag(self, tmp_path, monkeypatch):
+    def test_install_reinstall_replaces_existing_directory(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         config = Config(projects_dir=tmp_path / "projects")
         target_dir = tmp_path / ".claude" / "skills" / "todos-manager"
@@ -102,6 +102,27 @@ class TestCmdSkillsInstall:
         assert result == 0
         content = (target_dir / "SKILL.md").read_text(encoding="utf-8")
         assert content != "stale content"
+
+    def test_install_reinstall_target_all_preflights_before_removing_first(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
+        codex_dest = tmp_path / ".agents" / "skills" / "todos-manager"
+        claude_dest.mkdir(parents=True)
+        codex_dest.parent.mkdir(parents=True)
+        codex_dest.write_text("not a directory", encoding="utf-8")
+        (claude_dest / "SKILL.md").write_text("keep me", encoding="utf-8")
+
+        result = _cmd_skills_install(
+            FakeArgs(target="all", scope="user", reinstall=True), config
+        )
+
+        out = capsys.readouterr().out
+        assert result == 1
+        assert (claude_dest / "SKILL.md").read_text(encoding="utf-8") == "keep me"
+        assert "Problem (codex): cannot replace todos-manager" in out
 
     def test_reinstall_stages_before_replacing_existing_destination(
         self, tmp_path, monkeypatch
