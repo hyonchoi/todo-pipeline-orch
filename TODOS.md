@@ -40,7 +40,7 @@
   - **Depends on:** `TODO-24`
   - **Decisions:** Priority `P3`, Effort `M`, Phase `2 (Design)`, Branch `feature/conditional-phase-registration`, Test Coverage `required`, Security Review `not-required`
 
-- [ ] **TODO-33: Rename main CLI script to `tpo`** — Replace `pipeline-watch`/`hermes-pipeline` console-scripts with a single short `tpo` entry point
+- [x] **TODO-33: Rename main CLI script to `tpo`** — Replace `pipeline-watch`/`hermes-pipeline` console-scripts with a single short `tpo` entry point
   - **What:** Replace both `pipeline-watch` and `hermes-pipeline` console-script entries in `pyproject.toml`'s `[project.scripts]` with a single `tpo` entry point (`hermes_pipeline.cli:main`), then update all references across docs (10+ files under `docs/`), tests (test_contract.py, test_recover_counter_cli.py, test_cli_entrypoint.py, test_tick_subcommand.py, test_cli.py), README, and CHANGELOG to use `tpo`.
   - **Why:** The current script names (`pipeline-watch`, `hermes-pipeline`) are too long to type repeatedly during manual/interactive CLI usage; a single short name (`tpo`) improves day-to-day ergonomics.
   - **Pros:** Much faster to type; single unambiguous CLI name going forward.
@@ -48,7 +48,7 @@
   - **Context:** `pyproject.toml` `[project.scripts]` (lines 11-12); docs: howto-agent-skills-profile.md, howto-pipeline-contract.md, howto-approve-and-ship.md, howto-multi-project-setup.md, + gstack design docs; tests: test_contract.py, test_recover_counter_cli.py, test_cli_entrypoint.py, test_tick_subcommand.py, test_cli.py.
   - **Decisions:** Priority `P2`, Effort `L`, Phase `4 (Development)`, Branch `feature/rename-cli-to-tpo`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
 
-- [ ] **TODO-34: Embed todos-manager skill as package data with `tpo skills install` subcommand** — Replace git-clone-dependent install script with an in-package installer usable after `uv tool install`
+- [x] **TODO-34: Embed todos-manager skill as package data with `tpo skills install` subcommand** — Replace git-clone-dependent install script with an in-package installer usable after `uv tool install`
   - **What:** Move `skills/todos-manager/` into `hermes_pipeline/skills/todos-manager/`, mark it as package data in `pyproject.toml` (hatch wheel force-include or similar), and add a `tpo skills install` CLI subcommand (in `cli.py`, alongside `_cmd_install_profile` at cli.py:1070) that uses `importlib.resources.files("hermes_pipeline") / "skills/todos-manager"` to locate the packaged skill and symlinks/copies it into `~/.claude/skills/` and `~/.agents/skills/`, porting the logic currently in `scripts/install-todos-manager.sh`.
   - **Why:** `scripts/install-todos-manager.sh` requires a git clone of the repo to run, which is incompatible with the `uv tool install todo-pipeline-orchestrator` distribution model where users never see the source tree.
   - **Pros:** No git dependency; single source of truth versioned with the package; works for any `uv tool install` user; testable via pytest like other CLI subcommands.
