@@ -73,7 +73,7 @@ uv run tpo approve myproject --todo TODO-5 --force --force
 
 ### `recover-counter`
 
-Scan TODOS.md and initialize `.hermes/todo_id_counter` by finding the highest TODO-N.
+Initialize `.hermes/todo_id_counter` from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files.
 
 ```bash
 uv run tpo recover-counter myproject

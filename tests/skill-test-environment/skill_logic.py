@@ -170,20 +170,9 @@ def assign_next_todo_id(
     def transform(text: str) -> str:
         nonlocal assigned, messages
         tracked, issues = read_next_todo_id(text)
-        tracked_id_is_used = tracked is not None and (
-            bool(re.search(rf"\bTODO-{tracked}\b", text))
-            or (
-                archive_path.exists()
-                and bool(
-                    re.search(
-                        rf"\bTODO-{tracked}\b",
-                        archive_path.read_text(encoding="utf-8"),
-                    )
-                )
-            )
-        )
-        if tracked is None or issues or tracked_id_is_used:
-            scanned_next = compute_scan_next_id(todos_path, archive_path)
+        scanned_next = compute_scan_next_id(todos_path, archive_path)
+        tracked_is_stale = tracked is not None and tracked != scanned_next
+        if tracked is None or issues or tracked_is_stale:
             assigned = scanned_next
             messages.append(f"add: corrected NEXT_TODO_ID from {tracked} to {scanned_next}")
         else:

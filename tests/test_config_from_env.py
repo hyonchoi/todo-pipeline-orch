@@ -5,6 +5,12 @@ from pathlib import Path
 from hermes_pipeline.config import Config
 
 
+def _isolate_implicit_global_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+
+
 def test_from_env_layer2_config_file(monkeypatch, tmp_path):
     """Config file overrides default, env overrides file."""
     f = tmp_path / "config.yaml"
@@ -24,8 +30,9 @@ def test_from_env_pipeline_env_does_not_override_file(monkeypatch, tmp_path):
     assert cfg.slack_channel == "#config-alerts"
 
 
-def test_from_env_projects_dir_default(monkeypatch):
+def test_from_env_projects_dir_default(monkeypatch, tmp_path):
     """Without config file, projects_dir keeps its default."""
+    _isolate_implicit_global_config(monkeypatch, tmp_path)
     monkeypatch.delenv("PIPELINE_PROJECTS_DIR", raising=False)
     cfg = Config.from_env()
     assert cfg.projects_dir == Path.home() / "projects"
@@ -33,6 +40,7 @@ def test_from_env_projects_dir_default(monkeypatch):
 
 def test_from_env_pipeline_projects_dir_compat_alias(monkeypatch, tmp_path):
     """PIPELINE_PROJECTS_DIR remains a deprecated fallback when no file sets it."""
+    _isolate_implicit_global_config(monkeypatch, tmp_path)
     monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     cfg = Config.from_env()

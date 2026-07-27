@@ -1390,23 +1390,35 @@ def _skills_install_targets(target: str, scope: str) -> list[tuple[str, Path]]:
 
 
 def _preflight_skill_replacement(name: str, dest: Path) -> str | None:
+    def probe_writable(directory: Path, prefix: str) -> None:
+        fd, probe_name = tempfile.mkstemp(prefix=prefix, dir=directory)
+        try:
+            os.close(fd)
+            Path(probe_name).unlink()
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                Path(probe_name).unlink()
+            except OSError:
+                pass
+            raise
+
     if dest.is_symlink():
         return "the destination is a symlink"
     if dest.exists() and not dest.is_dir():
         return "the destination exists but is not a directory"
     if dest.exists():
         try:
-            probe = dest / f".tpo-delete-probe-{name}"
-            probe.write_text("", encoding="utf-8")
-            probe.unlink()
+            probe_writable(dest, f".tpo-delete-probe-{name}-")
         except OSError as e:
             return f"the destination is not writable ({e})"
     parent = dest.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
-        probe = parent / f".tpo-install-probe-{name}"
-        probe.write_text("", encoding="utf-8")
-        probe.unlink()
+        probe_writable(parent, f".tpo-install-probe-{name}-")
     except OSError as e:
         return f"the install directory is not writable ({e})"
     return None
@@ -1472,28 +1484,26 @@ def _cmd_skills_uninstall(args, config: Config | None) -> int:
         print("Fix: inspect the listed destinations and preserved backups, then retry.")
         return 1
 
-    cleanup_failures: list[tuple[str, Path, OSError]] = []
+    cleanup_warnings: list[tuple[str, Path, OSError]] = []
     for name, _dest, backup in staged:
         try:
             shutil.rmtree(backup)
         except OSError as e:
-            cleanup_failures.append((name, backup, e))
+            cleanup_warnings.append((name, backup, e))
 
     staged_destinations = {(name, dest) for name, dest, _backup in staged}
-    cleanup_failed_names = {name for name, _backup, _error in cleanup_failures}
     for name, install_dir in targets:
         dest = install_dir / "todos-manager"
         if (name, dest) in staged_destinations:
-            if name not in cleanup_failed_names:
-                print(f"OK ({name}): removed todos-manager from {dest}")
+            print(f"OK ({name}): removed todos-manager from {dest}")
         else:
             print(f"OK ({name}): todos-manager is not installed at {dest}")
 
-    for name, backup, e in cleanup_failures:
-        print(f"Problem ({name}): removal could not clean the preserved backup at {backup}.")
+    for name, backup, e in cleanup_warnings:
+        print(f"Warning ({name}): removal could not clean the staged backup at {backup}.")
         print(f"Details: {e}")
-        print("Fix: review the backup and remove it manually when its contents are safe to delete.")
-    return 1 if cleanup_failures else 0
+        print("Fix: review the leftover path and remove it manually when its contents are safe to delete.")
+    return 1 if cleanup_warnings else 0
 
 
 def _cmd_skills_install(args, config: Config | None) -> int:
@@ -1520,22 +1530,32 @@ def _cmd_skills_install(args, config: Config | None) -> int:
     targets = _skills_install_targets(args.target, args.scope)
     any_failed = False
     reinstall = bool(getattr(args, "reinstall", False))
-    if reinstall:
-        preflight_errors: list[tuple[str, Path, str]] = []
-        for name, install_dir in targets:
-            dest = install_dir / "todos-manager"
+    preflight_errors: list[tuple[str, Path, str]] = []
+    for name, install_dir in targets:
+        dest = install_dir / "todos-manager"
+        if reinstall:
             reason = _preflight_skill_replacement(name, dest)
             if reason is not None:
                 preflight_errors.append((name, dest, reason))
-        if preflight_errors:
-            for name, dest, reason in preflight_errors:
-                print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
-                print(f"Cause: {reason}.")
+        elif dest.exists() or dest.is_symlink():
+            preflight_errors.append((name, dest, "todos-manager is already installed"))
+    if preflight_errors:
+        for name, dest, reason in preflight_errors:
+            if not reinstall and reason == "todos-manager is already installed":
+                print(f"Problem ({name}): todos-manager is already installed at {dest}.")
+                print("Cause: reinstalling without --reinstall would overwrite local changes.")
                 print(
-                    "Fix: make the destination removable, or uninstall it manually "
-                    "after reviewing local changes."
+                    f"Fix: rerun with `tpo skills install --target {name} --scope {args.scope} --reinstall` "
+                    "after reviewing the destination."
                 )
-            return 1
+                continue
+            print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
+            print(f"Cause: {reason}.")
+            print(
+                "Fix: make the destination removable, or uninstall it manually "
+                "after reviewing local changes."
+            )
+        return 1
 
     for name, install_dir in targets:
         dest = install_dir / "todos-manager"
@@ -1588,7 +1608,9 @@ def _cmd_skills_install(args, config: Config | None) -> int:
                     if not preserve_backup:
                         shutil.rmtree(backup, ignore_errors=True)
             else:
-                shutil.copytree(source, dest, dirs_exist_ok=True)
+                if dest.exists() or dest.is_symlink():
+                    raise FileExistsError(f"destination appeared before copy: {dest}")
+                shutil.copytree(source, dest)
             print(f"OK ({name}): installed todos-manager to {dest}")
         except PermissionError as e:
             any_failed = True

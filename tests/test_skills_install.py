@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from hermes_pipeline.cli import _cmd_skills_install, _cmd_skills_uninstall, build_parser
+from hermes_pipeline.cli import (
+    _cmd_skills_install,
+    _cmd_skills_uninstall,
+    _preflight_skill_replacement,
+    build_parser,
+)
 from hermes_pipeline.config import Config
 
 
@@ -123,6 +128,32 @@ def test_uninstall_rejects_symlink_destination(tmp_path, monkeypatch, capsys):
     assert "destination is a symlink" in capsys.readouterr().out
 
 
+def test_preflight_install_probe_does_not_follow_predictable_symlink(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    install_dir = tmp_path / ".agents" / "skills"
+    install_dir.mkdir(parents=True)
+    (install_dir / ".tpo-install-probe-codex").symlink_to(victim)
+
+    reason = _preflight_skill_replacement("codex", install_dir / "todos-manager")
+
+    assert reason is None
+    assert victim.read_text(encoding="utf-8") == "keep"
+
+
+def test_preflight_delete_probe_does_not_follow_predictable_symlink(tmp_path):
+    victim = tmp_path / "victim.txt"
+    victim.write_text("keep", encoding="utf-8")
+    dest = tmp_path / ".claude" / "skills" / "todos-manager"
+    dest.mkdir(parents=True)
+    (dest / ".tpo-delete-probe-claude").symlink_to(victim)
+
+    reason = _preflight_skill_replacement("claude", dest)
+
+    assert reason is None
+    assert victim.read_text(encoding="utf-8") == "keep"
+
+
 def test_uninstall_all_preflights_before_removing_first(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
@@ -168,7 +199,7 @@ def test_uninstall_rolls_back_all_staged_destinations_when_later_rename_fails(
 
 
 def test_uninstall_preserves_staged_backup_when_nested_cleanup_fails(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, capsys
 ):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     dest = tmp_path / ".claude" / "skills" / "todos-manager"
@@ -185,10 +216,12 @@ def test_uninstall_preserves_staged_backup_when_nested_cleanup_fails(
     result = _cmd_skills_uninstall(FakeArgs(target="claude", scope="user", yes=True), None)
 
     backups = list(dest.parent.glob(".tpo-skill-backup-*"))
+    out = capsys.readouterr().out
     assert result == 1
     assert not dest.exists()
     assert len(backups) == 1
     assert (backups[0] / "nested" / "locked.txt").read_text(encoding="utf-8") == "keep"
+    assert "Warning (claude): removal could not clean the staged backup" in out
 
 
 class TestCmdSkillsInstall:
@@ -219,6 +252,26 @@ class TestCmdSkillsInstall:
         assert "Problem (claude): todos-manager is already installed" in out
         assert "Cause: reinstalling without --reinstall would overwrite local changes." in out
         assert "Fix: rerun with `tpo skills install --target claude --scope user --reinstall`" in out
+
+    def test_install_target_all_without_reinstall_preflights_before_copying_first(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        codex_dest = tmp_path / ".agents" / "skills" / "todos-manager"
+        codex_dest.mkdir(parents=True)
+        (codex_dest / "SKILL.md").write_text("local edit", encoding="utf-8")
+
+        result = _cmd_skills_install(
+            FakeArgs(target="all", scope="user", reinstall=False), config
+        )
+
+        out = capsys.readouterr().out
+        claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
+        assert result == 1
+        assert not claude_dest.exists()
+        assert (codex_dest / "SKILL.md").read_text(encoding="utf-8") == "local edit"
+        assert "Problem (codex): todos-manager is already installed" in out
 
     def test_install_reinstall_replaces_existing_directory(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)

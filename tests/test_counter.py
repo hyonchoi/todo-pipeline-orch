@@ -12,7 +12,7 @@ class TestRecoverCounter:
     def test_recover_counter_uses_tracked_next_todo_id_minus_one(self, tmp_path):
         project_dir = tmp_path
         (project_dir / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-3: Active\n",
+            "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-7: Active\n",
             encoding="utf-8",
         )
 
@@ -20,6 +20,36 @@ class TestRecoverCounter:
 
         assert result == 7
         assert (project_dir / COUNTER_FILE).read_text(encoding="utf-8") == "7"
+
+    def test_recover_counter_accepts_crlf_tracked_next_todo_id(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\r\n\r\n> - NEXT_TODO_ID: 8\r\n\r\n- [ ] TODO-7: Active\r\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(tmp_path)
+
+        assert result == 7
+
+    def test_recover_counter_falls_back_when_tracked_state_is_stale_low(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 3\n\n- [ ] TODO-9: Active\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(tmp_path)
+
+        assert result == 9
+
+    def test_recover_counter_falls_back_when_tracked_state_is_stale_high(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 50\n\n- [ ] TODO-7: Active\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(tmp_path)
+
+        assert result == 7
 
     def test_recover_counter_falls_back_to_scan_when_tracked_state_missing(self, tmp_path):
         project_dir = tmp_path
@@ -70,6 +100,32 @@ class TestRecoverCounter:
         result = recover_counter(tmp_path)
 
         assert result == 9
+
+    def test_recover_counter_ignores_metadata_outside_preamble(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "> **Format rules:**\n"
+            "> - NEXT_TODO_ID: 8\n\n"
+            "- [ ] TODO-7: Active\n\n"
+            "> - NEXT_TODO_ID: 99\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(tmp_path)
+
+        assert result == 7
+
+    def test_recover_counter_rejects_only_out_of_preamble_metadata(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "- [ ] TODO-4: Active\n\n"
+            "> - NEXT_TODO_ID: 99\n",
+            encoding="utf-8",
+        )
+
+        result = recover_counter(tmp_path)
+
+        assert result == 4
 
     def test_happy_path(self, tmp_path):
         """TODO-1..5 in TODOS.md -> writes 5 to counter."""
