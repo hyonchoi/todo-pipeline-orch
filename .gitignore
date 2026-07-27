@@ -2,6 +2,7 @@
 graphify-out/
 .gstack/
 .superpowers/
+.worktrees/
 .claude/worktrees/
 
 # ---- Agent client install (local-only, not platform-neutral) ----
