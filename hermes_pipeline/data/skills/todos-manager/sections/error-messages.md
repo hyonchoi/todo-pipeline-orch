@@ -75,7 +75,7 @@ The skill logs the following to `.claude/gstack/todos-manager.log`:
 
 ```
 [2026-06-11T10:30:45Z] todos-manager: start
-[2026-06-11T10:30:45Z] todos-manager: next_todo_id - read 9 from preamble
+[2026-06-11T10:30:45Z] todos-manager: next_todo_id - read 9 from ## Metadata
 [2026-06-11T10:30:45Z] todos-manager: next_id = TODO-9
 [2026-06-11T10:30:50Z] todos-manager: user_input - title="Refactor state module"
 [2026-06-11T10:30:55Z] todos-manager: auto-research - derived Why from design doc

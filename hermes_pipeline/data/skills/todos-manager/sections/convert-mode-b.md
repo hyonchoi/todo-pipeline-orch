@@ -88,7 +88,8 @@ Use this section when `--convert` detects a header-based TODOS.md (`## Open` / `
     - Remove all `### Title` header-based entries from TODOS.md.
     - Preserve any existing canonical `- [ ] TODO-<n>` entries (if hybrid file).
     - Insert all converted entries in canonical format at the end of the file.
-    - Set the preamble's `NEXT_TODO_ID` to one greater than the highest ID in the converted active entries plus any archived entries; use `1` when no IDs exist.
+    - Write the canonical `# TODOS`, `## Metadata`, `## Entry Schema`, and `## Entries` sections.
+    - Set `NEXT_TODO_ID` under `## Metadata` to one greater than the highest ID in the converted active entries plus any archived entries; use `1` when no IDs exist.
     - If there are non-convertible entries, write them to `TODOS-reference.md`:
       ```markdown
       # TODOS Reference

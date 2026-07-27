@@ -68,20 +68,21 @@
 
 ---
 
-### Scenario A3: `--convert` on existing TODOS.md without preamble (Mode A)
+### Scenario A3: `--convert` on legacy flat TODOS.md (Mode A)
 
 **Setup:**
-- TODOS.md exists with canonical `- [ ] TODO-N` entries but no preamble blockquote.
+- TODOS.md exists with canonical `- [ ] TODO-N` entries but without the canonical three-section layout.
 
 **Walkthrough:**
 1. User invokes `todos-manager --convert`.
-2. Skill detects Mode A (canonical entries), inserts preamble after `# TODOS` header.
-3. Skill validates each entry against schema.
+2. Skill detects Mode A (legacy flat entries) and migrates the document to `# TODOS`, `## Metadata`, `## Entry Schema`, and `## Entries`.
+3. Skill validates only entries under `## Entries` against the schema.
 4. Skill outputs audit report listing any missing required fields.
 5. Skill does not rewrite entry bodies.
 
 **Expected outcome:**
-- TODOS.md now has preamble blockquote.
+- TODOS.md now has the canonical three-section layout with `NEXT_TODO_ID: <n>` under `## Metadata`.
+- The schema blockquote is under `## Entry Schema`, and active entries are under `## Entries`.
 - Entry bodies unchanged.
 - Report surfaces any schema violations.
 
@@ -106,12 +107,12 @@
 7. Skill creates `TODOS.md.backup.2026-07-13`.
 8. Skill shows preview gate with entry mapping, field transformations, status summary, and non-convertible list.
 9. User types `y`.
-10. Skill writes preamble + converted entries to TODOS.md, sets `NEXT_TODO_ID` to one greater than the highest assigned ID, and removes section headers.
+10. Skill writes `# TODOS`, `## Metadata`, `## Entry Schema`, and `## Entries` to TODOS.md, sets `NEXT_TODO_ID` under `## Metadata` to one greater than the highest assigned ID, and removes legacy grouping headers.
 11. Skill writes non-convertible entry to `TODOS-reference.md`.
 12. Skill prints "✓ Converted N entries. 1 entry saved to TODOS-reference.md. Z entries need user review for <<USER-REVIEW>> markers."
 
 **Expected outcome:**
-- TODOS.md has preamble blockquote + all entries in canonical `- [ ] TODO-N:` format.
+- TODOS.md has the canonical three-section layout and all converted entries under `## Entries` in canonical `- [ ] TODO-N:` format.
 - `## Open` / `## Completed` headers removed.
 - `**Resolution:**` renamed to `**Resolved design:**`.
 - `**Depends on / blocked by:**` renamed to `**Depends on:**`.
