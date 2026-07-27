@@ -49,7 +49,16 @@ def replace_next_todo_id_line(text: str, next_id: int) -> str:
     """Replace or insert the tracked next TODO ID preamble line."""
     replacement = f"> - NEXT_TODO_ID: {next_id}"
     if NEXT_TODO_ID_LINE_RE.search(text):
-        return NEXT_TODO_ID_LINE_RE.sub(replacement, text, count=1)
+        first_match = True
+
+        def replace_match(match: re.Match[str]) -> str:
+            nonlocal first_match
+            if first_match:
+                first_match = False
+                return replacement
+            return ""
+
+        return NEXT_TODO_ID_LINE_RE.sub(replace_match, text)
     marker = "> **Format rules (enforced by `todos-manager` skill):**"
     if marker in text:
         return text.replace(marker, marker + "\n" + replacement, 1)

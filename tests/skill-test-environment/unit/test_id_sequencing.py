@@ -122,6 +122,38 @@ class TestTrackedNextTodoId:
         assert "> - NEXT_TODO_ID: 5" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("inserted NEXT_TODO_ID: 5" in message for message in messages)
 
+    def test_reconcile_removes_duplicate_metadata_lines(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "> - NEXT_TODO_ID: 2\n"
+            "> - NEXT_TODO_ID: 9\n\n"
+            "- [ ] TODO-1: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        next_id, _ = reconcile_next_todo_id(tmp_path, mode="audit")
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert next_id == 2
+        assert updated.count("> - NEXT_TODO_ID:") == 1
+        assert "> - NEXT_TODO_ID: 2" in updated
+
+    def test_reconcile_repairs_malformed_present_value(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: invalid\n\n- [ ] TODO-4: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert next_id == 5
+        assert updated.count("> - NEXT_TODO_ID:") == 1
+        assert "> - NEXT_TODO_ID: 5" in updated
+        assert any("positive base-10 integer" in message for message in messages)
+
 
 class TestCounterCache:
     """Counter cache is performance-only; scan is authoritative."""
