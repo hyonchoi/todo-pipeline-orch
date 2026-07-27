@@ -1457,7 +1457,11 @@ def _cmd_config_path(args, config: Config | None) -> int:
 def _cmd_config_get(args, config: Config | None) -> int:
     """Handle 'config get <key>' — show effective value with source attribution."""
     from .config import Config
-    from .config_loader import find_config_file, validate_config_key
+    from .config_loader import (
+        find_config_file,
+        load_global_config_with_active_keys,
+        validate_config_key,
+    )
 
     try:
         key = validate_config_key(args.key)
@@ -1466,17 +1470,24 @@ def _cmd_config_get(args, config: Config | None) -> int:
         return 2
 
     try:
-        cfg = Config.from_env()
+        cfg, active_keys = load_global_config_with_active_keys()
     except ValueError as e:
         print(f"Warning: config file has errors: {e}")
         print("Falling back to defaults.")
         cfg = Config.default()
+        active_keys = set()
 
     value = getattr(cfg, key)
 
     # Determine source attribution
     default_cfg = Config.default()
-    if value != getattr(default_cfg, key):
+    if key in active_keys:
+        cfg_file = find_config_file()
+        source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
+    elif key == "projects_dir" and "PIPELINE_PROJECTS_DIR" in os.environ:
+        source = " (from env: PIPELINE_PROJECTS_DIR)"
+        value = Config.from_env().projects_dir
+    elif value != getattr(default_cfg, key):
         cfg_file = find_config_file()
         source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
     else:

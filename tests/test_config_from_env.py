@@ -31,12 +31,22 @@ def test_from_env_projects_dir_default(monkeypatch):
     assert cfg.projects_dir == Path.home() / "projects"
 
 
-def test_from_env_pipeline_projects_dir_ignored(monkeypatch, tmp_path):
-    """PIPELINE_PROJECTS_DIR no longer overrides the global config."""
+def test_from_env_pipeline_projects_dir_compat_alias(monkeypatch, tmp_path):
+    """PIPELINE_PROJECTS_DIR remains a deprecated fallback when no file sets it."""
     monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     cfg = Config.from_env()
-    assert cfg.projects_dir == Path.home() / "projects"
+    assert cfg.projects_dir == tmp_path / "projects"
+
+
+def test_from_env_config_projects_dir_beats_compat_alias(monkeypatch, tmp_path):
+    """File config wins over the deprecated PIPELINE_PROJECTS_DIR alias."""
+    f = tmp_path / "config.yaml"
+    f.write_text(f"projects_dir: {tmp_path / 'from-file'}\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
+    monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "from-env"))
+    cfg = Config.from_env()
+    assert cfg.projects_dir == tmp_path / "from-file"
 
 
 def test_from_env_no_config_file_uses_default(monkeypatch):

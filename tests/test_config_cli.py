@@ -102,6 +102,29 @@ def test_config_get_from_file(monkeypatch, tmp_path, capsys):
     assert "#config-alerts" in captured.out
 
 
+def test_config_get_initialized_default_from_file(monkeypatch, tmp_path, capsys):
+    """Active default-valued entries are still attributed to the config file."""
+    f = tmp_path / "config.yaml"
+    f.write_text("projects_dir: ~/projects\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
+    exit_code = main(["config", "get", "projects_dir"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert "projects_dir:" in captured.out
+    assert "from file" in captured.out
+
+
+def test_config_get_pipeline_projects_dir_compat_alias(monkeypatch, tmp_path, capsys):
+    """tpo config get reports the deprecated projects_dir env fallback."""
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "missing.yaml"))
+    monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
+    exit_code = main(["config", "get", "projects_dir"])
+    assert exit_code == 0
+    captured = capsys.readouterr()
+    assert str(tmp_path / "projects") in captured.out
+    assert "PIPELINE_PROJECTS_DIR" in captured.out
+
+
 def test_config_get_env_override(monkeypatch, tmp_path, capsys):
     """tpo config get ignores PIPELINE_* env vars for config entries."""
     f = tmp_path / "config.yaml"

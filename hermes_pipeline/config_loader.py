@@ -12,6 +12,16 @@ from .config import Config
 
 # Resolve stringified annotations from `from __future__ import annotations`
 _config_field_hints = typing.get_type_hints(Config)
+_LEGACY_CONFIG_KEYS = {
+    "lock_dir",
+    "claude_cmd",
+    "checkpoint_subdir",
+    "ready_for_review_subdir",
+    "counter_file_subpath",
+    "default_timeout",
+    "kanban_adapter",
+    "kanban_outbox_cap",
+}
 
 
 # -- XDG search paths --
@@ -99,9 +109,14 @@ def validate_config_value(value: str, key: str):
 
 
 def load_global_config() -> Config:
+    config, _active_keys = load_global_config_with_active_keys()
+    return config
+
+
+def load_global_config_with_active_keys() -> tuple[Config, set[str]]:
     config_file = find_config_file()
     if config_file is None:
-        return Config.default()
+        return Config.default(), set()
 
     if config_file.is_symlink():
         raise ValueError(
@@ -115,7 +130,7 @@ def load_global_config() -> Config:
         raise ValueError(f"YAML parse error in {config_file}: {e}")
 
     if raw is None:
-        return Config.default()
+        return Config.default(), set()
     if not isinstance(raw, dict):
         raise ValueError(
             f"Config file {config_file} must contain a YAML mapping. "
@@ -125,7 +140,7 @@ def load_global_config() -> Config:
     return _coerce_config(raw, config_file)
 
 
-def _coerce_config(raw: dict, source: Path) -> Config:
+def _coerce_config(raw: dict, source: Path) -> tuple[Config, set[str]]:
     field_names = set(_config_field_hints.keys())
     overrides = {}
     errors = []
@@ -134,6 +149,8 @@ def _coerce_config(raw: dict, source: Path) -> Config:
         if key.startswith("_"):
             continue
         if key not in field_names:
+            if key in _LEGACY_CONFIG_KEYS:
+                continue
             errors.append(
                 f"unknown config key {key!r} in {source} — "
                 f"valid keys: {', '.join(sorted(field_names))}"
@@ -151,9 +168,9 @@ def _coerce_config(raw: dict, source: Path) -> Config:
         )
 
     if not overrides:
-        return Config.default()
+        return Config.default(), set()
 
-    return dataclasses.replace(Config.default(), **overrides)
+    return dataclasses.replace(Config.default(), **overrides), set(overrides)
 
 
 # -- YAML formatting --

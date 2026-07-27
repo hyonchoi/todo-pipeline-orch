@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 
@@ -20,9 +21,13 @@ class Config:
 
     @classmethod
     def from_env(cls) -> Config:
-        from .config_loader import load_global_config
+        from .config_loader import load_global_config_with_active_keys
 
-        return load_global_config()
+        config, active_keys = load_global_config_with_active_keys()
+        projects_dir = os.environ.get("PIPELINE_PROJECTS_DIR")
+        if projects_dir is None or "projects_dir" in active_keys:
+            return config
+        return replace(config, projects_dir=Path(projects_dir).expanduser())
 
 @dataclass(frozen=True)
 class SelectionConfig:

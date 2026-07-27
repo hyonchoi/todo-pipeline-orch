@@ -298,6 +298,19 @@ def test_load_global_config_unknown_key_raises(monkeypatch, tmp_path):
         load_global_config()
 
 
+def test_load_global_config_legacy_removed_keys_are_ignored(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text(
+        "projects_dir: /opt\n"
+        "claude_cmd: claude-code\n"
+        "lock_dir: /tmp/locks\n"
+        "kanban_adapter: hermes\n"
+    )
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(cfg))
+    config = load_global_config()
+    assert config.projects_dir == Path("/opt")
+
+
 def test_load_global_config_underscore_key_skipped(monkeypatch, tmp_path):
     cfg = tmp_path / "config.yaml"
     cfg.write_text("_internal: something\nprojects_dir: /opt\n")
