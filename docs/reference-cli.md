@@ -33,7 +33,10 @@ uv run tpo tick myproject    # tick one project
 4. Run Hermes agent selection on TODOS.md
 5. Register kanban phases with `--parent` dependency chains
 
-Without a project argument, scans all subdirectories of `PIPELINE_PROJECTS_DIR` for `TODOS.md` files. Per-project locks isolate failures — one project's held lock does not block others. Scan order rotates each tick for fairness.
+Without a project argument, scans all subdirectories of the global
+`projects_dir` for `TODOS.md` files. Per-project locks isolate failures — one
+project's held lock does not block others. Scan order rotates each tick for
+fairness.
 
 ---
 
@@ -186,11 +189,16 @@ uv run tpo test --fixture happy-path --convergence-threshold 2
 
 ## Environment Variables
 
+Machine-level defaults live in the global config file. Create it with
+`tpo config init`, then edit it directly or use `tpo config set <key> <value>`.
+The generated file includes active defaults for `projects_dir`, `state_dir`,
+`log_file_subpath`, `log_retention_days`, and `slack_channel`.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PIPELINE_PROJECTS_DIR` | `~/projects` | Directory to scan for project `TODOS.md` files |
-| `PIPELINE_STATE_DIR` | `~/.hermes` | Global state directory |
-| `PIPELINE_SLACK_CHANNEL` | `#alert` | Default Slack channel (overridden by per-project config) |
+| `PIPELINE_PROJECTS_DIR` | `~/projects` | Deprecated compatibility override for `projects_dir`; prefer `tpo config set projects_dir <path>` |
+| `PIPELINE_STATE_DIR` | `~/.hermes` | Environment override for the global state directory |
+| `PIPELINE_SLACK_CHANNEL` | `#alert` | Environment override for the default Slack channel; per-project config still wins |
 
 ## See Also
 

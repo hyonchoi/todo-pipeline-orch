@@ -14,13 +14,17 @@ multiple projects for the scan loop.
 
 ### Setting the Projects Directory
 
-If your projects live outside `~/projects`, set the environment variable:
+If your projects live outside `~/projects`, set `projects_dir` in the global
+config file:
 
 ```bash
-export PIPELINE_PROJECTS_DIR=/path/to/your/projects
+tpo config init
+tpo config set projects_dir /path/to/your/projects
 ```
 
-This cannot be configured via `.hermes/config.toml` — it must be set as an environment variable.
+`PIPELINE_PROJECTS_DIR` is still available as an environment override for
+one-off runs. `.hermes/config.toml` is per-project and does not set the global
+scan directory.
 
 ### Per-Project Configuration
 

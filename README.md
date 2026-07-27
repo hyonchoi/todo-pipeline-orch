@@ -174,12 +174,14 @@ Use the global config file for machine-level defaults, including the project
 scan directory:
 
 ```bash
+tpo config init
 tpo config set projects_dir ~/my-projects
 tpo config get projects_dir
 tpo config path
 ```
 
-The default config path is `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`.
+`tpo config init` creates a config file with active default values. The default
+config path is `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`.
 For isolated tests or one-off runs, `TPO_CONFIG_FILE=/path/to/config.yaml`
 points `tpo` at a specific config file.
 

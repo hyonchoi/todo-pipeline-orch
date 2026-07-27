@@ -33,7 +33,7 @@ The package is organized into lanes — loosely coupled subsystems with well-def
 ```
 hermes_pipeline/
 ├── cli.py                    # CLI entry point (argparse subcommands)
-├── config.py                 # Configuration loading (env vars + TOML overlay)
+├── config.py                 # Configuration loading (global config, env overrides, TOML overlay)
 ├── circuit.py                # Circuit breaker (no-progress tracking, Slack alerts)
 ├── counter.py                # TODO ID counter management
 ├── contract.py               # Pipeline execution contract (schema, load, validate, capabilities)

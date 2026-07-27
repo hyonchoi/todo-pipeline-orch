@@ -80,13 +80,16 @@ You now have a project that tpo can discover. Next, tell tpo where to find it.
 
 ## Step 3: Configure tpo
 
-Pipeline-watch discovers projects by scanning a directory you specify via `PIPELINE_PROJECTS_DIR`. The default is `~/projects`. Tell it where your projects are:
+Pipeline-watch discovers projects by scanning the `projects_dir` from the global
+tpo config file. The default is `~/projects`. Tell it where your projects are:
 
 ```bash
-export PIPELINE_PROJECTS_DIR=~/my-projects
+tpo config init
+tpo config set projects_dir ~/my-projects
 ```
 
-(In production, you'd add this to your shell profile or systemd environment file.)
+For one-off runs, `PIPELINE_PROJECTS_DIR` still works as an environment override,
+but the config file is the preferred persistent setting.
 
 Verify the configuration by checking that the default pipeline contract was written:
 
