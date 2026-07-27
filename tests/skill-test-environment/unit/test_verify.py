@@ -61,8 +61,11 @@ class TestRunStructural:
         golden = load_golden(skill_golden_dir / "init_output.yaml")
         todos = (
             "# TODOS\n\n"
+            "## Metadata\n\n"
             "NEXT_TODO_ID: 1\n\n"
-            "> **Format rules (enforced by `todos-manager` skill):**\n"
+            "## Entry Schema\n\n"
+            "> **Format rules (enforced by `todos-manager` skill):**\n\n"
+            "## Entries\n"
         )
         archive = "# TODOS Archive\n\nCompleted TODOs, archived via `todos-manager --archive`.\n"
 

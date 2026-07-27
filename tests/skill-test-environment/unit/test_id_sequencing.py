@@ -94,6 +94,89 @@ class TestComputeNextId:
 class TestTrackedNextTodoId:
     """Tracked metadata is reconciled against the scan-derived next ID."""
 
+    def test_assign_next_todo_id_appends_under_entries_section(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Existing** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n",
+            encoding="utf-8",
+        )
+
+        assigned, messages = assign_next_todo_id(
+            tmp_path,
+            lambda todo_id: (
+                f"- [ ] **TODO-{todo_id}: Added** — Summary\n"
+                "  - **What:** Work\n"
+                "  - **Why:** Reason\n"
+                "  - **Decisions:** Priority `P1`"
+            ),
+        )
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert assigned == 8
+        assert messages == []
+        assert updated.index("TODO-8: Added") > updated.index("## Entries")
+        assert updated.index("TODO-8: Added") > updated.index("TODO-7: Existing")
+        assert updated.index("NEXT_TODO_ID: 9") < updated.index("## Entry Schema")
+
+    def test_reconcile_migrates_legacy_layout_to_sections(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "NEXT_TODO_ID: 2\n\n"
+            "> **Format rules:**\n"
+            "> - Entry header: example\n\n"
+            "- [ ] **TODO-1: Existing** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n",
+            encoding="utf-8",
+        )
+
+        reconciled, messages = reconcile_next_todo_id(tmp_path, "audit")
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert reconciled == 2
+        assert "## Metadata\n\nNEXT_TODO_ID: 2" in updated
+        assert "## Entry Schema\n\n> **Format rules:**" in updated
+        assert "## Entries\n\n- [ ] **TODO-1: Existing**" in updated
+        assert any(
+            "inserted NEXT_TODO_ID" in message
+            or "corrected NEXT_TODO_ID" in message
+            for message in messages
+        )
+
+    def test_reconcile_repairs_misplaced_metadata_under_entries(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Existing** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n\n"
+            "NEXT_TODO_ID: 99\n",
+            encoding="utf-8",
+        )
+
+        reconciled, messages = reconcile_next_todo_id(tmp_path, "audit")
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert reconciled == 8
+        assert updated.count("NEXT_TODO_ID:") == 1
+        assert "## Metadata\n\nNEXT_TODO_ID: 8" in updated
+        assert "NEXT_TODO_ID: 99" not in updated
+        assert any("outside ## Metadata" in message for message in messages)
+
     def test_atomic_update_todos_rolls_back_when_replace_fails(self, tmp_path, monkeypatch):
         from tests.skill_test_environment import skill_logic
 
@@ -129,7 +212,9 @@ class TestTrackedNextTodoId:
 
     def test_assign_next_todo_id_repairs_stale_high_tracked_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\nNEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
+            "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 50\n\n"
+            "## Entry Schema\n\n> **Format rules:**\n\n"
+            "## Entries\n\n- [ ] TODO-7: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
@@ -282,7 +367,9 @@ class TestTrackedNextTodoId:
 
     def test_reconcile_repairs_stale_low_value_from_archive(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\nNEXT_TODO_ID: 3\n\n- [ ] TODO-1: A\n",
+            "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 3\n\n"
+            "## Entry Schema\n\n> **Format rules:**\n\n"
+            "## Entries\n\n- [ ] TODO-1: A\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text(
@@ -297,7 +384,9 @@ class TestTrackedNextTodoId:
 
     def test_reconcile_repairs_stale_high_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\nNEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
+            "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 50\n\n"
+            "## Entry Schema\n\n> **Format rules:**\n\n"
+            "## Entries\n\n- [ ] TODO-7: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
@@ -362,7 +451,9 @@ class TestTrackedNextTodoId:
 
     def test_reconcile_repairs_malformed_present_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\nNEXT_TODO_ID: invalid\n\n- [ ] TODO-4: Existing\n",
+            "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: invalid\n\n"
+            "## Entry Schema\n\n> **Format rules:**\n\n"
+            "## Entries\n\n- [ ] TODO-4: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")

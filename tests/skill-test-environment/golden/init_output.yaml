@@ -7,7 +7,9 @@ preconditions:
 assertions:
   - file_exists: TODOS.md
   - file_exists: TODOS-archive.md
-  - preamble_present: true
+  - regex_present: "^## Metadata$"
+  - regex_present: "^## Entry Schema$"
+  - regex_present: "^## Entries$"
   - regex_count:
       pattern: "^- \\[.\\] TODO-\\d+:"
       count: 0

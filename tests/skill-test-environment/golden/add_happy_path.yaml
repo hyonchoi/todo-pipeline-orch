@@ -11,7 +11,9 @@ assertions:
       pattern: "^- \\[.\\] TODO-\\d+:"
       count: 7
   - regex_present: "^- \\[ \\] TODO-8:"
-  - preamble_present: true
+  - regex_present: "^## Metadata$"
+  - regex_present: "^## Entry Schema$"
+  - regex_present: "^## Entries$"
   - max_id: 8
   - no_duplicate_ids: true
   - regex_present: "^NEXT_TODO_ID: 9$"

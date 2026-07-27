@@ -343,7 +343,13 @@ def assign_next_todo_id(
             assigned = tracked
         messages.extend(issues)
         updated = replace_next_todo_id_line(text, assigned + 1)
-        return updated.rstrip() + "\n\n" + entry_builder(assigned).rstrip() + "\n"
+        entry = entry_builder(assigned).rstrip()
+        sections = parse_todos_document_sections(updated)
+        if sections.has_canonical_layout:
+            existing_entries = sections.entries.rstrip()
+            combined_entries = f"{existing_entries}\n\n{entry}" if existing_entries else entry
+            return _replace_entries_section(updated, combined_entries)
+        return updated.rstrip() + "\n\n" + entry + "\n"
 
     atomic_update_todos(todos_path, transform)
     return assigned, messages
@@ -362,13 +368,13 @@ def reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]
         reconciled_id = compute_scan_next_id(todos_path, archive_path)
         if tracked == reconciled_id and not issues:
             return text
+        messages.extend(issues)
         if tracked is None:
             messages.append(f"{mode}: inserted NEXT_TODO_ID: {reconciled_id}")
         else:
             messages.append(
                 f"{mode}: corrected NEXT_TODO_ID from {tracked} to {reconciled_id}"
             )
-        messages.extend(issues)
         return replace_next_todo_id_line(text, reconciled_id)
 
     atomic_update_todos(todos_path, transform)
