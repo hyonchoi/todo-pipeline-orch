@@ -60,7 +60,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [TODOS Manager skill](hermes_pipeline/data/skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 7 subcommands |
 | [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step: init, add, revise, archive a completed TODO |
 | [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using --init, --add, --convert, --audit, --archive, --list, --revise |
-| [Install TODOS Manager](tpo-skills-install) | How-to | Run `tpo skills install --help` to install todos-manager to user-level skill directories |
+| [Install TODOS Manager](#todos-manager-skill-v2) | How-to | Run `tpo skills install --help` to install todos-manager to user-level skill directories |
 | [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for the todos-manager skill |
 | [Skill test environment quickstart](docs/howto-skill-test-environment.md) | How-to | Adding and maintaining tests in the skill test harness |
 | [Skill test harness API](docs/reference-skill-test-harness.md) | Reference | Complete API for the todos-manager skill test environment |
@@ -126,7 +126,7 @@ Approve and ship a ready TODO (runs deterministic guards, bumps version, squash-
 uv run tpo approve myproject --todo TODO-5
 ```
 
-Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful when bootstrapping a project with hand-written TODOs but no counter file):
+Recover the TODO ID counter cache from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files:
 ```bash
 uv run tpo recover-counter <project>
 ```

@@ -80,7 +80,7 @@ Counter set to 5 for project my-project
 
 - **Never decreases the counter.** If the counter file says 8 and TODOS.md has TODO-4, the counter stays at 8. This prevents ID resurrection when completed TODOs were removed.
 - **Creates `.hermes/` if needed.** If the directory doesn't exist, it's created automatically.
-- **Atomic write.** Uses a temp file + rename so a crash mid-write leaves a partial file (which the reader treats as 0) rather than a corrupted counter. The committed HEAD uses `counter_path.write_text()` — the temp+rename approach is in the working tree.
+- **Atomic write.** Uses a same-directory temp file plus `os.replace()` so a crash before replacement leaves the prior counter intact.
 - **Corrupt counter recovery.** If the counter file contains non-integer text, it's treated as 0 and replaced with the scanned maximum.
 
 ### Error cases

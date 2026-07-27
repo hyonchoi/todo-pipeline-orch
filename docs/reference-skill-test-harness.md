@@ -40,6 +40,18 @@ The tracked preamble line used by `todos-manager --add` on the common path. The 
 
 ### ID Management
 
+#### `read_next_todo_id(text: str) -> tuple[int | None, list[str]]`
+
+Read and validate the tracked `NEXT_TODO_ID` line from the TODOS.md preamble. Returns the parsed value and a list of validation issues.
+
+#### `replace_next_todo_id_line(text: str, next_id: int) -> str`
+
+Replace the first tracked `NEXT_TODO_ID` preamble line, remove duplicate tracked lines, or insert the line into the preamble when it is missing.
+
+#### `reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]]`
+
+Under the TODO write lock, reconcile tracked metadata against active plus archived IDs and return the usable next ID plus any repair messages.
+
 #### `scan_ids(text: str) -> set[int]`
 
 Parse all TODO-N IDs from markdown text.
@@ -317,7 +329,7 @@ golden = load_golden(Path("tests/skill-test-environment/golden/add_happy_path.ya
 # Returns: {"subcommand": "add", "assertions": [...], ...}
 ```
 
-#### `run_structural(golden: dict, todos_text: str, archive_text: Optional[str] = None) -> dict`
+#### `run_structural(golden: dict, todos_text: str, archive_text: str | None = None, audit_report: str = "") -> dict`
 
 Run all structural assertions from a golden file against actual file content.
 
@@ -325,6 +337,7 @@ Run all structural assertions from a golden file against actual file content.
 - `golden` — Dictionary returned by `load_golden()`
 - `todos_text` — Actual TODOS.md content
 - `archive_text` — Actual TODOS-archive.md content (defaults to empty string)
+- `audit_report` — Optional text output from `--audit`, used by audit-report assertions
 
 **Returns:** Result dictionary:
 ```python
@@ -356,7 +369,7 @@ if result["failed"] > 0:
             print(f"  - {r['detail']}")
 ```
 
-#### `assert_golden(golden_path: Path, todos_text: str, archive_text: str = "") -> None`
+#### `assert_golden(golden_path: Path, todos_text: str, archive_text: str = "", audit_report: str = "") -> None`
 
 Run golden assertions and raise `AssertionError` on first failure.
 
@@ -364,6 +377,7 @@ Run golden assertions and raise `AssertionError` on first failure.
 - `golden_path` — Path to golden YAML file
 - `todos_text` — Actual TODOS.md content
 - `archive_text` — Actual TODOS-archive.md content
+- `audit_report` — Optional text output from `--audit`, used by audit-report assertions
 
 **Raises:** `AssertionError` with detailed failure messages if any assertion fails
 
@@ -393,6 +407,7 @@ Golden YAML files declare assertions using one key per assertion. The `verify.py
 - `regex_count: {pattern: "...", count: N}` — Exact count in TODOS.md
 - `regex_count: {pattern: "...", count_in_todos: N, count_in_archive: M}` — Split count
 - `regex_present: "..."` — Pattern found in TODOS.md
+- `audit_report_regex_present: "..."` — Pattern found in the supplied audit report text
 
 #### Entry Counts
 

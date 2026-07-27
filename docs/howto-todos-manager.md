@@ -131,7 +131,7 @@ todos-manager --convert
 3. Scans each entry for required fields and valid status markers
 4. Outputs an audit report listing any issues
 
-**What it does NOT do:** Rewrite entry bodies or auto-fix missing fields. It reports only.
+**What it does NOT do:** Auto-fill missing fields. Canonical entries keep their bodies unchanged; header-based legacy entries are converted into the canonical entry shape.
 
 **Example output:**
 ```
@@ -145,7 +145,7 @@ Issues found: 2
 - TODO-3: Missing required field **Decisions:**
 - TODO-7: Status marker `[->]` — expected `[→]`
 
-ID gap check: OK (max=11, counter=11)
+NEXT_TODO_ID: 12 (valid)
 ```
 
 ## Audit TODOS.md for compliance
@@ -287,7 +287,7 @@ After any subcommand, verify the result:
 
 - **`--init`:** `head -10 TODOS.md` shows the preamble blockquote; `cat TODOS-archive.md` shows the header
 - **`--add`:** Tail of TODOS.md contains the new entry with all required fields
-- **`--convert`:** TODOS.md has the preamble; entry bodies are unchanged
+- **`--convert`:** TODOS.md has the preamble; canonical entry bodies are unchanged, while header-based legacy entries are converted to the canonical format
 - **`--audit`:** A structured report with zero or more issues
 - **`--archive`:** TODOS.md has fewer entries; TODOS-archive.md has the moved entries
 - **`--list`:** A markdown table matching the current entries in TODOS.md (and TODOS-archive.md if `--all`)

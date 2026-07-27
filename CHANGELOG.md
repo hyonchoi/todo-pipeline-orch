@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tpo recover-counter` now rebuilds the legacy counter cache from tracked TODO metadata when the tracked state is valid.
 
 ### Fixed
-- Skill install and uninstall now preflight all selected targets before mutating any of them.
+- Skill install and uninstall now preflight all selected targets before replacing or removing installed skills.
 - Failed skill replacement or uninstall cleanup now preserves recoverable backups and reports failure instead of pretending the operation fully succeeded.
 - Stale, duplicated, malformed, CRLF, and archive-only TODO ID metadata now reconcile consistently across the bundled skill docs and the executable test oracle.
 

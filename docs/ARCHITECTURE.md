@@ -104,7 +104,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ├── ready_for_review/          # TODOs ready for human review
 ├── phase_started/             # In-flight phase markers
 ├── tick.lock/                 # Global tick lock (atomic mkdir)
-├── todo_id_counter            # Monotonic TODO ID counter
+├── todo_id_counter            # Compatibility cache for tracked TODO IDs
 ├── config.toml                # Per-project config overlay
 ├── project.toml               # Project marker (enabled/slack_channel)
 ├── pipeline.toml              # Pipeline execution contract (assignee, capabilities)
