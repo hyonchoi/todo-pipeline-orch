@@ -29,9 +29,9 @@ def recover_counter(project_dir: Path) -> int:
     "todo_id_counter". Legacy files without valid tracked state fall back to
     the maximum N in TODO-N patterns and preserve a higher existing counter.
 
-    If the counter file exists and has a higher value than the scanned max
-    (e.g., completed TODOs were removed), the existing counter is preserved.
-    This prevents ID resurrection.
+    During legacy recovery only, if the counter file exists and has a higher
+    value than the scanned max (e.g., completed TODOs were removed), the
+    existing counter is preserved. This prevents ID resurrection.
 
     Args:
         project_dir: Path to the project root (containing TODOS.md).
