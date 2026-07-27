@@ -5,7 +5,7 @@ This guide covers the seven subcommands of the `todos-manager` skill for adding,
 - **`--init`** — create TODOS.md with schema preamble and TODOS-archive.md
 - **`--add`** — add a new entry with field prompts and a preview gate
 - **`--convert`** — add the schema preamble to an existing TODOS.md
-- **`--audit`** — check format compliance without modifying files
+- **`--audit`** — check format compliance and reconcile invalid tracked ID metadata
 - **`--archive`** — move completed `[x]` entries to TODOS-archive.md
 - **`--list`** — display active TODO entries as a table (`--all` also shows archived)
 - **`--revise`** — fill missing or weak fields in an existing entry with AI-pre-filled suggestions
@@ -150,7 +150,7 @@ ID gap check: OK (max=11, counter=11)
 
 ## Audit TODOS.md for compliance
 
-Run a format compliance check without modifying any files:
+Run a format compliance check. It modifies `TODOS.md` only when it must reconcile missing, malformed, stale, duplicated, or conflicting `NEXT_TODO_ID` metadata:
 
 ```bash
 todos-manager --audit

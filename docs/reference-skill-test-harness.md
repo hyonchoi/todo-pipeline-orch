@@ -482,7 +482,7 @@ The `golden/` subdirectory contains YAML assertion descriptors for skill subcomm
 
 ### `add_happy_path.yaml`
 
-Scenario: Adding a new entry to demo-project TODOS.md results in 7 entries, with tracked next ID 8.
+Scenario: Adding `TODO-8` to demo-project TODOS.md results in 7 entries and advances `NEXT_TODO_ID` to 9.
 
 **Preconditions:** Demo TODOS.md with max ID 7
 

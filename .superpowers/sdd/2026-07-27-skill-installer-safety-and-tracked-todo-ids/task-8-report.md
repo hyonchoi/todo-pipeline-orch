@@ -37,3 +37,17 @@ archived TODO IDs is documented only for reconciliation or legacy recovery.
 ## Concerns
 
 - `uv` emits a non-failing warning that the base checkout's `VIRTUAL_ENV` does not match this worktree's `.venv`; it ignored that variable and used the worktree environment successfully.
+
+## Review Fixes
+
+Addressed the Task 8 review's important findings:
+
+- `docs/ARCHITECTURE.md` now distinguishes immutable assigned `TODO-<n>` IDs from the `NEXT_TODO_ID` counter, which advances after a successful add.
+- `docs/howto-todos-manager.md` now consistently says that `--audit` can modify `TODOS.md` only to reconcile invalid tracked metadata.
+- `docs/reference-skill-test-harness.md` now states that adding `TODO-8` advances `NEXT_TODO_ID` to `9`, matching `add_happy_path.yaml`.
+
+### Focused Verification
+
+- `uv run pytest tests/skill-test-environment -v`: 67 passed in 0.12s.
+- `uv run pytest tests/skill-test-environment/unit/test_id_sequencing.py::TestTrackedNextTodoId::test_assign_next_todo_id_repairs_conflict_before_returning -v`: 1 passed in 0.15s; confirms assigning `TODO-8` writes `NEXT_TODO_ID: 9`.
+- `git diff --check`: passed before commit.

@@ -150,7 +150,7 @@ The `todos-manager` skill enforces the canonical TODOS.md schema and provides se
 The skill source lives at `hermes_pipeline/data/skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `tpo skills install --target all`. The skill enforces:
 - Required fields: **What:**, **Why:**, **Decisions:**
 - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
-- Stable TODO-<n> IDs: `NEXT_TODO_ID` in the preamble is the common-path source and is immutable once committed; active and archived IDs are scanned only for reconciliation
+- Stable TODO-<n> IDs: assigned `TODO-<n>` IDs are immutable once committed; `NEXT_TODO_ID` in the preamble is the common-path source and advances after each successful add, while active and archived IDs are scanned only for reconciliation
 - Preamble blockquote at top of TODOS.md documenting the schema, including `> - NEXT_TODO_ID: <n>`
 
 The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. This Phase 1 harness provides pure-Python implementations of skill rules that serve as the test oracle, enabling instant feedback without API tokens. See:
