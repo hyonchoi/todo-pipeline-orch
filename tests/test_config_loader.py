@@ -102,6 +102,7 @@ def test_find_config_file_none_when_missing(monkeypatch, tmp_path):
 
 
 def test_default_config_path_returns_first_path(monkeypatch):
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     assert default_config_path() == Path.home() / ".config" / "tpo" / "config.yaml"
@@ -463,6 +464,7 @@ def test_integration_init_set_get_load(monkeypatch, tmp_path):
     from hermes_pipeline.config import Config
     from hermes_pipeline.config_loader import default_config_path
 
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_DIR", str(tmp_path))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     monkeypatch.delenv("PIPELINE_SLACK_CHANNEL", raising=False)
@@ -515,6 +517,7 @@ def test_integration_config_set_preserves_skeleton(monkeypatch, tmp_path):
     from hermes_pipeline.cli import main
 
     xdg = tmp_path / "xdg"
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
 

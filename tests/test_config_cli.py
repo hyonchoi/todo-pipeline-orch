@@ -9,6 +9,7 @@ except ImportError:
 def test_config_init_creates_file(monkeypatch, tmp_path):
     """tpo config init creates skeleton file at default path."""
     xdg = tmp_path / "xdg"
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     exit_code = main(["config", "init"])
@@ -23,6 +24,7 @@ def test_config_init_refuses_existing(monkeypatch, tmp_path):
     xdg = tmp_path / "xdg"
     (xdg / "tpo").mkdir(parents=True)
     (xdg / "tpo" / "config.yaml").write_text("existing")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     exit_code = main(["config", "init"])
@@ -34,6 +36,7 @@ def test_config_init_force_overwrites(monkeypatch, tmp_path):
     xdg = tmp_path / "xdg"
     (xdg / "tpo").mkdir(parents=True)
     (xdg / "tpo" / "config.yaml").write_text("existing")
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     exit_code = main(["config", "init", "--force"])
