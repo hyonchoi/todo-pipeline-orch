@@ -175,18 +175,18 @@ def _format_value(value, key: str) -> str:
     return str(value)
 
 
-# -- SKELETON template --
+# -- Config template --
 
 SKELETON = """\
 # tpo global configuration
 # Created by `tpo config init`
 #
-# Uncomment and edit any field to override the built-in default.
+# Edit any field to override the built-in default.
 # Run `tpo config get <key>` to see the effective value with source attribution.
 
-# projects_dir: ~/projects
-# state_dir: ~/.hermes
-# log_file_subpath: pipeline.log
-# log_retention_days: 7
-# slack_channel: ""
+projects_dir: ~/projects
+state_dir: ~/.hermes
+log_file_subpath: pipeline.log
+log_retention_days: 7
+slack_channel: ""
 """

@@ -1420,7 +1420,7 @@ def _cmd_skills_install(args, config: Config | None) -> int:
 
 
 def _cmd_config_init(args, config: Config | None) -> int:
-    """Handle 'config init' — create a skeleton config file at the default path."""
+    """Handle 'config init' — create a default config file at the default path."""
     from .config_loader import SKELETON, default_config_path
 
     path = default_config_path()

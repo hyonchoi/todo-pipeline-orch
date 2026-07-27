@@ -354,7 +354,7 @@ def test_skeleton_has_header():
     assert "# tpo global configuration" in SKELETON
 
 
-def test_skeleton_all_fields_commented():
+def test_skeleton_includes_all_fields():
     for field in dataclasses.fields(Config):
         assert field.name in SKELETON
 
@@ -362,11 +362,17 @@ def test_skeleton_all_fields_commented():
 import dataclasses
 
 
-def test_skeleton_no_uncommented_fields():
-    for line in SKELETON.splitlines():
-        stripped = line.strip()
-        if stripped and not stripped.startswith("#"):
-            pytest.fail(f"SKELETON should have no uncommented lines, got: {stripped}")
+def test_skeleton_has_active_default_fields():
+    import yaml
+
+    raw = yaml.safe_load(SKELETON)
+    assert raw == {
+        "projects_dir": "~/projects",
+        "state_dir": "~/.hermes",
+        "log_file_subpath": "pipeline.log",
+        "log_retention_days": 7,
+        "slack_channel": "",
+    }
 
 
 # ============================================================
@@ -439,6 +445,8 @@ def test_integration_init_set_get_load(monkeypatch, tmp_path):
     # Init
     assert main(["config", "init"]) == 0
     assert default_config_path().exists()
+    cfg0 = Config.from_env()
+    assert cfg0 == Config.default()
 
     # Set
     assert main(["config", "set", "slack_channel", "#config-alerts"]) == 0
