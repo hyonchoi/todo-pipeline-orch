@@ -123,20 +123,26 @@ def reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]
     """Repair tracked metadata so it agrees with the scan-derived ID."""
     todos_path = project_dir / "TODOS.md"
     archive_path = project_dir / "TODOS-archive.md"
-    text = todos_path.read_text(encoding="utf-8")
-    tracked, issues = read_next_todo_id(text)
-    scanned_next = compute_scan_next_id(todos_path, archive_path)
     messages: list[str] = []
-    if tracked == scanned_next and not issues:
-        return tracked, messages
-    updated = replace_next_todo_id_line(text, scanned_next)
-    todos_path.write_text(updated, encoding="utf-8")
-    if tracked is None:
-        messages.append(f"{mode}: inserted NEXT_TODO_ID: {scanned_next}")
-    else:
-        messages.append(f"{mode}: corrected NEXT_TODO_ID from {tracked} to {scanned_next}")
-    messages.extend(issues)
-    return scanned_next, messages
+    reconciled_id = 1
+
+    def transform(text: str) -> str:
+        nonlocal reconciled_id
+        tracked, issues = read_next_todo_id(text)
+        reconciled_id = compute_scan_next_id(todos_path, archive_path)
+        if tracked == reconciled_id and not issues:
+            return text
+        if tracked is None:
+            messages.append(f"{mode}: inserted NEXT_TODO_ID: {reconciled_id}")
+        else:
+            messages.append(
+                f"{mode}: corrected NEXT_TODO_ID from {tracked} to {reconciled_id}"
+            )
+        messages.extend(issues)
+        return replace_next_todo_id_line(text, reconciled_id)
+
+    atomic_update_todos(todos_path, transform)
+    return reconciled_id, messages
 
 
 COUNTER_FILE = ".hermes/todo_id_counter"

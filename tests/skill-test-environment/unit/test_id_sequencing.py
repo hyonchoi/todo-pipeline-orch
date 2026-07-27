@@ -1,5 +1,6 @@
 """Tests for ID sequencing logic — scanning, next-ID computation, counter cache."""
 
+import multiprocessing as mp
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,12 @@ from tests.skill_test_environment.skill_logic import (
     reconcile_next_todo_id,
     scan_ids,
 )
+
+
+def _assign_todo_id_in_process(project_dir: str, start_event, results) -> None:
+    """Reserve an ID after both worker processes have been started."""
+    start_event.wait()
+    results.put(assign_next_todo_id(Path(project_dir))[0])
 
 
 class TestScanIds:
@@ -113,6 +120,72 @@ class TestTrackedNextTodoId:
         assert assigned == 8
         assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID" in message for message in messages)
+
+    def test_assign_next_todo_id_serializes_competing_writers(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 1\n", encoding="utf-8"
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+        context = mp.get_context("spawn")
+        start_event = context.Event()
+        results = context.Queue()
+        workers = [
+            context.Process(
+                target=_assign_todo_id_in_process,
+                args=(str(tmp_path), start_event, results),
+            )
+            for _ in range(2)
+        ]
+        for worker in workers:
+            worker.start()
+        start_event.set()
+
+        assigned = sorted(results.get(timeout=5) for _ in workers)
+        for worker in workers:
+            worker.join(timeout=5)
+            assert worker.exitcode == 0
+
+        assert assigned == [1, 2]
+        assert "> - NEXT_TODO_ID: 3" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+
+    def test_assign_next_todo_id_removes_temporary_file_when_replace_fails(
+        self, tmp_path, monkeypatch
+    ):
+        from tests.skill_test_environment import skill_logic
+
+        todos = tmp_path / "TODOS.md"
+        original = "# TODOS\n\n> - NEXT_TODO_ID: 1\n"
+        todos.write_text(original, encoding="utf-8")
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        def fail_replace(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(skill_logic.os, "replace", fail_replace)
+
+        with pytest.raises(OSError):
+            skill_logic.assign_next_todo_id(tmp_path)
+
+        assert todos.read_text(encoding="utf-8") == original
+        assert not list(tmp_path.glob(".TODOS.*"))
+
+    def test_reconcile_next_todo_id_rolls_back_when_replace_fails(self, tmp_path, monkeypatch):
+        from tests.skill_test_environment import skill_logic
+
+        todos = tmp_path / "TODOS.md"
+        original = "# TODOS\n\n> - NEXT_TODO_ID: 1\n\n- [ ] TODO-4: Existing\n"
+        todos.write_text(original, encoding="utf-8")
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        def fail_replace(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(skill_logic.os, "replace", fail_replace)
+
+        with pytest.raises(OSError):
+            skill_logic.reconcile_next_todo_id(tmp_path, mode="audit")
+
+        assert todos.read_text(encoding="utf-8") == original
 
     def test_compute_scan_next_id_matches_existing_scan(self, tmp_path):
         todos = tmp_path / "TODOS.md"
