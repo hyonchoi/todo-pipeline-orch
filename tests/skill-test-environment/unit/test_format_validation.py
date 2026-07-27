@@ -280,6 +280,25 @@ class TestValidateAllEntries:
         assert results[1]["id"] == 2
         assert len(results[1]["issues"]) > 0
 
+    def test_schema_example_missing_fields_is_not_validated(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 3\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-1: Example Missing Fields** — Documentation only\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-2: Real** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n"
+        )
+
+        results = validate_all_entries(text)
+
+        assert [result["id"] for result in results] == [2]
+        assert results[0]["issues"] == []
+
 
 class TestValidateDependencyRefs:
     def test_valid_deps(self, skill_demo_dir):
@@ -298,3 +317,22 @@ class TestValidateDependencyRefs:
         )
         broken = validate_dependency_refs(text)
         assert any("TODO-99" in b for b in broken)
+
+    def test_schema_example_does_not_satisfy_dependency_reference(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 3\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-99: Example** — Documentation only\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-2: Real** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Depends on:** `TODO-99`\n"
+            "  - **Decisions:** Priority `P1`\n"
+        )
+
+        broken = validate_dependency_refs(text)
+
+        assert broken == ["TODO-2: Dependency TODO-99 does not exist"]

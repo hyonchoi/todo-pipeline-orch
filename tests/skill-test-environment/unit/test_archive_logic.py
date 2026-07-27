@@ -74,3 +74,27 @@ class TestSimulateArchive:
         text = "- [ ] **TODO-1: Pending** — S\n  - **What:** W\n  - **Why:** Y\n  - **Decisions:** D\n"
         new_todos, new_archive = simulate_archive(text, "")
         assert new_todos == text
+
+    def test_schema_completed_example_is_not_archived(self):
+        todos = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 4\n\n"
+            "## Entry Schema\n\n"
+            "- [x] **TODO-99: Done Example** — Documentation only\n\n"
+            "## Entries\n\n"
+            "- [x] **TODO-3: Done Real** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n"
+        )
+
+        completed = find_completed_entries(todos)
+        blocks = extract_entry_blocks(todos)
+        new_todos, new_archive = simulate_archive(todos, "")
+
+        assert [entry["id"] for entry in completed] == [3]
+        assert len(blocks) == 1
+        assert "TODO-99" in new_todos
+        assert "TODO-3" not in new_todos
+        assert "TODO-3" in new_archive

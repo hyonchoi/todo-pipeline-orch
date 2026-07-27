@@ -416,12 +416,17 @@ FIELD_RE = re.compile(
 )
 
 
+def _entries_text(text: str) -> str:
+    sections = parse_todos_document_sections(text)
+    return sections.entries if sections.has_canonical_layout else text
+
+
 def parse_entries(text: str) -> list[dict]:
-    """Parse all TODO entries from TODOS.md markdown text.
+    """Parse TODO entries under ## Entries from TODOS.md markdown text.
 
     Returns a list of dicts with keys: id, status, title, summary, fields.
     """
-    lines = text.split("\n")
+    lines = _entries_text(text).split("\n")
     entries: list[dict] = []
     current: dict | None = None
 
@@ -500,12 +505,12 @@ def find_completed_entries(text: str) -> list[dict]:
 
 
 def extract_entry_blocks(text: str) -> list[str]:
-    """Extract raw markdown text blocks for each entry.
+    """Extract raw markdown blocks for entries under ## Entries.
 
     Returns a list of strings, each containing the header line and sub-bullets
     for one entry.
     """
-    lines = text.split("\n")
+    lines = _entries_text(text).split("\n")
     blocks: list[str] = []
     current_block: list[str] = []
 
@@ -526,6 +531,22 @@ def extract_entry_blocks(text: str) -> list[str]:
         blocks.append("\n".join(current_block))
 
     return blocks
+
+
+def _replace_entries_section(text: str, entries_text: str) -> str:
+    sections = parse_todos_document_sections(text)
+    if not sections.has_canonical_layout:
+        return text
+    newline = sections.newline
+    lines = text.splitlines(keepends=True)
+    spans = _section_spans(lines)
+    start, end = spans["## Entries"]
+    replacement = [newline]
+    if entries_text.strip():
+        replacement.extend(entries_text.rstrip().splitlines(keepends=True))
+        if not replacement[-1].endswith(("\n", "\r\n")):
+            replacement.append(newline)
+    return "".join(lines[:start] + replacement + lines[end:])
 
 
 def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
@@ -551,18 +572,19 @@ def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
         else:
             remaining_blocks.append(block)
 
-    # Reconstruct TODOS.md header + remaining entries
-    # Find the first actual entry (line starting with "- "), skipping blockquote lines
-    first_entry_pos = -1
-    for line in todos_text.split("\n"):
-        if ENTRY_HEADER_RE.match(line):
-            break
-        first_entry_pos += len(line) + 1  # +1 for the newline
-    if first_entry_pos == -1 or first_entry_pos >= len(todos_text):
-        new_todos = todos_text
+    if parse_todos_document_sections(todos_text).has_canonical_layout:
+        new_todos = _replace_entries_section(todos_text, "\n\n".join(remaining_blocks))
     else:
-        header = todos_text[:first_entry_pos]
-        new_todos = header + "\n".join(remaining_blocks)
+        first_entry_pos = -1
+        for line in todos_text.split("\n"):
+            if ENTRY_HEADER_RE.match(line):
+                break
+            first_entry_pos += len(line) + 1
+        if first_entry_pos == -1 or first_entry_pos >= len(todos_text):
+            new_todos = todos_text
+        else:
+            header = todos_text[:first_entry_pos]
+            new_todos = header + "\n".join(remaining_blocks)
 
     # Append to archive
     if not archive_text.strip():
