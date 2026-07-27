@@ -34,3 +34,32 @@ Complete. Task 2 implementation is committed.
 
 - The non-eval suite has one unrelated failure in `tests/test_config_from_env.py::test_from_env_pipeline_projects_dir_compat_alias`: `Config.from_env()` returned `/Users/hyonchoi/projects` instead of the test temporary path. The failure reproduces in isolation and does not involve the changed files.
 - `uv` reports that the inherited `VIRTUAL_ENV` points at the base checkout and ignores it in favor of this worktree's `.venv`; tests still execute successfully from the worktree environment.
+
+## Review Fix Report
+
+### Status
+
+Complete. The Critical and Important review findings are addressed.
+
+### Findings Addressed
+
+- Critical: reinstall preflight now calls `_preflight_skill_replacement` for every selected target, including targets whose `todos-manager` destination does not yet exist. Missing install parents are therefore validated before any selected target is replaced.
+- Important: added coverage for an existing Claude destination and a missing Codex destination whose install parent rejects creation. The test asserts Claude remains unchanged.
+- Minor: retained the per-target helper call as a defensive race check and added a comment clarifying its purpose after the global preflight.
+
+### Verification
+
+- Red phase: the new missing-parent regression failed because Claude was replaced before the Codex parent failure was detected.
+- Focused installer suite after the fix: `19 passed`.
+- Ruff on changed source and tests: `All checks passed!`
+- `git diff --check`: passed.
+
+### Files Changed
+
+- `hermes_pipeline/cli.py`
+- `tests/test_skills_install.py`
+- This report file.
+
+### Remaining Concern
+
+- The previously reported unrelated non-eval failure remains: `tests/test_config_from_env.py::test_from_env_pipeline_projects_dir_compat_alias` resolves `/Users/hyonchoi/projects` instead of the test temporary path under the ambient configuration. It is outside the amended files.

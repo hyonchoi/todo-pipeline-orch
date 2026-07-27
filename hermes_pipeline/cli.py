@@ -1425,10 +1425,9 @@ def _cmd_skills_install(args, config: Config | None) -> int:
         preflight_errors: list[tuple[str, Path, str]] = []
         for name, install_dir in targets:
             dest = install_dir / "todos-manager"
-            if dest.exists() or dest.is_symlink():
-                reason = _preflight_skill_replacement(name, dest)
-                if reason is not None:
-                    preflight_errors.append((name, dest, reason))
+            reason = _preflight_skill_replacement(name, dest)
+            if reason is not None:
+                preflight_errors.append((name, dest, reason))
         if preflight_errors:
             for name, dest, reason in preflight_errors:
                 print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
@@ -1451,6 +1450,7 @@ def _cmd_skills_install(args, config: Config | None) -> int:
                     "after reviewing the destination."
                 )
                 continue
+            # Re-check in case the destination changed after the global preflight.
             reason = _preflight_skill_replacement(name, dest)
             if reason is not None:
                 any_failed = True

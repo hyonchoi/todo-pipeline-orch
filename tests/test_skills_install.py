@@ -124,6 +124,34 @@ class TestCmdSkillsInstall:
         assert (claude_dest / "SKILL.md").read_text(encoding="utf-8") == "keep me"
         assert "Problem (codex): cannot replace todos-manager" in out
 
+    def test_install_reinstall_target_all_preflights_missing_later_parent(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
+        codex_parent = tmp_path / ".agents" / "skills"
+        claude_dest.mkdir(parents=True)
+        (claude_dest / "SKILL.md").write_text("keep me", encoding="utf-8")
+
+        real_mkdir = Path.mkdir
+
+        def _reject_codex_parent(self, *args, **kwargs):
+            if self == codex_parent:
+                raise PermissionError("codex parent is not writable")
+            return real_mkdir(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "mkdir", _reject_codex_parent)
+
+        result = _cmd_skills_install(
+            FakeArgs(target="all", scope="user", reinstall=True), config
+        )
+
+        out = capsys.readouterr().out
+        assert result == 1
+        assert (claude_dest / "SKILL.md").read_text(encoding="utf-8") == "keep me"
+        assert "Problem (codex): cannot replace todos-manager" in out
+
     def test_reinstall_stages_before_replacing_existing_destination(
         self, tmp_path, monkeypatch
     ):
