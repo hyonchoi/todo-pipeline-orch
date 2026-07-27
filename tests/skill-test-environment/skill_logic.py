@@ -7,7 +7,8 @@ import fcntl
 import os
 import re
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 
@@ -69,12 +70,22 @@ def replace_next_todo_id_line(text: str, next_id: int) -> str:
     return text.replace("# TODOS\n", "# TODOS\n\n" + replacement + "\n", 1)
 
 
-def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> None:
-    """Apply a TODO transform under an exclusive lock using atomic replacement."""
-    lock_path = todos_path.with_suffix(todos_path.suffix + ".lock")
+@contextmanager
+def _todo_lock(lock_path: Path) -> Iterator[None]:
+    """Hold the sidecar lock used to serialize TODO updates."""
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     with lock_path.open("w", encoding="utf-8") as lock_file:
         fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> None:
+    """Apply a TODO transform under an exclusive lock using atomic replacement."""
+    lock_path = todos_path.with_suffix(todos_path.suffix + ".lock")
+    with _todo_lock(lock_path):
         original = todos_path.read_text(encoding="utf-8")
         updated = transform(original)
         fd, tmp_name = tempfile.mkstemp(dir=todos_path.parent, prefix=".TODOS.", text=True)
@@ -91,8 +102,6 @@ def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> No
             except OSError:
                 pass
             raise
-        finally:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def assign_next_todo_id(project_dir: Path) -> tuple[int, list[str]]:

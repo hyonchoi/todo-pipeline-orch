@@ -1,6 +1,6 @@
 """Tests for ID sequencing logic — scanning, next-ID computation, counter cache."""
 
-import multiprocessing as mp
+import threading
 from pathlib import Path
 
 import pytest
@@ -14,12 +14,6 @@ from tests.skill_test_environment.skill_logic import (
     reconcile_next_todo_id,
     scan_ids,
 )
-
-
-def _assign_todo_id_in_process(project_dir: str, start_event, results) -> None:
-    """Reserve an ID after both worker processes have been started."""
-    start_event.wait()
-    results.put(assign_next_todo_id(Path(project_dir))[0])
 
 
 class TestScanIds:
@@ -121,31 +115,66 @@ class TestTrackedNextTodoId:
         assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID" in message for message in messages)
 
-    def test_assign_next_todo_id_serializes_competing_writers(self, tmp_path):
+    def test_assign_next_todo_id_serializes_a_forced_stale_writer(self, tmp_path, monkeypatch):
+        from tests.skill_test_environment import skill_logic
+
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n> - NEXT_TODO_ID: 1\n", encoding="utf-8"
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
-        context = mp.get_context("spawn")
-        start_event = context.Event()
-        results = context.Queue()
-        workers = [
-            context.Process(
-                target=_assign_todo_id_in_process,
-                args=(str(tmp_path), start_event, results),
-            )
-            for _ in range(2)
-        ]
-        for worker in workers:
-            worker.start()
-        start_event.set()
 
-        assigned = sorted(results.get(timeout=5) for _ in workers)
-        for worker in workers:
-            worker.join(timeout=5)
-            assert worker.exitcode == 0
+        class ObservedLock:
+            def __init__(self):
+                self._lock = threading.Lock()
+                self._state_lock = threading.Lock()
+                self.acquisitions = 0
+                self.second_attempted = threading.Event()
 
-        assert assigned == [1, 2]
+            def __enter__(self):
+                with self._state_lock:
+                    self.acquisitions += 1
+                    if self.acquisitions == 2:
+                        self.second_attempted.set()
+                self._lock.acquire()
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                self._lock.release()
+
+        observed_lock = ObservedLock()
+        original_read = skill_logic.read_next_todo_id
+        first_transform_entered = threading.Event()
+
+        def pause_after_first_read(text):
+            if not first_transform_entered.is_set():
+                first_transform_entered.set()
+                assert observed_lock.second_attempted.wait(timeout=1)
+            return original_read(text)
+
+        monkeypatch.setattr(skill_logic, "_todo_lock", lambda lock_path: observed_lock)
+        monkeypatch.setattr(skill_logic, "read_next_todo_id", pause_after_first_read)
+        results: list[int] = []
+        errors: list[BaseException] = []
+
+        def reserve_id():
+            try:
+                results.append(assign_next_todo_id(tmp_path)[0])
+            except BaseException as error:
+                errors.append(error)
+
+        first_worker = threading.Thread(target=reserve_id)
+        second_worker = threading.Thread(target=reserve_id)
+        first_worker.start()
+        assert first_transform_entered.wait(timeout=1)
+        second_worker.start()
+        first_worker.join(timeout=1)
+        second_worker.join(timeout=1)
+
+        assert not errors
+        assert not first_worker.is_alive()
+        assert not second_worker.is_alive()
+        assert observed_lock.acquisitions == 2
+        assert sorted(results) == [1, 2]
         assert "> - NEXT_TODO_ID: 3" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
 
     def test_assign_next_todo_id_removes_temporary_file_when_replace_fails(
