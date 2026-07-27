@@ -114,8 +114,10 @@ def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> No
             raise
 
 
-def assign_next_todo_id(project_dir: Path) -> tuple[int, list[str]]:
-    """Reserve the next TODO ID and advance the tracked preamble value."""
+def assign_next_todo_id(
+    project_dir: Path, entry_builder: Callable[[int], str] | None = None
+) -> tuple[int, list[str]]:
+    """Assign the next TODO ID and optionally append its entry atomically."""
     todos_path = project_dir / "TODOS.md"
     archive_path = project_dir / "TODOS-archive.md"
     messages: list[str] = []
@@ -125,14 +127,16 @@ def assign_next_todo_id(project_dir: Path) -> tuple[int, list[str]]:
         nonlocal assigned, messages
         tracked, issues = read_next_todo_id(text)
         scanned_next = compute_scan_next_id(todos_path, archive_path)
-        used = scan_ids(text)
-        if tracked is None or tracked in used or tracked < scanned_next:
+        if tracked != scanned_next:
             assigned = scanned_next
             messages.append(f"add: corrected NEXT_TODO_ID from {tracked} to {scanned_next}")
         else:
             assigned = tracked
         messages.extend(issues)
-        return replace_next_todo_id_line(text, assigned + 1)
+        updated = replace_next_todo_id_line(text, assigned + 1)
+        if entry_builder is None:
+            return updated
+        return updated.rstrip() + "\n\n" + entry_builder(assigned).rstrip() + "\n"
 
     atomic_update_todos(todos_path, transform)
     return assigned, messages

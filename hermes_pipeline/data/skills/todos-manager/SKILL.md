@@ -203,7 +203,8 @@ Issues found: K
 - TODO-Y: Invalid dependency reference `TODO-Z` (not found)
 - TODO-W: Status marker `[->]` — expected `[→]`
 
-ID gap check: OK (max=23, counter=23)
+NEXT_TODO_ID: 24 (valid)
+ID gap check: OK (max=23)
 ```
 
 `--audit` reports schema findings and repairs only missing, malformed, duplicated, stale, or conflicting `NEXT_TODO_ID` metadata before reporting.

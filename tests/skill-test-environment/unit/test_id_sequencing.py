@@ -17,8 +17,12 @@ from tests.skill_test_environment.skill_logic import (
 
 
 def _assign_todo_id_in_process(project_dir: str, results) -> None:
-    """Reserve an ID in a worker that inherits the test synchronization hooks."""
-    results.put(assign_next_todo_id(Path(project_dir))[0])
+    """Append an entry in the worker's atomic TODO update."""
+    assigned, _ = assign_next_todo_id(
+        Path(project_dir),
+        entry_builder=lambda todo_id: f"- [ ] TODO-{todo_id}: Reserved",
+    )
+    results.put(assigned)
 
 
 class TestScanIds:
@@ -119,6 +123,19 @@ class TestTrackedNextTodoId:
         assert assigned == 8
         assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID" in message for message in messages)
+
+    def test_assign_next_todo_id_repairs_stale_high_value_before_returning(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        assigned, messages = assign_next_todo_id(tmp_path)
+
+        assert assigned == 8
+        assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert any("corrected NEXT_TODO_ID from 50 to 8" in message for message in messages)
 
     def test_assign_next_todo_id_serializes_a_forced_stale_writer(self, tmp_path, monkeypatch):
         from tests.skill_test_environment import skill_logic
@@ -242,6 +259,19 @@ class TestTrackedNextTodoId:
         assert next_id == 8
         assert "> - NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID from 3 to 8" in message for message in messages)
+
+    def test_reconcile_repairs_stale_high_value(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
+
+        assert next_id == 8
+        assert "> - NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert any("corrected NEXT_TODO_ID from 50 to 8" in message for message in messages)
 
     def test_reconcile_missing_line_inserts_after_format_rules(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
