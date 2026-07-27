@@ -303,7 +303,8 @@ def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> No
     lock_path = todos_path.with_suffix(todos_path.suffix + ".lock")
     _before_todo_lock()
     with _todo_lock(lock_path):
-        original = todos_path.read_text(encoding="utf-8")
+        with todos_path.open("r", encoding="utf-8", newline="") as todos_file:
+            original = todos_file.read()
         updated = transform(original)
         fd, tmp_name = tempfile.mkstemp(dir=todos_path.parent, prefix=".TODOS.", text=True)
         tmp_path = Path(tmp_name)
@@ -346,8 +347,14 @@ def assign_next_todo_id(
         entry = entry_builder(assigned).rstrip()
         sections = parse_todos_document_sections(updated)
         if sections.has_canonical_layout:
+            entry = entry.replace("\r\n", "\n").replace("\r", "\n")
+            entry = entry.replace("\n", sections.newline)
             existing_entries = sections.entries.rstrip()
-            combined_entries = f"{existing_entries}\n\n{entry}" if existing_entries else entry
+            combined_entries = (
+                f"{existing_entries}{sections.newline}{sections.newline}{entry}"
+                if existing_entries
+                else entry
+            )
             return _replace_entries_section(updated, combined_entries)
         return updated.rstrip() + "\n\n" + entry + "\n"
 

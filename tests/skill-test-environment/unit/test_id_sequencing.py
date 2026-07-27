@@ -126,6 +126,38 @@ class TestTrackedNextTodoId:
         assert updated.index("TODO-8: Added") > updated.index("TODO-7: Existing")
         assert updated.index("NEXT_TODO_ID: 9") < updated.index("## Entry Schema")
 
+    def test_assign_next_todo_id_preserves_crlf_for_canonical_document(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\r\n\r\n"
+            "## Metadata\r\n\r\n"
+            "NEXT_TODO_ID: 8\r\n\r\n"
+            "## Entry Schema\r\n\r\n"
+            "> **Format rules:**\r\n\r\n"
+            "## Entries\r\n\r\n"
+            "- [ ] **TODO-7: Existing** — Summary\r\n"
+            "  - **What:** Work\r\n"
+            "  - **Why:** Reason\r\n"
+            "  - **Decisions:** Priority `P1`\r\n",
+            encoding="utf-8",
+        )
+
+        assigned, messages = assign_next_todo_id(
+            tmp_path,
+            lambda todo_id: (
+                f"- [ ] **TODO-{todo_id}: Added** — Summary\n"
+                "  - **What:** Work\n"
+                "  - **Why:** Reason\n"
+                "  - **Decisions:** Priority `P1`"
+            ),
+        )
+
+        with (tmp_path / "TODOS.md").open(encoding="utf-8", newline="") as todos_file:
+            updated = todos_file.read()
+        assert assigned == 8
+        assert messages == []
+        assert "**TODO-8: Added** — Summary\r\n" in updated
+        assert "\n" not in updated.replace("\r\n", "")
+
     def test_reconcile_migrates_legacy_layout_to_sections(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n"
