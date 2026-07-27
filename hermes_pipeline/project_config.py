@@ -64,12 +64,12 @@ def _resolve_slack_channel(
 
     Priority:
       1. project.toml's [notifications] slack_channel
-      2. PIPELINE_SLACK_CHANNEL env var (env_channel parameter)
+      2. Global config slack_channel value (env_channel parameter)
       3. #alert (hardcoded fallback)
 
     Args:
         project_dir: Project root directory.
-        env_channel: Value from PIPELINE_SLACK_CHANNEL env var.
+        env_channel: Value from global config.
         toml_data: Pre-parsed project.toml data (optional — read from disk if not provided).
 
     Returns:
@@ -90,12 +90,12 @@ def _resolve_slack_channel(
                 channel, project_dir.name,
             )
 
-    # Level 2: env var
+    # Level 2: global config
     if env_channel:
         if _is_valid_slack_channel(env_channel):
             return env_channel
         log.warning(
-            "ignoring invalid PIPELINE_SLACK_CHANNEL %r — using default",
+            "ignoring invalid global slack_channel %r — using default",
             env_channel,
         )
 

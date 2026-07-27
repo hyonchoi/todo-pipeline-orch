@@ -470,22 +470,25 @@ def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
 
 @contextmanager
 def isolate_config(*, state_dir: Path):
-    """Context manager that sets PIPELINE_* env vars for config isolation.
+    """Context manager that points tpo at an isolated config file.
 
     HOME is left untouched — the harness invokes real hermes/claude CLI
     subprocesses, which need the real $HOME to read auth credentials.
     """
     saved = {}
-    for key in ("PIPELINE_STATE_DIR",):
+    for key in ("TPO_CONFIG_FILE",):
         if key in os.environ:
             saved[key] = os.environ[key]
 
-    os.environ["PIPELINE_STATE_DIR"] = str(state_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    config_path = state_dir / "tpo-config.yaml"
+    config_path.write_text(f"state_dir: {state_dir}\n")
+    os.environ["TPO_CONFIG_FILE"] = str(config_path)
 
     try:
         yield
     finally:
-        for key in ("PIPELINE_STATE_DIR",):
+        for key in ("TPO_CONFIG_FILE",):
             if key in saved:
                 os.environ[key] = saved[key]
             else:

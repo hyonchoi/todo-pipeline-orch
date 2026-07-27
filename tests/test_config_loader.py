@@ -467,7 +467,7 @@ def test_integration_init_set_get_load(monkeypatch, tmp_path):
 
 
 def test_integration_env_overrides_config_file(monkeypatch, tmp_path):
-    """Env var layers on top of config file."""
+    """PIPELINE_* env vars do not layer on top of config file."""
     from hermes_pipeline.config import Config
 
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
@@ -479,10 +479,10 @@ def test_integration_env_overrides_config_file(monkeypatch, tmp_path):
     cfg = Config.from_env()
     assert cfg.slack_channel == "#config-alerts"
 
-    # With env override
+    # PIPELINE_* env var does not override config file
     monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
     cfg2 = Config.from_env()
-    assert cfg2.slack_channel == "#env-alerts"
+    assert cfg2.slack_channel == "#config-alerts"
 
 
 def test_integration_config_set_preserves_skeleton(monkeypatch, tmp_path):
@@ -523,14 +523,14 @@ def test_regression_no_config_file_unchanged(monkeypatch):
     assert cfg.slack_channel == default.slack_channel
 
 def test_regression_env_vars_still_work(monkeypatch, tmp_path):
-    """Remaining PIPELINE_* env vars still work without config file."""
+    """PIPELINE_* env vars do not override defaults without a config file."""
     monkeypatch.setenv("TPO_CONFIG_FILE", "/nonexistent")
     monkeypatch.setenv("PIPELINE_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
     from hermes_pipeline.config import Config
     cfg = Config.from_env()
-    assert cfg.state_dir == tmp_path / "state"
-    assert cfg.slack_channel == "#env-alerts"
+    assert cfg.state_dir == Config.default().state_dir
+    assert cfg.slack_channel == Config.default().slack_channel
 
 def test_regression_frozen_config_unchanged():
     """Config dataclass is still frozen."""

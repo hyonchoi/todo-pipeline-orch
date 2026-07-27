@@ -43,7 +43,7 @@ The `recover_counter()` function is exposed via the `tpo recover-counter` CLI su
 uv run tpo recover-counter my-project
 ```
 
-The CLI handler (`_cmd_recover_counter` in cli.py) resolves the project directory from `PIPELINE_PROJECTS_DIR / project`, validates the slug, calls `recover_counter()`, and prints the result.
+The CLI handler (`_cmd_recover_counter` in cli.py) resolves the project directory from the configured `projects_dir`, validates the slug, calls `recover_counter()`, and prints the result.
 
 ## Design decisions
 

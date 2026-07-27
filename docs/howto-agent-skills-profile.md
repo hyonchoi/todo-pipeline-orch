@@ -5,7 +5,7 @@ Pipeline profiles let a project select an independent set of phases — the prom
 ## Prerequisites
 
 - `todo-pipeline-orchestrator` installed and `uv run tpo` working
-- A project with a `TODOS.md` file in your `PIPELINE_PROJECTS_DIR`
+- A project with a `TODOS.md` file under `tpo config get projects_dir`
 - The `agent-skills` plugin's skills (spec-driven-development, planning-and-task-breakdown, incremental-implementation, test-driven-development, code-review-and-quality, security-and-hardening, ship) available in the environment that runs the pipeline
 
 ## What is a profile?

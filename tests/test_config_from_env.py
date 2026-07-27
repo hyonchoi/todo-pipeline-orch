@@ -14,29 +14,29 @@ def test_from_env_layer2_config_file(monkeypatch, tmp_path):
     assert cfg.slack_channel == "#config-alerts"
 
 
-def test_from_env_layer3_env_overrides_file(monkeypatch, tmp_path):
-    """Env var overrides config file value."""
+def test_from_env_pipeline_env_does_not_override_file(monkeypatch, tmp_path):
+    """PIPELINE_* env vars do not override global config file entries."""
     f = tmp_path / "config.yaml"
     f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
     monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#env-alerts")
     cfg = Config.from_env()
-    assert cfg.slack_channel == "#env-alerts"
+    assert cfg.slack_channel == "#config-alerts"
 
 
-def test_from_env_no_projects_dir_env_var(monkeypatch):
-    """Without PIPELINE_PROJECTS_DIR, projects_dir keeps its default."""
+def test_from_env_projects_dir_default(monkeypatch):
+    """Without config file, projects_dir keeps its default."""
     monkeypatch.delenv("PIPELINE_PROJECTS_DIR", raising=False)
     cfg = Config.from_env()
     assert cfg.projects_dir == Path.home() / "projects"
 
 
-def test_from_env_pipeline_projects_dir_deprecated_alias(monkeypatch, tmp_path):
-    """PIPELINE_PROJECTS_DIR remains a deprecated env override for patch compatibility."""
+def test_from_env_pipeline_projects_dir_ignored(monkeypatch, tmp_path):
+    """PIPELINE_PROJECTS_DIR no longer overrides the global config."""
     monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(tmp_path / "projects"))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     cfg = Config.from_env()
-    assert cfg.projects_dir == tmp_path / "projects"
+    assert cfg.projects_dir == Path.home() / "projects"
 
 
 def test_from_env_no_config_file_uses_default(monkeypatch):
@@ -46,15 +46,15 @@ def test_from_env_no_config_file_uses_default(monkeypatch):
     assert cfg == Config.default()
 
 
-def test_from_env_env_var_path_expansion(monkeypatch, tmp_path):
-    """Path env vars should expand ~ correctly."""
+def test_from_env_config_file_path_expansion(monkeypatch, tmp_path):
+    """Path config values should expand ~ correctly."""
     import os
     orig_home = os.environ.get("HOME")
     try:
         os.environ["HOME"] = str(tmp_path)
         monkeypatch.setenv("HOME", str(tmp_path))
         f = tmp_path / "config.yaml"
-        f.write_text("")
+        f.write_text("state_dir: ~/state\n")
         monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
         monkeypatch.setenv("PIPELINE_STATE_DIR", "~/state")
         cfg = Config.from_env()

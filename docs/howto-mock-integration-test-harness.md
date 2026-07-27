@@ -176,7 +176,7 @@ kanban board and polls for transitions rather than dispatching phases directly.
 Key flow:
 1. `preflight_check()` verifies git/hermes/claude on PATH
 2. `create_mock_project()` initializes a temp git repo with TODOS.md + .hermes config
-3. `isolate_config()` sets `PIPELINE_STATE_DIR`
+3. `isolate_config()` writes a temporary config file and points `TPO_CONFIG_FILE` at it
 4. `register_todo_phases()` creates kanban tasks for all pipeline phases
 5. Initial phase status is printed via `log.info()` to console
 6. Poll loop calls `get_todo_kanban_status()` on each interval, logging phase transitions

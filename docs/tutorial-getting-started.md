@@ -88,8 +88,7 @@ tpo config init
 tpo config set projects_dir ~/my-projects
 ```
 
-For one-off runs, `PIPELINE_PROJECTS_DIR` still works as an environment override,
-but the config file is the preferred persistent setting.
+For one-off runs, point `TPO_CONFIG_FILE` at an alternate complete config file.
 
 Verify the configuration by checking that the default pipeline contract was written:
 
@@ -189,7 +188,7 @@ If the file doesn't exist, the project is active by default. To archive a projec
 
 **Slack channel resolution (priority):**
 1. `project.toml`'s `slack_channel`
-2. `PIPELINE_SLACK_CHANNEL` environment variable
+2. Global config `slack_channel`
 3. `#alert` (hardcoded fallback)
 
 ---
@@ -259,7 +258,7 @@ You now have a working tpo setup that:
 ### Next steps
 
 **Explore the full feature set:**
-- Read [Configuration](../README.md#configuration) to customize `PIPELINE_STATE_DIR`, `PIPELINE_SLACK_CHANNEL`, etc.
+- Read [Configuration](../README.md#configuration) to customize `state_dir`, `slack_channel`, etc.
 - See [Troubleshooting](../README.md#troubleshooting) for common issues and fixes
 
 **Run ticks iteratively during development:**

@@ -20,8 +20,8 @@ configures per-project Slack channels, and archives projects without deleting th
 Create a directory for your projects and two project directories inside it:
 
 ```bash
-export PIPELINE_PROJECTS_DIR=~/my-projects
 mkdir -p ~/my-projects/demo-app ~/my-projects/second-app
+tpo config set projects_dir ~/my-projects
 
 # Set up demo-app
 cd ~/my-projects/demo-app
@@ -110,7 +110,7 @@ EOF
 ```
 
 Now alerts for second-app go to `#project__second-app`, while demo-app falls
-back to the global `PIPELINE_SLACK_CHANNEL` or `#alert`.
+back to the global `slack_channel` config value or `#alert`.
 
 Run another tick to verify:
 

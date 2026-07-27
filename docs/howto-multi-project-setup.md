@@ -22,9 +22,8 @@ tpo config init
 tpo config set projects_dir /path/to/your/projects
 ```
 
-`PIPELINE_PROJECTS_DIR` is still available as an environment override for
-one-off runs. `.hermes/config.toml` is per-project and does not set the global
-scan directory.
+For one-off runs, point `TPO_CONFIG_FILE` at an alternate complete config file.
+`.hermes/config.toml` is per-project and does not set the global scan directory.
 
 ### Per-Project Configuration
 
@@ -59,7 +58,7 @@ The next tick will skip this project.
 
 Alerts for each project go to the Slack channel determined by:
 1. `project.toml`'s `[notifications] slack_channel`
-2. `PIPELINE_SLACK_CHANNEL` environment variable
+2. Global config `slack_channel`
 3. `#alert` (hardcoded fallback)
 
 ## Cron Setup

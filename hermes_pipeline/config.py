@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -21,34 +20,9 @@ class Config:
 
     @classmethod
     def from_env(cls) -> Config:
-        import typing
-        from dataclasses import fields as _fields
-        from dataclasses import replace
+        from .config_loader import load_global_config
 
-        from .config_loader import _coerce_value, load_global_config
-
-        # Layer 1 + 2: defaults → config file
-        base = load_global_config()
-
-        # Resolve stringified annotations from `from __future__ import annotations`
-        field_hints = typing.get_type_hints(cls)
-
-        # Layer 3: env var overrides (auto-generated from dataclass)
-        env_map = {}
-        for f in _fields(cls):
-            env_name = f"PIPELINE_{f.name.upper()}"
-            env_map[env_name] = (f.name, field_hints[f.name])
-
-        overrides = {}
-        for env_key, (attr, field_type) in env_map.items():
-            val = os.environ.get(env_key)
-            if val is not None:
-                coerced = _coerce_value(val, field_type, attr, Path(f"<env:{env_key}>"))
-                overrides[attr] = coerced
-
-        if not overrides:
-            return base
-        return replace(base, **overrides)
+        return load_global_config()
 
 @dataclass(frozen=True)
 class SelectionConfig:

@@ -193,12 +193,11 @@ Machine-level defaults live in the global config file. Create it with
 `tpo config init`, then edit it directly or use `tpo config set <key> <value>`.
 The generated file includes active defaults for `projects_dir`, `state_dir`,
 `log_file_subpath`, `log_retention_days`, and `slack_channel`.
+Individual `PIPELINE_*` environment variables do not override config entries.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PIPELINE_PROJECTS_DIR` | `~/projects` | Deprecated compatibility override for `projects_dir`; prefer `tpo config set projects_dir <path>` |
-| `PIPELINE_STATE_DIR` | `~/.hermes` | Environment override for the global state directory |
-| `PIPELINE_SLACK_CHANNEL` | `#alert` | Environment override for the default Slack channel; per-project config still wins |
+| `TPO_CONFIG_FILE` | unset | Path to an alternate complete config file |
 
 ## See Also
 

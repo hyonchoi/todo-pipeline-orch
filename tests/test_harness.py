@@ -154,17 +154,17 @@ class TestIsolateConfig:
         state_dir.mkdir()
 
         with isolate_config(state_dir=state_dir):
-            assert os.environ.get("PIPELINE_STATE_DIR") == str(state_dir)
+            assert os.environ.get("TPO_CONFIG_FILE") == str(state_dir / "tpo-config.yaml")
 
-        assert "PIPELINE_STATE_DIR" not in os.environ
+        assert "TPO_CONFIG_FILE" not in os.environ
 
     def test_saves_and_restores(self, monkeypatch: pytest.MonkeyPatch):
-        monkeypatch.setenv("PIPELINE_STATE_DIR", "/original/state")
+        monkeypatch.setenv("TPO_CONFIG_FILE", "/original/config.yaml")
 
         with isolate_config(state_dir=Path("/tmp")):
-            assert os.environ["PIPELINE_STATE_DIR"] == "/tmp"
+            assert os.environ["TPO_CONFIG_FILE"] == "/tmp/tpo-config.yaml"
 
-        assert os.environ["PIPELINE_STATE_DIR"] == "/original/state"
+        assert os.environ["TPO_CONFIG_FILE"] == "/original/config.yaml"
 
 
 class TestHarnessResult:

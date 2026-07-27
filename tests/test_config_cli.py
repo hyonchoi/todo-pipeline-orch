@@ -103,7 +103,7 @@ def test_config_get_from_file(monkeypatch, tmp_path, capsys):
 
 
 def test_config_get_env_override(monkeypatch, tmp_path, capsys):
-    """tpo config get shows env var override with attribution."""
+    """tpo config get ignores PIPELINE_* env vars for config entries."""
     f = tmp_path / "config.yaml"
     f.write_text("slack_channel: '#config-alerts'\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
@@ -111,8 +111,9 @@ def test_config_get_env_override(monkeypatch, tmp_path, capsys):
     exit_code = main(["config", "get", "slack_channel"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "#env-alerts" in captured.out
-    assert "PIPELINE_SLACK_CHANNEL" in captured.out or "env" in captured.out
+    assert "#config-alerts" in captured.out
+    assert "from file" in captured.out
+    assert "PIPELINE_SLACK_CHANNEL" not in captured.out
 
 
 def test_config_get_invalid_key(monkeypatch, tmp_path):
@@ -141,7 +142,7 @@ def test_config_get_broken_config_recovery(monkeypatch, tmp_path, capsys):
 
 
 def test_config_get_broken_config_still_applies_env(monkeypatch, tmp_path, capsys):
-    """tpo config get reports env values even when the config file is broken."""
+    """tpo config get falls back to defaults when the config file is broken."""
     f = tmp_path / "config.yaml"
     f.write_text("badkey: value\n")
     monkeypatch.setenv("TPO_CONFIG_FILE", str(f))
@@ -149,8 +150,9 @@ def test_config_get_broken_config_still_applies_env(monkeypatch, tmp_path, capsy
     exit_code = main(["config", "get", "slack_channel"])
     assert exit_code == 0
     captured = capsys.readouterr()
-    assert "#env-alerts" in captured.out
-    assert "PIPELINE_SLACK_CHANNEL" in captured.out
+    assert "slack_channel:" in captured.out
+    assert "#env-alerts" not in captured.out
+    assert "from default" in captured.out
 
 
 # -- set --

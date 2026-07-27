@@ -183,15 +183,14 @@ tpo config path
 `tpo config init` creates a config file with active default values. The default
 config path is `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`.
 For isolated tests or one-off runs, `TPO_CONFIG_FILE=/path/to/config.yaml`
-points `tpo` at a specific config file.
+points `tpo` at a specific config file. Individual `PIPELINE_*` environment
+variables do not override config entries.
 
-These environment variables still override the config file for runtime behavior:
+Runtime environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PIPELINE_PROJECTS_DIR` | `~/projects` | Deprecated compatibility alias for `projects_dir`; prefer `tpo config set projects_dir <path>` |
-| `PIPELINE_STATE_DIR` | `~/.hermes` | Global state directory (tick lock, config) |
-| `PIPELINE_SLACK_CHANNEL` | `#alert` | Default Slack channel for alerts (overridden by per-project config) |
+| `TPO_CONFIG_FILE` | unset | Path to an alternate complete config file |
 
 Example:
 ```bash
