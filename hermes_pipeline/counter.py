@@ -13,9 +13,9 @@ NEXT_TODO_ID_METADATA_RE = re.compile(
     r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:[^\r\n]*\r?$", re.MULTILINE
 )
 NEXT_TODO_ID_RE = re.compile(
-    r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:[ \t]*([1-9][0-9]*)[ \t]*\r?$",
-    re.MULTILINE,
+    r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:[ \t]*([1-9][0-9]*)[ \t]*$"
 )
+SECTION_HEADINGS = ("## Metadata", "## Entry Schema", "## Entries")
 
 
 def _preamble_line_indexes(lines: list[str]) -> range:
@@ -47,20 +47,51 @@ def _preamble_line_indexes(lines: list[str]) -> range:
     return range(start, end)
 
 
+def _line_without_ending(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
+def _section_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
+    headings: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        stripped = _line_without_ending(line)
+        if stripped in SECTION_HEADINGS:
+            headings.append((stripped, index))
+    spans: dict[str, tuple[int, int]] = {}
+    for position, (heading, index) in enumerate(headings):
+        end = headings[position + 1][1] if position + 1 < len(headings) else len(lines)
+        spans[heading] = (index + 1, end)
+    return spans
+
+
 def _read_tracked_next_todo_id(todos_text: str) -> int | None:
     lines = todos_text.splitlines(keepends=True)
-    metadata_lines = []
-    matches = []
-    for line in lines:
-        line = line.rstrip("\r\n")
-        if NEXT_TODO_ID_METADATA_RE.fullmatch(line):
-            metadata_lines.append(line)
-        match = NEXT_TODO_ID_RE.fullmatch(line)
-        if match is not None:
-            matches.append(match.group(1))
-    if len(metadata_lines) != 1 or len(matches) != 1:
+    heading_positions = [
+        _line_without_ending(line)
+        for line in lines
+        if _line_without_ending(line) in SECTION_HEADINGS
+    ]
+    if heading_positions != list(SECTION_HEADINGS):
         return None
-    return int(matches[0])
+    spans = _section_spans(lines)
+    metadata_span = spans.get("## Metadata")
+    if metadata_span is None:
+        return None
+    metadata_start, metadata_end = metadata_span
+    all_metadata_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if NEXT_TODO_ID_METADATA_RE.fullmatch(_line_without_ending(line))
+    ]
+    if len(all_metadata_indexes) != 1:
+        return None
+    metadata_index = all_metadata_indexes[0]
+    if not (metadata_start <= metadata_index < metadata_end):
+        return None
+    match = NEXT_TODO_ID_RE.fullmatch(_line_without_ending(lines[metadata_index]))
+    if match is None:
+        return None
+    return int(match.group(1))
 
 
 def recover_counter(project_dir: Path) -> int:
