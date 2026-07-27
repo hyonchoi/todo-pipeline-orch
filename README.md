@@ -83,7 +83,7 @@ The `todos-manager` skill provides schema-enforced TODOS.md management with seve
 | `--init` | Initialize TODOS.md with preamble and create TODOS-archive.md |
 | `--add` | Add new entry with schema enforcement and preview gate |
 | `--convert` | Add preamble to existing TODOS.md and validate format |
-| `--audit` | Audit TODOS.md for format compliance (no auto-fix) |
+| `--audit` | Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata |
 | `--archive` | Move all `[x]` completed entries to TODOS-archive.md |
 | `--list` | List active TODO entries as a table (`--all` also shows archived) |
 | `--revise` | Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions |
@@ -96,7 +96,9 @@ tpo skills install --target all
 
 This installs `todos-manager` to `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/`.
 
-The skill enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment (scanning both TODOS.md and TODOS-archive.md), and a preview/confirm gate before writing. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
+`tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
+
+The skill enforces the canonical schema (What/Why/Decisions + optional fields), tracked stable TODO-<n> ID assignment, and a preview/confirm gate before writing. `TODOS.md` stores the tracked `NEXT_TODO_ID` value in its format-rules preamble. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
 
 ---
 

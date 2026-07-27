@@ -6,7 +6,7 @@ Design rationale for the pure-Python golden-file test architecture.
 
 The `todos-manager` skill enforces a complex, multi-rule schema for TODOS.md entries:
 
-- **ID sequencing** — Must compute `max(all IDs) + 1` atomically across two files
+- **ID sequencing** — Must use tracked `NEXT_TODO_ID` atomically on the common path and scan active plus archived IDs only to reconcile invalid tracked state
 - **Field validation** — Required fields (What, Why, Decisions), optional fields (Pros, Cons, Context, etc.)
 - **Status markers** — Only `[ ]`, `[→]`, `[x]`, `[~]` allowed
 - **Dependency resolution** — References to non-existent TODO-N IDs must be detected

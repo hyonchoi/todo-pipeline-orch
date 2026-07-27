@@ -33,6 +33,11 @@ REQUIRED_FIELDS = {"What", "Why", "Decisions"}
 ```
 The three mandatory entry fields. All other fields (Pros, Cons, Context, Depends on, Assumptions, Completed, Resolved design) are optional.
 
+```markdown
+> - NEXT_TODO_ID: <n>
+```
+The tracked preamble line used by `todos-manager --add` on the common path. The skill increments it after a successful write and reconciles it against active and archived IDs only when it is missing, malformed, stale, or conflicting.
+
 ### ID Management
 
 #### `scan_ids(text: str) -> set[int]`
@@ -53,13 +58,13 @@ assert ids == {1, 3}
 
 #### `compute_next_id(todos_path: Path, archive_path: Path) -> int`
 
-Compute the next sequential TODO ID from both TODOS.md and TODOS-archive.md.
+Compute the next sequential TODO ID by scanning both TODOS.md and TODOS-archive.md. This helper supports reconciliation and legacy fixtures; `todos-manager --add` normally uses tracked `NEXT_TODO_ID` instead.
 
 **Args:**
 - `todos_path` — Path to TODOS.md file
 - `archive_path` — Path to TODOS-archive.md file
 
-**Returns:** Next available ID (always `max(all IDs) + 1`, or `1` if no IDs found)
+**Returns:** Next available ID from the scan (`max(all IDs) + 1`, or `1` if no IDs are found)
 
 **Example:**
 ```python
@@ -477,7 +482,7 @@ The `golden/` subdirectory contains YAML assertion descriptors for skill subcomm
 
 ### `add_happy_path.yaml`
 
-Scenario: Adding a new entry to demo-project TODOS.md results in 7 entries, next ID is 8.
+Scenario: Adding a new entry to demo-project TODOS.md results in 7 entries, with tracked next ID 8.
 
 **Preconditions:** Demo TODOS.md with max ID 7
 

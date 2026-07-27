@@ -1,12 +1,12 @@
 # Counter Recovery (counter.py)
 
-The counter recovery module initializes and updates `.hermes/todo_id_counter` by scanning TODOS.md for the highest TODO-N ID. It is the safety net when the counter file is missing — for example, when bootstrapping a project that already has hand-written TODOs but no counter yet.
+The counter recovery module initializes and updates the compatibility cache at `.hermes/todo_id_counter`. When `TODOS.md` has valid tracked metadata, recovery uses `NEXT_TODO_ID - 1`; scanning TODO-N IDs is the legacy fallback for files without valid tracked state.
 
 ## API
 
 ### `recover_counter(project_dir: Path) -> int`
 
-Scan TODOS.md for TODO-N entries and initialize/update the counter file.
+Initialize or update the counter cache from tracked TODO metadata, with a legacy scan fallback.
 
 **Parameters:**
 
@@ -14,7 +14,7 @@ Scan TODOS.md for TODO-N entries and initialize/update the counter file.
 
 **Returns:**
 
-- The counter value after recovery (the maximum of the existing counter and the scanned maximum from TODOS.md)
+- The counter value after recovery. With valid tracked metadata this is `NEXT_TODO_ID - 1`; legacy recovery returns the higher of the existing counter and scanned maximum.
 
 **Raises:**
 
@@ -22,10 +22,10 @@ Scan TODOS.md for TODO-N entries and initialize/update the counter file.
 
 **Behavior:**
 
-1. Reads `project_dir / "TODOS.md"` and finds all TODO-N patterns using the regex `\bTODO-(\d+)\b`
-2. Determines `scanned_max` — the maximum N found (0 if no TODO-N entries)
-3. Reads the existing counter from `project_dir / ".hermes/todo_id_counter"` (0 if missing or corrupt)
-4. Writes `max(existing_value, scanned_max)` back to the counter file
+1. Reads `project_dir / "TODOS.md"` and its tracked `NEXT_TODO_ID` value.
+2. When exactly one valid tracked value exists, writes `NEXT_TODO_ID - 1` to the counter cache.
+3. Otherwise, scans TODO-N patterns using `\bTODO-(\d+)\b` and determines `scanned_max` (0 if no TODO-N entries).
+4. In that legacy fallback only, reads the existing counter (0 if missing or corrupt) and writes `max(existing_value, scanned_max)`.
 
 ### `COUNTER_FILE`
 
@@ -47,9 +47,13 @@ The CLI handler (`_cmd_recover_counter` in cli.py) resolves the project director
 
 ## Design decisions
 
-### Max-over-write semantics (never decrease)
+### Tracked state is authoritative
 
-The counter is set to `max(existing_value, scanned_max)`, not `scanned_max`. If you had TODO-8 and then removed it from TODOS.md (completed it), the counter stays at 8 instead of dropping to whatever is the new max. This prevents ID collisions — a future TODO could be assigned 8 again if the counter dropped.
+`NEXT_TODO_ID` in the tracked preamble is the source of truth. `recover_counter()` writes `NEXT_TODO_ID - 1` when that metadata is valid, keeping the legacy counter cache compatible without making it authoritative.
+
+### Legacy max-over-write semantics (never decrease)
+
+For legacy TODO files without valid tracked state, the counter is set to `max(existing_value, scanned_max)`, not `scanned_max`. If you had TODO-8 and then removed it from TODOS.md, the counter stays at 8 instead of dropping to the new scanned maximum. This prevents ID resurrection during legacy recovery.
 
 ### Regex matches TODO-N anywhere
 

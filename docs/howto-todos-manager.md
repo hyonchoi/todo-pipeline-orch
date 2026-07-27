@@ -15,6 +15,8 @@ This guide covers the seven subcommands of the `todos-manager` skill for adding,
 - The todos-manager skill installed via `tpo skills install --target all`
 - A project with write access to the repo root
 
+`tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
+
 ## Initialize a new project
 
 Create TODOS.md with the enforced schema preamble and a companion TODOS-archive.md:
@@ -53,7 +55,7 @@ todos-manager --add
 
 **Interactive workflow:**
 
-1. The skill computes the next `TODO-<n>` ID by scanning both TODOS.md and TODOS-archive.md
+1. `TODOS.md` stores the tracked `NEXT_TODO_ID` value in its format-rules preamble. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting.
 2. Prompts for **title** and **summary**
 3. **Auto-research phase** — silently reads TODOS.md, TODOS-archive.md, git log, design docs under `docs/gstack/`, CLAUDE.md, and source files implied by the title. Derives `What`, `Why`, `Pros`, `Cons`, `Context`, `Priority`, `Effort`, `Phase`, `Branch`, `Test Coverage`, `Security Review`, `UI Review`, and `Depends on` from what it finds. Budget capped at 20 file reads and 10 searches.
 4. **Gap questions** — for any field research couldn't resolve, asks one question at a time (`Why` first, then `What`, `Priority`, `Effort`, `Depends on`)
@@ -162,9 +164,9 @@ todos-manager --audit
 
 **Cross-entry checks:**
 - ID sequence contiguity (gaps reported, not flagged as errors)
-- Counter cache (`.hermes/todo_id_counter`) matches max scanned ID
+- `NEXT_TODO_ID` is present, valid, and consistent with active and archived IDs; the counter cache (`.hermes/todo_id_counter`) is compatibility state only
 
-The skill outputs a structured report and modifies no files.
+The skill outputs a structured report and reconciles missing, malformed, stale, duplicated, or conflicting tracked metadata before reporting.
 
 ## Archive completed TODOs
 

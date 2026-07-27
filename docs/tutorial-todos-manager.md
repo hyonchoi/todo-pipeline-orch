@@ -25,6 +25,8 @@ tpo skills install --target all
 
 This installs the todos-manager skill to `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/`. The skill source is packaged at `hermes_pipeline/data/skills/todos-manager/SKILL.md` — git-tracked and platform-neutral.
 
+`tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
+
 **Verify:**
 
 ```bash
@@ -48,7 +50,7 @@ todos-manager --init
 cat TODOS.md
 ```
 
-The file starts with `# TODOS` followed by a blockquote preamble that documents every schema rule — entry format, status markers, required fields, ID assignment. This isn't decoration. It's the contract the skill enforces.
+The file starts with `# TODOS` followed by a blockquote preamble that documents every schema rule — entry format, status markers, required fields, and ID assignment. The preamble includes the exact tracked line `> - NEXT_TODO_ID: 1`.
 
 A `TODOS-archive.md` is also created with a minimal header:
 
@@ -84,6 +86,8 @@ Proceed? [y / edit / cancel]
 ```
 
 Confirm with `y`. The entry appears in TODOS.md.
+
+`TODOS.md` stores the tracked `NEXT_TODO_ID` value in its format-rules preamble. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting.
 
 **Output:**
 ```
@@ -205,7 +209,7 @@ Check the result:
 cat TODOS-archive.md
 ```
 
-TODO-1 is now in the archive. The next `todos-manager --add` will still compute `max(all IDs) + 1` across both files, so the next entry becomes `TODO-3` — not `TODO-1`.
+TODO-1 is now in the archive. The tracked `NEXT_TODO_ID` remains the common-path source for the next entry, so the next entry becomes `TODO-3` — not `TODO-1`; archived IDs are consulted only when reconciliation is needed.
 
 ---
 
@@ -215,7 +219,7 @@ A working TODOS.md with:
 - A schema-enforced preamble that documents the entry format
 - Three entries (TODO-1 archived, TODO-2 pending, TODO-3 revised with AI-pre-filled fields)
 - An archive file with completed work
-- Stable IDs computed across both TODOS.md and TODOS-archive.md
+- Stable IDs tracked in the `NEXT_TODO_ID` preamble, with archive-aware reconciliation when needed
 
 ### Next steps
 

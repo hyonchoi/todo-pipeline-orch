@@ -142,7 +142,7 @@ The `todos-manager` skill enforces the canonical TODOS.md schema and provides se
 - `--init`: Initialize TODOS.md with format preamble and create TODOS-archive.md
 - `--add`: Add new entry with schema enforcement and preview gate
 - `--convert`: Convert existing TODOS.md to enforced format (inserts preamble, validates entries)
-- `--audit`: Audit TODOS.md for format compliance (reports only, no auto-fix)
+- `--audit`: Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata
 - `--archive`: Move completed `[x]` entries to TODOS-archive.md (newest first)
 - `--list`: List active TODO entries (optional `--all` flag shows archived entries)
 - `--revise`: Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions
@@ -150,8 +150,8 @@ The `todos-manager` skill enforces the canonical TODOS.md schema and provides se
 The skill source lives at `hermes_pipeline/data/skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `tpo skills install --target all`. The skill enforces:
 - Required fields: **What:**, **Why:**, **Decisions:**
 - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
-- Stable TODO-<n> IDs: `max(all IDs in TODOS.md + TODOS-archive.md) + 1`, immutable once committed
-- Preamble blockquote at top of TODOS.md documenting the schema
+- Stable TODO-<n> IDs: `NEXT_TODO_ID` in the preamble is the common-path source and is immutable once committed; active and archived IDs are scanned only for reconciliation
+- Preamble blockquote at top of TODOS.md documenting the schema, including `> - NEXT_TODO_ID: <n>`
 
 The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. This Phase 1 harness provides pure-Python implementations of skill rules that serve as the test oracle, enabling instant feedback without API tokens. See:
 - [Reference: Skill Test Harness API](reference-skill-test-harness.md) — Complete function signatures, assertion types, fixtures
