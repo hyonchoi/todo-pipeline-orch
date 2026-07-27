@@ -23,12 +23,13 @@ from hermes_pipeline.config_loader import (
 # ============================================================
 
 
-def test_search_paths_uses_xdg_config_home(monkeypatch, tmp_path):
-    xdg = tmp_path / "xdg"
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+def test_search_paths_ignores_xdg_config_home(monkeypatch, tmp_path):
+    xdg_home = tmp_path / "xdg-home"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
+    monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     paths = _search_paths()
-    assert paths[0] == xdg / "tpo" / "config.yaml"
+    assert paths[0] == Path.home() / ".config" / "tpo" / "config.yaml"
 
 
 def test_search_paths_uses_xdg_config_dir_fallback(monkeypatch, tmp_path):
@@ -40,14 +41,14 @@ def test_search_paths_uses_xdg_config_dir_fallback(monkeypatch, tmp_path):
     assert paths[0] == xdg / "tpo" / "config.yaml"
 
 
-def test_search_paths_prefers_xdg_config_home(monkeypatch, tmp_path):
+def test_search_paths_uses_xdg_config_dir_when_xdg_config_home_is_set(monkeypatch, tmp_path):
     xdg = tmp_path / "xdg"
     xdg_home = tmp_path / "xdg-home"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_home))
     monkeypatch.setenv("XDG_CONFIG_DIR", str(xdg))
     monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
     paths = _search_paths()
-    assert paths[0] == xdg_home / "tpo" / "config.yaml"
+    assert paths[0] == xdg / "tpo" / "config.yaml"
 
 
 def test_search_paths_default(monkeypatch):

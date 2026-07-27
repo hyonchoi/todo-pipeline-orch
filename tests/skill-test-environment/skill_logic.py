@@ -22,9 +22,9 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
     """Compute next sequential ID from TODOS.md and TODOS-archive.md."""
     all_ids: set[int] = set()
     if todos_path.exists():
-        all_ids |= scan_ids(todos_path.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(todos_path.read_text(encoding="utf-8"))
     if archive_path.exists():
-        all_ids |= scan_ids(archive_path.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(archive_path.read_text(encoding="utf-8"))
     if not all_ids:
         return 1
     return max(all_ids) + 1
@@ -92,16 +92,16 @@ def _metadata_line_indexes(lines: list[str]) -> list[int]:
     ]
 
 
-def _section_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
+def _section_spans(lines: list[str]) -> list[tuple[str, int, int]]:
     headings: list[tuple[str, int]] = []
     for index, line in enumerate(lines):
         stripped = _line_without_ending(line)
         if stripped in SECTION_HEADINGS:
             headings.append((stripped, index))
-    spans: dict[str, tuple[int, int]] = {}
+    spans: list[tuple[str, int, int]] = []
     for position, (heading, index) in enumerate(headings):
         end = headings[position + 1][1] if position + 1 < len(headings) else len(lines)
-        spans[heading] = (index + 1, end)
+        spans.append((heading, index + 1, end))
     return spans
 
 
@@ -120,25 +120,33 @@ def parse_todos_document_sections(text: str) -> TodoDocumentSections:
         diagnostics.append("TODOS.md must contain ## Metadata, ## Entry Schema, and ## Entries in that order")
 
     def section_text(heading: str) -> str:
-        if heading not in spans:
+        chunks: list[list[str]] = []
+        for span_heading, start, end in spans:
+            if span_heading != heading:
+                continue
+            chunk = lines[start:end]
+            while chunk and not chunk[0].strip():
+                chunk = chunk[1:]
+            while chunk and not chunk[-1].strip():
+                chunk = chunk[:-1]
+            if chunk:
+                chunks.append(chunk)
+        if not chunks:
             return ""
-        start, end = spans[heading]
-        chunk = lines[start:end]
-        while chunk and not chunk[0].strip():
-            chunk = chunk[1:]
-        while chunk and not chunk[-1].strip():
-            chunk = chunk[:-1]
-        return "".join(chunk)
+        return newline.join("".join(chunk) for chunk in chunks)
 
     metadata_indexes = _metadata_line_indexes(lines)
-    metadata_span = spans.get("## Metadata")
     misplaced_indexes = []
-    if metadata_span is not None:
-        start, end = metadata_span
+    metadata_spans = [
+        (start, end) for heading, start, end in spans if heading == "## Metadata"
+    ]
+    if metadata_spans:
         misplaced_indexes = [
-            index for index in metadata_indexes if not (start <= index < end)
+            index
+            for index in metadata_indexes
+            if not any(start <= index < end for start, end in metadata_spans)
         ]
-    elif metadata_indexes:
+    else:
         misplaced_indexes = metadata_indexes
     if misplaced_indexes:
         diagnostics.append("NEXT_TODO_ID appears outside ## Metadata")
@@ -153,6 +161,13 @@ def parse_todos_document_sections(text: str) -> TodoDocumentSections:
         newline=newline,
         has_canonical_layout=has_canonical_layout,
     )
+
+
+def _scan_document_ids(text: str) -> set[int]:
+    """Scan sectioned documents only within ## Entries, otherwise scan legacy text."""
+    sections = parse_todos_document_sections(text)
+    has_section_headings = bool(_section_spans(text.splitlines(keepends=True)))
+    return scan_ids(sections.entries if has_section_headings else text)
 
 
 def _repair_embedded_metadata(lines: list[str]) -> None:
@@ -240,7 +255,7 @@ def replace_next_todo_id_line(text: str, next_id: int) -> str:
     lines = text.splitlines(keepends=True)
     _repair_embedded_metadata(lines)
     sections = parse_todos_document_sections("".join(lines))
-    if sections.has_canonical_layout:
+    if sections.has_canonical_layout or _section_spans(lines):
         schema_lines = sections.schema.splitlines(keepends=True)
         entries_lines = sections.entries.splitlines(keepends=True)
     else:
@@ -408,9 +423,9 @@ def counter_matches_scan(project_dir: Path) -> bool:
     archive = project_dir / "TODOS-archive.md"
     all_ids: set[int] = set()
     if todos.exists():
-        all_ids |= scan_ids(todos.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(todos.read_text(encoding="utf-8"))
     if archive.exists():
-        all_ids |= scan_ids(archive.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(archive.read_text(encoding="utf-8"))
     if not all_ids:
         return read_counter_cache(project_dir) in (None, 0)
     max_id = max(all_ids)
@@ -552,8 +567,13 @@ def _replace_entries_section(text: str, entries_text: str) -> str:
         return text
     newline = sections.newline
     lines = text.splitlines(keepends=True)
-    spans = _section_spans(lines)
-    start, end = spans["## Entries"]
+    entries_spans = [
+        (start, end)
+        for heading, start, end in _section_spans(lines)
+        if heading == "## Entries"
+    ]
+    assert len(entries_spans) == 1
+    start, end = entries_spans[0]
     replacement = [newline]
     if entries_text.strip():
         replacement.extend(entries_text.rstrip().splitlines(keepends=True))

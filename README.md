@@ -80,9 +80,9 @@ The `todos-manager` skill provides schema-enforced TODOS.md management with seve
 
 | Subcommand | Purpose |
 |---|---|
-| `--init` | Initialize TODOS.md with preamble and create TODOS-archive.md |
+| `--init` | Initialize TODOS.md with Metadata, Entry Schema, and Entries sections; create TODOS-archive.md |
 | `--add` | Add new entry with schema enforcement and preview gate |
-| `--convert` | Add preamble to existing TODOS.md and validate format |
+| `--convert` | Migrate an existing TODOS.md to Metadata, Entry Schema, and Entries sections; validate format |
 | `--audit` | Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata |
 | `--archive` | Move all `[x]` completed entries to TODOS-archive.md |
 | `--list` | List active TODO entries as a table (`--all` also shows archived) |
@@ -98,7 +98,7 @@ This installs `todos-manager` to `~/.claude/skills/todos-manager/` and `~/.agent
 
 `tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
 
-The skill enforces the canonical schema (What/Why/Decisions + optional fields), tracked stable TODO-<n> ID assignment, and a preview/confirm gate before writing. `TODOS.md` stores the tracked `NEXT_TODO_ID` value as standalone file-level metadata before the format-rules blockquote. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
+The skill enforces the canonical schema (What/Why/Decisions + optional fields), tracked stable TODO-<n> ID assignment, and a preview/confirm gate before writing. `TODOS.md` uses three canonical sections: `## Metadata`, `## Entry Schema`, and `## Entries`; `NEXT_TODO_ID` lives under `## Metadata`. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
 
 ---
 

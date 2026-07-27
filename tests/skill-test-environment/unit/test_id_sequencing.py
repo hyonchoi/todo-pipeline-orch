@@ -94,6 +94,78 @@ class TestComputeNextId:
 class TestTrackedNextTodoId:
     """Tracked metadata is reconciled against the scan-derived next ID."""
 
+    def test_compute_scan_next_id_ignores_schema_examples_in_canonical_documents(
+        self, tmp_path
+    ):
+        todos = tmp_path / "TODOS.md"
+        archive = tmp_path / "TODOS-archive.md"
+        todos.write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-99: Example** — Documentation only\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Active** — Summary\n",
+            encoding="utf-8",
+        )
+        archive.write_text(
+            "# TODOS Archive\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "- [x] **TODO-99: Example** — Documentation only\n\n"
+            "## Entries\n\n"
+            "- [x] **TODO-6: Archived** — Summary\n",
+            encoding="utf-8",
+        )
+
+        assert compute_scan_next_id(todos, archive) == 8
+
+    def test_assign_next_todo_id_ignores_numeric_schema_example(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-99: Example** — Documentation only\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Active** — Summary\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        assigned, messages = assign_next_todo_id(
+            tmp_path, lambda todo_id: f"- [ ] **TODO-{todo_id}: Added** — Summary"
+        )
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert assigned == 8
+        assert messages == []
+        assert "NEXT_TODO_ID: 9" in updated
+        assert "TODO-8: Added" in updated
+
+    def test_reconcile_ignores_numeric_schema_example(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-99: Example** — Documentation only\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Active** — Summary\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        reconciled, messages = reconcile_next_todo_id(tmp_path, "audit")
+
+        assert reconciled == 8
+        assert messages == []
+        assert "NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(
+            encoding="utf-8"
+        )
+
     def test_assign_next_todo_id_appends_under_entries_section(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n"
@@ -183,6 +255,67 @@ class TestTrackedNextTodoId:
             or "corrected NEXT_TODO_ID" in message
             for message in messages
         )
+
+    @pytest.mark.parametrize(
+        ("name", "text", "expected_next"),
+        [
+            (
+                "missing_heading",
+                "# TODOS\n\n"
+                "## Entry Schema\n\n"
+                "- [ ] **TODO-99: Example** — Documentation only\n\n"
+                "## Entries\n\n"
+                "- [ ] **TODO-7: Active** — Summary\n",
+                8,
+            ),
+            (
+                "duplicate_entries",
+                "# TODOS\n\n"
+                "## Metadata\n\n"
+                "NEXT_TODO_ID: 8\n\n"
+                "## Entry Schema\n\n"
+                "- [ ] **TODO-99: Example** — Documentation only\n\n"
+                "## Entries\n\n"
+                "- [ ] **TODO-7: Active** — Summary\n\n"
+                "## Entries\n\n"
+                "- [ ] **TODO-8: Also Active** — Summary\n",
+                9,
+            ),
+            (
+                "out_of_order",
+                "# TODOS\n\n"
+                "## Entries\n\n"
+                "- [ ] **TODO-7: Active** — Summary\n\n"
+                "## Metadata\n\n"
+                "NEXT_TODO_ID: 8\n\n"
+                "## Entry Schema\n\n"
+                "- [ ] **TODO-99: Example** — Documentation only\n",
+                8,
+            ),
+        ],
+        ids=["missing_heading", "duplicate_heading", "out_of_order_heading"],
+    )
+    def test_reconcile_preserves_recognized_sections_without_promoting_schema_examples(
+        self, tmp_path, name, text, expected_next
+    ):
+        (tmp_path / "TODOS.md").write_text(text, encoding="utf-8")
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        reconciled, _ = reconcile_next_todo_id(tmp_path, "audit")
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        schema = updated.split("## Entry Schema\n\n", 1)[1].split(
+            "\n\n## Entries", 1
+        )[0]
+        entries = updated.split("## Entries\n\n", 1)[1]
+        assert reconciled == expected_next
+        assert "TODO-99: Example" in schema
+        assert "TODO-99: Example" not in entries
+        if name == "duplicate_entries":
+            assert "TODO-7: Active" in entries
+            assert "TODO-8: Also Active" in entries
+        else:
+            assert "TODO-7: Active" in entries
 
     def test_reconcile_repairs_misplaced_metadata_under_entries(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
