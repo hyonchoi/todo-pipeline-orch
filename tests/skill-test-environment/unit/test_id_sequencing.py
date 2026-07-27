@@ -6,8 +6,10 @@ import pytest
 
 from tests.skill_test_environment.skill_logic import (
     compute_next_id,
+    compute_scan_next_id,
     counter_matches_scan,
     read_counter_cache,
+    reconcile_next_todo_id,
     scan_ids,
 )
 
@@ -76,6 +78,49 @@ class TestComputeNextId:
         archive.write_text("")
         next_id = compute_next_id(todos, archive)
         assert next_id == 6
+
+
+class TestTrackedNextTodoId:
+    """Tracked metadata is reconciled against the scan-derived next ID."""
+
+    def test_compute_scan_next_id_matches_existing_scan(self, tmp_path):
+        todos = tmp_path / "TODOS.md"
+        archive = tmp_path / "TODOS-archive.md"
+        todos.write_text("# TODOS\n\n- [ ] TODO-4: Existing\n", encoding="utf-8")
+        archive.write_text("- [x] TODO-7: Archived\n", encoding="utf-8")
+
+        assert compute_scan_next_id(todos, archive) == 8
+
+    def test_reconcile_repairs_stale_low_value_from_archive(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 3\n\n- [ ] TODO-1: A\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text(
+            "- [x] TODO-7: Archived\n", encoding="utf-8"
+        )
+
+        next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
+
+        assert next_id == 8
+        assert "> - NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert any("corrected NEXT_TODO_ID from 3 to 8" in message for message in messages)
+
+    def test_reconcile_missing_line_inserts_after_format_rules(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "> **Format rules (enforced by `todos-manager` skill):**\n"
+            "> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`\n\n"
+            "- [ ] TODO-4: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
+
+        assert next_id == 5
+        assert "> - NEXT_TODO_ID: 5" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert any("inserted NEXT_TODO_ID: 5" in message for message in messages)
 
 
 class TestCounterCache:

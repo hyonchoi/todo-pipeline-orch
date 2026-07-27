@@ -24,6 +24,58 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
     return max(all_ids) + 1
 
 
+NEXT_TODO_ID_LINE_RE = re.compile(r"^>\s+-\s+NEXT_TODO_ID:\s+(.+?)\s*$", re.MULTILINE)
+
+
+def read_next_todo_id(text: str) -> tuple[int | None, list[str]]:
+    """Read and validate the tracked next TODO ID from the preamble."""
+    matches = list(NEXT_TODO_ID_LINE_RE.finditer(text))
+    if not matches:
+        return None, ["NEXT_TODO_ID is missing from the TODOS.md preamble"]
+    if len(matches) > 1:
+        return None, ["NEXT_TODO_ID is duplicated in the TODOS.md preamble"]
+    raw = matches[0].group(1)
+    if not re.fullmatch(r"[1-9][0-9]*", raw):
+        return None, [f"NEXT_TODO_ID must be a positive base-10 integer, got {raw!r}"]
+    return int(raw), []
+
+
+def compute_scan_next_id(todos_path: Path, archive_path: Path) -> int:
+    """Return the scan-derived next TODO ID."""
+    return compute_next_id(todos_path, archive_path)
+
+
+def replace_next_todo_id_line(text: str, next_id: int) -> str:
+    """Replace or insert the tracked next TODO ID preamble line."""
+    replacement = f"> - NEXT_TODO_ID: {next_id}"
+    if NEXT_TODO_ID_LINE_RE.search(text):
+        return NEXT_TODO_ID_LINE_RE.sub(replacement, text, count=1)
+    marker = "> **Format rules (enforced by `todos-manager` skill):**"
+    if marker in text:
+        return text.replace(marker, marker + "\n" + replacement, 1)
+    return text.replace("# TODOS\n", "# TODOS\n\n" + replacement + "\n", 1)
+
+
+def reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]]:
+    """Repair tracked metadata so it agrees with the scan-derived ID."""
+    todos_path = project_dir / "TODOS.md"
+    archive_path = project_dir / "TODOS-archive.md"
+    text = todos_path.read_text(encoding="utf-8")
+    tracked, issues = read_next_todo_id(text)
+    scanned_next = compute_scan_next_id(todos_path, archive_path)
+    messages: list[str] = []
+    if tracked == scanned_next and not issues:
+        return tracked, messages
+    updated = replace_next_todo_id_line(text, scanned_next)
+    todos_path.write_text(updated, encoding="utf-8")
+    if tracked is None:
+        messages.append(f"{mode}: inserted NEXT_TODO_ID: {scanned_next}")
+    else:
+        messages.append(f"{mode}: corrected NEXT_TODO_ID from {tracked} to {scanned_next}")
+    messages.extend(issues)
+    return scanned_next, messages
+
+
 COUNTER_FILE = ".hermes/todo_id_counter"
 
 
@@ -224,4 +276,3 @@ def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
         new_archive += "\n".join(archived_blocks) + "\n"
 
     return new_todos, new_archive
-

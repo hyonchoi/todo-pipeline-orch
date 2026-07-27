@@ -2,10 +2,48 @@
 
 from tests.skill_test_environment.skill_logic import (
     REQUIRED_FIELDS,
+    read_next_todo_id,
+    replace_next_todo_id_line,
     validate_all_entries,
     validate_dependency_refs,
     validate_entry,
 )
+
+
+class TestTrackedNextTodoIdFormat:
+    def test_read_next_todo_id_from_preamble(self):
+        text = "# TODOS\n\n> **Format rules:**\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-1: A\n"
+
+        value, issues = read_next_todo_id(text)
+
+        assert value == 8
+        assert issues == []
+
+    def test_read_next_todo_id_rejects_zero_negative_and_non_integer(self):
+        for raw in ("0", "-1", "1.5", "abc"):
+            text = f"# TODOS\n\n> - NEXT_TODO_ID: {raw}\n"
+            value, issues = read_next_todo_id(text)
+            assert value is None
+            assert any("NEXT_TODO_ID" in issue for issue in issues)
+
+    def test_read_next_todo_id_rejects_duplicate_lines(self):
+        text = "# TODOS\n\n> - NEXT_TODO_ID: 8\n> - NEXT_TODO_ID: 9\n"
+
+        value, issues = read_next_todo_id(text)
+
+        assert value is None
+        assert any("duplicated" in issue.lower() for issue in issues)
+
+    def test_replace_next_todo_id_line_preserves_preamble(self):
+        text = (
+            "# TODOS\n\n> **Format rules:**\n> - NEXT_TODO_ID: 8\n"
+            "> - Completed entries: archived\n"
+        )
+
+        updated = replace_next_todo_id_line(text, 9)
+
+        assert "> - NEXT_TODO_ID: 9" in updated
+        assert "> - Completed entries: archived" in updated
 
 
 class TestRequiredFields:
