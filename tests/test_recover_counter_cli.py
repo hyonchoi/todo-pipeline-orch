@@ -89,6 +89,30 @@ class TestRecoverCounterCLI:
         assert result == 0
         assert (project_dir / ".hermes/todo_id_counter").read_text(encoding="utf-8") == "7"
 
+    def test_recover_counter_ignores_schema_example_ids(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "myproject"
+        project_dir.mkdir(parents=True)
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 3\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-99: Example** — Summary\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-2: Active** — Summary\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "hermes_pipeline.cli.Config.from_env",
+            lambda: Config(projects_dir=projects_dir),
+        )
+
+        result = main(["recover-counter", "myproject"])
+
+        assert result == 0
+        assert (project_dir / ".hermes/todo_id_counter").read_text(encoding="utf-8") == "2"
+
     def test_recover_counter_ignores_misplaced_tracked_metadata(self, tmp_path, monkeypatch):
         projects_dir = tmp_path / "projects"
         project_dir = projects_dir / "myproject"

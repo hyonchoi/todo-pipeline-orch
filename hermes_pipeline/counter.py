@@ -64,8 +64,7 @@ def _section_spans(lines: list[str]) -> dict[str, tuple[int, int]]:
     return spans
 
 
-def _read_tracked_next_todo_id(todos_text: str) -> int | None:
-    lines = todos_text.splitlines(keepends=True)
+def _canonical_section_spans(lines: list[str]) -> dict[str, tuple[int, int]] | None:
     heading_positions = [
         _line_without_ending(line)
         for line in lines
@@ -73,7 +72,14 @@ def _read_tracked_next_todo_id(todos_text: str) -> int | None:
     ]
     if heading_positions != list(SECTION_HEADINGS):
         return None
-    spans = _section_spans(lines)
+    return _section_spans(lines)
+
+
+def _read_tracked_next_todo_id(todos_text: str) -> int | None:
+    lines = todos_text.splitlines(keepends=True)
+    spans = _canonical_section_spans(lines)
+    if spans is None:
+        return None
     metadata_span = spans.get("## Metadata")
     if metadata_span is None:
         return None
@@ -125,9 +131,17 @@ def recover_counter(project_dir: Path) -> int:
     archive_content = (
         archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
     )
+    todos_lines = todos_content.splitlines(keepends=True)
+    sections = _canonical_section_spans(todos_lines)
+    if sections is None:
+        active_todos_content = todos_content
+    else:
+        entries_start, entries_end = sections["## Entries"]
+        active_todos_content = "".join(todos_lines[entries_start:entries_end])
     scanned_ids = [
         int(m)
-        for m in TODO_ID_RE.findall(todos_content) + TODO_ID_RE.findall(archive_content)
+        for m in TODO_ID_RE.findall(active_todos_content)
+        + TODO_ID_RE.findall(archive_content)
     ]
     scanned_max = max(scanned_ids) if scanned_ids else 0
     scanned_next = scanned_max + 1
