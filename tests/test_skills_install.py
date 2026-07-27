@@ -103,6 +103,30 @@ class TestCmdSkillsInstall:
         content = (target_dir / "SKILL.md").read_text(encoding="utf-8")
         assert content != "stale content"
 
+    def test_reinstall_stages_before_replacing_existing_destination(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        target_dir = tmp_path / ".claude" / "skills" / "todos-manager"
+        target_dir.mkdir(parents=True)
+        skill_md = target_dir / "SKILL.md"
+        skill_md.write_text("local edit", encoding="utf-8")
+
+        def _fail_after_partial_stage(source, destination, **kwargs):
+            Path(destination, "partial-file").write_text("partial", encoding="utf-8")
+            raise PermissionError("nested destination failure")
+
+        monkeypatch.setattr("shutil.copytree", _fail_after_partial_stage)
+
+        result = _cmd_skills_install(
+            FakeArgs(target="claude", scope="user", reinstall=True), config
+        )
+
+        assert result == 1
+        assert skill_md.read_text(encoding="utf-8") == "local edit"
+        assert not (target_dir / "partial-file").exists()
+
     def test_creates_target_directory_if_missing(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         config = Config(projects_dir=tmp_path / "projects")

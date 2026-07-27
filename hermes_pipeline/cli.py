@@ -1381,7 +1381,7 @@ def _preflight_skill_replacement(name: str, dest: Path) -> str | None:
         return "the destination exists but is not a directory"
     if dest.exists():
         try:
-            probe = dest / ".tpo-delete-probe"
+            probe = dest / f".tpo-delete-probe-{name}"
             probe.write_text("", encoding="utf-8")
             probe.unlink()
         except OSError as e:
@@ -1389,7 +1389,7 @@ def _preflight_skill_replacement(name: str, dest: Path) -> str | None:
     parent = dest.parent
     try:
         parent.mkdir(parents=True, exist_ok=True)
-        probe = parent / ".tpo-install-probe"
+        probe = parent / f".tpo-install-probe-{name}"
         probe.write_text("", encoding="utf-8")
         probe.unlink()
     except OSError as e:
@@ -1446,8 +1446,29 @@ def _cmd_skills_install(args, config: Config | None) -> int:
         try:
             install_dir.mkdir(parents=True, exist_ok=True)
             if reinstall and dest.exists():
-                shutil.rmtree(dest)
-            shutil.copytree(source, dest, dirs_exist_ok=True)
+                staged = Path(
+                    tempfile.mkdtemp(prefix=".tpo-skill-stage-", dir=install_dir)
+                )
+                staged.rmdir()
+                backup = Path(
+                    tempfile.mkdtemp(prefix=".tpo-skill-backup-", dir=install_dir)
+                )
+                backup.rmdir()
+                try:
+                    shutil.copytree(source, staged)
+                    dest.rename(backup)
+                    try:
+                        staged.rename(dest)
+                    except OSError:
+                        backup.rename(dest)
+                        raise
+                except OSError:
+                    shutil.rmtree(staged, ignore_errors=True)
+                    raise
+                finally:
+                    shutil.rmtree(backup, ignore_errors=True)
+            else:
+                shutil.copytree(source, dest, dirs_exist_ok=True)
             print(f"OK ({name}): installed todos-manager to {dest}")
         except PermissionError as e:
             any_failed = True
