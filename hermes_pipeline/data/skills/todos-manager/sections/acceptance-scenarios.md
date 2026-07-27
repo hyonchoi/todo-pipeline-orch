@@ -172,7 +172,7 @@
 **Walkthrough:**
 1. User invokes `todos-manager --audit`.
 2. Skill scans only entries under `## Entries`, checks required fields, and validates dependencies.
-3. Skill reconciles missing, malformed, stale, duplicated, or conflicting `NEXT_TODO_ID` metadata before reporting.
+3. Skill reports and repairs section-layout issues before entry schema findings, then reconciles missing, malformed, stale, duplicated, misplaced, or conflicting `NEXT_TODO_ID` metadata under `## Metadata`.
 4. Skill outputs structured report listing issues and the `NEXT_TODO_ID` reconciliation result.
 
 **Expected outcome:**
@@ -186,3 +186,4 @@
 - Archive-only max: archived `TODO-9` with active max `TODO-4` is corrected to `10`.
 - Failed write: if replacement fails, `TODOS.md` remains byte-for-byte unchanged and `.hermes/todo_id_counter` is not advanced.
 - Conflict: if `NEXT_TODO_ID` points to an active TODO, reconciliation scans active plus archive IDs, writes the corrected value, and continues.
+- Misplaced metadata: `NEXT_TODO_ID` under `## Entry Schema`, `## Entries`, or outside canonical sections is invalid and is repaired to exactly one line under `## Metadata`.

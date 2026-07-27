@@ -59,7 +59,7 @@ uv run tpo --debug tick my-project
 
 ## Recovering the TODO ID counter
 
-When you start a project with hand-written TODOs in TODOS.md but no `.hermes/todo_id_counter` file, the pipeline may need to rebuild its compatibility cache. The `recover-counter` subcommand uses tracked `NEXT_TODO_ID` metadata when it is consistent with active and archived IDs, and falls back to scanning TODOS.md plus TODOS-archive.md for legacy or stale tracked state.
+When you start a project with hand-written TODOs in TODOS.md but no `.hermes/todo_id_counter` file, the pipeline may need to rebuild its compatibility cache. When `TODOS.md` has valid sectioned tracked metadata and the value equals the scan-derived next ID, `recover-counter` writes `NEXT_TODO_ID - 1` to `.hermes/todo_id_counter`. Legacy or invalid section placement falls back to scanning active plus archived IDs without decreasing a higher existing cache.
 
 ```bash
 uv run tpo recover-counter my-project
@@ -72,9 +72,9 @@ Counter set to 5 for project my-project
 
 ### How it works
 
-1. Reads `TODOS.md` in the project directory and checks the tracked `NEXT_TODO_ID` preamble value
+1. Reads `TODOS.md` in the project directory and checks the tracked `NEXT_TODO_ID` value under `## Metadata`
 2. If tracked state is valid and consistent, writes `NEXT_TODO_ID - 1` to `.hermes/todo_id_counter`
-3. If tracked state is missing, malformed, or stale, scans TODOS.md plus TODOS-archive.md and writes `max(existing_counter, scanned_max)`
+3. If tracked state is missing, malformed, misplaced, or stale, scans active IDs in TODOS.md plus archived IDs in TODOS-archive.md and writes `max(existing_counter, scanned_max)`
 
 ### Key behaviors
 

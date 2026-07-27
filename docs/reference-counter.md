@@ -1,6 +1,6 @@
 # Counter Recovery (counter.py)
 
-The counter recovery module initializes and updates the compatibility cache at `.hermes/todo_id_counter`. When `TODOS.md` has consistent tracked metadata, recovery uses `NEXT_TODO_ID - 1`; scanning TODO-N IDs is the fallback for legacy or stale tracked state.
+The counter recovery module initializes and updates the compatibility cache at `.hermes/todo_id_counter`. When `TODOS.md` has valid sectioned tracked metadata and the value equals the scan-derived next ID, `recover-counter` writes `NEXT_TODO_ID - 1` to `.hermes/todo_id_counter`. Legacy or invalid section placement falls back to scanning active plus archived IDs without decreasing a higher existing cache.
 
 ## API
 
@@ -22,8 +22,8 @@ Initialize or update the counter cache from tracked TODO metadata, with a legacy
 
 **Behavior:**
 
-1. Reads `project_dir / "TODOS.md"` and its tracked `NEXT_TODO_ID` value.
-2. Scans TODO-N patterns in both `TODOS.md` and `TODOS-archive.md` using `\bTODO-(\d+)\b` and determines `scanned_max` (0 if no TODO-N entries).
+1. Reads `project_dir / "TODOS.md"` and its tracked `NEXT_TODO_ID` value under `## Metadata`.
+2. Scans active IDs under `## Entries` in `TODOS.md` plus archived IDs in `TODOS-archive.md` and determines `scanned_max` (0 if no TODO-N entries).
 3. When exactly one valid tracked value exists and equals `scanned_max + 1`, writes `NEXT_TODO_ID - 1` to the counter cache.
 4. Otherwise, reads the existing counter (0 if missing or corrupt) and writes `max(existing_value, scanned_max)`.
 
@@ -49,15 +49,15 @@ The CLI handler (`_cmd_recover_counter` in cli.py) resolves the project director
 
 ### Tracked state is authoritative
 
-`NEXT_TODO_ID` in the tracked preamble is the source of truth when it is consistent with active and archived IDs. `recover_counter()` writes `NEXT_TODO_ID - 1` only in that case, keeping the legacy counter cache compatible without letting stale metadata resurrect IDs.
+`NEXT_TODO_ID` under `## Metadata` is the source of truth when valid sectioned metadata is consistent with active and archived IDs. `recover_counter()` writes `NEXT_TODO_ID - 1` only in that case, keeping the legacy counter cache compatible without letting stale metadata resurrect IDs.
 
 ### Legacy max-over-write semantics (never decrease)
 
 For legacy TODO files without consistent tracked state, the counter is set to `max(existing_value, scanned_max)`, not `scanned_max`. If you had TODO-8 and then removed it from TODOS.md, the counter stays at 8 instead of dropping to the new scanned maximum. This prevents ID resurrection during fallback recovery.
 
-### Regex matches TODO-N anywhere
+### Section-aware entry scanning
 
-The regex `\bTODO-(\d+)\b` matches TODO-N patterns anywhere in TODOS.md, not just as list entries. If TODO-6 appears in a "Depends on" note within a TODO-1 entry, the counter is set to 6. This is intentional — it ensures the counter never collides with referenced IDs, even if they aren't active entries.
+Recovery scans active entries only under `## Entries` in `TODOS.md`; TODO-like schema examples and misplaced metadata do not affect the scan-derived next ID. Archived IDs remain part of the scan. Legacy files without a valid sectioned layout retain the compatibility fallback scan.
 
 ### Atomic file writes
 

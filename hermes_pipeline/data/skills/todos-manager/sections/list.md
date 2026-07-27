@@ -1,5 +1,8 @@
 # `--list`: List Active TODO Entries
 
+Only entries under `## Entries` are active TODO entries. Ignore TODO-like text
+under `## Entry Schema` and anywhere outside `## Entries`.
+
 1. **Validate context:** Does TODOS.md exist? If not, print "TODOS.md not found. Run `todos-manager --init` first." and exit.
 2. **Scan only the `## Entries` section of TODOS.md** for entry header lines: `- [ ]`, `- [→]`, `- [x]`, or `- [~]` followed by `**TODO-<n>: ...`. Ignore TODO-like examples in `## Entry Schema`.
 3. **If no entries found in TODOS.md:**

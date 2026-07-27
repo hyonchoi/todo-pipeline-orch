@@ -34,19 +34,27 @@ REQUIRED_FIELDS = {"What", "Why", "Decisions"}
 The three mandatory entry fields. All other fields (Pros, Cons, Context, Depends on, Assumptions, Completed, Resolved design) are optional.
 
 ```markdown
+# TODOS
+
+## Metadata
+
 NEXT_TODO_ID: <n>
+
+## Entry Schema
+
+## Entries
 ```
-The tracked file-level metadata line used by `todos-manager --add` on the common path. It is standalone global state, not part of the blockquoted entry-format rules. The skill increments it after a successful write and reconciles it against active and archived IDs only when it is missing, malformed, stale, or conflicting.
+The tracked file-level metadata line used by `todos-manager --add` on the common path. It belongs under `## Metadata`; `## Entry Schema` is documentation only, and active entries belong under `## Entries`. The skill increments it after a successful write and reconciles it against active and archived IDs only when it is missing, malformed, misplaced, stale, duplicated, or conflicting.
 
 ### ID Management
 
 #### `read_next_todo_id(text: str) -> tuple[int | None, list[str]]`
 
-Read and validate the tracked `NEXT_TODO_ID` metadata line from TODOS.md. Returns the parsed value and a list of validation issues.
+Read and validate the tracked `NEXT_TODO_ID` metadata line under `## Metadata` in TODOS.md. Returns the parsed value and a list of validation issues.
 
 #### `replace_next_todo_id_line(text: str, next_id: int) -> str`
 
-Replace the first tracked `NEXT_TODO_ID` metadata line, remove duplicate tracked lines, or insert the line near the top of TODOS.md when it is missing.
+Replace the tracked `NEXT_TODO_ID` metadata line, remove duplicates or misplaced lines, or insert exactly one line under `## Metadata` when it is missing.
 
 #### `reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]]`
 
@@ -288,7 +296,7 @@ Simulate moving completed entries from TODOS.md to TODOS-archive.md.
 - Finds all `[x]` entries in TODOS.md
 - Removes them from TODOS.md
 - Appends them to TODOS-archive.md (newest first)
-- Preserves all other content (headers, preambles)
+- Preserves all other content (headers and canonical sections)
 
 **Example:**
 ```python
@@ -425,7 +433,7 @@ Golden YAML files declare assertions using one key per assertion. The `verify.py
 
 #### Structural Checks
 
-- `preamble_present: true` — TODOS.md has format rules blockquote
+- `regex_present: "^## Metadata$"`, `regex_present: "^## Entry Schema$"`, and `regex_present: "^## Entries$"` — TODOS.md has the canonical sections
 - `archive_header_present: true` — TODOS-archive.md has "# TODOS Archive" header
 
 #### Validation Checks

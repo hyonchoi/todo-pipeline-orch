@@ -62,6 +62,8 @@ file-level state in `## Metadata`, not an entry field. `## Entry Schema` is
 documentation only; TODO-like examples in it are never active entries and must
 not be parsed, validated, dependency-resolved, listed, revised, archived, or
 counted.
+Any `NEXT_TODO_ID:` line under `## Entry Schema`, under `## Entries`, or
+outside the canonical sections is invalid tracked state.
 
 ```markdown
 # TODOS

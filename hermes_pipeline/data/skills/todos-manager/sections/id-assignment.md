@@ -10,18 +10,35 @@
 
 ### Tracked state rule
 
-`TODOS.md` must contain this file-level metadata line in `## Metadata`:
+`TODOS.md` must use this canonical skeleton:
 
 ```markdown
+# TODOS
+
+## Metadata
+
 NEXT_TODO_ID: <n>
+
+## Entry Schema
+
+> **Format rules (enforced by `todos-manager` skill):**
+> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
+> - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
+> - Required fields: **What:**, **Why:**, **Decisions:**
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
+> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
+> - ID: sequential, immutable TODO-<n>
+> - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
+
+## Entries
 ```
 
 `<n>` must be a positive base-10 integer and means "the next ID to assign."
 
 ### Reconciliation algorithm
 
-1. Read `NEXT_TODO_ID` from `TODOS.md`.
-2. If the value is missing, duplicated, non-integer, zero, negative, stale, or already used by an active TODO, scan only entries under `## Entries` in `TODOS.md` and `TODOS-archive.md`.
+1. Read `NEXT_TODO_ID` from `## Metadata` in `TODOS.md`.
+2. If the value is missing, duplicated, misplaced, non-integer, zero, negative, stale, or already used by an active TODO, scan only entries under `## Entries` in `TODOS.md` and `TODOS-archive.md`.
 3. Compute `max(all IDs) + 1`, or `1` when no IDs exist.
 4. Write the corrected `NEXT_TODO_ID` in place and report the correction.
 5. For `--add`, continue by assigning the corrected ID and incrementing the tracked value.

@@ -12,6 +12,9 @@ not be parsed, validated, dependency-resolved, listed, revised, archived, or
 counted. Consumers must apply the entry boundary algorithm only to the text
 between `## Entries` and the next top-level section (or end of file).
 
+`NEXT_TODO_ID` belongs only under `## Metadata`; any occurrence in entry text
+or schema documentation is invalid tracked metadata, not an entry field.
+
 ## Entry Header Pattern
 
 An entry starts with a markdown list item containing a status marker followed by a TODO-ID:

@@ -18,7 +18,7 @@ NEXT_TODO_ID: 24 (valid)
 ID gap check: OK (max=23)
 ```
 
-`--audit` repairs missing, malformed, duplicated, stale, or conflicting `NEXT_TODO_ID` metadata before reporting. The report states whether the value was valid, inserted, or corrected.
+`--audit` reports and repairs section-layout issues before entry schema findings. It repairs missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`. The report states whether the value was valid, inserted, or corrected.
 
 ---
 
@@ -65,7 +65,7 @@ Remediation: Run `todos-manager --audit` to repair the tracked metadata.
 | **Decisions:** is missing | Missing required field | Provide key decisions with backtick-delimited values |
 | Dependency TODO-<n> does not exist | Invalid reference | Verify TODO-<n> exists in TODOS.md or archive |
 | Invalid status marker | Typo in marker | Use one of: [ ], [→], [x], [~] |
-| Invalid NEXT_TODO_ID | Missing, malformed, duplicated, stale, or conflicting tracked metadata | Run `todos-manager --audit` or continue with `--add` to reconcile it |
+| Invalid NEXT_TODO_ID | Missing, malformed, duplicated, misplaced, stale, or conflicting tracked metadata | Run `todos-manager --audit` or continue with `--add` to reconcile it |
 
 ---
 

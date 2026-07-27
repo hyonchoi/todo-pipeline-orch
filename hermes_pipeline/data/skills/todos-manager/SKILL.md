@@ -24,6 +24,11 @@ counted. All entry consumers must use `sections/entry-boundary.md` and limit
 their scan to `## Entries` (or use the documented legacy fallback for a file
 not yet converted).
 
+Read `NEXT_TODO_ID` from `## Metadata`. Treat any `NEXT_TODO_ID:` line under
+`## Entry Schema`, under `## Entries`, or outside the canonical sections as
+invalid tracked state. `## Entry Schema` is documentation only; never count,
+list, archive, revise, validate, or use TODO-like examples in that section.
+
 ### When to use
 
 - Adding a new entry to an existing TODOS.md file (`--add`) — auto-researches the codebase to pre-fill fields
@@ -124,7 +129,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - `y` → proceed to step 9
    - `edit` → return to step 6 (no ID burned, no files written)
    - `cancel` → print "Entry discarded." and exit
-9. **Write to TODOS.md:** Under the TODO write lock, insert the formatted entry at end of file (after last entry, before trailing blank lines) and increment `NEXT_TODO_ID` in the same atomic replacement. If the replacement fails, leave TODOS.md byte-for-byte unchanged.
+9. **Write to TODOS.md:** Under the TODO write lock, insert the formatted entry under `## Entries` after the last active entry and increment `NEXT_TODO_ID` under `## Metadata` in the same atomic replacement. If replacement fails, leave `TODOS.md` byte-for-byte unchanged.
 10. **Update counter cache:** Only after the TODO write succeeds, `.hermes/todo_id_counter` may be updated as compatibility/cache state. It does not decide the next ID.
 11. **Confirm:** "✓ Entry added as TODO-<n>."
 
@@ -144,7 +149,7 @@ The skill supports seven subcommands. Each has its own workflow below.
     - Required fields present: **What:**, **Why:**, **Decisions:**
     - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
     - ID matches `TODO-<digits>` pattern
-5a. **Report findings:** Reconcile missing or malformed `NEXT_TODO_ID` before outputting the structured report (see `sections/error-messages.md`). Do not rewrite entry bodies.
+5a. **Report findings:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`. Do not rewrite entry bodies.
 
 ---
 
@@ -157,7 +162,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Status marker valid?
    - ID format correct?
    - Dependency references (if any) exist in TODOS.md or TODOS-archive.md?
-4. **Reconcile tracked state:** Read `NEXT_TODO_ID`. If it is missing, malformed, stale, duplicated, or conflicts with an active TODO, scan active and archived IDs, atomically repair the metadata line, and report the correction.
+4. **Reconcile tracked state:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
 5. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
    - Counter cache (`.hermes/todo_id_counter`) is compatibility/cache state only.
@@ -217,7 +222,7 @@ NEXT_TODO_ID: 24 (valid)
 ID gap check: OK (max=23)
 ```
 
-`--audit` reports schema findings and repairs only missing, malformed, duplicated, stale, or conflicting `NEXT_TODO_ID` metadata before reporting.
+`--audit` reports and repairs section-layout issues before entry schema findings. It repairs missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
 
 ---
 

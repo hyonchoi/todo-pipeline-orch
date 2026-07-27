@@ -6,6 +6,8 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
 
 ## Constraints
 
+- Only entries under `## Entries` are active TODO entries. Ignore TODO-like text
+  under `## Entry Schema` and anywhere outside `## Entries`.
 - Only revises **active** entries in TODOS.md. TODOS-archive.md is never modified.
 - One entry at a time — user selects by TODO-ID.
 - Reuses `sections/auto-research.md` without modifying it.
