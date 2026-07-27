@@ -63,13 +63,14 @@
   - **What:** Separated `hermes_pipeline/data/profiles` into `hermes_pipeline/data/hermes-identity/pipeline/` (SOUL.md) and `hermes_pipeline/data/phase-profiles/` (gstack/phases.yaml, agent-skills/phases.yaml). Updated `bundled_profile_dir()` (contract.py) and `resolve_profile_phases_path()` (phases.py) call sites, added `tests/test_profile_layout_split.py` regression coverage, and updated docs/howto-agent-skills-profile.md and docs/howto-pipeline-contract.md.
   - **Completed:** v0.5.9 (2026-07-24)
 
-- [ ] **TODO-35: Add --reinstall flag, default-on-exists fail, and uninstall subcommand to skills install CLI** — Make `tpo skills install` fail when dest exists, add explicit `--reinstall` opt-in, and create `tpo skills uninstall` with confirmation
+- [x] **TODO-35: Add --reinstall flag, default-on-exists fail, and uninstall subcommand to skills install CLI** — Make `tpo skills install` fail when dest exists, add explicit `--reinstall` opt-in, and create `tpo skills uninstall` with confirmation
   - **What:** Add --reinstall flag to `tpo skills install` (removes existing dest before copying), make default install fail when dest exists, and add `tpo skills uninstall` subcommand with confirmation prompt.
   - **Why:** `shutil.copytree(dest, dirs_exist_ok=True)` fails on structural mismatches (file vs dir conflicts) and silently overwrites. Users need explicit opt-in to reinstall and a way to remove skills.
   - **Pros:** Prevents accidental silent overwrites; gives users clean reinstall path; adds symmetry with uninstall
   - **Cons:** Breaking change — existing scripts/aliases that double-run install without --reinstall will get errors
   - **Context:** CLI in hermes_pipeline/cli.py:1222-1265, tests in tests/test_skills_install.py
   - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feat/skills-install-reinstall`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.6.3 (2026-07-27)
 
 - [ ] **TODO-36: Reorganize and refresh README.md's docs table** — Fix broken link, remove stale CLI-name references, group the 30-entry doc table by subsystem, and rewrite Getting Started for real install paths
   - **What:** Restructure the flat 30-row "Documentation" table in README.md (README.md:37-75) into subsystem-grouped sections (pipeline core, multi-project setup, pipeline contract, todos-manager, skill test harness) instead of one undifferentiated table. Fix the broken link `[Install TODOS Manager](tpo-skills-install)` (README.md:63) to point at a real doc/section. Update `docs/pipeline-modularization-plan.md`, which still references the pre-rename `pipeline-watch`/`hermes-pipeline` CLI names instead of `tpo`. Rewrite the Getting Started / Installation section (README.md:103-138) to reflect the actual install and onboarding paths, currently undocumented or misleading:
@@ -91,9 +92,10 @@
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/global-config-file`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
   - **Completed:** v0.6.1 (2026-07-26)
 
-- [ ] **TODO-38: Track NEXT_TODO_ID in TODOS.md instead of scanning archive** — Track NEXT_TODO_ID in TODOS.md instead of scanning archive
+- [x] **TODO-38: Track NEXT_TODO_ID in TODOS.md instead of scanning archive** — Track NEXT_TODO_ID in TODOS.md instead of scanning archive
   - **What:** Add a `NEXT_TODO_ID: <n>` line to TODOS.md's preamble as the primary source for `--add`'s ID computation, replacing the per-add archive scan. Add a conflict check: before assigning NEXT_TODO_ID to a new entry, verify no existing TODO-<NEXT_TODO_ID> already exists in TODOS.md (e.g. from a manual edit or merge). If a conflict is detected, automatically run the `--audit` reconciliation scan (max ID across TODOS.md + TODOS-archive.md) to recompute and correct NEXT_TODO_ID in place, log the correction, then continue the `--add` flow with the corrected ID — no user interruption needed. `--audit` (invoked standalone) performs the same full-scan reconciliation. Out of scope: deprecating `.hermes/todo_id_counter` itself (separate cleanup).
   - **Why:** Fixes the ID-assignment mechanism discussed earlier this session: `.hermes/todo_id_counter` is gitignored, so any agent that forgets to update it causes wrong TODO-<n> picks; committing NEXT_TODO_ID directly in tracked TODOS.md removes that failure mode and the archive-scan cost.
   - **Pros:** O(1) next-ID lookup instead of archive scan in the common case; self-healing on drift (no silent bad ID assignment); state lives in a tracked file so it can't silently diverge across clones/worktrees/agents.
   - **Cons:** Requires a one-time migration to backfill NEXT_TODO_ID into existing TODOS.md files; conflict-triggered auto-audit adds a fallback archive scan back on the rare drift path (acceptable since it's no longer the common path).
   - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/todos-next-id-tracking`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.6.3 (2026-07-27)
