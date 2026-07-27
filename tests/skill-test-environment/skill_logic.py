@@ -30,7 +30,7 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
 
 
 NEXT_TODO_ID_LINE_RE = re.compile(
-    r"^>[ \t]+-[ \t]+NEXT_TODO_ID:(?P<value>[^\r\n]*)$"
+    r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:(?P<value>[^\r\n]*)$"
 )
 
 
@@ -46,6 +46,10 @@ def _preamble_line_indexes(lines: list[str]) -> range:
     start = heading + 1
     while start < len(lines) and not lines[start].strip():
         start += 1
+    if start < len(lines) and NEXT_TODO_ID_LINE_RE.fullmatch(lines[start].rstrip("\r\n")):
+        start += 1
+        while start < len(lines) and not lines[start].strip():
+            start += 1
     if start == len(lines) or not lines[start].startswith(">"):
         return range(0)
 
@@ -62,9 +66,19 @@ def _preamble_line_indexes(lines: list[str]) -> range:
 def _metadata_line_indexes(lines: list[str]) -> list[int]:
     return [
         index
-        for index in _preamble_line_indexes(lines)
+        for index, line in enumerate(lines)
         if NEXT_TODO_ID_LINE_RE.fullmatch(lines[index].rstrip("\r\n"))
     ]
+
+
+def _repair_embedded_metadata(lines: list[str]) -> None:
+    marker = "> **Format rules (enforced by `todos-manager` skill):**"
+    for index in _preamble_line_indexes(lines):
+        line = lines[index]
+        stripped = line.rstrip("\r\n")
+        if stripped.startswith("> **Format rules") and "NEXT_TODO_ID" in stripped:
+            ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+            lines[index] = marker + ending
 
 
 def read_next_todo_id(text: str) -> tuple[int | None, list[str]]:
@@ -89,24 +103,16 @@ def compute_scan_next_id(todos_path: Path, archive_path: Path) -> int:
 
 
 def replace_next_todo_id_line(text: str, next_id: int) -> str:
-    """Replace or insert the tracked next TODO ID preamble line."""
-    replacement = f"> - NEXT_TODO_ID: {next_id}"
+    """Replace or insert the tracked next TODO ID metadata line."""
+    replacement = f"NEXT_TODO_ID: {next_id}"
     lines = text.splitlines(keepends=True)
+    _repair_embedded_metadata(lines)
     metadata_indexes = _metadata_line_indexes(lines)
     if metadata_indexes:
-        first_index, *duplicate_indexes = metadata_indexes
-        original = lines[first_index]
-        ending = "\r\n" if original.endswith("\r\n") else "\n" if original.endswith("\n") else ""
-        lines[first_index] = replacement + ending
-        for index in reversed(duplicate_indexes):
+        for index in reversed(metadata_indexes):
             del lines[index]
-        return "".join(lines)
+        metadata_indexes = []
 
-    marker = "> **Format rules (enforced by `todos-manager` skill):**"
-    for index in _preamble_line_indexes(lines):
-        if lines[index].rstrip("\r\n") == marker:
-            lines.insert(index + 1, replacement + "\n")
-            return "".join(lines)
     for index, line in enumerate(lines):
         if line.rstrip("\r\n") == "# TODOS":
             lines.insert(index + 1, "\n" + replacement + "\n")

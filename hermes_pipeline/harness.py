@@ -63,14 +63,14 @@ def _get_todos_for_fixture(fixture_name: str) -> str:
     if fixture_name == "happy-path":
         return (
             "# TODOS\n\n"
+            "NEXT_TODO_ID: 2\n\n"
             "> **Format rules (enforced by `todos-manager` skill):**\n"
             "> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`\n"
             "> - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold\n"
             "> - Required fields: **What:**, **Why:**, **Decisions:**\n"
             "> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**\n"
             "> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim\n"
-            "> - NEXT_TODO_ID: 2\n"
-            "> - ID: sequential, immutable. Use `NEXT_TODO_ID` for the common path; reconcile by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicts.\n"
+            "> - ID: sequential, immutable TODO-<n>\n"
             "> - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`\n\n"
             "- [ ] **TODO-1: Implement mock feature A** — adds a simple data transformation module\n"
             "  - **What:** Create a mock feature for integration testing.\n"

@@ -98,7 +98,7 @@ class TestTrackedNextTodoId:
         from tests.skill_test_environment import skill_logic
 
         todos = tmp_path / "TODOS.md"
-        original = "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-7: Existing\n"
+        original = "# TODOS\n\nNEXT_TODO_ID: 8\n\n- [ ] TODO-7: Existing\n"
         todos.write_text(original, encoding="utf-8")
 
         def fail_replace(src, dst):
@@ -113,7 +113,7 @@ class TestTrackedNextTodoId:
 
     def test_assign_next_todo_id_repairs_conflict_before_returning(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 7\n\n- [ ] TODO-7: Existing\n",
+            "# TODOS\n\nNEXT_TODO_ID: 7\n\n- [ ] TODO-7: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
@@ -123,13 +123,13 @@ class TestTrackedNextTodoId:
         )
 
         assert assigned == 8
-        assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert "NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert "TODO-8: Added" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID" in message for message in messages)
 
     def test_assign_next_todo_id_repairs_stale_high_tracked_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
+            "# TODOS\n\nNEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
@@ -140,13 +140,13 @@ class TestTrackedNextTodoId:
 
         assert assigned == 8
         updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
-        assert "> - NEXT_TODO_ID: 9" in updated
+        assert "NEXT_TODO_ID: 9" in updated
         assert "TODO-8: Added" in updated
         assert any("corrected NEXT_TODO_ID from 50 to 8" in message for message in messages)
 
     def test_assign_next_todo_id_uses_consistent_tracked_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-7: Existing\n",
+            "# TODOS\n\nNEXT_TODO_ID: 8\n\n- [ ] TODO-7: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
@@ -157,12 +157,12 @@ class TestTrackedNextTodoId:
 
         assert assigned == 8
         updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
-        assert "> - NEXT_TODO_ID: 9" in updated
+        assert "NEXT_TODO_ID: 9" in updated
         assert "TODO-8: Added" in updated
 
     def test_assign_next_todo_id_requires_entry_builder(self, tmp_path):
         todos = tmp_path / "TODOS.md"
-        original = "# TODOS\n\n> - NEXT_TODO_ID: 1\n"
+        original = "# TODOS\n\nNEXT_TODO_ID: 1\n"
         todos.write_text(original, encoding="utf-8")
 
         with pytest.raises(TypeError):
@@ -174,7 +174,7 @@ class TestTrackedNextTodoId:
         from tests.skill_test_environment import skill_logic
 
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 1\n", encoding="utf-8"
+            "# TODOS\n\nNEXT_TODO_ID: 1\n", encoding="utf-8"
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
         context = mp.get_context("fork")
@@ -229,7 +229,7 @@ class TestTrackedNextTodoId:
         assert replacements.value == 2
         assert flock_calls.value == 4
         assert assigned == [1, 2]
-        assert "> - NEXT_TODO_ID: 3" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert "NEXT_TODO_ID: 3" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
 
     def test_assign_next_todo_id_removes_temporary_file_when_replace_fails(
         self, tmp_path, monkeypatch
@@ -237,7 +237,7 @@ class TestTrackedNextTodoId:
         from tests.skill_test_environment import skill_logic
 
         todos = tmp_path / "TODOS.md"
-        original = "# TODOS\n\n> - NEXT_TODO_ID: 1\n"
+        original = "# TODOS\n\nNEXT_TODO_ID: 1\n"
         todos.write_text(original, encoding="utf-8")
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
 
@@ -258,7 +258,7 @@ class TestTrackedNextTodoId:
         from tests.skill_test_environment import skill_logic
 
         todos = tmp_path / "TODOS.md"
-        original = "# TODOS\n\n> - NEXT_TODO_ID: 1\n\n- [ ] TODO-4: Existing\n"
+        original = "# TODOS\n\nNEXT_TODO_ID: 1\n\n- [ ] TODO-4: Existing\n"
         todos.write_text(original, encoding="utf-8")
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
 
@@ -282,7 +282,7 @@ class TestTrackedNextTodoId:
 
     def test_reconcile_repairs_stale_low_value_from_archive(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 3\n\n- [ ] TODO-1: A\n",
+            "# TODOS\n\nNEXT_TODO_ID: 3\n\n- [ ] TODO-1: A\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text(
@@ -292,12 +292,12 @@ class TestTrackedNextTodoId:
         next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
 
         assert next_id == 8
-        assert "> - NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert "NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID from 3 to 8" in message for message in messages)
 
     def test_reconcile_repairs_stale_high_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
+            "# TODOS\n\nNEXT_TODO_ID: 50\n\n- [ ] TODO-7: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
@@ -305,7 +305,7 @@ class TestTrackedNextTodoId:
         next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
 
         assert next_id == 8
-        assert "> - NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert "NEXT_TODO_ID: 8" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert any("corrected NEXT_TODO_ID from 50 to 8" in message for message in messages)
 
     def test_reconcile_missing_line_inserts_after_format_rules(self, tmp_path):
@@ -321,14 +321,33 @@ class TestTrackedNextTodoId:
         next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
 
         assert next_id == 5
-        assert "> - NEXT_TODO_ID: 5" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert "NEXT_TODO_ID: 5" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert any("inserted NEXT_TODO_ID: 5" in message for message in messages)
+
+    def test_reconcile_repairs_metadata_embedded_in_format_heading(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "> **Format rules (enforced by `todos-manager` skill): NEXT_TODO_ID: 3**\n"
+            "> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`\n\n"
+            "- [ ] TODO-4: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        next_id, messages = reconcile_next_todo_id(tmp_path, mode="audit")
+
+        updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert next_id == 5
+        assert "> **Format rules (enforced by `todos-manager` skill):**\n" in updated
+        assert "NEXT_TODO_ID: 5\n" in updated
+        assert "NEXT_TODO_ID: 3**" not in updated
         assert any("inserted NEXT_TODO_ID: 5" in message for message in messages)
 
     def test_reconcile_removes_duplicate_metadata_lines(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n"
-            "> - NEXT_TODO_ID: 2\n"
-            "> - NEXT_TODO_ID: 9\n\n"
+            "NEXT_TODO_ID: 2\n"
+            "NEXT_TODO_ID: 9\n\n"
             "- [ ] TODO-1: Existing\n",
             encoding="utf-8",
         )
@@ -338,12 +357,12 @@ class TestTrackedNextTodoId:
 
         updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert next_id == 2
-        assert updated.count("> - NEXT_TODO_ID:") == 1
-        assert "> - NEXT_TODO_ID: 2" in updated
+        assert updated.count("NEXT_TODO_ID:") == 1
+        assert "NEXT_TODO_ID: 2" in updated
 
     def test_reconcile_repairs_malformed_present_value(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: invalid\n\n- [ ] TODO-4: Existing\n",
+            "# TODOS\n\nNEXT_TODO_ID: invalid\n\n- [ ] TODO-4: Existing\n",
             encoding="utf-8",
         )
         (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
@@ -352,8 +371,8 @@ class TestTrackedNextTodoId:
 
         updated = (tmp_path / "TODOS.md").read_text(encoding="utf-8")
         assert next_id == 5
-        assert updated.count("> - NEXT_TODO_ID:") == 1
-        assert "> - NEXT_TODO_ID: 5" in updated
+        assert updated.count("NEXT_TODO_ID:") == 1
+        assert "NEXT_TODO_ID: 5" in updated
         assert any("positive base-10 integer" in message for message in messages)
 
 

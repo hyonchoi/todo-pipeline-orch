@@ -34,19 +34,19 @@ REQUIRED_FIELDS = {"What", "Why", "Decisions"}
 The three mandatory entry fields. All other fields (Pros, Cons, Context, Depends on, Assumptions, Completed, Resolved design) are optional.
 
 ```markdown
-> - NEXT_TODO_ID: <n>
+NEXT_TODO_ID: <n>
 ```
-The tracked preamble line used by `todos-manager --add` on the common path. The skill increments it after a successful write and reconciles it against active and archived IDs only when it is missing, malformed, stale, or conflicting.
+The tracked file-level metadata line used by `todos-manager --add` on the common path. It is standalone global state, not part of the blockquoted entry-format rules. The skill increments it after a successful write and reconciles it against active and archived IDs only when it is missing, malformed, stale, or conflicting.
 
 ### ID Management
 
 #### `read_next_todo_id(text: str) -> tuple[int | None, list[str]]`
 
-Read and validate the tracked `NEXT_TODO_ID` line from the TODOS.md preamble. Returns the parsed value and a list of validation issues.
+Read and validate the tracked `NEXT_TODO_ID` metadata line from TODOS.md. Returns the parsed value and a list of validation issues.
 
 #### `replace_next_todo_id_line(text: str, next_id: int) -> str`
 
-Replace the first tracked `NEXT_TODO_ID` preamble line, remove duplicate tracked lines, or insert the line into the preamble when it is missing.
+Replace the first tracked `NEXT_TODO_ID` metadata line, remove duplicate tracked lines, or insert the line near the top of TODOS.md when it is missing.
 
 #### `reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]]`
 

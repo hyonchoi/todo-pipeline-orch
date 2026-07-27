@@ -98,7 +98,7 @@ This installs `todos-manager` to `~/.claude/skills/todos-manager/` and `~/.agent
 
 `tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
 
-The skill enforces the canonical schema (What/Why/Decisions + optional fields), tracked stable TODO-<n> ID assignment, and a preview/confirm gate before writing. `TODOS.md` stores the tracked `NEXT_TODO_ID` value in its format-rules preamble. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
+The skill enforces the canonical schema (What/Why/Decisions + optional fields), tracked stable TODO-<n> ID assignment, and a preview/confirm gate before writing. `TODOS.md` stores the tracked `NEXT_TODO_ID` value as standalone file-level metadata before the format-rules blockquote. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
 
 ---
 

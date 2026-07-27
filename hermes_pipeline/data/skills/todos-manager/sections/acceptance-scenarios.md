@@ -56,14 +56,14 @@
 
 **Walkthrough:**
 1. User invokes `todos-manager --init`.
-2. Skill creates TODOS.md with preamble blockquote containing `> - NEXT_TODO_ID: 1`.
+2. Skill creates TODOS.md with standalone `NEXT_TODO_ID: 1` metadata followed by the preamble blockquote.
 3. Skill creates TODOS-archive.md with minimal header.
 4. Skill initializes `.hermes/todo_id_counter` to 0 (if `.hermes/` exists).
 5. Skill prints "✓ TODOS.md initialized."
 
 **Expected outcome:**
-- TODOS.md exists with preamble blockquote at repo root.
-- The preamble contains exactly one `> - NEXT_TODO_ID: 1` line.
+- TODOS.md exists with standalone `NEXT_TODO_ID: 1` metadata and a preamble blockquote at repo root.
+- The format-rules blockquote does not contain `NEXT_TODO_ID`.
 - TODOS-archive.md exists with minimal header.
 
 ---

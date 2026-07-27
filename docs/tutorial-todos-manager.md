@@ -50,7 +50,7 @@ todos-manager --init
 cat TODOS.md
 ```
 
-The file starts with `# TODOS` followed by a blockquote preamble that documents every schema rule — entry format, status markers, required fields, and ID assignment. The preamble includes the exact tracked line `> - NEXT_TODO_ID: 1`.
+The file starts with `# TODOS`, then standalone `NEXT_TODO_ID: 1` metadata, then a blockquote preamble that documents each TODO entry's format rules. `NEXT_TODO_ID` is global file state, not part of the entry schema.
 
 A `TODOS-archive.md` is also created with a minimal header:
 
@@ -87,7 +87,7 @@ Proceed? [y / edit / cancel]
 
 Confirm with `y`. The entry appears in TODOS.md.
 
-`TODOS.md` stores the tracked `NEXT_TODO_ID` value in its format-rules preamble. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting.
+`TODOS.md` stores the tracked `NEXT_TODO_ID` value as standalone file-level metadata before the format-rules blockquote. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, stale, or conflicting.
 
 **Output:**
 ```

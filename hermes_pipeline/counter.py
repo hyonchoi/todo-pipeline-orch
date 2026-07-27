@@ -10,10 +10,10 @@ from pathlib import Path
 COUNTER_FILE = ".hermes/todo_id_counter"
 TODO_ID_RE = re.compile(r"\bTODO-(\d+)\b")
 NEXT_TODO_ID_METADATA_RE = re.compile(
-    r"^>[ \t]+-[ \t]+NEXT_TODO_ID:[^\r\n]*\r?$", re.MULTILINE
+    r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:[^\r\n]*\r?$", re.MULTILINE
 )
 NEXT_TODO_ID_RE = re.compile(
-    r"^>[ \t]+-[ \t]+NEXT_TODO_ID:[ \t]*([1-9][0-9]*)[ \t]*\r?$",
+    r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:[ \t]*([1-9][0-9]*)[ \t]*\r?$",
     re.MULTILINE,
 )
 
@@ -30,6 +30,10 @@ def _preamble_line_indexes(lines: list[str]) -> range:
     start = heading + 1
     while start < len(lines) and not lines[start].strip():
         start += 1
+    if start < len(lines) and NEXT_TODO_ID_METADATA_RE.fullmatch(lines[start].rstrip("\r\n")):
+        start += 1
+        while start < len(lines) and not lines[start].strip():
+            start += 1
     if start == len(lines) or not lines[start].startswith(">"):
         return range(0)
 
@@ -47,8 +51,8 @@ def _read_tracked_next_todo_id(todos_text: str) -> int | None:
     lines = todos_text.splitlines(keepends=True)
     metadata_lines = []
     matches = []
-    for index in _preamble_line_indexes(lines):
-        line = lines[index].rstrip("\r\n")
+    for line in lines:
+        line = line.rstrip("\r\n")
         if NEXT_TODO_ID_METADATA_RE.fullmatch(line):
             metadata_lines.append(line)
         match = NEXT_TODO_ID_RE.fullmatch(line)

@@ -147,7 +147,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Status marker valid?
    - ID format correct?
    - Dependency references (if any) exist in TODOS.md or TODOS-archive.md?
-4. **Reconcile tracked state:** Read `NEXT_TODO_ID`. If it is missing, malformed, stale, duplicated, or conflicts with an active TODO, scan active and archived IDs, atomically repair the preamble line, and report the correction.
+4. **Reconcile tracked state:** Read `NEXT_TODO_ID`. If it is missing, malformed, stale, duplicated, or conflicts with an active TODO, scan active and archived IDs, atomically repair the metadata line, and report the correction.
 5. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
    - Counter cache (`.hermes/todo_id_counter`) is compatibility/cache state only.

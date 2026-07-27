@@ -4,16 +4,17 @@
 
 - IDs are assigned sequentially in insertion order, starting from 1.
 - Once a TODO-<n> is committed, its ID is immutable.
-- The common path reads `NEXT_TODO_ID` from the `TODOS.md` preamble and assigns that value.
+- The common path reads the standalone `NEXT_TODO_ID` metadata line from `TODOS.md` and assigns that value.
 - After a successful add, increment `NEXT_TODO_ID` by 1 in the same locked atomic write as the new entry.
 - Archived entries count during reconciliation. Do not fill gaps.
 
 ### Tracked state rule
 
-`TODOS.md` must contain this blockquote line inside the format-rules preamble:
+`TODOS.md` must contain this standalone file-level metadata line before the
+format-rules blockquote:
 
 ```markdown
-> - NEXT_TODO_ID: <n>
+NEXT_TODO_ID: <n>
 ```
 
 `<n>` must be a positive base-10 integer and means "the next ID to assign."

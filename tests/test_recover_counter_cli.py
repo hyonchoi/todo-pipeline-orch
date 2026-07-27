@@ -43,7 +43,7 @@ class TestRecoverCounterSubcommand:
         project = projects / "myproject"
         project.mkdir(parents=True)
         (project / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-7: Active\n",
+            "# TODOS\n\nNEXT_TODO_ID: 8\n\n- [ ] TODO-7: Active\n",
             encoding="utf-8",
         )
         config = Config(projects_dir=projects)

@@ -12,7 +12,7 @@ class TestRecoverCounter:
     def test_recover_counter_uses_tracked_next_todo_id_minus_one(self, tmp_path):
         project_dir = tmp_path
         (project_dir / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-7: Active\n",
+            "# TODOS\n\nNEXT_TODO_ID: 8\n\n- [ ] TODO-7: Active\n",
             encoding="utf-8",
         )
 
@@ -23,7 +23,7 @@ class TestRecoverCounter:
 
     def test_recover_counter_accepts_crlf_tracked_next_todo_id(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\r\n\r\n> - NEXT_TODO_ID: 8\r\n\r\n- [ ] TODO-7: Active\r\n",
+            "# TODOS\r\n\r\nNEXT_TODO_ID: 8\r\n\r\n- [ ] TODO-7: Active\r\n",
             encoding="utf-8",
         )
 
@@ -33,7 +33,7 @@ class TestRecoverCounter:
 
     def test_recover_counter_falls_back_when_tracked_state_is_stale_low(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 3\n\n- [ ] TODO-9: Active\n",
+            "# TODOS\n\nNEXT_TODO_ID: 3\n\n- [ ] TODO-9: Active\n",
             encoding="utf-8",
         )
 
@@ -43,7 +43,7 @@ class TestRecoverCounter:
 
     def test_recover_counter_falls_back_when_tracked_state_is_stale_high(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: 50\n\n- [ ] TODO-7: Active\n",
+            "# TODOS\n\nNEXT_TODO_ID: 50\n\n- [ ] TODO-7: Active\n",
             encoding="utf-8",
         )
 
@@ -65,7 +65,7 @@ class TestRecoverCounter:
     def test_recover_counter_falls_back_to_scan_when_tracked_state_malformed(self, tmp_path):
         project_dir = tmp_path
         (project_dir / "TODOS.md").write_text(
-            "# TODOS\n\n> - NEXT_TODO_ID: abc\n\n- [ ] TODO-4: Active\n",
+            "# TODOS\n\nNEXT_TODO_ID: abc\n\n- [ ] TODO-4: Active\n",
             encoding="utf-8",
         )
 
@@ -88,8 +88,8 @@ class TestRecoverCounter:
     def test_recover_counter_fallback_rejects_valid_and_malformed_metadata(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n"
-            "> - NEXT_TODO_ID: 12\n"
-            "> - NEXT_TODO_ID: malformed\n\n"
+            "NEXT_TODO_ID: 12\n"
+            "NEXT_TODO_ID: malformed\n\n"
             "- [ ] TODO-3: Active\n",
             encoding="utf-8",
         )
@@ -105,9 +105,9 @@ class TestRecoverCounter:
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n"
             "> **Format rules:**\n"
-            "> - NEXT_TODO_ID: 8\n\n"
+            "NEXT_TODO_ID: 8\n\n"
             "- [ ] TODO-7: Active\n\n"
-            "> - NEXT_TODO_ID: 99\n",
+            "NEXT_TODO_ID: 99\n",
             encoding="utf-8",
         )
 
@@ -119,7 +119,7 @@ class TestRecoverCounter:
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n"
             "- [ ] TODO-4: Active\n\n"
-            "> - NEXT_TODO_ID: 99\n",
+            "NEXT_TODO_ID: 99\n",
             encoding="utf-8",
         )
 
