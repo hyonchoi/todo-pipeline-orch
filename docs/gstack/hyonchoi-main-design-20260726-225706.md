@@ -43,6 +43,9 @@ through audit rather than becoming a hidden fork-local bug.
 - The todos-manager deterministic test oracle lives under `tests/skill-test-environment/`.
 - `Spec:` and `Reference:` fields remain `--revise`-only and must not be guessed.
 - `.hermes/todo_id_counter` is explicitly out of scope for deletion in `TODO-38`.
+- The real `todos-manager` runtime is the bundled skill documentation itself
+  (`SKILL.md` plus `sections/*.md`). The Python oracle verifies that runtime
+  contract, but does not execute in the user path.
 
 ## Premises
 
@@ -83,11 +86,12 @@ Reuses:
 
 ### Approach B: Shared Reconciler Foundation
 
-Implement a small TODO metadata/reconciliation helper used by the packaged skill
-test oracle and any Python-side support, with `NEXT_TODO_ID` parsing, conflict
-detection, audit repair, and archive fallback in one place. Keep `TODO-35`
-scoped to `cli.py`, while `TODO-38` updates schema, id-assignment docs, tests,
-fixtures, and audit behavior around the same helper contract.
+Implement a small TODO metadata/reconciliation helper in the packaged skill test
+oracle, with `NEXT_TODO_ID` parsing, conflict detection, audit repair, archive
+fallback, and write-safety simulation in one place. Keep `TODO-35` scoped to
+`cli.py`, while `TODO-38` updates the actual skill runtime docs, schema,
+id-assignment docs, tests, fixtures, legacy counter behavior, and audit output
+around the same helper contract.
 
 Effort: M
 Risk: Medium
@@ -101,6 +105,8 @@ Cons:
 - Slightly larger than the current `Effort S` label for `TODO-38`.
 - Requires care to avoid turning the skill docs into a Python runtime dependency.
 - Needs migration tests for preamble insertion and legacy projects.
+- The oracle is not the runtime. The runtime is prose skill instructions, so
+  docs and oracle must be updated together and reviewed as a contract pair.
 
 Reuses:
 - `tests/skill-test-environment/skill_logic.py` as the deterministic oracle surface.
@@ -137,7 +143,9 @@ Choose Approach B: Shared Reconciler Foundation.
 `TODO-35` and `TODO-38` should not be tangled in one module, but `TODO-38` should
 not be reduced to a text edit. The critical path is a single testable contract:
 
-1. `TODOS.md` preamble contains `NEXT_TODO_ID: <n>`.
+1. `TODOS.md` preamble contains the exact blockquote line
+   `> - NEXT_TODO_ID: <n>`, where `<n>` is a positive base-10 integer and the
+   value means "the next ID to assign."
 2. `--add` reads that value in O(1) on the common path.
 3. Before writing `TODO-<n>`, the workflow verifies the ID is not already present
    in active TODOs.
@@ -147,6 +155,25 @@ not be reduced to a text edit. The critical path is a single testable contract:
 5. Standalone `--audit` performs the same reconciliation and reports what changed.
 6. `.hermes/todo_id_counter` may still be updated as compatibility/cache state, but
    it no longer decides the next ID.
+7. `TODOS.md` updates that change `NEXT_TODO_ID` are locked and atomic: acquire
+   an exclusive lock for the whole read/validate/reconcile/write sequence, write
+   to a same-directory temporary file, then replace in one operation. Use
+   `fcntl.flock` on Unix; if Windows support is later needed, add a lock shim
+   before claiming concurrent-writer coverage there.
+8. If a `TODOS.md` write fails, the original file remains unchanged and
+   `.hermes/todo_id_counter` is not updated.
+9. The first shared reconciler lives in `tests/skill-test-environment/skill_logic.py`
+   as the deterministic oracle. The actual runtime contract lives in
+   `hermes_pipeline/data/skills/todos-manager/SKILL.md` and `sections/*.md`.
+   Do not add a product-runtime module until a real Python command path needs it.
+10. Malformed tracked state is a format error. If `NEXT_TODO_ID` is missing,
+    non-integer, zero, negative, duplicated, or outside the preamble blockquote,
+    `--audit` repairs it by full scan and reports the correction; `--add`
+    performs the same repair before assigning an ID.
+11. `tpo recover-counter` / `hermes_pipeline/counter.py` becomes compatibility
+    behavior: when `TODOS.md` has `NEXT_TODO_ID`, recover the cache from
+    `NEXT_TODO_ID - 1`; only fall back to scanning active plus archive IDs when
+    the tracked field is absent or malformed.
 
 For `TODO-35`, keep the behavior direct:
 
@@ -158,18 +185,27 @@ For `TODO-35`, keep the behavior direct:
    matching the confirmation style already used by `hermes profile delete`.
 5. `--target all` should report per-target outcomes and exit nonzero if any selected
    target fails.
+6. Destructive multi-target operations (`--target all --reinstall` and
+   `uninstall --target all --yes`) preflight all selected destinations before
+   deleting or replacing any target. If an obvious permission/path problem is
+   detected, fail before mutating the first target.
+7. Preflight must check target deletability as well as parent writability. A
+   destination that is a read-only directory, regular file, or symlink must have
+   an explicit expected outcome before any target is removed.
 
 ## Open Questions
 
-1. Should the installer replacement flag be named only `--reinstall`, or should
-   `--force` be accepted as a deprecated alias for script familiarity? Default
-   recommendation: only `--reinstall`, because the TODO explicitly names it and
-   the operation is clearer than generic force.
+1. Resolved by eng review: use only `--reinstall`; do not accept `--force` as an
+   alias. `--force` already has multiple meanings in this CLI, and TODO-35 is a
+   safety change where the destructive action should be named precisely.
 2. Should `tpo skills uninstall` support `--scope project` from day one?
    Default recommendation: yes, because install already supports user/project scope.
 3. Should `--audit` modify `TODOS.md` when only `NEXT_TODO_ID` is wrong?
    Default recommendation: yes, because `TODO-38` explicitly calls for audit
    reconciliation, and stale tracked metadata is a format error with a mechanical fix.
+4. Resolved by Claude outside voice: the oracle-first reconciler is allowed, but
+   only because the design now names the bundled Markdown skill docs as the
+   runtime contract and requires docs/oracle lockstep updates.
 
 ## Success Criteria
 
@@ -180,13 +216,25 @@ For `TODO-35`, keep the behavior direct:
 - `tpo skills uninstall` refuses to delete without confirmation unless `--yes` is passed.
 - `tpo skills uninstall --target all --scope user --yes` removes both supported user
   destinations and reports per-target results.
-- New or converted `TODOS.md` files include `NEXT_TODO_ID: <n>` in the preamble.
+- `tpo skills install --target all --reinstall` and
+  `tpo skills uninstall --target all --yes` preflight all selected targets before
+  deleting or replacing any existing destination.
+- New or converted `TODOS.md` files include the exact preamble line
+  `> - NEXT_TODO_ID: <n>`.
 - `todos-manager --add` uses `NEXT_TODO_ID` on the common path and increments it
   after a successful write.
 - If `NEXT_TODO_ID` points at an existing TODO, add/audit reconciles by scanning
   `TODOS.md` plus `TODOS-archive.md` and writes the corrected next value.
 - Legacy projects without `NEXT_TODO_ID` are migrated by `--audit` or before first
   `--add`, without renumbering existing TODOs.
+- `--init`, `--convert`, `--add`, and `--audit` all preserve `NEXT_TODO_ID`
+  invariants, including archive-only max ID reconciliation.
+- Failed or interrupted tracked-counter writes leave `TODOS.md` unchanged and do
+  not advance `.hermes/todo_id_counter`.
+- Malformed `NEXT_TODO_ID` values are reported and repaired by `--audit` and by
+  the pre-add reconciliation path.
+- `tpo recover-counter` updates `.hermes/todo_id_counter` from `NEXT_TODO_ID - 1`
+  when tracked state exists, and falls back to full scan only for legacy files.
 - `uv run pytest tests/test_skills_install.py tests/skill-test-environment` passes.
 
 ## Distribution Plan
@@ -212,12 +260,64 @@ lookup.
 2. Flip `tests/test_skills_install.py::test_reinstall_overwrites_without_error`
    into a fail-by-default test and add explicit reinstall/uninstall cases.
 3. Add a TODO metadata helper in the skill test environment for reading, writing,
-   and reconciling `NEXT_TODO_ID`.
-4. Update `sections/schema.md` and `sections/id-assignment.md` so the tracked
-   preamble field is canonical and archive scanning is a repair path.
+   atomically updating, and reconciling `NEXT_TODO_ID`.
+4. Update every runtime-doc and fixture surface that states ID behavior:
+   `hermes_pipeline/data/skills/todos-manager/SKILL.md`,
+   `sections/schema.md`, `sections/id-assignment.md`,
+   `sections/error-messages.md`, `sections/acceptance-scenarios.md`,
+   `sections/convert-mode-b.md`, `tests/skill-test-environment/demo-project/TODOS.md`,
+   golden YAML files, root `TODOS.md`, and any docs that quote the preamble.
 5. Add golden tests for legacy migration, stale low `NEXT_TODO_ID`, conflicting
-   active ID, archive-only max ID, and successful increment after add.
-6. Run focused tests first, then full `uv run pytest` before shipping.
+   active ID, archive-only max ID, successful increment after add, failed write
+   rollback, and concurrent/stale writer protection.
+6. Add destructive multi-target tests for reinstall/uninstall preflight: when the
+   second selected target is not writable, the first target remains untouched.
+7. Update `hermes_pipeline/counter.py` and `recover-counter` tests so the legacy
+   cache is recovered from tracked `NEXT_TODO_ID` when present.
+8. Run focused tests first, then full `uv run pytest` before shipping.
+
+## Eng Review Amendments
+
+Accepted by `/plan-eng-review` on 2026-07-27:
+
+1. Keep TODO-35 and TODO-38 in the same implementation scope, despite the
+   complexity smell, because the user chose the combined design explicitly.
+2. Treat `NEXT_TODO_ID` as tracked state. All writes that update it must be
+   locked and atomic, with rollback tests for write failure and stale writer
+   cases.
+3. Keep the shared reconciler in the deterministic skill-test oracle first.
+   Extract to product runtime only when a real Python execution path needs it.
+4. Expand the test plan into a contract for every `NEXT_TODO_ID` mutation path:
+   `--init`, `--convert`, `--add`, `--audit`, conflict reconciliation,
+   archive-only max ID, failed writes, and concurrent/stale writers.
+5. Preflight destructive multi-target skill operations before mutation.
+6. Use only `--reinstall`; do not add a `--force` alias.
+
+## Claude Outside Voice Amendments
+
+Accepted after Claude outside voice on 2026-07-27:
+
+1. The design now explicitly separates runtime from oracle. The runtime is the
+   bundled Markdown skill docs; `tests/skill-test-environment/skill_logic.py`
+   is the executable oracle that proves those docs describe a coherent contract.
+2. The exact tracked preamble line is `> - NEXT_TODO_ID: <n>`. It belongs inside
+   the existing format-rules blockquote. The parser accepts only a positive
+   base-10 integer.
+3. Missing or malformed `NEXT_TODO_ID` is repaired by `--audit` and by the
+   pre-add reconciliation path. Repair scans `TODOS.md` and `TODOS-archive.md`,
+   writes `max_id + 1`, reports the correction, then continues.
+4. "Locked and atomic" means an exclusive lock spans read, reconciliation, and
+   replacement. Same-directory temp-file replacement alone is not enough to
+   claim stale-writer protection.
+5. `recover-counter` remains compatibility-only. When tracked state exists,
+   `.hermes/todo_id_counter` is set to `NEXT_TODO_ID - 1`; full scan is only the
+   legacy fallback.
+6. The migration file list is explicit: `SKILL.md`, `sections/schema.md`,
+   `sections/id-assignment.md`, `sections/error-messages.md`,
+   `sections/acceptance-scenarios.md`, `sections/convert-mode-b.md`,
+   `tests/skill-test-environment/skill_logic.py`, unit tests, golden YAML files,
+   demo fixtures, root `TODOS.md`, `hermes_pipeline/counter.py`, and
+   `recover-counter` tests.
 
 ## The Assignment
 
@@ -234,3 +334,17 @@ contract work; the messages and schema line are the contract users will copy.
   patch. That is the right instinct for tracked project metadata.
 - You chose the shared reconciler foundation instead of the smallest patch, which
   says the failure you care about is future drift between docs, tests, and behavior.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | not run | not needed for maintainer-workflow hardening |
+| Codex Review | `/claude` | Independent outside voice | 1 | ABSORBED | 10 findings; TODO-38 runtime/oracle, locking, counter, and format gaps folded into plan |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | CLEAR | 5 issues found, 0 critical gaps; all accepted into plan |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | not run | no UI scope |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | not run | not requested |
+
+- **CROSS-MODEL:** Claude agreed TODO-35 was ready and found TODO-38 needed sharper runtime/format/counter semantics; those gaps are now absorbed.
+- **VERDICT:** ENG + CLAUDE OUTSIDE VOICE CLEARED — ready to implement the amended combined plan.
+NO UNRESOLVED DECISIONS
