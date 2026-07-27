@@ -4,6 +4,14 @@
 
 Defines how to identify and extract individual TODO entries from TODOS.md or TODOS-archive.md. This spec is shared by `--archive` and `--revise` to prevent DRY violations.
 
+## Active Entry Scope
+
+In the canonical layout, only entries under `## Entries` are active TODOs. The
+`## Entry Schema` section is documentation only. TODO-like examples there must
+not be parsed, validated, dependency-resolved, listed, revised, archived, or
+counted. Consumers must apply the entry boundary algorithm only to the text
+between `## Entries` and the next top-level section (or end of file).
+
 ## Entry Header Pattern
 
 An entry starts with a markdown list item containing a status marker followed by a TODO-ID:
@@ -31,11 +39,13 @@ Non-indented blank lines or non-entry lines (e.g., section headers, paragraph te
 
 ## Entry Extraction Algorithm
 
-1. Scan the file line by line.
-2. When a line matches the entry header pattern, mark it as the start of a new entry.
-3. All subsequent lines that are indented sub-bullets (`  - `) or blank lines between sub-bullets belong to that entry.
-4. The entry ends when the next entry header is found or the file ends.
-5. Trim trailing blank lines from the entry text (but preserve internal blank lines between sub-bullets if they exist).
+1. Select the `## Entries` section when the document has the canonical layout;
+   otherwise, retain the legacy whole-document fallback used during migration.
+2. Scan the selected entry text line by line.
+3. When a line matches the entry header pattern, mark it as the start of a new entry.
+4. All subsequent lines that are indented sub-bullets (`  - `) or blank lines between sub-bullets belong to that entry.
+5. The entry ends when the next entry header is found or the selected entry text ends.
+6. Trim trailing blank lines from the entry text (but preserve internal blank lines between sub-bullets if they exist).
 
 ## Example
 

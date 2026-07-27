@@ -14,6 +14,16 @@ metadata:
 
 The **todos-manager** skill automates the addition and management of TODOS.md entries in gstack-format projects. It enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment, and provides a preview/confirm gate before writing to disk. Completed TODOs can be archived to keep TODOS.md clean.
 
+### Canonical entry scope
+
+Canonical TODOS.md files contain `# TODOS`, `## Metadata`, `## Entry Schema`,
+and `## Entries` in that order. Only TODO entries under `## Entries` are active
+TODOs. `## Entry Schema` is documentation only: TODO-like examples there must
+not be parsed, validated, dependency-resolved, listed, revised, archived, or
+counted. All entry consumers must use `sections/entry-boundary.md` and limit
+their scan to `## Entries` (or use the documented legacy fallback for a file
+not yet converted).
+
 ### When to use
 
 - Adding a new entry to an existing TODOS.md file (`--add`) — auto-researches the codebase to pre-fill fields
@@ -39,7 +49,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 
 | When | Read this section |
 |------|-------------------|
-| Any step references the TODOS.md schema, field definitions, or the Preamble Template | `sections/schema.md` |
+| Any step references the TODOS.md schema, field definitions, or canonical document layout | `sections/schema.md` |
 | Computing or validating TODO-<n> IDs | `sections/id-assignment.md` |
 | Executing `--add` step 4.5 (auto-research) | `sections/auto-research.md` |
 | `--convert` detects header-based format (Mode B: `## Open`/`## Completed` + `### Title` entries) | `sections/convert-mode-b.md` |
@@ -56,7 +66,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 When the user invokes `todos-manager --init` on a project with no TODOS.md:
 
 1. **Check if TODOS.md exists** at repo root.
-   - If absent, create TODOS.md with preamble blockquote (read `sections/schema.md` for the Preamble Template).
+   - If absent, create TODOS.md with the canonical three-section layout (read `sections/schema.md`).
 2. **Create TODOS-archive.md** at repo root with minimal header:
    ```markdown
    # TODOS Archive
@@ -75,7 +85,7 @@ The skill supports seven subcommands. Each has its own workflow below.
 ### `--add`: Add new entry with schema enforcement
 
 1. **Validate context:** Does TODOS.md exist? If not, prompt to run `--init` first.
-2. **Compute next TODO-<n>:** Read `sections/id-assignment.md`, then read `NEXT_TODO_ID` from the TODOS.md preamble. Reconcile it by scanning TODOS.md plus TODOS-archive.md only when it is missing, malformed, stale, duplicated, or conflicts with an active TODO.
+2. **Compute next TODO-<n>:** Read `sections/id-assignment.md`, then read `NEXT_TODO_ID` from `## Metadata`. Reconcile it by scanning entries under `## Entries` in TODOS.md plus TODOS-archive.md only when it is missing, malformed, stale, duplicated, or conflicts with an active TODO.
    - **Output to user:** "Next ID will be `TODO-<n>`."
 3. **Prompt for title:** "Enter the TODO title (required):"
    - Validation: 10–200 characters, non-empty.
@@ -123,14 +133,14 @@ The skill supports seven subcommands. Each has its own workflow below.
 ### `--convert`: Convert existing TODOS.md to enforced format
 
 1. Read TODOS.md. If absent, print error and exit.
-2. Read `sections/schema.md` for the Preamble Template and field definitions.
+2. Read `sections/schema.md` for the canonical document layout and field definitions.
 3. **Detect format:**
-   - Canonical entries (`- [ ] TODO-N`) with no preamble → **Mode A**.
+   - Canonical entries (`- [ ] TODO-N`) without the three canonical sections → **Mode A** migration.
    - Header-based sections (`## Open`/`## Completed` with `### Title` entries, no canonical entries) → **Mode B**. Read `sections/convert-mode-b.md` and follow its steps in full.
 
 #### Mode A: Canonical format validation
 
-4a. **Validate each entry:** Scan for TODO-<n> entries. For each entry, check:
+4a. **Validate each entry:** Scan only the `## Entries` section for TODO-<n> entries. For each entry, check:
     - Required fields present: **What:**, **Why:**, **Decisions:**
     - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
     - ID matches `TODO-<digits>` pattern
@@ -140,8 +150,8 @@ The skill supports seven subcommands. Each has its own workflow below.
 
 ### `--audit`: Audit TODOS.md for format compliance
 
-1. **Scan TODOS.md** for all TODO-<n> entries.
-2. **Scan TODOS-archive.md** (if exists) for archived TODO-<n> entries.
+1. **Scan only the `## Entries` section of TODOS.md** for active TODO-<n> entries.
+2. **Scan only the `## Entries` section of TODOS-archive.md** (if it uses the canonical layout) for archived TODO-<n> entries.
 3. **Per-entry checks:**
    - Required fields: **What:**, **Why:**, **Decisions:** present?
    - Status marker valid?
@@ -157,7 +167,7 @@ The skill supports seven subcommands. Each has its own workflow below.
 
 ### `--archive`: Move completed TODOs to archive
 
-1. **Scan TODOS.md** for `[x]` entries. Use `sections/entry-boundary.md` for entry boundary detection.
+1. **Scan only the `## Entries` section of TODOS.md** for `[x]` entries. Use `sections/entry-boundary.md` for entry boundary detection.
 2. **If no `[x]` entries found:** Print "No completed TODOs to archive." and exit.
 3. **If TODOS-archive.md does not exist:** Create it with minimal header:
    ```markdown

@@ -1,7 +1,7 @@
 # `--list`: List Active TODO Entries
 
 1. **Validate context:** Does TODOS.md exist? If not, print "TODOS.md not found. Run `todos-manager --init` first." and exit.
-2. **Scan TODOS.md** for entry header lines: `- [ ]`, `- [→]`, `- [x]`, or `- [~]` followed by `**TODO-<n>: ...`.
+2. **Scan only the `## Entries` section of TODOS.md** for entry header lines: `- [ ]`, `- [→]`, `- [x]`, or `- [~]` followed by `**TODO-<n>: ...`. Ignore TODO-like examples in `## Entry Schema`.
 3. **If no entries found in TODOS.md:**
    - If `--all` was passed: skip the active table (do not exit) and continue to step 6 to show archived entries.
    - If `--all` was NOT passed: print "No active TODOs found." and exit.
@@ -19,7 +19,7 @@
    |----|--------|-------|---------|
    | TODO-1 | Pending | Example title | One-line summary |
    ```
-6. **If `--all` flag is present**, also scan TODOS-archive.md (if exists):
+6. **If `--all` flag is present**, also scan only the `## Entries` section of TODOS-archive.md (if it uses the canonical layout):
    - Apply the same scan and extraction rules as steps 2 and 4 (entry matching and field extraction) to TODOS-archive.md
    - Display as a separate table section labeled "Archived TODOs" below the active table
    - If TODOS-archive.md does not exist or contains no entries, skip the archived section silently

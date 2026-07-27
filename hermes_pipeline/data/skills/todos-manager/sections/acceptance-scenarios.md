@@ -56,14 +56,14 @@
 
 **Walkthrough:**
 1. User invokes `todos-manager --init`.
-2. Skill creates TODOS.md with standalone `NEXT_TODO_ID: 1` metadata followed by the preamble blockquote.
+2. Skill creates TODOS.md with canonical `## Metadata`, `## Entry Schema`, and `## Entries` sections, setting `NEXT_TODO_ID: 1` under `## Metadata`.
 3. Skill creates TODOS-archive.md with minimal header.
 4. Skill initializes `.hermes/todo_id_counter` to 0 (if `.hermes/` exists).
 5. Skill prints "✓ TODOS.md initialized."
 
 **Expected outcome:**
-- TODOS.md exists with standalone `NEXT_TODO_ID: 1` metadata and a preamble blockquote at repo root.
-- The format-rules blockquote does not contain `NEXT_TODO_ID`.
+- TODOS.md exists with `# TODOS`, `## Metadata`, `## Entry Schema`, and `## Entries` in that order.
+- `NEXT_TODO_ID: 1` appears under `## Metadata`, and the format-rules blockquote is under `## Entry Schema`.
 - TODOS-archive.md exists with minimal header.
 
 ---
@@ -124,12 +124,12 @@
 ### Scenario A4: `--archive` completed TODOs
 
 **Setup:**
-- TODOS.md has 15 entries, 10 marked `[x]`.
+- TODOS.md has 15 entries under `## Entries`, 10 marked `[x]`.
 - TODOS-archive.md does not exist.
 
 **Walkthrough:**
 1. User invokes `todos-manager --archive`.
-2. Skill scans for `[x]` entries — finds 10.
+2. Skill scans only `## Entries` for `[x]` entries — finds 10.
 3. Skill creates TODOS-archive.md with header.
 4. Skill moves all 10 entries to TODOS-archive.md (newest first by ID).
 5. Skill removes 10 entries from TODOS.md.
@@ -142,6 +142,27 @@
 
 ---
 
+### Scenario A4b: `--archive` ignores schema examples
+
+**Setup:**
+- TODOS.md uses the canonical three-section layout.
+- `## Entry Schema` contains a completed example `TODO-99`.
+- `## Entries` contains a completed real entry `TODO-3`.
+- TODOS-archive.md also uses the canonical three-section layout and contains a schema example plus archived entries.
+
+**Walkthrough:**
+1. User invokes `todos-manager --archive`.
+2. Skill scans only `## Entries` and selects `TODO-3`.
+3. Skill preserves `## Metadata` and `## Entry Schema` in both canonical documents.
+4. Skill moves `TODO-3` to the archive and does not move or count `TODO-99`.
+
+**Expected outcome:**
+- `TODO-99` remains in the schema documentation and is absent from active/archive entry results.
+- `TODO-3` is removed from `## Entries` and appears in the archive's `## Entries` section.
+- Schema examples in either document are not parsed or counted; `NEXT_TODO_ID` and schema text are preserved.
+
+---
+
 ### Scenario A5: `--audit` with issues found
 
 **Setup:**
@@ -149,7 +170,7 @@
 
 **Walkthrough:**
 1. User invokes `todos-manager --audit`.
-2. Skill scans all entries, checks required fields, validates dependencies.
+2. Skill scans only entries under `## Entries`, checks required fields, and validates dependencies.
 3. Skill reconciles missing, malformed, stale, duplicated, or conflicting `NEXT_TODO_ID` metadata before reporting.
 4. Skill outputs structured report listing issues and the `NEXT_TODO_ID` reconciliation result.
 
