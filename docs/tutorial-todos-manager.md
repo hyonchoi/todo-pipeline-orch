@@ -209,7 +209,7 @@ Check the result:
 cat TODOS-archive.md
 ```
 
-TODO-1 is now in the archive. The tracked `NEXT_TODO_ID` remains the common-path source for the next entry, so the next entry becomes `TODO-3` — not `TODO-1`; archived IDs are consulted only when reconciliation is needed.
+TODO-1 is now in the archive. The tracked `NEXT_TODO_ID` remains the common-path source for the next entry, so the next entry becomes `TODO-4` — not `TODO-1`; archived IDs are consulted only when reconciliation is needed.
 
 ---
 

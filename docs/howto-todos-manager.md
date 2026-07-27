@@ -187,7 +187,7 @@ todos-manager --archive
 ✓ Archived 3 entries to TODOS-archive.md.
 ```
 
-**Important:** Archived entries count toward ID computation. After archiving TODO-1 through TODO-3, the next `todos-manager --add` will use `TODO-4` — not `TODO-1`.
+**Important:** Archived entries are still considered during reconciliation. After archiving TODO-1 through TODO-3, `NEXT_TODO_ID` should still point at `TODO-4` — not `TODO-1`.
 
 **If no entries are marked `[x]`:**
 ```
