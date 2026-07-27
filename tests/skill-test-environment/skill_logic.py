@@ -3,7 +3,11 @@
 Serves as both test oracle and golden-file generator.
 """
 
+import fcntl
+import os
 import re
+import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 
@@ -63,6 +67,56 @@ def replace_next_todo_id_line(text: str, next_id: int) -> str:
     if marker in text:
         return text.replace(marker, marker + "\n" + replacement, 1)
     return text.replace("# TODOS\n", "# TODOS\n\n" + replacement + "\n", 1)
+
+
+def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> None:
+    """Apply a TODO transform under an exclusive lock using atomic replacement."""
+    lock_path = todos_path.with_suffix(todos_path.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        original = todos_path.read_text(encoding="utf-8")
+        updated = transform(original)
+        fd, tmp_name = tempfile.mkstemp(dir=todos_path.parent, prefix=".TODOS.", text=True)
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.write(updated)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_path, todos_path)
+        except BaseException:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def assign_next_todo_id(project_dir: Path) -> tuple[int, list[str]]:
+    """Reserve the next TODO ID and advance the tracked preamble value."""
+    todos_path = project_dir / "TODOS.md"
+    archive_path = project_dir / "TODOS-archive.md"
+    messages: list[str] = []
+    assigned = 1
+
+    def transform(text: str) -> str:
+        nonlocal assigned, messages
+        tracked, issues = read_next_todo_id(text)
+        scanned_next = compute_scan_next_id(todos_path, archive_path)
+        used = scan_ids(text)
+        if tracked is None or tracked in used or tracked < scanned_next:
+            assigned = scanned_next
+            messages.append(f"add: corrected NEXT_TODO_ID from {tracked} to {scanned_next}")
+        else:
+            assigned = tracked
+        messages.extend(issues)
+        return replace_next_todo_id_line(text, assigned + 1)
+
+    atomic_update_todos(todos_path, transform)
+    return assigned, messages
 
 
 def reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]]:

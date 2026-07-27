@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from tests.skill_test_environment.skill_logic import (
+    assign_next_todo_id,
     compute_next_id,
     compute_scan_next_id,
     counter_matches_scan,
@@ -82,6 +83,36 @@ class TestComputeNextId:
 
 class TestTrackedNextTodoId:
     """Tracked metadata is reconciled against the scan-derived next ID."""
+
+    def test_atomic_update_todos_rolls_back_when_replace_fails(self, tmp_path, monkeypatch):
+        from tests.skill_test_environment import skill_logic
+
+        todos = tmp_path / "TODOS.md"
+        original = "# TODOS\n\n> - NEXT_TODO_ID: 8\n\n- [ ] TODO-7: Existing\n"
+        todos.write_text(original, encoding="utf-8")
+
+        def fail_replace(src, dst):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(skill_logic.os, "replace", fail_replace)
+
+        with pytest.raises(OSError):
+            skill_logic.atomic_update_todos(todos, lambda text: text.replace("8", "9", 1))
+
+        assert todos.read_text(encoding="utf-8") == original
+
+    def test_assign_next_todo_id_repairs_conflict_before_returning(self, tmp_path):
+        (tmp_path / "TODOS.md").write_text(
+            "# TODOS\n\n> - NEXT_TODO_ID: 7\n\n- [ ] TODO-7: Existing\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        assigned, messages = assign_next_todo_id(tmp_path)
+
+        assert assigned == 8
+        assert "> - NEXT_TODO_ID: 9" in (tmp_path / "TODOS.md").read_text(encoding="utf-8")
+        assert any("corrected NEXT_TODO_ID" in message for message in messages)
 
     def test_compute_scan_next_id_matches_existing_scan(self, tmp_path):
         todos = tmp_path / "TODOS.md"
