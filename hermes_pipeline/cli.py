@@ -389,6 +389,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     skills_install_parser.set_defaults(func=_cmd_skills_install)
 
+    skills_uninstall_parser = skills_subparsers.add_parser(
+        "uninstall",
+        help="Remove the bundled todos-manager skill from selected skill directories",
+    )
+    skills_uninstall_parser.add_argument(
+        "--target", choices=["codex", "claude", "all"], default="claude"
+    )
+    skills_uninstall_parser.add_argument(
+        "--scope", choices=["user", "project"], default="user"
+    )
+    skills_uninstall_parser.add_argument(
+        "-y", "--yes", action="store_true", help="Confirm deletion without prompting"
+    )
+    skills_uninstall_parser.set_defaults(func=_cmd_skills_uninstall)
+
     # config: read/write global tpo configuration
     config_parser = subparsers.add_parser(
         "config",
@@ -1395,6 +1410,43 @@ def _preflight_skill_replacement(name: str, dest: Path) -> str | None:
     except OSError as e:
         return f"the install directory is not writable ({e})"
     return None
+
+
+def _cmd_skills_uninstall(args, config: Config | None) -> int:
+    targets = _skills_install_targets(args.target, args.scope)
+    if not bool(getattr(args, "yes", False)):
+        for name, install_dir in targets:
+            dest = install_dir / "todos-manager"
+            print(f"Problem ({name}): uninstall requires confirmation.")
+            print(f"Cause: deleting {dest} removes the installed todos-manager skill.")
+            print(
+                f"Fix: rerun with `tpo skills uninstall --target {name} --scope {args.scope} --yes` "
+                "to confirm deletion."
+            )
+        return 1
+
+    preflight_errors: list[tuple[str, Path, str]] = []
+    for name, install_dir in targets:
+        dest = install_dir / "todos-manager"
+        if dest.exists() or dest.is_symlink():
+            reason = _preflight_skill_replacement(name, dest)
+            if reason is not None:
+                preflight_errors.append((name, dest, reason))
+    if preflight_errors:
+        for name, dest, reason in preflight_errors:
+            print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
+            print(f"Cause: {reason}.")
+            print("Fix: make the destination removable, or uninstall it manually after reviewing local changes.")
+        return 1
+
+    for name, install_dir in targets:
+        dest = install_dir / "todos-manager"
+        if dest.exists():
+            shutil.rmtree(dest)
+            print(f"OK ({name}): removed todos-manager from {dest}")
+        else:
+            print(f"OK ({name}): todos-manager is not installed at {dest}")
+    return 0
 
 
 def _cmd_skills_install(args, config: Config | None) -> int:

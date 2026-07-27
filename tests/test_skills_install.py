@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from hermes_pipeline.cli import _cmd_skills_install, build_parser
+from hermes_pipeline.cli import _cmd_skills_install, _cmd_skills_uninstall, build_parser
 from hermes_pipeline.config import Config
 
 
@@ -57,6 +57,58 @@ class TestSkillsInstallParsing:
         parser = build_parser()
         with pytest.raises(SystemExit):
             parser.parse_args(["skills", "install", "--target", "bogus"])
+
+
+def test_uninstall_parser_accepts_scope_target_and_yes():
+    parser = build_parser()
+    args = parser.parse_args(["skills", "uninstall", "--target", "all", "--scope", "project", "--yes"])
+    assert args.skills_command == "uninstall"
+    assert args.target == "all"
+    assert args.scope == "project"
+    assert args.yes is True
+
+
+def test_uninstall_refuses_without_yes(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    dest = tmp_path / ".claude" / "skills" / "todos-manager"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text("installed", encoding="utf-8")
+
+    result = _cmd_skills_uninstall(FakeArgs(target="claude", scope="user", yes=False), None)
+
+    out = capsys.readouterr().out
+    assert result == 1
+    assert dest.exists()
+    assert "Problem (claude): uninstall requires confirmation." in out
+
+
+def test_uninstall_yes_removes_existing_destination(tmp_path, monkeypatch):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    dest = tmp_path / ".claude" / "skills" / "todos-manager"
+    dest.mkdir(parents=True)
+    (dest / "SKILL.md").write_text("installed", encoding="utf-8")
+
+    result = _cmd_skills_uninstall(FakeArgs(target="claude", scope="user", yes=True), None)
+
+    assert result == 0
+    assert not dest.exists()
+
+
+def test_uninstall_all_preflights_before_removing_first(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
+    codex_dest = tmp_path / ".agents" / "skills" / "todos-manager"
+    claude_dest.mkdir(parents=True)
+    codex_dest.parent.mkdir(parents=True)
+    codex_dest.write_text("not a directory", encoding="utf-8")
+    (claude_dest / "SKILL.md").write_text("keep me", encoding="utf-8")
+
+    result = _cmd_skills_uninstall(FakeArgs(target="all", scope="user", yes=True), None)
+
+    out = capsys.readouterr().out
+    assert result == 1
+    assert claude_dest.exists()
+    assert "Problem (codex): cannot replace todos-manager" in out
 
 
 class TestCmdSkillsInstall:
