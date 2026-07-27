@@ -512,7 +512,7 @@ Scenario: Adding `TODO-8` to demo-project TODOS.md results in 7 entries and adva
 **Assertions:**
 - File exists
 - 7 total entries (one added)
-- Preamble present
+- `## Metadata`, `## Entry Schema`, and `## Entries` are present
 - Max ID is 8
 - No duplicate IDs
 
@@ -541,7 +541,7 @@ Scenario: Initialization creates both files with proper headers.
 
 **Assertions:**
 - Both files exist
-- Preamble in TODOS.md
+- `## Metadata`, `## Entry Schema`, and `## Entries` are present in TODOS.md
 - Archive header in TODOS-archive.md
 
 ## Usage Examples

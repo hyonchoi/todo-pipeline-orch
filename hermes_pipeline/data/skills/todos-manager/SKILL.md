@@ -90,7 +90,7 @@ The skill supports seven subcommands. Each has its own workflow below.
 ### `--add`: Add new entry with schema enforcement
 
 1. **Validate context:** Does TODOS.md exist? If not, prompt to run `--init` first.
-2. **Compute next TODO-<n>:** Read `sections/id-assignment.md`, then read `NEXT_TODO_ID` from `## Metadata`. Reconcile it by scanning entries under `## Entries` in TODOS.md plus TODOS-archive.md only when it is missing, malformed, stale, duplicated, or conflicts with an active TODO.
+2. **Compute next TODO-<n>:** Read `sections/id-assignment.md`, then read `NEXT_TODO_ID` from `## Metadata`. Reconcile it by scanning entries under `## Entries` in TODOS.md plus TODOS-archive.md only when it is missing, malformed, misplaced, stale, duplicated, or conflicts with an active TODO; repair tracked state by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
    - **Output to user:** "Next ID will be `TODO-<n>`."
 3. **Prompt for title:** "Enter the TODO title (required):"
    - Validation: 10–200 characters, non-empty.
