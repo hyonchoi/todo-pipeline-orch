@@ -542,15 +542,15 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
     )
 
 
-def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> bool:
-    """Return True when Phase 8 handed off a branch whose PR is not merged."""
+def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, bool]:
+    """Return (pending, counts_as_no_progress) for a Phase 8 PR handoff."""
     branch_file = state_dir / "pipeline_branch.txt"
     if not branch_file.exists():
-        return False
+        return (False, False)
 
     work_branch = branch_file.read_text().strip()
     if not work_branch:
-        return False
+        return (False, False)
 
     try:
         result = _cli_sp.run(
@@ -568,28 +568,42 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> bool:
             work_branch,
             e,
         )
-        return True
+        return (True, True)
 
     if result.returncode != 0:
-        log.info(
+        log.warning(
             "project has PR handoff branch %s but gh pr view failed: %s; "
             "leaving project in handoff",
             work_branch,
             result.stderr.strip()[:200],
         )
-        return True
+        return (True, True)
 
     try:
         state = (json.loads(result.stdout).get("state") or "").upper()
     except json.JSONDecodeError:
-        log.info(
+        log.warning(
             "project has PR handoff branch %s but gh pr view returned "
             "non-JSON; leaving project in handoff",
             work_branch,
         )
-        return True
+        return (True, True)
 
-    return state != "MERGED"
+    if state == "MERGED":
+        return (False, False)
+    if state == "OPEN":
+        return (True, False)
+    log.warning(
+        "project has PR handoff branch %s but PR state is %s; leaving project in handoff",
+        work_branch,
+        state or "unknown",
+    )
+    return (True, True)
+
+
+def _status_map_has_successful_pr_handoff(status_map: dict[str, str]) -> bool:
+    """True only after the default finish-branch phase completed successfully."""
+    return status_map.get("phase_8_finish_branch") == "done"
 
 
 def _persist_tick_id(
@@ -966,6 +980,22 @@ def _tick_project(
                 tick_id=prior_tick_id,
                 status_map=status_map,
             )
+            if _status_map_has_successful_pr_handoff(status_map):
+                pending, counts_as_no_progress = _has_pending_pr_handoff(
+                    project_dir, project_state
+                )
+                if pending:
+                    cb.observe(
+                        picked=None,
+                        counts_as_no_progress=counts_as_no_progress,
+                    )
+                    log.info(
+                        "project %s: prior tick %s is waiting on PR handoff, skipping",
+                        project_slug,
+                        prior_tick_id,
+                    )
+                    return
+
             cb.observe_from_outcomes(
                 state_dir=project_state,
                 prior_tick_id=prior_tick_id,
@@ -977,14 +1007,6 @@ def _tick_project(
                 prior_tick_id,
                 e,
             )
-
-        if _has_pending_pr_handoff(project_dir, project_state):
-            log.info(
-                "project %s: prior tick %s is waiting on PR handoff, skipping",
-                project_slug,
-                prior_tick_id,
-            )
-            return
 
     # Step 3: Build context & run selection
     todos_path = project_dir / "TODOS.md"
