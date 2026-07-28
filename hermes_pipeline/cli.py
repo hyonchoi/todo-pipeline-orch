@@ -823,9 +823,26 @@ def _tick_project(
         phases = load_phases()
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
-            assignee="default",
+            assignee="pipeline",
             capabilities=tuple(sorted(required_capabilities(phases))),
         )
+        result = _cli_sp.run(
+            ["hermes", "profile", "show", contract.assignee],
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        if result.returncode != 0:
+            log.warning(
+                "project %s has no pipeline contract at %s; falling back to "
+                "assignee='pipeline', but `hermes profile show pipeline` failed "
+                "(rc=%d). Run `tpo install-profile`, then `tpo init %s --assignee pipeline`.",
+                project_slug,
+                contract_path(project_state),
+                result.returncode,
+                project_slug,
+            )
     except (ContractSchemaError, ContractVersionMismatchError) as e:
         log.error(
             "project %s: pipeline contract invalid: %s — run `tpo doctor %s` for details",
