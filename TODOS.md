@@ -48,7 +48,7 @@ NEXT_TODO_ID: 39
   - **Depends on:** `TODO-24`
   - **Decisions:** Priority `P3`, Effort `M`, Phase `2 (Design)`, Branch `feature/conditional-phase-registration`, Test Coverage `required`, Security Review `not-required`
 
-- [ ] **TODO-36: Reorganize and refresh README.md's docs table** — Fix broken link, remove stale CLI-name references, group the 30-entry doc table by subsystem, and rewrite Getting Started for real install paths
+- [x] **TODO-36: Reorganize and refresh README.md's docs table** — Fix broken link, remove stale CLI-name references, group the 30-entry doc table by subsystem, and rewrite Getting Started for real install paths
   - **What:** Restructure the flat 30-row "Documentation" table in README.md (README.md:37-75) into subsystem-grouped sections (pipeline core, multi-project setup, pipeline contract, todos-manager, skill test harness) instead of one undifferentiated table. Fix the broken link `[Install TODOS Manager](tpo-skills-install)` (README.md:63) to point at a real doc/section. Update `docs/pipeline-modularization-plan.md`, which still references the pre-rename `pipeline-watch`/`hermes-pipeline` CLI names instead of `tpo`. Rewrite the Getting Started / Installation section (README.md:103-138) to reflect the actual install and onboarding paths, currently undocumented or misleading:
     1. Document `uv tool install` as the primary install method — the CLI is invoked directly as `tpo ...`, not `uv run tpo ...` (README's current "Run"/"CLI Commands" section (README.md:113-155) exclusively shows `uv run tpo <cmd>`, which only applies to running from a source checkout, not the packaged/installed CLI).
     2. Add an explicit "starting a project from scratch" path (`tpo init <project>` on a project with no TODOS.md yet, tying into `todos-manager --init`).
@@ -60,3 +60,4 @@ NEXT_TODO_ID: 39
   - **Spec:** docs/superpowers/plans/2026-07-28-todo-36-readme-refresh.md
   - **Reference:** docs/superpowers/specs/2026-07-28-todo-36-readme-refresh-design.md
   - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `docs/reorganize-readme-docs-table`, Test Coverage `not-required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.6.4 (2026-07-28)

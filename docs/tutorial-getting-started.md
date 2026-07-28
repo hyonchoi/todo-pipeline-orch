@@ -9,10 +9,11 @@ In this tutorial, you'll set up your first pipeline-watched project and run the 
 - Python 3.12+
 - `uv`
 - `tpo` installed as a uv tool, or a source checkout with `uv sync`
-- A Hermes agent runtime/profile available when you run pipeline phases
+- The Hermes CLI on `PATH`, authenticated with `hermes login`, with an agent runtime/profile available when you run pipeline phases
+- A Hermes kanban board configured for your project
 - Write permissions on the git repositories you want `tpo` to scan
 
-Provider authentication depends on the model/runtime configured for your Hermes profile. It is not required for every `tpo` installation path.
+Provider authentication depends on the model/runtime configured for your Hermes profile. It is not required for installing `tpo`, but it is required before `tpo tick` can run pipeline phases.
 
 If you don't have a test project yet, the setup section below will guide you through creating one.
 
@@ -56,12 +57,6 @@ Install `todos-manager` for the agent that will edit TODOs:
 tpo skills install --target all
 ```
 
-For project-local Codex/agents setup, run this from the project root instead:
-
-```bash
-tpo skills install --scope project --target codex
-```
-
 `codex` installs to the `.agents/skills` convention, `claude` installs to the `.claude/skills` convention, and `all` installs both.
 
 ## Step 3: Create or adopt a project
@@ -74,9 +69,9 @@ cd ~/my-projects/demo-app
 git init
 ```
 
-For a new project with no `TODOS.md`, initialize the canonical TODO files:
+For a new project with no `TODOS.md`, ask your agent to invoke the installed `todos-manager` skill with `--init`, then `--add`:
 
-```bash
+```text
 todos-manager --init
 todos-manager --add
 ```
@@ -88,14 +83,20 @@ git add TODOS.md TODOS-archive.md
 git commit -m "init: create canonical TODOs"
 ```
 
-For an existing project with a hand-written `TODOS.md`, use this path instead:
+For an existing project with a hand-written `TODOS.md`, invoke the `todos-manager` skill with `--convert`, then `--audit`:
 
-```bash
+```text
 todos-manager --convert
 todos-manager --audit
 ```
 
-Use `todos-manager --revise` when a specific entry needs stronger required or optional fields.
+Invoke `todos-manager --revise` when a specific entry needs stronger required or optional fields.
+
+For project-local Codex/agents setup, install the skill from the project root after the project exists:
+
+```bash
+tpo skills install --scope project --target codex
+```
 
 ## Step 4: Configure project discovery
 
@@ -123,6 +124,8 @@ OK: schema_version=1
 ```
 
 ## Step 6: Run a manual tick
+
+Before the first tick, mark the TODO you want the pipeline to select as in progress by changing its status marker to `[→]` in `TODOS.md`.
 
 ```bash
 tpo tick demo-app

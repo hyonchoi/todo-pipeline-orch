@@ -40,7 +40,7 @@ ls -la ~/.claude/skills/todos-manager/SKILL.md
 
 The `--init` subcommand creates TODOS.md with canonical sections and a companion archive file. In a new Claude Code session, invoke the skill:
 
-```bash
+```text
 todos-manager --init
 ```
 
@@ -100,7 +100,7 @@ Confirm with `y`. The entry appears in TODOS.md.
 
 Add another entry that depends on the first:
 
-```bash
+```text
 todos-manager --add
 ```
 
@@ -119,7 +119,7 @@ Now TODOS.md has two entries. You can see the enforced format in action — both
 
 Add an entry intentionally leaving some fields blank. This simulates a real-world scenario where you create a TODO quickly without enough context to fill in all details:
 
-```bash
+```text
 todos-manager --add
 ```
 
@@ -138,7 +138,7 @@ Now TODOS.md has three entries. TODO-3 has required fields but is missing option
 
 Invoke `todos-manager --revise` to fill gaps in TODO-3 using AI-pre-filled suggestions:
 
-```bash
+```text
 todos-manager --revise
 ```
 
@@ -188,9 +188,9 @@ TODO-3 now has the enriched fields. The revision synthesis used codebase signals
 
 ## Step 7: Archive a completed TODO
 
-Mark TODO-1 as done by changing its status marker to `[x]` in TODOS.md, then run:
+Mark TODO-1 as done by changing its status marker to `[x]` in TODOS.md, then invoke the installed skill:
 
-```bash
+```text
 todos-manager --archive
 ```
 
@@ -231,8 +231,8 @@ A working TODOS.md with:
 - [Install TODOS Manager](reference-cli.md#skills) — run `tpo skills install --help` to install todos-manager to user-level directories
 
 **Convert an existing TODOS.md:**
-- Run `todos-manager --convert` to add the canonical sections and validate entries against the enforced schema.
+- Invoke `todos-manager --convert` to add the canonical sections and validate entries against the enforced schema.
 
 **Audit and revise entries:**
-- Run `todos-manager --audit` to check all entries for missing required fields, invalid status markers, and broken dependency references.
-- Run `todos-manager --revise` to fill missing or weak fields in any entry using AI-pre-filled suggestions.
+- Invoke `todos-manager --audit` to check all entries for missing required fields, invalid status markers, and broken dependency references.
+- Invoke `todos-manager --revise` to fill missing or weak fields in any entry using AI-pre-filled suggestions.

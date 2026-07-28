@@ -10,7 +10,7 @@ configures per-project Slack channels, and archives projects without deleting th
 
 - `todo-pipeline-orchestrator` installed (see [Getting Started](tutorial-getting-started.md#step-1-install-and-verify-tpo))
 - Python 3.12+ and uv package manager
-- A Hermes agent runtime/profile available when pipeline phases run
+- The Hermes CLI on `PATH`, authenticated with `hermes login`, with an agent runtime/profile available when pipeline phases run
 - Hermes kanban configured for your project
 
 ---

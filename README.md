@@ -34,7 +34,7 @@ uv run tpo --version
 
 ## Prerequisite setup
 
-For pipeline phase execution, make sure a Hermes agent runtime/profile is available. Provider authentication is model-specific and is not a baseline `tpo` prerequisite.
+For pipeline phase execution, make sure the Hermes CLI is installed, on `PATH`, and has an agent runtime/profile available. Provider authentication is model-specific and is not a baseline `tpo` prerequisite.
 
 Install the bundled pipeline profile when you want unattended pipeline phase execution:
 
@@ -71,23 +71,29 @@ tpo config init
 tpo config set projects_dir ~/my-projects
 ```
 
-Start a new project with no `TODOS.md`:
+Start a new project with no `TODOS.md` by asking your agent to invoke the installed `todos-manager` skill with `--init`, then `--add`:
 
 ```bash
 cd ~/my-projects/my-project
+```
+
+```text
 todos-manager --init
 todos-manager --add
 ```
 
-Adopt an existing hand-written `TODOS.md`:
+Adopt an existing hand-written `TODOS.md` by invoking the `todos-manager` skill with `--convert`, then `--audit`:
 
 ```bash
 cd ~/my-projects/my-project
+```
+
+```text
 todos-manager --convert
 todos-manager --audit
 ```
 
-Use `todos-manager --revise` for individual entries that need stronger fields.
+Invoke `todos-manager --revise` for individual entries that need stronger fields.
 
 Write or verify the pipeline contract for an existing project:
 
@@ -193,7 +199,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 
 ## Contributing
 
-Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orchestrator/issues).
+Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orch/issues).
 
 ## License
 
