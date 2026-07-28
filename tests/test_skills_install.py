@@ -113,19 +113,25 @@ def test_uninstall_yes_is_a_noop_for_absent_destination(tmp_path, monkeypatch, c
     assert "todos-manager is not installed" in capsys.readouterr().out
 
 
-def test_uninstall_rejects_symlink_destination(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("dangling", [False, True], ids=["live", "dangling"])
+def test_uninstall_removes_symlink_without_following_target(
+    tmp_path, monkeypatch, dangling
+):
     monkeypatch.setattr(Path, "home", lambda: tmp_path)
     target = tmp_path / "target"
-    target.mkdir()
+    if not dangling:
+        target.mkdir()
+        (target / "keep.txt").write_text("keep", encoding="utf-8")
     dest = tmp_path / ".claude" / "skills" / "todos-manager"
     dest.parent.mkdir(parents=True)
     dest.symlink_to(target, target_is_directory=True)
 
     result = _cmd_skills_uninstall(FakeArgs(target="claude", scope="user", yes=True), None)
 
-    assert result == 1
-    assert dest.is_symlink()
-    assert "destination is a symlink" in capsys.readouterr().out
+    assert result == 0
+    assert not dest.is_symlink()
+    if not dangling:
+        assert (target / "keep.txt").read_text(encoding="utf-8") == "keep"
 
 
 def test_preflight_install_probe_does_not_follow_predictable_symlink(tmp_path):
@@ -273,6 +279,31 @@ class TestCmdSkillsInstall:
         assert (codex_dest / "SKILL.md").read_text(encoding="utf-8") == "local edit"
         assert "Problem (codex): todos-manager is already installed" in out
 
+    def test_install_preserves_destination_that_appears_after_preflight(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        install_dir = tmp_path / ".claude" / "skills"
+        dest = install_dir / "todos-manager"
+        real_mkdir = Path.mkdir
+
+        def create_destination_at_copy_boundary(self, *args, **kwargs):
+            result = real_mkdir(self, *args, **kwargs)
+            if self == install_dir and not dest.exists():
+                dest.mkdir()
+                (dest / "SKILL.md").write_text("appeared locally", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr(Path, "mkdir", create_destination_at_copy_boundary)
+
+        result = _cmd_skills_install(
+            FakeArgs(target="claude", scope="user", reinstall=False), config
+        )
+
+        assert result == 1
+        assert (dest / "SKILL.md").read_text(encoding="utf-8") == "appeared locally"
+
     def test_install_reinstall_replaces_existing_directory(self, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         config = Config(projects_dir=tmp_path / "projects")
@@ -336,6 +367,66 @@ class TestCmdSkillsInstall:
         assert result == 1
         assert (claude_dest / "SKILL.md").read_text(encoding="utf-8") == "keep me"
         assert "Problem (codex): cannot replace todos-manager" in out
+
+    def test_reinstall_target_all_restores_every_original_when_second_swap_fails(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        claude_dest = tmp_path / ".claude" / "skills" / "todos-manager"
+        codex_dest = tmp_path / ".agents" / "skills" / "todos-manager"
+        for dest, content in ((claude_dest, "claude local"), (codex_dest, "codex local")):
+            dest.mkdir(parents=True)
+            (dest / "SKILL.md").write_text(content, encoding="utf-8")
+
+        real_rename = Path.rename
+
+        def fail_second_replacement(self, destination):
+            if (
+                self.name.startswith(".tpo-skill-stage-")
+                and Path(destination) == codex_dest
+            ):
+                raise OSError("second replacement failed")
+            return real_rename(self, destination)
+
+        monkeypatch.setattr(Path, "rename", fail_second_replacement)
+
+        result = _cmd_skills_install(
+            FakeArgs(target="all", scope="user", reinstall=True), config
+        )
+
+        assert result == 1
+        assert (claude_dest / "SKILL.md").read_text(encoding="utf-8") == "claude local"
+        assert (codex_dest / "SKILL.md").read_text(encoding="utf-8") == "codex local"
+        assert not list(tmp_path.glob("**/.tpo-skill-stage-*"))
+        assert not list(tmp_path.glob("**/.tpo-skill-backup-*"))
+
+    def test_reinstall_preserves_destination_that_appears_after_preflight(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+        dest = tmp_path / ".claude" / "skills" / "todos-manager"
+        real_copytree = __import__("shutil").copytree
+
+        def create_local_destination_after_staging(*args, **kwargs):
+            result = real_copytree(*args, **kwargs)
+            staged = Path(args[1])
+            if staged.parent == dest.parent and not dest.exists():
+                dest.mkdir()
+                (dest / "SKILL.md").write_text("appeared locally", encoding="utf-8")
+            return result
+
+        monkeypatch.setattr("shutil.copytree", create_local_destination_after_staging)
+
+        result = _cmd_skills_install(
+            FakeArgs(target="claude", scope="user", reinstall=True), config
+        )
+
+        assert result == 1
+        assert (dest / "SKILL.md").read_text(encoding="utf-8") == "appeared locally"
+        assert not list(tmp_path.glob("**/.tpo-skill-stage-*"))
+        assert not list(tmp_path.glob("**/.tpo-skill-backup-*"))
 
     def test_reinstall_stages_before_replacing_existing_destination(
         self, tmp_path, monkeypatch

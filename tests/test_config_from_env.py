@@ -6,8 +6,8 @@ from hermes_pipeline.config import Config
 
 
 def _isolate_implicit_global_config(monkeypatch, tmp_path):
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
-    monkeypatch.delenv("XDG_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setenv("XDG_CONFIG_DIR", str(tmp_path / "xdg-config"))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes-home"))
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
 

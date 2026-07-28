@@ -1,4 +1,4 @@
-"""Counter recovery — scan TODOS.md for max TODO-N and initialize .hermes/todo_id_counter."""
+"""Recover the TODO counter from tracked metadata or legacy ID scans."""
 
 from __future__ import annotations
 
@@ -16,35 +16,6 @@ NEXT_TODO_ID_RE = re.compile(
     r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:[ \t]*([1-9][0-9]*)[ \t]*$"
 )
 SECTION_HEADINGS = ("## Metadata", "## Entry Schema", "## Entries")
-
-
-def _preamble_line_indexes(lines: list[str]) -> range:
-    """Return the contiguous blockquote preamble immediately after ``# TODOS``."""
-    heading = next(
-        (index for index, line in enumerate(lines) if line.rstrip("\r\n") == "# TODOS"),
-        None,
-    )
-    if heading is None:
-        return range(0)
-
-    start = heading + 1
-    while start < len(lines) and not lines[start].strip():
-        start += 1
-    if start < len(lines) and NEXT_TODO_ID_METADATA_RE.fullmatch(lines[start].rstrip("\r\n")):
-        start += 1
-        while start < len(lines) and not lines[start].strip():
-            start += 1
-    if start == len(lines) or not lines[start].startswith(">"):
-        return range(0)
-
-    end = start
-    while end < len(lines):
-        line = lines[end]
-        if line.startswith(">") or not line.strip():
-            end += 1
-            continue
-        break
-    return range(start, end)
 
 
 def _line_without_ending(line: str) -> str:

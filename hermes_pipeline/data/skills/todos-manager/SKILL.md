@@ -182,10 +182,19 @@ The skill supports seven subcommands. Each has its own workflow below.
 
    Archived: <ISO-8601 timestamp>
    ```
-4. **For each `[x]` entry (newest first by ID):**
-   - Extract entry using `sections/entry-boundary.md`
-   - Append to end of TODOS-archive.md
-5. **Remove archived entries from TODOS.md.**
+4. **Under the TODO write lock, compute both final files before writing:**
+   - Extract `[x]` entries using `sections/entry-boundary.md`
+   - Build the new TODOS-archive.md text with completed entries appended
+   - Build the new TODOS.md text with those completed entries removed
+5. **Write both files as one recoverable transaction:**
+   - Write durable payload files for the intended final TODOS.md and
+     TODOS-archive.md contents
+   - Write a transaction journal only after both payloads are fsynced
+   - Replace TODOS-archive.md, then TODOS.md, using same-directory temp files and
+     atomic `os.replace`-style replacement
+   - If a journal exists at the start of any TODO write, roll it forward before
+     reading current TODO state
+   - Remove the journal and payload files only after both target files are replaced
 6. **Confirm:** "✓ Archived N entries to TODOS-archive.md."
 
 ---

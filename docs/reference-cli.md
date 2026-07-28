@@ -164,7 +164,7 @@ uv run tpo skills uninstall --target codex --yes
 | `--scope` | No | `user` | Remove from the user home directory or the current project |
 | `--yes` | Yes | false | Confirm removal without an interactive prompt |
 
-Install refuses to overwrite an existing destination unless `--reinstall` is set. Install and uninstall preflight all selected targets before replacing or removing an installed skill, reject symlink destinations, and return nonzero if rollback or cleanup leaves a recoverable backup behind.
+Install refuses to overwrite an existing destination unless `--reinstall` is set. Install and uninstall preflight all selected targets before replacing or removing an installed skill. Reinstall rejects symlink destinations; uninstall removes the link itself without following its target. Both commands return nonzero if rollback or cleanup leaves a recoverable backup behind.
 
 ---
 
@@ -226,8 +226,7 @@ Individual `PIPELINE_*` environment variables do not override config entries.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TPO_CONFIG_FILE` | unset | Path to an alternate complete config file |
-| `XDG_CONFIG_HOME` | `~/.config` | Base directory for the default `tpo/config.yaml` path |
-| `XDG_CONFIG_DIR` | unset | Deprecated compatibility fallback when `XDG_CONFIG_HOME` is unset |
+| `XDG_CONFIG_DIR` | `~/.config` | Base directory for the default `tpo/config.yaml` path |
 | `HERMES_HOME` | `~/.hermes` | Base for the legacy fallback config path `tpo.yaml` |
 
 ## See Also

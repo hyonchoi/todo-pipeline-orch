@@ -317,6 +317,34 @@ class TestTrackedNextTodoId:
         else:
             assert "TODO-7: Active" in entries
 
+    def test_reconcile_preserves_free_text_in_partial_layout_and_is_idempotent(
+        self, tmp_path
+    ):
+        todos = tmp_path / "TODOS.md"
+        todos.write_text(
+            "# TODOS\n\n"
+            "Project-level guidance that must survive migration.\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Active** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n\n"
+            "Reference notes after the entries.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "TODOS-archive.md").write_text("", encoding="utf-8")
+
+        reconciled, _ = reconcile_next_todo_id(tmp_path, "audit")
+        first_repair = todos.read_text(encoding="utf-8")
+        second_reconciled, second_messages = reconcile_next_todo_id(tmp_path, "audit")
+
+        assert reconciled == 8
+        assert "Project-level guidance that must survive migration." in first_repair
+        assert "Reference notes after the entries." in first_repair
+        assert todos.read_text(encoding="utf-8") == first_repair
+        assert second_reconciled == 8
+        assert second_messages == []
+
     def test_reconcile_repairs_misplaced_metadata_under_entries(self, tmp_path):
         (tmp_path / "TODOS.md").write_text(
             "# TODOS\n\n"

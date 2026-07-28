@@ -183,7 +183,7 @@ tpo config path
 ```
 
 `tpo config init` creates a config file with active default values. The default
-config path is `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`.
+config path is `${XDG_CONFIG_DIR:-~/.config}/tpo/config.yaml`.
 For isolated tests or one-off runs, `TPO_CONFIG_FILE=/path/to/config.yaml`
 points `tpo` at a specific config file. Individual `PIPELINE_*` environment
 variables do not override config entries.
