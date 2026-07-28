@@ -13,6 +13,8 @@ In scope:
 
 - Rewrite `README.md` around overview, install, prerequisites, core workflows,
   subcommand summary, grouped documentation, contributing, and license.
+- Revise `docs/tutorial-getting-started.md` as the essential first-run companion
+  so it matches the README's install path, prerequisites, and onboarding split.
 - Reorganize the current flat documentation table into subsystem groups.
 - Fix the malformed/broken documentation table and the stale todos-manager
   install link.
@@ -27,8 +29,8 @@ Out of scope:
 
 - Changing CLI behavior.
 - Changing `tpo init` semantics.
-- Rewriting the full getting-started tutorial or CLI reference unless the
-  implementation finds a direct contradiction introduced by the README update.
+- Rewriting the full CLI reference. The CLI reference remains the detailed
+  command manual linked from README and the tutorial.
 - Adding new install targets. The current CLI target names remain `codex`,
   `claude`, and `all`.
 
@@ -131,6 +133,27 @@ tpo approve <project> --todo TODO-5
 
 Keep detailed explanations behind links.
 
+## Getting-Started Tutorial Design
+
+`docs/tutorial-getting-started.md` should be revised alongside README because it
+is the README's primary first-run link. It should be more detailed than README
+but follow the same conceptual order:
+
+1. Install `tpo` as a tool and verify direct `tpo --version` usage.
+2. Call out source-checkout usage separately for contributors.
+3. Install the pipeline profile when the user wants pipeline phase execution.
+4. Install `todos-manager` for the intended agent target/scope.
+5. Choose the project onboarding path:
+   - new project: `todos-manager --init`, then `todos-manager --add`;
+   - existing project: `todos-manager --convert`, then `--audit` or `--revise`;
+   - pipeline contract: `tpo init <project>` writes `.hermes/pipeline.toml`.
+6. Configure `projects_dir`.
+7. Run `tpo doctor`, `tpo tick`, and later `tpo approve`.
+
+The tutorial must not create a non-canonical hand-written `TODOS.md` as the
+first-run example. It should use `todos-manager --init` for a new project or
+explicitly frame any legacy file as input to `todos-manager --convert`.
+
 ## Subcommand Summary
 
 Use a compact table for these subcommands:
@@ -202,10 +225,18 @@ Implementation verification should include:
 
 - Search README for `uv run tpo` and confirm every occurrence is explicitly
   source-checkout/contributor context.
+- Search `docs/tutorial-getting-started.md` for `uv run tpo` and confirm every
+  occurrence is explicitly source-checkout/contributor context.
 - Search README for `hermes login` and confirm it is absent.
+- Search `docs/tutorial-getting-started.md` for `hermes login` and confirm it is
+  absent unless it is clearly framed as provider-specific optional setup.
 - Search README for `--target agents` and confirm it is absent.
+- Search `docs/tutorial-getting-started.md` for `--target agents` and confirm it
+  is absent.
 - Search README for `tpo init` and confirm it is described as pipeline contract
   setup only.
+- Search `docs/tutorial-getting-started.md` for `tpo init` and confirm it is
+  described as pipeline contract setup only.
 - Run a markdown link check or a focused link/path audit for README links.
 - Search `docs/pipeline-modularization-plan.md` for stale current-use references
   to `pipeline-watch` and `hermes-pipeline` CLI usage and update or label them.
@@ -215,6 +246,10 @@ Implementation verification should include:
 - README is shorter and easier to scan than the current file.
 - README's first-run path does not conflate `todos-manager --init` with
   `tpo init`.
+- `docs/tutorial-getting-started.md` matches the README's install,
+  prerequisites, and onboarding split.
+- The getting-started tutorial no longer teaches users to create a
+  non-canonical hand-written `TODOS.md` as the normal new-project path.
 - Installed CLI examples use `tpo ...` directly.
 - Source checkout examples are clearly labeled.
 - Prerequisites mention Hermes agent/profile availability but do not require
