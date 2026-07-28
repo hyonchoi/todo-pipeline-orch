@@ -55,6 +55,12 @@ authentication or `hermes login` as a baseline prerequisite.
 
 ## Install Design
 
+If `uv` is missing, show the uv installer first:
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
 The primary install path is the installed CLI:
 
 ```bash
@@ -140,15 +146,16 @@ is the README's primary first-run link. It should be more detailed than README
 but follow the same conceptual order:
 
 1. Install `tpo` as a tool and verify direct `tpo --version` usage.
-2. Call out source-checkout usage separately for contributors.
-3. Install the pipeline profile when the user wants pipeline phase execution.
-4. Install `todos-manager` for the intended agent target/scope.
-5. Choose the project onboarding path:
+2. If `uv` is missing, install `uv` first.
+3. Call out source-checkout usage separately for contributors.
+4. Install the pipeline profile when the user wants pipeline phase execution.
+5. Install `todos-manager` for the intended agent target/scope.
+6. Choose the project onboarding path:
    - new project: `todos-manager --init`, then `todos-manager --add`;
    - existing project: `todos-manager --convert`, then `--audit` or `--revise`;
    - pipeline contract: `tpo init <project>` writes `.hermes/pipeline.toml`.
-6. Configure `projects_dir`.
-7. Run `tpo doctor`, `tpo tick`, and later `tpo approve`.
+7. Configure `projects_dir`.
+8. Run `tpo doctor`, `tpo tick`, and later `tpo approve`.
 
 The tutorial must not create a non-canonical hand-written `TODOS.md` as the
 first-run example. It should use `todos-manager --init` for a new project or
@@ -246,6 +253,8 @@ Implementation verification should include:
 - README is shorter and easier to scan than the current file.
 - README's first-run path does not conflate `todos-manager --init` with
   `tpo init`.
+- README and the getting-started tutorial show how to install `uv` when it is
+  missing.
 - `docs/tutorial-getting-started.md` matches the README's install,
   prerequisites, and onboarding split.
 - The getting-started tutorial no longer teaches users to create a
