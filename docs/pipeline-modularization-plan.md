@@ -1,5 +1,7 @@
 # Plan: Pipeline Modularization + TODOS Manager 스킬
 
+> Historical note: this plan records the original modularization design. The current installed CLI is `tpo`; legacy `pipeline-watch` and `hermes-pipeline` entrypoints are compatibility shims, not the preferred commands for new docs.
+
 ## 목표
 
 1. `pipeline_watcher.py`를 **uv/pip 관리 Python 패키지**로 모듈화 (재설치/업그레이드 가능)
@@ -26,7 +28,7 @@ hermes-pipeline/
 │   ├── state.py                 # 체크포인트 + 락 + 해시
 │   └── slack.py                 # Slack 알림 (send_message 연동)
 ├── bin/
-│   └── pipeline-watch           # CLI 엔트리포인트 (bash 스크립트)
+│   └── pipeline-watch           # historical CLI entrypoint sketch; current CLI is tpo
 └── configs/
     └── phases.yaml              # Phase별 설정 (명령어, 도구, 턴수)
 ```
@@ -258,7 +260,7 @@ def notify(channel: str, emoji: str, message: str):
 
 ### Phase 7: CLI 엔트리포인트
 
-**`bin/pipeline-watch`:**
+**Historical `bin/pipeline-watch` sketch:**
 
 ```bash
 #!/bin/bash
@@ -285,6 +287,8 @@ cronjob(
     name="Pipeline Watcher"
 )
 ```
+
+Current scheduled usage should follow the tpo/Hermes cron docs linked from README.
 
 ---
 
@@ -429,7 +433,7 @@ metadata:
 
 ### 6단계: 설치 + 검증
 
-- [ ] `pip install -e ./hermes-pipeline` 로컬 설치
+- [ ] Historical local editable install: `pip install -e ./hermes-pipeline` (not current README guidance)
 - [ ] Cron Job 실행 검증
 - [ ] Slack 알림 검증
 
@@ -453,7 +457,7 @@ Implements the final lane bringing together all pieces into executable commands:
 
 - **TF.1** `watcher.py`: Auto-tick discovery with per-project isolation. Discovers all projects with TODOS.md, detects changes via hash comparison, selects eligible TODOs, and isolates parse errors per project.
 - **TF.2** `status.py`: Pending-records table printer. Collects ready_for_review records and formats them as a human-readable table with project, TODO ID, branch, PR URL, merge status, and age.
-- **TF.3** `cli.py`: Argparse subcommands (`auto`, `merge`, `status`). Fully featured with config loading, logging setup, and per-command dispatch.
+- **TF.3** `cli.py`: Historical Argparse subcommand names (`auto`, `merge`, `status`), superseded by current `tpo` subcommands. Fully featured with config loading, logging setup, and per-command dispatch.
 - **TF.4** `install-cron.sh`: Idempotent 5-minute cron registration helper.
 - **TF.5** Documentation updates: README.md and this plan now document the full feature set and architecture.
 - **TF.6** Full verification: All 192 tests pass; CLI help and subcommands verified.

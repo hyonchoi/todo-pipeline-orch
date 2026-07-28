@@ -65,4 +65,4 @@ _tick_project(project)
 
 - [How to configure the pipeline execution contract](howto-pipeline-contract.md) — task-oriented guide for editing, validating, and migrating contracts
 - [Getting started tutorial](tutorial-getting-started.md) — `init` and `doctor` in the onboarding flow
-- [README — pipeline execution contract](../README.md#pipeline-execution-contract) — reference: TOML schema and field descriptions
+- [Pipeline contract setup and reference](howto-pipeline-contract.md) — TOML schema and field descriptions
