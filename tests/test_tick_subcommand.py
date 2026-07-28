@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -318,6 +319,37 @@ class TestTickSubcommand:
         content = sentinel_files[0].read_text().strip()
         data = json.loads(content)
         assert data.get("outcome") == "picked_none"
+
+    def test_tick_picked_none_logs_rationale(self, tmp_path, mocker, caplog):
+        """picked=None log includes the decision rationale for CLI debugging."""
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+
+        from hermes_pipeline.decision.schema import HermesSelectionDecision
+        mock_selection.return_value = HermesSelectionDecision(
+            tick_id="01HB",
+            timestamp="2026-01-01T00:00:00Z",
+            model="claude-opus-4-7",
+            prompt_sha="abc123",
+            candidates_considered=[],
+            picked=None,
+            rationale="No real TODO-N entries are present in TODOS.md.",
+            blocked_reasons={},
+            in_flight=[],
+        )
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        with caplog.at_level(logging.INFO, logger="hermes_pipeline.cli"):
+            result = _cmd_tick(FakeArgs(), config)
+
+        assert result == 0
+        assert "No real TODO-N entries are present in TODOS.md." in caplog.text
 
     def test_tick_project_arg_help(self):
         """tick --help shows the optional project argument."""

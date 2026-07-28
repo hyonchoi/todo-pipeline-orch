@@ -990,7 +990,9 @@ def _tick_project(
 
     if picked is None:
         log.info(
-            "project %s: selection picked None, observing circuit breaker", project_slug
+            "project %s: selection picked None, observing circuit breaker: %s",
+            project_slug,
+            decision.rationale[:200],
         )
         cb.observe(picked=None, counts_as_no_progress=True)
 
