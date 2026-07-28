@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 from hermes_pipeline import __version__
@@ -822,9 +823,30 @@ def _tick_project(
         phases = load_phases()
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
-            assignee="default",
+            assignee="pipeline",
             capabilities=tuple(sorted(required_capabilities(phases))),
         )
+        try:
+            result = _cli_sp.run(
+                ["hermes", "profile", "show", contract.assignee],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            profile_rc = result.returncode
+        except FileNotFoundError:
+            profile_rc = 127
+        if profile_rc != 0:
+            log.warning(
+                "project %s has no pipeline contract at %s; falling back to "
+                "assignee='pipeline', but `hermes profile show pipeline` failed "
+                "(rc=%d). Run `tpo install-profile`, then `tpo init %s --assignee pipeline`.",
+                project_slug,
+                contract_path(project_state),
+                profile_rc,
+                project_slug,
+            )
     except (ContractSchemaError, ContractVersionMismatchError) as e:
         log.error(
             "project %s: pipeline contract invalid: %s — run `tpo doctor %s` for details",
@@ -927,11 +949,16 @@ def _tick_project(
     except (FileNotFoundError, ValueError):
         toml_cfg = None
 
+    project_base_config = replace(config, state_dir=project_state)
     if toml_cfg is not None:
-        full_cfg = toml_cfg
+        full_cfg = FullConfig(
+            base=project_base_config,
+            selection=toml_cfg.selection,
+            circuit_breaker=toml_cfg.circuit_breaker,
+        )
     else:
         full_cfg = FullConfig(
-            base=config,
+            base=project_base_config,
             selection=SelectionConfig(),
             circuit_breaker=cb_cfg,
         )
@@ -967,7 +994,9 @@ def _tick_project(
 
     if picked is None:
         log.info(
-            "project %s: selection picked None, observing circuit breaker", project_slug
+            "project %s: selection picked None, observing circuit breaker: %s",
+            project_slug,
+            decision.rationale[:200],
         )
         cb.observe(picked=None, counts_as_no_progress=True)
 

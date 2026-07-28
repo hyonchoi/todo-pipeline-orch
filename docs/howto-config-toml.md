@@ -31,6 +31,7 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
    model = "auto"
    max_tokens = 4000
    auto_execute = false
+   # Optional override. Unset uses hermes_pipeline/data/prompts/selection.md.
    prompt_path = ".hermes/prompts/selection.md"
    expected_prompt_sha = "abc123def456..."
 
@@ -59,8 +60,8 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 | `model` | `auto` | Model id passed to `hermes chat -q -m <model>`. `"auto"` lets Hermes resolve the current best model. Pin a specific snapshot to keep eval results stable; bumping this is a real change — re-run the eval suite. |
 | `max_tokens` | `4000` | Cap on the model's response. The selection JSON is small (<1KB typical); raising this rarely helps and costs more. |
 | `auto_execute` | `false` | When `false`, decisions are persisted but the phase does not run (shadow mode). Set `true` only after the eval suite passes against the current prompt. |
-| `prompt_path` | `.hermes/prompts/selection.md` | File the agent loads and hashes. Path is resolved relative to the working directory of `tpo`, not the state dir. |
-| `expected_prompt_sha` | `None` | If set, mismatch with the file's actual SHA-256 aborts the tick (rationale `prompt_sha_mismatch:...`) without counting as no-progress. Leave unset only in dev. |
+| `prompt_path` | bundled `hermes_pipeline/data/prompts/selection.md` | Optional prompt override. Relative paths are resolved relative to the working directory of `tpo`, not the state dir. |
+| `expected_prompt_sha` | `None` | If set, mismatch with the resolved prompt's actual SHA-256 aborts the tick (rationale `prompt_sha_mismatch:...`) without counting as no-progress. Leave unset only in dev. |
 
 ### `[circuit_breaker]`
 
@@ -75,7 +76,17 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 
 ### Pin a new prompt SHA
 
-1. Compute it: `sha256sum .hermes/prompts/selection.md`
+1. Compute it from the resolved prompt. For the bundled default:
+
+   ```bash
+   uv run python - <<'PY'
+   from importlib.resources import as_file, files
+   with as_file(files("hermes_pipeline.data").joinpath("prompts", "selection.md")) as p:
+       print(p)
+   PY
+   ```
+
+   Then run `sha256sum <printed-path>`.
 2. Update `expected_prompt_sha` in `[selection]` to the new value.
 3. Run the eval suite: see [howto-eval-suite.md](howto-eval-suite.md).
 

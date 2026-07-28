@@ -31,7 +31,7 @@ uv run tpo tick myproject    # tick one project
 2. Check prior tick outcomes; observe circuit breaker
 3. Detect ready-to-ship or plan-gate TODOs; alert via Slack
 4. Run Hermes agent selection on TODOS.md
-5. Register kanban phases with `--parent` dependency chains
+5. Register executable kanban phases with `--parent` dependency chains and detached blocked gates
 
 Without a project argument, scans all subdirectories of the global
 `projects_dir` for `TODOS.md` files. Per-project locks isolate failures — one

@@ -115,6 +115,21 @@ def _parse(raw: str) -> dict:
             if len(parts) == 3:
                 inner = inner.rsplit("```", 1)[0]
             body = inner
+    else:
+        # CLI backends may prepend warning lines before otherwise-valid raw JSON.
+        # Only accept the first decoded object when it consumes the remaining
+        # response; prose can contain example JSON that must not override the
+        # final answer.
+        decoder = json.JSONDecoder()
+        for idx, ch in enumerate(body):
+            if ch != "{":
+                continue
+            try:
+                d, end = decoder.raw_decode(body[idx:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(d, dict) and body[idx + end :].strip() == "":
+                return _format_result(d)
 
     error = None
     try:
@@ -136,9 +151,12 @@ def _parse(raw: str) -> dict:
 
 def _format_result(d: dict) -> dict:
     """Extract and normalize fields from a parsed JSON object."""
+    picked = d.get("picked")
+    if isinstance(picked, str) and picked.strip().lower() == "null":
+        picked = None
     return {
         "candidates_considered": list(d.get("candidates_considered", [])),
-        "picked": d.get("picked"),
+        "picked": picked,
         "rationale": str(d.get("rationale", "")),
         "blocked_reasons": dict(d.get("blocked_reasons", {})),
         "in_flight": list(d.get("in_flight", [])),

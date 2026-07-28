@@ -113,6 +113,69 @@ def test_fenced_json_with_leading_warning_line_parses(tmp_path, monkeypatch):
     r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
     assert r.parsed["picked"] == "TODO-1"
 
+def test_raw_json_with_leading_warning_line_parses(tmp_path, monkeypatch):
+    """CLI backends may prepend warning lines before raw JSON."""
+    p = _write_prompt(tmp_path)
+    raw = (
+        "Warning: Unknown toolsets: messaging\n"
+        + json.dumps({
+            "candidates_considered": ["TODO-1"],
+            "picked": "TODO-1",
+            "rationale": "only candidate",
+            "blocked_reasons": {},
+            "in_flight": [],
+        })
+    )
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._api_call",
+        lambda *a, **kw: raw,
+    )
+    r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
+    assert r.parsed["picked"] == "TODO-1"
+
+def test_prefix_json_does_not_override_fenced_answer(tmp_path, monkeypatch):
+    """Prose examples before the fenced answer must not become the decision."""
+    p = _write_prompt(tmp_path)
+    prefix = json.dumps({
+        "candidates_considered": ["TODO-2"],
+        "picked": "TODO-2",
+        "rationale": "draft",
+        "blocked_reasons": {},
+        "in_flight": [],
+    })
+    final = json.dumps({
+        "candidates_considered": ["TODO-1"],
+        "picked": "TODO-1",
+        "rationale": "final",
+        "blocked_reasons": {},
+        "in_flight": [],
+    })
+    raw = f"Warning: example object follows {prefix}\n```json\n{final}\n```"
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._api_call",
+        lambda *a, **kw: raw,
+    )
+    r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
+    assert r.parsed["picked"] == "TODO-1"
+    assert r.parsed["rationale"] == "final"
+
+def test_string_null_pick_normalizes_to_none(tmp_path, monkeypatch):
+    """Models sometimes quote null despite the schema."""
+    p = _write_prompt(tmp_path)
+    raw = json.dumps({
+        "candidates_considered": [],
+        "picked": "null",
+        "rationale": "nothing ready",
+        "blocked_reasons": {},
+        "in_flight": [],
+    })
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._api_call",
+        lambda *a, **kw: raw,
+    )
+    r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
+    assert r.parsed["picked"] is None
+
 def test_fenced_json_one_line_no_crash(tmp_path, monkeypatch):
     """One-line fenced JSON should not raise IndexError (Codex P1)."""
     p = _write_prompt(tmp_path)

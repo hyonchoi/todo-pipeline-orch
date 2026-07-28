@@ -1,7 +1,9 @@
 # How to recover from a prompt SHA mismatch
 
-The selection agent SHA-pins `.hermes/prompts/selection.md` against
-`selection.expected_prompt_sha` in `.hermes/config.toml`. On mismatch, the
+The selection agent SHA-pins the resolved selection prompt against
+`selection.expected_prompt_sha` in `.hermes/config.toml`. By default, that
+prompt is bundled at `hermes_pipeline/data/prompts/selection.md`; a project can
+override it with `[selection].prompt_path`. On mismatch, the
 tick aborts with `picked=None`, fires a Slack alert, and is **explicitly not
 counted as a no-progress event** (so it doesn't trip the circuit breaker).
 This guide unblocks the pipeline after a mismatch.
@@ -20,7 +22,7 @@ In the alerts channel:
 ```
 [pipeline-tick <tick_id>] PROMPT SHA MISMATCH: expected=abc123def456
 actual=789ghi012jkl. Selection skipped (NOT counted as no-progress).
-Check Hermes config repo for prompt drift.
+Check TPO selection prompt for drift.
 ```
 
 `tpo status` continues to show no new in-flight phase; ticks keep
@@ -30,7 +32,7 @@ firing and keep producing the same mismatch until you intervene.
 
 - Shell access to the host running `tpo`.
 - `sha256sum` (Linux) or `shasum -a 256` (macOS) on PATH.
-- Read access to `.hermes/config.toml` and `.hermes/prompts/selection.md`.
+- Read access to `.hermes/config.toml` and the resolved selection prompt.
 - Hermes CLI installed and authenticated (as of v0.3, selection routes through
   `hermes chat -q`).
 
@@ -40,30 +42,51 @@ A mismatch means either the prompt file drifted (someone edited it without
 updating the pin) or the pin drifted (config rolled back, wrong env). Decide
 which is canonical before changing anything.
 
-1. Compute the actual SHA:
+1. Find the resolved prompt path:
 
    ```bash
-   sha256sum .hermes/prompts/selection.md
-   # macOS: shasum -a 256 .hermes/prompts/selection.md
+   uv run python - <<'PY'
+   import tomllib
+   from importlib.resources import as_file, files
+   from pathlib import Path
+
+   cfg = Path(".hermes/config.toml")
+   prompt_path = None
+   if cfg.exists():
+       prompt_path = tomllib.loads(cfg.read_text()).get("selection", {}).get("prompt_path")
+
+   if prompt_path:
+       print(Path(prompt_path))
+   else:
+       with as_file(files("hermes_pipeline.data").joinpath("prompts", "selection.md")) as p:
+           print(p)
+   PY
    ```
 
-2. Read the pinned SHA:
+2. Compute the actual SHA:
+
+   ```bash
+   sha256sum <resolved-prompt-path>
+   # macOS: shasum -a 256 <resolved-prompt-path>
+   ```
+
+3. Read the pinned SHA:
 
    ```bash
    grep expected_prompt_sha .hermes/config.toml
    ```
 
-3. Pick one of the two paths below.
+4. Pick one of the two paths below.
 
 ## Path A — accept the new prompt (prompt change was intentional)
 
-Use this when a teammate intentionally edited the prompt and the new behavior
-is desired. You're updating the pin to match the file.
+Use this when the prompt change was intentional and the new behavior is
+desired. You're updating the pin to match the resolved prompt.
 
 1. Re-read the prompt to confirm it's the version you want:
 
    ```bash
-   cat .hermes/prompts/selection.md
+   cat <resolved-prompt-path>
    ```
 
 2. Update the pin in `.hermes/config.toml`:
@@ -89,28 +112,32 @@ is desired. You're updating the pin to match the file.
 
 ## Path B — revert the prompt (file change was unintentional)
 
-Use this when the prompt file was edited by mistake (rebase artifact,
-accidental save, untrusted source). You're restoring the file to match the
-pin.
+Use this when the prompt file was edited by mistake. You're restoring the file
+to match the pin. For the bundled default, restore it in the TPO repository and
+ship a normal package change. For a project override, restore the override file.
 
-1. Find the prompt's last good revision in your Hermes config repo:
+1. Find the prompt's last good revision:
 
    ```bash
-   cd ~/.hermes && git log -- prompts/selection.md
+   git log -- hermes_pipeline/data/prompts/selection.md
+   # or, for an override:
+   git log -- <configured-prompt-path>
    ```
 
 2. Restore the file to the version whose SHA matches
    `expected_prompt_sha`:
 
    ```bash
-   git checkout <good-sha> -- prompts/selection.md
+   git checkout <good-sha> -- hermes_pipeline/data/prompts/selection.md
+   # or, for an override:
+   git checkout <good-sha> -- <configured-prompt-path>
    ```
 
 3. Verify the SHA now matches:
 
    ```bash
-   sha256sum prompts/selection.md
-   grep expected_prompt_sha ~/projects/<repo>/.hermes/config.toml
+   sha256sum <resolved-prompt-path>
+   grep expected_prompt_sha .hermes/config.toml
    ```
 
    The two values should be identical.

@@ -4,6 +4,8 @@ Skipped only when neither backend is available.
 from __future__ import annotations
 
 import os
+from contextlib import nullcontext
+from importlib.resources import as_file, files
 from pathlib import Path
 
 import pytest
@@ -12,7 +14,7 @@ from hermes_pipeline.decision.agent import call_agent
 from hermes_pipeline.decision.schema import SelectionContext
 
 FIXTURE_DIR = Path(__file__).parent / "selection"
-PROMPT_PATH = Path(os.environ.get("SELECTION_PROMPT_PATH", ".hermes/prompts/selection.md"))
+_PROMPT_OVERRIDE = os.environ.get("SELECTION_PROMPT_PATH")
 
 
 def _detect_backend() -> str | None:
@@ -81,13 +83,20 @@ def test_selection_fixture(fixture_path):
         kanban_snapshot={"columns": []},
         project_slug="eval",
     )
-    r = call_agent(
-        ctx=ctx, prompt_path=PROMPT_PATH,
-        model=os.environ.get("EVAL_MODEL", "auto"),
-        max_tokens=2000, expected_sha=None,
-        backend=_get_backend(),
-        timeout=120,
+    prompt_resource = files("hermes_pipeline.data").joinpath("prompts", "selection.md")
+    prompt_context = (
+        as_file(prompt_resource)
+        if _PROMPT_OVERRIDE is None
+        else nullcontext(Path(_PROMPT_OVERRIDE))
     )
+    with prompt_context as prompt_path:
+        r = call_agent(
+            ctx=ctx, prompt_path=prompt_path,
+            model=os.environ.get("EVAL_MODEL", "auto"),
+            max_tokens=2000, expected_sha=None,
+            backend=_get_backend(),
+            timeout=120,
+        )
     picked = r.parsed["picked"]
     if meta.get("expected_picked_is_none"):
         assert picked is None, f"expected None, got {picked!r}; rationale={r.parsed['rationale']!r}"
