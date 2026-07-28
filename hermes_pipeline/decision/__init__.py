@@ -4,6 +4,9 @@ from __future__ import annotations
 import datetime as _dt
 import re as _re
 import subprocess
+from contextlib import nullcontext as _nullcontext
+from importlib.resources import as_file as _as_file
+from importlib.resources import files as _resource_files
 from pathlib import Path as _P
 
 from . import store as _store
@@ -32,7 +35,7 @@ def _emit_sha_mismatch_alert(*, tick_id: str, expected: str, actual: str) -> Non
         f"[pipeline-tick {tick_id}] PROMPT SHA MISMATCH: "
         f"expected={expected[:12]} actual={actual[:12]}. "
         "Selection skipped (NOT counted as no-progress). "
-        "Check Hermes config repo for prompt drift."
+        "Check TPO selection prompt for drift."
     )
     try:
         subprocess.run(
@@ -41,6 +44,13 @@ def _emit_sha_mismatch_alert(*, tick_id: str, expected: str, actual: str) -> Non
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
         pass
+
+def _selection_prompt_path(prompt_path: str | None):
+    if prompt_path:
+        return _nullcontext(_P(prompt_path))
+    return _as_file(
+        _resource_files("hermes_pipeline.data").joinpath("prompts", "selection.md")
+    )
 
 def run_selection(
     *,
@@ -62,59 +72,59 @@ def run_selection(
             outlive the lock that protects it.
     """
     state_dir = _P(cfg.base.state_dir)
-    prompt_path = _P(cfg.selection.prompt_path)
     model = cfg.selection.model
 
-    try:
-        result = call_agent(
-            ctx=ctx,
-            prompt_path=prompt_path,
-            model=model,
-            max_tokens=cfg.selection.max_tokens,
-            expected_sha=cfg.selection.expected_prompt_sha,
-            timeout=timeout,
-        )
-        parsed = result.parsed
-        prompt_sha = result.prompt_sha
-    except PromptShaMismatch as e:
-        _emit_sha_mismatch_alert(tick_id=tick_id, expected=e.expected, actual=e.actual)
-        parsed = {
-            "candidates_considered": [],
-            "picked": None,
-            "rationale": f"prompt_sha_mismatch: expected={e.expected[:12]} actual={e.actual[:12]}",
-            "blocked_reasons": {},
-            "in_flight": ctx.in_flight,
-        }
-        prompt_sha = e.actual
-    except KeyError as e:
-        # Config fault — missing required setting. Persist a
-        # decision so the next tick's `recent_decisions` carries the cause,
-        # but do not crash the cron entrypoint.
-        parsed = {
-            "candidates_considered": [],
-            "picked": None,
-            "rationale": f"config_error: missing setting {e.args[0]!r}",
-            "blocked_reasons": {},
-            "in_flight": ctx.in_flight,
-        }
-        prompt_sha = ""
-    except Exception as e:
-        # Hermes call surface — 401/429/5xx/network/timeout/CLI errors —
-        # plus any other transport error. The plan's edge-case contract:
-        # produce picked=None with a distinct rationale; the circuit breaker
-        # treats it as no-progress (caller responsibility).
-        rationale = f"api_error: {type(e).__name__}: {str(e)[:200]}"
+    with _selection_prompt_path(cfg.selection.prompt_path) as prompt_path:
         try:
-            prompt_sha = compute_prompt_sha(prompt_path)
-        except OSError:
+            result = call_agent(
+                ctx=ctx,
+                prompt_path=prompt_path,
+                model=model,
+                max_tokens=cfg.selection.max_tokens,
+                expected_sha=cfg.selection.expected_prompt_sha,
+                timeout=timeout,
+            )
+            parsed = result.parsed
+            prompt_sha = result.prompt_sha
+        except PromptShaMismatch as e:
+            _emit_sha_mismatch_alert(tick_id=tick_id, expected=e.expected, actual=e.actual)
+            parsed = {
+                "candidates_considered": [],
+                "picked": None,
+                "rationale": f"prompt_sha_mismatch: expected={e.expected[:12]} actual={e.actual[:12]}",
+                "blocked_reasons": {},
+                "in_flight": ctx.in_flight,
+            }
+            prompt_sha = e.actual
+        except KeyError as e:
+            # Config fault — missing required setting. Persist a
+            # decision so the next tick's `recent_decisions` carries the cause,
+            # but do not crash the cron entrypoint.
+            parsed = {
+                "candidates_considered": [],
+                "picked": None,
+                "rationale": f"config_error: missing setting {e.args[0]!r}",
+                "blocked_reasons": {},
+                "in_flight": ctx.in_flight,
+            }
             prompt_sha = ""
-        parsed = {
-            "candidates_considered": [],
-            "picked": None,
-            "rationale": rationale,
-            "blocked_reasons": {},
-            "in_flight": ctx.in_flight,
-        }
+        except Exception as e:
+            # Hermes call surface — 401/429/5xx/network/timeout/CLI errors —
+            # plus any other transport error. The plan's edge-case contract:
+            # produce picked=None with a distinct rationale; the circuit breaker
+            # treats it as no-progress (caller responsibility).
+            rationale = f"api_error: {type(e).__name__}: {str(e)[:200]}"
+            try:
+                prompt_sha = compute_prompt_sha(prompt_path)
+            except OSError:
+                prompt_sha = ""
+            parsed = {
+                "candidates_considered": [],
+                "picked": None,
+                "rationale": rationale,
+                "blocked_reasons": {},
+                "in_flight": ctx.in_flight,
+            }
 
     # LLM-output trust boundary. Three failure modes to gate against:
     #   1. `picked` doesn't match the TODO-N shape (model returned a string,

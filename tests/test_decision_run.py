@@ -27,6 +27,13 @@ def _cfg(state_dir: Path, prompt_path: Path, expected_sha=None) -> FullConfig:
         circuit_breaker=CircuitBreakerConfig(),
     )
 
+def _default_cfg(state_dir: Path) -> FullConfig:
+    return FullConfig(
+        base=Config(state_dir=state_dir),
+        selection=SelectionConfig(model="m", max_tokens=100, auto_execute=False),
+        circuit_breaker=CircuitBreakerConfig(),
+    )
+
 def _prompt(tmp_path: Path) -> Path:
     p = tmp_path / "p.md"
     p.write_text("PROMPT")
@@ -55,6 +62,28 @@ def test_happy_path_persists_decision(tmp_path):
     assert isinstance(d, HermesSelectionDecision)
     assert d.picked == "TODO-1"
     assert (state / "decisions" / "01JA.json").exists()
+
+def test_default_prompt_is_bundled_package_data(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    fake = AgentResult(
+        parsed={
+            "candidates_considered": ["TODO-1"],
+            "picked": "TODO-1",
+            "rationale": "ok",
+            "blocked_reasons": {},
+            "in_flight": [],
+        },
+        prompt_sha="sha",
+        raw_response="{}",
+    )
+    with patch("hermes_pipeline.decision.call_agent", return_value=fake) as call:
+        d = run_selection(tick_id="01JDEFAULT", ctx=_ctx(), cfg=_default_cfg(state))
+
+    assert d.picked == "TODO-1"
+    prompt_path = call.call_args.kwargs["prompt_path"]
+    assert prompt_path.name == "selection.md"
+    assert prompt_path.parts[-3:] == ("data", "prompts", "selection.md")
 
 def test_picked_not_in_todos_md_is_rejected(tmp_path):
     """LLM-output trust boundary: picked must appear in TODOS.md (NOT in the

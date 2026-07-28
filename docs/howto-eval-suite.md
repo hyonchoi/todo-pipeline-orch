@@ -3,7 +3,7 @@
 Exercise the live Hermes selection agent (routed through `hermes chat -q` as of v0.3) against a fixture battery and
 verify the model picks (or correctly refuses to pick) the expected TODO. Use
 this before changing `decision/agent.py`, the prompt template
-(`.hermes/prompts/selection.md`), or the pinned model id.
+(`hermes_pipeline/data/prompts/selection.md`), or the pinned model id.
 
 ## Prerequisites
 
@@ -12,8 +12,9 @@ this before changing `decision/agent.py`, the prompt template
   orchestrator routes through Hermes via `hermes chat -q`, so Hermes must also be
   installed and authenticated (`hermes login`).
 - `uv sync` has run at the repo root.
-- A prompt file at `.hermes/prompts/selection.md` (or `SELECTION_PROMPT_PATH`
-  pointing to one). The runner reads the bytes and hashes them on every call.
+- The bundled prompt at `hermes_pipeline/data/prompts/selection.md`, or
+  `SELECTION_PROMPT_PATH` pointing to an override. The runner reads the bytes
+  and hashes them on every call.
 
 ## Steps
 
@@ -104,7 +105,7 @@ signal about whether the prompt is leading the model astray.
 `.github/workflows/eval.yml` runs the same battery on every PR that touches:
 
 - `hermes_pipeline/decision/agent.py`
-- `.hermes/prompts/**`
+- `hermes_pipeline/data/prompts/**`
 - `tests/eval/**`
 
 The workflow is `continue-on-error: true` — eval failures inform, they do not
@@ -134,14 +135,15 @@ Hermes resolves auth internally.
 **Parse error: `picked=None, rationale='parse error: ...'`.**
 The model returned non-JSON or unfenced text. `agent.py:_parse` strips ` ```json `
 fences. If the model is returning prose, the prompt likely lost its structured-
-output instructions — diff against `.hermes/prompts/selection.md` HEAD.
+output instructions — diff against `hermes_pipeline/data/prompts/selection.md`
+HEAD.
 
 **A fixture that used to pass now fails.**
-Either the prompt drifted (run `sha256sum .hermes/prompts/selection.md` and
-compare to the value in `.hermes/config.toml`'s
-`selection.expected_prompt_sha`), or the model id moved. Both are
-investigable; do not silently update `expected_picked_in` to match the new
-behavior.
+Either the prompt drifted (run `sha256sum` on
+`hermes_pipeline/data/prompts/selection.md` or the configured
+`SELECTION_PROMPT_PATH` override and compare to
+`selection.expected_prompt_sha`), or the model id moved. Both are investigable;
+do not silently update `expected_picked_in` to match the new behavior.
 
 ## Related
 

@@ -95,6 +95,18 @@ def _parse(raw: str) -> dict:
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
+    # CLI backends may prepend warning lines before otherwise-valid raw JSON.
+    decoder = json.JSONDecoder()
+    for idx, ch in enumerate(body):
+        if ch != "{":
+            continue
+        try:
+            d, _end = decoder.raw_decode(body[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(d, dict):
+            return _format_result(d)
+
     # Fall back to fence extraction (CLI backends may prepend warnings).
     fence_start = body.find("```")
     if fence_start != -1:
@@ -136,9 +148,12 @@ def _parse(raw: str) -> dict:
 
 def _format_result(d: dict) -> dict:
     """Extract and normalize fields from a parsed JSON object."""
+    picked = d.get("picked")
+    if isinstance(picked, str) and picked.strip().lower() == "null":
+        picked = None
     return {
         "candidates_considered": list(d.get("candidates_considered", [])),
-        "picked": d.get("picked"),
+        "picked": picked,
         "rationale": str(d.get("rationale", "")),
         "blocked_reasons": dict(d.get("blocked_reasons", {})),
         "in_flight": list(d.get("in_flight", [])),

@@ -34,7 +34,7 @@ class SelectionConfig:
     model: str = "auto"
     max_tokens: int = 4000
     auto_execute: bool = False
-    prompt_path: str = ".hermes/prompts/selection.md"
+    prompt_path: str | None = None
     expected_prompt_sha: str | None = None
 
 @dataclass(frozen=True)
