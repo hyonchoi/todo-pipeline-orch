@@ -228,7 +228,7 @@ A working TODOS.md with:
 
 **Reference:**
 - [TODOS Manager skill](../hermes_pipeline/data/skills/todos-manager/SKILL.md) — full schema, ID assignment rules, acceptance scenarios, error messages
-- [Install TODOS Manager](../README.md#todos-manager-skill-v2) — run `tpo skills install --help` to install todos-manager to user-level directories
+- [Install TODOS Manager](reference-cli.md#skills) — run `tpo skills install --help` to install todos-manager to user-level directories
 
 **Convert an existing TODOS.md:**
 - Run `todos-manager --convert` to add the canonical sections and validate entries against the enforced schema.

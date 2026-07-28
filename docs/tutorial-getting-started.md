@@ -24,14 +24,16 @@ If `uv` is missing:
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-Install the CLI:
+Install the CLI from a source checkout:
 
 ```bash
+git clone https://github.com/hyonchoi/todo-pipeline-orch.git
+cd todo-pipeline-orch
 uv tool install .
 tpo --version
 ```
 
-From a source checkout:
+For contributor work in that checkout:
 
 ```bash
 uv sync
