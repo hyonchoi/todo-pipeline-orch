@@ -274,3 +274,51 @@ Archived: 2026-07-14T00:00:00Z
   - **Cons:** Risk of scope creep into a full pipeline redesign; changes to phase prompts affect live orchestrator runs.
   - **Context:** Related prior work — `TODO-7` (added phase_5_review) and `TODO-8` (replaced phase_8 ship gate), both in TODOS-archive.md.
   - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/refine-phases-yaml`, Test Coverage `not-required`, Security Review `not-required`
+
+- [x] **TODO-33: Rename main CLI script to `tpo`** — Replace `pipeline-watch`/`hermes-pipeline` console-scripts with a single short `tpo` entry point
+  - **What:** Replace both `pipeline-watch` and `hermes-pipeline` console-script entries in `pyproject.toml`'s `[project.scripts]` with a single `tpo` entry point (`hermes_pipeline.cli:main`), then update all references across docs (10+ files under `docs/`), tests (test_contract.py, test_recover_counter_cli.py, test_cli_entrypoint.py, test_tick_subcommand.py, test_cli.py), README, and CHANGELOG to use `tpo`.
+  - **Why:** The current script names (`pipeline-watch`, `hermes-pipeline`) are too long to type repeatedly during manual/interactive CLI usage; a single short name (`tpo`) improves day-to-day ergonomics.
+  - **Pros:** Much faster to type; single unambiguous CLI name going forward.
+  - **Cons:** Full breakage of old names — every doc, test, and any external script/muscle-memory using `pipeline-watch`/`hermes-pipeline` must be updated in the same change.
+  - **Context:** `pyproject.toml` `[project.scripts]` (lines 11-12); docs: howto-agent-skills-profile.md, howto-pipeline-contract.md, howto-approve-and-ship.md, howto-multi-project-setup.md, + gstack design docs; tests: test_contract.py, test_recover_counter_cli.py, test_cli_entrypoint.py, test_tick_subcommand.py, test_cli.py.
+  - **Decisions:** Priority `P2`, Effort `L`, Phase `4 (Development)`, Branch `feature/rename-cli-to-tpo`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+
+- [x] **TODO-34: Embed todos-manager skill as package data with `tpo skills install` subcommand** — Replace git-clone-dependent install script with an in-package installer usable after `uv tool install`
+  - **What:** Move `skills/todos-manager/` into `hermes_pipeline/skills/todos-manager/`, mark it as package data in `pyproject.toml` (hatch wheel force-include or similar), and add a `tpo skills install` CLI subcommand (in `cli.py`, alongside `_cmd_install_profile` at cli.py:1070) that uses `importlib.resources.files("hermes_pipeline") / "skills/todos-manager"` to locate the packaged skill and symlinks/copies it into `~/.claude/skills/` and `~/.agents/skills/`, porting the logic currently in `scripts/install-todos-manager.sh`.
+  - **Why:** `scripts/install-todos-manager.sh` requires a git clone of the repo to run, which is incompatible with the `uv tool install todo-pipeline-orchestrator` distribution model where users never see the source tree.
+  - **Pros:** No git dependency; single source of truth versioned with the package; works for any `uv tool install` user; testable via pytest like other CLI subcommands.
+  - **Cons:** One-time migration effort — pyproject.toml package-data wiring, porting bash symlink logic to Python, deleting/deprecating the old script.
+  - **Context:** Existing subcommand pattern to follow: `_cmd_install_profile` (cli.py:1070) and its parser registration (cli.py:289). Old install path: `scripts/install-todos-manager.sh`.
+  - **Depends on:** `TODO-33`
+  - **Assumptions:** hatchling build backend (already in use) supports package-data inclusion for non-Python files via `[tool.hatch.build.targets.wheel]` config.
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/embed-todos-manager-skill-install`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+
+- [x] **TODO-32: Separate `data/profiles` into identity and phase-config contexts** — Split mixed Hermes identity profile and pipeline phase definitions into distinct directories
+  - **What:** Separated `hermes_pipeline/data/profiles` into `hermes_pipeline/data/hermes-identity/pipeline/` (SOUL.md) and `hermes_pipeline/data/phase-profiles/` (gstack/phases.yaml, agent-skills/phases.yaml). Updated `bundled_profile_dir()` (contract.py) and `resolve_profile_phases_path()` (phases.py) call sites, added `tests/test_profile_layout_split.py` regression coverage, and updated docs/howto-agent-skills-profile.md and docs/howto-pipeline-contract.md.
+  - **Completed:** v0.5.9 (2026-07-24)
+
+- [x] **TODO-35: Add --reinstall flag, default-on-exists fail, and uninstall subcommand to skills install CLI** — Make `tpo skills install` fail when dest exists, add explicit `--reinstall` opt-in, and create `tpo skills uninstall` with confirmation
+  - **What:** Add --reinstall flag to `tpo skills install` (removes existing dest before copying), make default install fail when dest exists, and add `tpo skills uninstall` subcommand with confirmation prompt.
+  - **Why:** `shutil.copytree(dest, dirs_exist_ok=True)` fails on structural mismatches (file vs dir conflicts) and silently overwrites. Users need explicit opt-in to reinstall and a way to remove skills.
+  - **Pros:** Prevents accidental silent overwrites; gives users clean reinstall path; adds symmetry with uninstall
+  - **Cons:** Breaking change — existing scripts/aliases that double-run install without --reinstall will get errors
+  - **Context:** CLI in hermes_pipeline/cli.py:1222-1265, tests in tests/test_skills_install.py
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `4 (Development)`, Branch `feat/skills-install-reinstall`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.6.3 (2026-07-27)
+
+- [x] **TODO-37: Add global config file with `tpo config` command, deprecating PIPELINE_PROJECTS_DIR** — Introduce an XDG-style global config.yaml as the source for projects_dir and other base settings, with a `tpo config` subcommand to read/write it.
+  - **What:** Add a global config file, resolved via a search order — `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`, else `~/.tpo/config.yaml`, else `${HERMES_HOME:-~/.hermes}/tpo.yaml` (first existing file wins; default to the first path if none exist) — loaded in `Config.from_env()`/`hermes_pipeline/config.py` before env var overrides are applied. Add `tpo config get <key>`, `tpo config set <key> <value>`, and `tpo config path` subcommands (mirroring the `skills` subparser pattern at cli.py:329) to read/write the YAML file. `PIPELINE_PROJECTS_DIR` env var support remains as a deprecated compatibility alias; users should prefer setting `projects_dir` via the global config file.
+  - **Why:** `PIPELINE_PROJECTS_DIR` is the only base-level setting not covered by the existing per-project overlays, forcing users into ad hoc shell exports for a value that's effectively static per machine. A discoverable, persistent global config file with a `tpo config` command gives users a standard place to set install-wide defaults, consistent with the XDG convention already implied by `~/.hermes` state dir usage.
+  - **Pros:** Persistent config survives shell restarts; XDG-compliant discovery order matches conventions of other CLI tools; `tpo config` subcommand makes the setting discoverable/scriptable instead of requiring users to know an undocumented env var.
+  - **Cons:** Keeping PIPELINE_PROJECTS_DIR as a deprecated alias avoids a patch-release break, but leaves two ways to configure `projects_dir` until the alias is removed in a later major/minor release.
+  - **Context:** hermes_pipeline/config.py (Config.from_env, env_map at line 35-42); existing per-project overlay pattern at config.py:105 (load_toml_overlay), loaded from .hermes/config.toml per cli.py:409-425 (selection/circuit_breaker settings) — distinct from .hermes/pipeline.toml (contract.py:20, phase/profile contract) and .hermes/project.toml (project_config.py:14, enabled/notifications settings); skills subcommand pattern at cli.py:329-335 for the `tpo config` subparser structure.
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `2 (Design)`, Branch `feature/global-config-file`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.6.1 (2026-07-26)
+
+- [x] **TODO-38: Track NEXT_TODO_ID in TODOS.md instead of scanning archive** — Track NEXT_TODO_ID in TODOS.md instead of scanning archive
+  - **What:** Add a `NEXT_TODO_ID: <n>` line under `## Metadata` as the primary source for `--add`'s ID computation, replacing the per-add archive scan. Add a conflict check: before assigning NEXT_TODO_ID to a new entry, verify no existing TODO-<NEXT_TODO_ID> already exists in TODOS.md (e.g. from a manual edit or merge). If a conflict is detected, automatically run the `--audit` reconciliation scan (max ID across TODOS.md + TODOS-archive.md) to recompute and correct NEXT_TODO_ID in place, log the correction, then continue the `--add` flow with the corrected ID — no user interruption needed. `--audit` (invoked standalone) performs the same full-scan reconciliation. Out of scope: deprecating `.hermes/todo_id_counter` itself (separate cleanup).
+  - **Why:** Fixes the ID-assignment mechanism discussed earlier this session: `.hermes/todo_id_counter` is gitignored, so any agent that forgets to update it causes wrong TODO-<n> picks; committing NEXT_TODO_ID directly in tracked TODOS.md removes that failure mode and the archive-scan cost.
+  - **Pros:** O(1) next-ID lookup instead of archive scan in the common case; self-healing on drift (no silent bad ID assignment); state lives in a tracked file so it can't silently diverge across clones/worktrees/agents.
+  - **Cons:** Requires a one-time migration to backfill NEXT_TODO_ID into existing TODOS.md files; conflict-triggered auto-audit adds a fallback archive scan back on the rare drift path (acceptable since it's no longer the common path).
+  - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/todos-next-id-tracking`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.6.3 (2026-07-27)
