@@ -19,6 +19,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 from hermes_pipeline import __version__
@@ -927,11 +928,16 @@ def _tick_project(
     except (FileNotFoundError, ValueError):
         toml_cfg = None
 
+    project_base_config = replace(config, state_dir=project_state)
     if toml_cfg is not None:
-        full_cfg = toml_cfg
+        full_cfg = FullConfig(
+            base=project_base_config,
+            selection=toml_cfg.selection,
+            circuit_breaker=toml_cfg.circuit_breaker,
+        )
     else:
         full_cfg = FullConfig(
-            base=config,
+            base=project_base_config,
             selection=SelectionConfig(),
             circuit_breaker=cb_cfg,
         )

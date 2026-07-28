@@ -105,6 +105,25 @@ class TestTickSubcommand:
         result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
+    def test_tick_selection_uses_project_state_dir(self, tmp_path, mocker):
+        """Selection decisions are persisted under the project, not global state."""
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        cfg = mock_selection.call_args.kwargs["cfg"]
+        assert cfg.base.state_dir == project_dir / ".hermes"
+
     def test_tick_lock_held_skips_that_project(self, tmp_path, mocker):
         """A held per-project lock skips that project; scan still returns 0.
 
