@@ -826,21 +826,25 @@ def _tick_project(
             assignee="pipeline",
             capabilities=tuple(sorted(required_capabilities(phases))),
         )
-        result = _cli_sp.run(
-            ["hermes", "profile", "show", contract.assignee],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            check=False,
-        )
-        if result.returncode != 0:
+        try:
+            result = _cli_sp.run(
+                ["hermes", "profile", "show", contract.assignee],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            profile_rc = result.returncode
+        except FileNotFoundError:
+            profile_rc = 127
+        if profile_rc != 0:
             log.warning(
                 "project %s has no pipeline contract at %s; falling back to "
                 "assignee='pipeline', but `hermes profile show pipeline` failed "
                 "(rc=%d). Run `tpo install-profile`, then `tpo init %s --assignee pipeline`.",
                 project_slug,
                 contract_path(project_state),
-                result.returncode,
+                profile_rc,
                 project_slug,
             )
     except (ContractSchemaError, ContractVersionMismatchError) as e:

@@ -91,6 +91,24 @@ class TestTickContractAssignee:
         assert mock_register.call_args.kwargs["assignee"] == "pipeline"
         assert "hermes profile show pipeline" in caplog.text
 
+    def test_tick_no_contract_warns_when_hermes_missing(self, tmp_path, mocker, caplog):
+        """Missing Hermes binary warns but does not skip the implicit fallback."""
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mock_register = mocker.patch("hermes_pipeline.cli.register_todo_phases", return_value=["t_1"])
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=FileNotFoundError("hermes"))
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+        result = _cmd_tick(FakeArgs(), config)
+
+        assert result == 0
+        mock_register.assert_called_once()
+        assert mock_register.call_args.kwargs["assignee"] == "pipeline"
+        assert "rc=127" in caplog.text
+
     def test_tick_capability_mismatch_skips_project_not_whole_scan(self, tmp_path, mocker):
         """A project with a capability-deficient contract is skipped, scan continues."""
         mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
