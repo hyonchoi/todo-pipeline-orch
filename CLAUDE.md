@@ -1,4 +1,4 @@
-# CLAUDE.md
+# AI Agent Instructions
 
 Project-specific instructions for Claude Code in this repository.
 
