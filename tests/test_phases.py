@@ -117,6 +117,15 @@ def test_load_phases_no_args_still_returns_gstack_phases():
     assert phases[0].phase_key == "phase_2_autoplan"
 
 
+def test_real_phases_yaml_records_pipeline_branch_for_pr_handoff():
+    phases = {p.phase_key: p for p in load_phases()}
+    autoplan = phases["phase_2_autoplan"]
+    finish = phases["phase_8_finish_branch"]
+    assert ".hermes/pipeline_branch.txt" in autoplan.prompt
+    assert ".hermes/pipeline_branch.txt" in finish.prompt
+    assert "current branch name" in finish.prompt
+
+
 def test_real_phases_yaml_finish_branch_uses_ship_skill():
     phases = {p.phase_key: p for p in load_phases()}
     finish = phases["phase_8_finish_branch"]

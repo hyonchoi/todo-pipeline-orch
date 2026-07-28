@@ -1,7 +1,7 @@
 """Hermes pipeline orchestrator CLI.
 
-Subcommands: merge, approve, status, kill.
-Scheduling is owned by the Hermes command repo.
+Subcommands: tick, approve, init, doctor, config, skills, recover-counter, test.
+Scheduling is owned by Hermes kanban tasks.
 """
 
 from __future__ import annotations
@@ -226,7 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
         prog="tpo",
-        description="Hermes pipeline orchestrator: merge, approve, status, and kill commands.",
+        description="Hermes pipeline orchestrator: tick projects, manage pipeline setup, and handle legacy approval gates.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -234,10 +234,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
 
-    # approve: Phase 9 ship gate — bump-in-PR, merge, complete gate
+    # approve: legacy ship gate — bump-in-PR, merge, complete gate
     approve_parser = subparsers.add_parser(
         "approve",
-        help="Ship a ready TODO: bump version in PR, merge to main, complete the gate",
+        help="Legacy helper: ship a TODO from an existing ship-gate sidecar",
     )
     approve_parser.add_argument("project", help="Project name")
     approve_parser.add_argument(
@@ -540,6 +540,56 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
         alert_dedup_hours=cb_cfg.alert_dedup_hours,
         slack_channel=slack_channel,
     )
+
+
+def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> bool:
+    """Return True when Phase 8 handed off a branch whose PR is not merged."""
+    branch_file = state_dir / "pipeline_branch.txt"
+    if not branch_file.exists():
+        return False
+
+    work_branch = branch_file.read_text().strip()
+    if not work_branch:
+        return False
+
+    try:
+        result = _cli_sp.run(
+            ["gh", "pr", "view", work_branch, "--json", "state"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (FileNotFoundError, _cli_sp.TimeoutExpired) as e:
+        log.info(
+            "project has PR handoff branch %s but merge state could not be "
+            "verified (%s); leaving project in handoff",
+            work_branch,
+            e,
+        )
+        return True
+
+    if result.returncode != 0:
+        log.info(
+            "project has PR handoff branch %s but gh pr view failed: %s; "
+            "leaving project in handoff",
+            work_branch,
+            result.stderr.strip()[:200],
+        )
+        return True
+
+    try:
+        state = (json.loads(result.stdout).get("state") or "").upper()
+    except json.JSONDecodeError:
+        log.info(
+            "project has PR handoff branch %s but gh pr view returned "
+            "non-JSON; leaving project in handoff",
+            work_branch,
+        )
+        return True
+
+    return state != "MERGED"
 
 
 def _persist_tick_id(
@@ -883,6 +933,19 @@ def _tick_project(
     cb = _make_circuit_breaker(project_state, cb_cfg, slack_channel)
 
     if prior_tick_id is not None:
+        # Legacy ship-gate compatibility: custom/older profiles can still have
+        # a blocked phase_9_ship. Detect and write the sidecar before the
+        # in-flight early return so `tpo approve` can finish those ticks.
+        from . import ship
+
+        ship.maybe_ship_ready(
+            project_dir=project_dir,
+            project_slug=project_slug,
+            prior_tick_id=prior_tick_id,
+            state_dir=project_state,
+            slack_channel=slack_channel,
+        )
+
         if not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
         ):
@@ -914,6 +977,14 @@ def _tick_project(
                 prior_tick_id,
                 e,
             )
+
+        if _has_pending_pr_handoff(project_dir, project_state):
+            log.info(
+                "project %s: prior tick %s is waiting on PR handoff, skipping",
+                project_slug,
+                prior_tick_id,
+            )
+            return
 
     # Step 3: Build context & run selection
     todos_path = project_dir / "TODOS.md"

@@ -11,7 +11,8 @@ phases:
       1. Run CEO/Eng/UI/DX reviews for {todo_id}.
       2. Write all plan and auxiliary documents into docs/pipeline/ (e.g., {todo_id}-plan.md and any review artifacts).
       3. Create a new branch from main.
-      4. Commit all generated docs.
+      4. Save the branch name to .hermes/pipeline_branch.txt.
+      5. Commit all generated docs.
 
       If {todo_id} itself is ambiguous or needs revision before you can
       proceed, or you hit any other blocker, do NOT ask for clarification
@@ -152,6 +153,10 @@ phases:
       case, run every other step of the skill (verification, version bump
       checks, etc.) and leave the branch committed and ready, without
       creating a PR — this is expected, not a failure.
+
+      Before completing, verify .hermes/pipeline_branch.txt contains the
+      current branch name. If it is missing or stale, rewrite it with the
+      current branch name and commit that state update.
 
       Do not block this task because a PR is ready. The only blocking/failure
       condition is the final verdict from /ship saying that the agent must run

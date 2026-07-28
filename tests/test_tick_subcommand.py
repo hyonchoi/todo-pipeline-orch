@@ -90,6 +90,69 @@ class TestTickSubcommand:
         result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
+    def test_tick_prior_complete_waits_for_open_pr_handoff(self, tmp_path, mocker):
+        """A completed Phase 8 handoff with an open PR must block new selection."""
+        mocker.patch(
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
+        )
+        mocker.patch("hermes_pipeline.cli.observe_outcomes")
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
+        mock_run.return_value = mocker.Mock(
+            returncode=0,
+            stdout='{"state": "OPEN"}',
+            stderr="",
+        )
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        project_state = project_dir / ".hermes"
+        project_state.mkdir(parents=True)
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        (project_state / "pipeline_branch.txt").write_text("todo-5-feat\n")
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
+        mock_selection.assert_not_called()
+
+    def test_tick_prior_complete_proceeds_after_merged_pr_handoff(self, tmp_path, mocker):
+        """Once the handoff PR is merged, the next tick may select new work."""
+        mocker.patch(
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
+        )
+        mocker.patch("hermes_pipeline.cli.observe_outcomes")
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
+        mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
+        mock_run.return_value = mocker.Mock(
+            returncode=0,
+            stdout='{"state": "MERGED"}',
+            stderr="",
+        )
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        project_state = project_dir / ".hermes"
+        project_state.mkdir(parents=True)
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        (project_state / "pipeline_branch.txt").write_text("todo-5-feat\n")
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
+        mock_selection.assert_called_once()
+
     def test_tick_no_prior_proceeds(self, tmp_path, mocker):
         """No prior tick -> proceed normally."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
