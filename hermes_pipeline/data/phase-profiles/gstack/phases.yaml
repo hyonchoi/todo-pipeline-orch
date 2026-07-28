@@ -161,7 +161,4 @@ phases:
     tools: "Read,Write,Edit,Bash"
     turns: 100
     timeout: 7200
-  - phase_key: "phase_9_ship"
-    name: "Phase 9: Ship Gate"
-    gate: true
     terminal: true

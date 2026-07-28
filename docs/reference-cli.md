@@ -2,7 +2,7 @@
 
 Complete reference for `tpo` subcommands.
 
-- `uv run tpo <command> [args]` — Production pipeline orchestration (tick, merge, approve, ...)
+- `uv run tpo <command> [args]` — Production pipeline orchestration (tick, init, doctor, ...)
 - `uv run tpo test [args]` — Mock integration test harness
 
 ## tpo Global Flags
@@ -29,9 +29,9 @@ uv run tpo tick myproject    # tick one project
 **Flow per project:**
 1. Load pipeline contract from `.hermes/pipeline.toml`
 2. Check prior tick outcomes; observe circuit breaker
-3. Detect ready-to-ship or plan-gate TODOs; alert via Slack
+3. Check in-flight phase state and circuit breaker progress
 4. Run Hermes agent selection on TODOS.md
-5. Register executable kanban phases with `--parent` dependency chains and detached blocked gates
+5. Register executable kanban phases with `--parent` dependency chains; profiles may also define detached blocked gates
 
 Without a project argument, scans all subdirectories of the global
 `projects_dir` for `TODOS.md` files. Per-project locks isolate failures — one
@@ -42,7 +42,7 @@ fairness.
 
 ### `approve`
 
-Ship a ready TODO: bump version in PR, squash-merge to main, complete the ship gate.
+Legacy helper for existing ship-gate sidecars: bump version in PR, squash-merge to main, complete the ship gate.
 
 ```bash
 uv run tpo approve myproject --todo TODO-5
@@ -67,7 +67,7 @@ uv run tpo approve myproject --todo TODO-5 --force --force
 - Dirty working tree: always refuses, cannot be bypassed
 - PR head SHA changed since review: refuses unless `--force --force` (logged to `approve_audit.log`)
 - CI not green: refuses; re-run once checks pass (bump commit already pushed)
-- No ship sidecar or gate task: refuses
+- No legacy ship sidecar or gate task: refuses
 
 ---
 

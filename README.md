@@ -4,7 +4,7 @@ Pipeline watcher and TODOS manager orchestration toolkit, packaged as a uv-manag
 
 ## Overview
 
-`tpo` helps maintain schema-enforced `TODOS.md` files, install the bundled `todos-manager` skill, prepare pipeline contracts, run pipeline ticks, and approve ready TODOs for shipping. Pipeline phases run through Hermes agent profiles and use kanban tasks for phase scheduling.
+`tpo` helps maintain schema-enforced `TODOS.md` files, install the bundled `todos-manager` skill, prepare pipeline contracts, and run pipeline ticks through PR handoff. Pipeline phases run through Hermes agent profiles and use kanban tasks for phase scheduling.
 
 Use this README as the quick map. Detailed setup, reference, and recovery guides live in the documentation index below.
 
@@ -102,12 +102,11 @@ tpo init my-project
 tpo doctor my-project
 ```
 
-Run and ship:
+Run the pipeline:
 
 ```bash
 tpo tick
 tpo tick my-project
-tpo approve my-project --todo TODO-5
 ```
 
 ## Subcommands
@@ -115,7 +114,7 @@ tpo approve my-project --todo TODO-5
 | Subcommand | Purpose |
 |---|---|
 | `tick` | Discover configured projects, select eligible TODOs, and register pipeline phases. |
-| `approve` | Ship a reviewed TODO through the approval/merge workflow. |
+| `approve` | Legacy guarded merge helper for existing ship-gate sidecars. |
 | `init` | Write `.hermes/pipeline.toml` for an existing project. |
 | `doctor` | Verify a project's pipeline contract against the selected profile. |
 | `recover-counter` | Rebuild legacy TODO counter compatibility state from tracked TODO IDs. |
@@ -148,7 +147,6 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | Doc | Type | When to read |
 |---|---|---|
 | [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `tpo tick` for iterative development |
-| [Approve and ship a TODO](docs/howto-approve-and-ship.md) | How-to | Running `tpo approve` |
 | [Set up the pipeline profile](docs/howto-pipeline-profile.md) | How-to | Installing the dedicated pipeline Hermes profile |
 | [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
 | [Handle phase 5 review outcomes](docs/howto-review-outcomes.md) | How-to | Inspecting review artifacts and reverted/timed-out reviews |

@@ -23,7 +23,7 @@ Phase 5: Code Review (gstack /review, v0.4+)
 Phase 6.1: CSO Security Review --> Phase 6.2: QA
     |
     v
-Phase 7: Document Release --> Phase 8: Finish Branch --> Phase 9: Ship Gate
+Phase 7: Document Release --> Phase 8: Finish Branch
 ```
 
 ## Lane Structure
@@ -40,7 +40,7 @@ hermes_pipeline/
 ├── hermes_adapter.py         # Hermes CLI wrapper (replaces direct Anthropic SDK)
 ├── kanban.py                 # Kanban adapter (hermes kanban commands)
 ├── kanban_tasks.py           # Task registration with --parent chains and manual gates
-├── ship.py                   # Phase 9 ship gate: version bump, CI-green gate, squash merge
+├── ship.py                   # Legacy ship-gate helper for existing sidecars
 ├── outcomes.py               # Outcome sidecar writing/reading
 ├── phases.py                 # Phase definitions + hermes subprocess invocation
 ├── project_config.py         # Multi-project discovery & per-project config
@@ -58,8 +58,8 @@ hermes_pipeline/
 ### Lane D: Runner & Phases
 `phases.py`, `tick.py` — Phase execution via Hermes subprocess. Atomic-mkdir tick lock prevents duplicate ticks. Phase 5 (code review) is a plain kanban-dispatched phase like any other — the code-owned pre/post review lifecycle (`review_phase.py`) was removed in v0.5.6 as dead code; the prompt instructs `/review` directly with no code-side snapshot/restore machinery.
 
-### Lane E: Ship Gate
-`ship.py` — Phase 9: confirm, version bump, CI-green gate, squash merge to main. (The standalone `merge.py` module was consolidated into `ship.py` in v0.5.6.)
+### Lane E: Finish Branch
+Phase 8 runs `/ship`, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the default gstack phase profile.
 
 ### Lane F: CLI, Multi-Project, State Migration
 `cli.py`, `project_config.py`, `state_migration.py` — User-facing commands, multi-project scanning, per-project state migration. (`watcher.py` and `status.py` were removed in v0.5.6 — the `__main__.py` event loop and `cli.py` subcommands cover their roles.)
@@ -102,7 +102,7 @@ All pipeline state lives under `<project>/.hermes/`:
 <project>/.hermes/
 ├── decisions/                 # Immutable selection decisions (write-once)
 ├── outcomes/                  # Phase completion/failure sidecars
-├── ready_for_review/          # TODOs ready for human review
+├── ready_for_review/          # Legacy ship-gate sidecars
 ├── phase_started/             # In-flight phase markers
 ├── tick.lock/                 # Global tick lock (atomic mkdir)
 ├── todo_id_counter            # Compatibility cache for tracked TODO IDs
@@ -131,7 +131,7 @@ All pipeline state lives under `<project>/.hermes/`:
 
 ## Key Design Decisions
 
-1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent` chains. Human gates are detached blocked tasks, so they stay manual.
+1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent` chains. Profiles may define detached blocked gates, but the default `gstack` profile ends at Phase 8 PR handoff.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review`, and the agent owns the review lifecycle end-to-end.
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.

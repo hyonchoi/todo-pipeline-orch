@@ -55,16 +55,13 @@ def test_non_gate_phase_defaults_gate_false(tmp_path):
     phases = load_phases(p)
     assert phases[0].gate is False
 
-def test_real_phases_yaml_ends_with_blocked_gate():
+def test_real_phases_yaml_ends_with_finish_branch():
     phases = load_phases()  # default: configs/phases.yaml
     keys = [p.phase_key for p in phases]
-    assert keys[-1] == "phase_9_ship"
-    gate = phases[-1]
-    assert gate.gate is True
-    # Phase 8 must no longer be terminal — the gate replaces the
-    # ready-for-review handoff.
-    phase_8 = next(p for p in phases if p.phase_key == "phase_8_finish_branch")
-    assert phase_8.terminal is False
+    assert keys[-1] == "phase_8_finish_branch"
+    finish = phases[-1]
+    assert finish.gate is False
+    assert finish.terminal is True
 
 
 def test_real_phases_yaml_has_review_phase_between_dev_and_cso():
@@ -100,7 +97,6 @@ def test_real_phases_yaml_order_unchanged_for_existing_phases():
         "phase_6_2_qa",
         "phase_7_document_release",
         "phase_8_finish_branch",
-        "phase_9_ship",
     ]
 
 
