@@ -196,7 +196,7 @@ todos-manager --archive
 
 **What it does:**
 - Scans TODOS.md for `[x]` entries
-- Appends them to TODOS-archive.md (newest first by ID)
+- Appends them to TODOS-archive.md
 - Removes them from TODOS.md
 
 **Output:**

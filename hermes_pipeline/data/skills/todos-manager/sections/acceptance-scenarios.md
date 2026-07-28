@@ -132,7 +132,7 @@
 1. User invokes `todos-manager --archive`.
 2. Skill scans only `## Entries` for `[x]` entries — finds 10.
 3. Skill creates TODOS-archive.md with header.
-4. Skill moves all 10 entries to TODOS-archive.md (newest first by ID).
+4. Skill moves all 10 entries to TODOS-archive.md.
 5. Skill removes 10 entries from TODOS.md.
 6. Skill prints "✓ Archived 10 entries to TODOS-archive.md."
 

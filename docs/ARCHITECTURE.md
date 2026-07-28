@@ -143,7 +143,7 @@ The `todos-manager` skill enforces the canonical TODOS.md schema and provides se
 - `--add`: Add new entry with schema enforcement and preview gate
 - `--convert`: Convert existing TODOS.md to the canonical sectioned format and validate entries
 - `--audit`: Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata
-- `--archive`: Move completed `[x]` entries to TODOS-archive.md (newest first)
+- `--archive`: Move completed `[x]` entries to TODOS-archive.md
 - `--list`: List active TODO entries (optional `--all` flag shows archived entries)
 - `--revise`: Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions
 

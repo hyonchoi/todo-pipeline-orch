@@ -178,7 +178,7 @@ todos-manager --archive
 
 **What it does:**
 1. Scans only `## Entries` in TODOS.md for `[x]` entries (header line plus all sub-bullets)
-2. Appends them to TODOS-archive.md, newest first by ID
+2. Appends them to TODOS-archive.md
 3. Removes them from TODOS.md
 4. If TODOS-archive.md doesn't exist, creates it with a header
 

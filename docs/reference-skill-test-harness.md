@@ -295,7 +295,7 @@ Simulate moving completed entries from TODOS.md to TODOS-archive.md.
 **Behavior:**
 - Finds all `[x]` entries in TODOS.md
 - Removes them from TODOS.md
-- Appends them to TODOS-archive.md (newest first)
+- Appends them to TODOS-archive.md
 - Preserves all other content (headers and canonical sections)
 
 **Example:**
