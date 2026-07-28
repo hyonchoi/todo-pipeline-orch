@@ -29,7 +29,12 @@ class TestRunStructural:
     def test_audit_golden_passes(self, skill_golden_dir, skill_demo_todos, skill_demo_archive):
         """Audit golden should pass against the demo fixture (all entries valid)."""
         golden = load_golden(skill_golden_dir / "audit_report.yaml")
-        result = run_structural(golden, skill_demo_todos, skill_demo_archive)
+        result = run_structural(
+            golden,
+            skill_demo_todos,
+            skill_demo_archive,
+            audit_report="NEXT_TODO_ID is valid.",
+        )
         assert result["passed"] == len(golden["assertions"])
         assert result["failed"] == 0
 
@@ -52,6 +57,22 @@ class TestRunStructural:
         result = run_structural(golden, skill_demo_todos, skill_demo_archive)
         assert result["failed"] > 0
 
+    def test_init_golden_passes_for_freshly_initialized_files(self, skill_golden_dir):
+        golden = load_golden(skill_golden_dir / "init_output.yaml")
+        todos = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 1\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules (enforced by `todos-manager` skill):**\n\n"
+            "## Entries\n"
+        )
+        archive = "# TODOS Archive\n\nCompleted TODOs, archived via `todos-manager --archive`.\n"
+
+        result = run_structural(golden, todos, archive)
+
+        assert result["failed"] == 0, result["results"]
+
 
 class TestAssertGolden:
     def test_raises_on_failure(self, skill_golden_dir, skill_demo_todos, skill_demo_archive):
@@ -63,4 +84,9 @@ class TestAssertGolden:
     def test_silently_passes(self, skill_golden_dir, skill_demo_todos, skill_demo_archive):
         """assert_golden should not raise when audit golden passes."""
         golden_path = skill_golden_dir / "audit_report.yaml"
-        assert_golden(golden_path, skill_demo_todos, skill_demo_archive)
+        assert_golden(
+            golden_path,
+            skill_demo_todos,
+            skill_demo_archive,
+            audit_report="NEXT_TODO_ID is valid.",
+        )

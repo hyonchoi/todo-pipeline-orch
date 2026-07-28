@@ -104,7 +104,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ├── ready_for_review/          # TODOs ready for human review
 ├── phase_started/             # In-flight phase markers
 ├── tick.lock/                 # Global tick lock (atomic mkdir)
-├── todo_id_counter            # Monotonic TODO ID counter
+├── todo_id_counter            # Compatibility cache for tracked TODO IDs
 ├── config.toml                # Per-project config overlay
 ├── project.toml               # Project marker (enabled/slack_channel)
 ├── pipeline.toml              # Pipeline execution contract (assignee, capabilities)
@@ -139,19 +139,19 @@ All pipeline state lives under `<project>/.hermes/`:
 ### TODOS Manager Skill (v2.1)
 
 The `todos-manager` skill enforces the canonical TODOS.md schema and provides seven subcommands:
-- `--init`: Initialize TODOS.md with format preamble and create TODOS-archive.md
+- `--init`: Initialize TODOS.md with `## Metadata`, `## Entry Schema`, and `## Entries`, then create TODOS-archive.md
 - `--add`: Add new entry with schema enforcement and preview gate
-- `--convert`: Convert existing TODOS.md to enforced format (inserts preamble, validates entries)
-- `--audit`: Audit TODOS.md for format compliance (reports only, no auto-fix)
-- `--archive`: Move completed `[x]` entries to TODOS-archive.md (newest first)
+- `--convert`: Convert existing TODOS.md to the canonical sectioned format and validate entries
+- `--audit`: Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata
+- `--archive`: Move completed `[x]` entries to TODOS-archive.md
 - `--list`: List active TODO entries (optional `--all` flag shows archived entries)
 - `--revise`: Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions
 
 The skill source lives at `hermes_pipeline/data/skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `tpo skills install --target all`. The skill enforces:
 - Required fields: **What:**, **Why:**, **Decisions:**
 - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
-- Stable TODO-<n> IDs: `max(all IDs in TODOS.md + TODOS-archive.md) + 1`, immutable once committed
-- Preamble blockquote at top of TODOS.md documenting the schema
+- Stable TODO-<n> IDs: assigned `TODO-<n>` IDs are immutable once committed; `NEXT_TODO_ID` under `## Metadata` is the common-path source and advances after each successful add, while active and archived IDs are scanned only for reconciliation
+- `TODOS.md` stores tracked ID state under `## Metadata` as `NEXT_TODO_ID: <n>`. The `## Entry Schema` section documents the format and is never parsed as active TODO content. Active entries live under `## Entries`.
 
 The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. This Phase 1 harness provides pure-Python implementations of skill rules that serve as the test oracle, enabling instant feedback without API tokens. See:
 - [Reference: Skill Test Harness API](reference-skill-test-harness.md) — Complete function signatures, assertion types, fixtures

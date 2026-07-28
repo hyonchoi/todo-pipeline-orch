@@ -33,7 +33,32 @@ REQUIRED_FIELDS = {"What", "Why", "Decisions"}
 ```
 The three mandatory entry fields. All other fields (Pros, Cons, Context, Depends on, Assumptions, Completed, Resolved design) are optional.
 
+```markdown
+# TODOS
+
+## Metadata
+
+NEXT_TODO_ID: <n>
+
+## Entry Schema
+
+## Entries
+```
+The tracked file-level metadata line used by `todos-manager --add` on the common path. It belongs under `## Metadata`; `## Entry Schema` is documentation only, and active entries belong under `## Entries`. The skill increments it after a successful write and reconciles it against active and archived IDs only when it is missing, malformed, misplaced, stale, duplicated, or conflicting.
+
 ### ID Management
+
+#### `read_next_todo_id(text: str) -> tuple[int | None, list[str]]`
+
+Read and validate the tracked `NEXT_TODO_ID` metadata line under `## Metadata` in TODOS.md. Returns the parsed value and a list of validation issues.
+
+#### `replace_next_todo_id_line(text: str, next_id: int) -> str`
+
+Replace the tracked `NEXT_TODO_ID` metadata line, remove duplicates or misplaced lines, or insert exactly one line under `## Metadata` when it is missing.
+
+#### `reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]]`
+
+Under the TODO write lock, reconcile tracked metadata against active plus archived IDs and return the usable next ID plus any repair messages.
 
 #### `scan_ids(text: str) -> set[int]`
 
@@ -53,13 +78,13 @@ assert ids == {1, 3}
 
 #### `compute_next_id(todos_path: Path, archive_path: Path) -> int`
 
-Compute the next sequential TODO ID from both TODOS.md and TODOS-archive.md.
+Compute the next sequential TODO ID by scanning both TODOS.md and TODOS-archive.md. This helper supports reconciliation and legacy fixtures; `todos-manager --add` normally uses tracked `NEXT_TODO_ID` instead.
 
 **Args:**
 - `todos_path` — Path to TODOS.md file
 - `archive_path` — Path to TODOS-archive.md file
 
-**Returns:** Next available ID (always `max(all IDs) + 1`, or `1` if no IDs found)
+**Returns:** Next available ID from the scan (`max(all IDs) + 1`, or `1` if no IDs are found)
 
 **Example:**
 ```python
@@ -270,8 +295,8 @@ Simulate moving completed entries from TODOS.md to TODOS-archive.md.
 **Behavior:**
 - Finds all `[x]` entries in TODOS.md
 - Removes them from TODOS.md
-- Appends them to TODOS-archive.md (newest first)
-- Preserves all other content (headers, preambles)
+- Appends them to TODOS-archive.md
+- Preserves all other content (headers and canonical sections)
 
 **Example:**
 ```python
@@ -312,7 +337,7 @@ golden = load_golden(Path("tests/skill-test-environment/golden/add_happy_path.ya
 # Returns: {"subcommand": "add", "assertions": [...], ...}
 ```
 
-#### `run_structural(golden: dict, todos_text: str, archive_text: Optional[str] = None) -> dict`
+#### `run_structural(golden: dict, todos_text: str, archive_text: str | None = None, audit_report: str = "") -> dict`
 
 Run all structural assertions from a golden file against actual file content.
 
@@ -320,6 +345,7 @@ Run all structural assertions from a golden file against actual file content.
 - `golden` — Dictionary returned by `load_golden()`
 - `todos_text` — Actual TODOS.md content
 - `archive_text` — Actual TODOS-archive.md content (defaults to empty string)
+- `audit_report` — Optional text output from `--audit`, used by audit-report assertions
 
 **Returns:** Result dictionary:
 ```python
@@ -351,7 +377,7 @@ if result["failed"] > 0:
             print(f"  - {r['detail']}")
 ```
 
-#### `assert_golden(golden_path: Path, todos_text: str, archive_text: str = "") -> None`
+#### `assert_golden(golden_path: Path, todos_text: str, archive_text: str = "", audit_report: str = "") -> None`
 
 Run golden assertions and raise `AssertionError` on first failure.
 
@@ -359,6 +385,7 @@ Run golden assertions and raise `AssertionError` on first failure.
 - `golden_path` — Path to golden YAML file
 - `todos_text` — Actual TODOS.md content
 - `archive_text` — Actual TODOS-archive.md content
+- `audit_report` — Optional text output from `--audit`, used by audit-report assertions
 
 **Raises:** `AssertionError` with detailed failure messages if any assertion fails
 
@@ -388,6 +415,7 @@ Golden YAML files declare assertions using one key per assertion. The `verify.py
 - `regex_count: {pattern: "...", count: N}` — Exact count in TODOS.md
 - `regex_count: {pattern: "...", count_in_todos: N, count_in_archive: M}` — Split count
 - `regex_present: "..."` — Pattern found in TODOS.md
+- `audit_report_regex_present: "..."` — Pattern found in the supplied audit report text
 
 #### Entry Counts
 
@@ -405,7 +433,7 @@ Golden YAML files declare assertions using one key per assertion. The `verify.py
 
 #### Structural Checks
 
-- `preamble_present: true` — TODOS.md has format rules blockquote
+- `regex_present: "^## Metadata$"`, `regex_present: "^## Entry Schema$"`, and `regex_present: "^## Entries$"` — TODOS.md has the canonical sections
 - `archive_header_present: true` — TODOS-archive.md has "# TODOS Archive" header
 
 #### Validation Checks
@@ -477,14 +505,14 @@ The `golden/` subdirectory contains YAML assertion descriptors for skill subcomm
 
 ### `add_happy_path.yaml`
 
-Scenario: Adding a new entry to demo-project TODOS.md results in 7 entries, next ID is 8.
+Scenario: Adding `TODO-8` to demo-project TODOS.md results in 7 entries and advances `NEXT_TODO_ID` to 9.
 
 **Preconditions:** Demo TODOS.md with max ID 7
 
 **Assertions:**
 - File exists
 - 7 total entries (one added)
-- Preamble present
+- `## Metadata`, `## Entry Schema`, and `## Entries` are present
 - Max ID is 8
 - No duplicate IDs
 
@@ -513,7 +541,7 @@ Scenario: Initialization creates both files with proper headers.
 
 **Assertions:**
 - Both files exist
-- Preamble in TODOS.md
+- `## Metadata`, `## Entry Schema`, and `## Entries` are present in TODOS.md
 - Archive header in TODOS-archive.md
 
 ## Usage Examples

@@ -54,12 +54,25 @@ TODOS.md is stored at the repo root. Each entry occupies a single markdown list 
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/modularize-watcher`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
 ```
 
-## Preamble Template
+## Canonical Document Layout
 
-When creating or converting TODOS.md, insert this blockquote as the file header:
+When creating or converting TODOS.md, use these sections in this order:
+`## Metadata`, `## Entry Schema`, and `## Entries`. `NEXT_TODO_ID` is
+file-level state in `## Metadata`, not an entry field. `## Entry Schema` is
+documentation only; TODO-like examples in it are never active entries and must
+not be parsed, validated, dependency-resolved, listed, revised, archived, or
+counted.
+Any `NEXT_TODO_ID:` line under `## Entry Schema`, under `## Entries`, or
+outside the canonical sections is invalid tracked state.
 
 ```markdown
 # TODOS
+
+## Metadata
+
+NEXT_TODO_ID: <n>
+
+## Entry Schema
 
 > **Format rules (enforced by `todos-manager` skill):**
 > - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
@@ -67,6 +80,13 @@ When creating or converting TODOS.md, insert this blockquote as the file header:
 > - Required fields: **What:**, **Why:**, **Decisions:**
 > - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
 > - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
-> - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
+> - ID: sequential, immutable TODO-<n>
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
+
+## Entries
+
+- [ ] **TODO-<n>: <Title>** — <Summary>
+  - **What:** ...
+  - **Why:** ...
+  - **Decisions:** ...
 ```

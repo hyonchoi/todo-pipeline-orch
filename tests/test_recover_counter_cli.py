@@ -4,10 +4,11 @@ from __future__ import annotations
 import os
 
 from hermes_pipeline.cli import build_parser, main
+from hermes_pipeline.config import Config
 from hermes_pipeline.counter import COUNTER_FILE
 
 
-class TestRecoverCounterSubcommand:
+class TestRecoverCounterCLI:
     """Tests for tpo recover-counter <project>."""
 
     def test_subcommand_parses(self):
@@ -36,6 +37,109 @@ class TestRecoverCounterSubcommand:
         finally:
             for k in ("TPO_CONFIG_FILE",):
                 os.environ.pop(k, None)
+
+    def test_recover_counter_cli_reports_tracked_value(self, tmp_path, monkeypatch, capsys):
+        projects = tmp_path / "projects"
+        project = projects / "myproject"
+        project.mkdir(parents=True)
+        (project / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] TODO-7: Active\n",
+            encoding="utf-8",
+        )
+        config = Config(projects_dir=projects)
+        monkeypatch.setattr("hermes_pipeline.cli.Config.from_env", lambda: config)
+
+        result = main(["recover-counter", "myproject"])
+
+        out = capsys.readouterr().out
+        assert result == 0
+        assert "Counter set to 7 for project myproject" in out
+
+    def test_recover_counter_uses_sectioned_metadata(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "myproject"
+        project_dir.mkdir(parents=True)
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Active** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
+        monkeypatch.setattr(
+            "hermes_pipeline.cli.Config.from_env",
+            lambda: Config(projects_dir=projects_dir),
+        )
+
+        result = main(["recover-counter", "myproject"])
+
+        assert result == 0
+        assert (project_dir / ".hermes/todo_id_counter").read_text(encoding="utf-8") == "7"
+
+    def test_recover_counter_ignores_schema_example_ids(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "myproject"
+        project_dir.mkdir(parents=True)
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 3\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-99: Example** — Summary\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-2: Active** — Summary\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(
+            "hermes_pipeline.cli.Config.from_env",
+            lambda: Config(projects_dir=projects_dir),
+        )
+
+        result = main(["recover-counter", "myproject"])
+
+        assert result == 0
+        assert (project_dir / ".hermes/todo_id_counter").read_text(encoding="utf-8") == "2"
+
+    def test_recover_counter_ignores_misplaced_tracked_metadata(self, tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        project_dir = projects_dir / "myproject"
+        project_dir.mkdir(parents=True)
+        (project_dir / ".hermes").mkdir()
+        (project_dir / ".hermes/todo_id_counter").write_text("20", encoding="utf-8")
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Active** — Summary\n"
+            "NEXT_TODO_ID: 8\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("PIPELINE_PROJECTS_DIR", str(projects_dir))
+        monkeypatch.setattr(
+            "hermes_pipeline.cli.Config.from_env",
+            lambda: Config(projects_dir=projects_dir),
+        )
+
+        result = main(["recover-counter", "myproject"])
+
+        assert result == 0
+        assert (project_dir / ".hermes/todo_id_counter").read_text(encoding="utf-8") == "20"
 
     def test_recover_counter_invalid_slug(self, tmp_path):
         """Invalid project slug (leading dash) returns 2."""

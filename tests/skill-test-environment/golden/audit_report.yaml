@@ -14,3 +14,8 @@ assertions:
   - all_required_fields_present: true
   - all_valid_status_markers: true
   - no_broken_dependency_refs: true
+  - regex_present: "^## Metadata$"
+  - regex_present: "^## Entry Schema$"
+  - regex_present: "^## Entries$"
+  - regex_present: "NEXT_TODO_ID"
+  - audit_report_regex_present: "NEXT_TODO_ID.*valid"

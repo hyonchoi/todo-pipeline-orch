@@ -59,7 +59,7 @@ uv run tpo --debug tick my-project
 
 ## Recovering the TODO ID counter
 
-When you start a project with hand-written TODOs in TODOS.md but no `.hermes/todo_id_counter` file, the pipeline doesn't know what ID to assign next. The `recover-counter` subcommand scans TODOS.md for the highest TODO-N and initializes the counter.
+When you start a project with hand-written TODOs in TODOS.md but no `.hermes/todo_id_counter` file, the pipeline may need to rebuild its compatibility cache. When `TODOS.md` has valid sectioned tracked metadata and the value equals the scan-derived next ID, `recover-counter` writes `NEXT_TODO_ID - 1` to `.hermes/todo_id_counter`. Legacy or invalid section placement falls back to scanning active plus archived IDs without decreasing a higher existing cache.
 
 ```bash
 uv run tpo recover-counter my-project
@@ -72,15 +72,15 @@ Counter set to 5 for project my-project
 
 ### How it works
 
-1. Reads `TODOS.md` in the project directory and finds all TODO-N patterns using the regex `\bTODO-(\d+)\b`
-2. Determines the maximum N (e.g., TODO-5 gives 5)
-3. Writes `max(existing_counter, scanned_max)` to `.hermes/todo_id_counter`
+1. Reads `TODOS.md` in the project directory and checks the tracked `NEXT_TODO_ID` value under `## Metadata`
+2. If tracked state is valid and consistent, writes `NEXT_TODO_ID - 1` to `.hermes/todo_id_counter`
+3. If tracked state is missing, malformed, misplaced, or stale, scans active IDs in TODOS.md plus archived IDs in TODOS-archive.md and writes `max(existing_counter, scanned_max)`
 
 ### Key behaviors
 
 - **Never decreases the counter.** If the counter file says 8 and TODOS.md has TODO-4, the counter stays at 8. This prevents ID resurrection when completed TODOs were removed.
 - **Creates `.hermes/` if needed.** If the directory doesn't exist, it's created automatically.
-- **Atomic write.** Uses a temp file + rename so a crash mid-write leaves a partial file (which the reader treats as 0) rather than a corrupted counter. The committed HEAD uses `counter_path.write_text()` — the temp+rename approach is in the working tree.
+- **Atomic write.** Uses a same-directory temp file plus `os.replace()` so a crash before replacement leaves the prior counter intact.
 - **Corrupt counter recovery.** If the counter file contains non-integer text, it's treated as 0 and replaced with the scanned maximum.
 
 ### Error cases

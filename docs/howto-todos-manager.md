@@ -2,10 +2,10 @@
 
 This guide covers the seven subcommands of the `todos-manager` skill for adding, converting, auditing, listing, archiving, and revising TODOS.md entries. Each section shows real commands and expected output.
 
-- **`--init`** — create TODOS.md with schema preamble and TODOS-archive.md
+- **`--init`** — create sectioned TODOS.md and TODOS-archive.md
 - **`--add`** — add a new entry with field prompts and a preview gate
-- **`--convert`** — add the schema preamble to an existing TODOS.md
-- **`--audit`** — check format compliance without modifying files
+- **`--convert`** — migrate an existing TODOS.md to the canonical sections
+- **`--audit`** — check format compliance and reconcile invalid tracked ID metadata
 - **`--archive`** — move completed `[x]` entries to TODOS-archive.md
 - **`--list`** — display active TODO entries as a table (`--all` also shows archived)
 - **`--revise`** — fill missing or weak fields in an existing entry with AI-pre-filled suggestions
@@ -15,16 +15,18 @@ This guide covers the seven subcommands of the `todos-manager` skill for adding,
 - The todos-manager skill installed via `tpo skills install --target all`
 - A project with write access to the repo root
 
+`tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
+
 ## Initialize a new project
 
-Create TODOS.md with the enforced schema preamble and a companion TODOS-archive.md:
+Create TODOS.md with the canonical sections and a companion TODOS-archive.md:
 
 ```bash
 todos-manager --init
 ```
 
 **What it does:**
-- Creates `TODOS.md` with a `# TODOS` header and a blockquote preamble documenting the schema rules
+- Creates `TODOS.md` with `## Metadata`, `## Entry Schema`, and `## Entries`
 - Creates `TODOS-archive.md` with a minimal header for completed entries
 - Initializes `.hermes/todo_id_counter` to `0` (if `.hermes/` exists)
 
@@ -41,7 +43,7 @@ If TODOS.md already exists, the skill prints a note and skips creation.
 head -10 TODOS.md
 ```
 
-The file should start with the `# TODOS` header followed by a blockquote with format rules.
+The file should start with `# TODOS`, followed by `## Metadata`, `## Entry Schema`, and `## Entries`.
 
 ## Add a new TODO entry
 
@@ -53,7 +55,7 @@ todos-manager --add
 
 **Interactive workflow:**
 
-1. The skill computes the next `TODO-<n>` ID by scanning both TODOS.md and TODOS-archive.md
+1. `TODOS.md` stores tracked ID state under `## Metadata` as `NEXT_TODO_ID: <n>`. The `## Entry Schema` section documents the format and is never parsed as active TODO content. Active entries live under `## Entries`. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, misplaced, stale, duplicated, or conflicting.
 2. Prompts for **title** and **summary**
 3. **Auto-research phase** — silently reads TODOS.md, TODOS-archive.md, git log, design docs under `docs/gstack/`, CLAUDE.md, and source files implied by the title. Derives `What`, `Why`, `Pros`, `Cons`, `Context`, `Priority`, `Effort`, `Phase`, `Branch`, `Test Coverage`, `Security Review`, `UI Review`, and `Depends on` from what it finds. Budget capped at 20 file reads and 10 searches.
 4. **Gap questions** — for any field research couldn't resolve, asks one question at a time (`Why` first, then `What`, `Priority`, `Effort`, `Depends on`)
@@ -117,19 +119,19 @@ Proceed? [y / edit / cancel]
 
 ## Convert an existing TODOS.md
 
-If your project has a TODOS.md without the enforced schema preamble, add it and validate entries:
+If your project has a TODOS.md without the canonical sections, migrate it and validate entries:
 
 ```bash
 todos-manager --convert
 ```
 
 **What it does:**
-1. Checks whether the preamble blockquote exists
-2. Inserts the preamble after `# TODOS` if absent
-3. Scans each entry for required fields and valid status markers
+1. Checks whether `## Metadata`, `## Entry Schema`, and `## Entries` exist in canonical order
+2. Migrates the document to that sectioned layout if needed
+3. Scans only entries under `## Entries` for required fields and valid status markers
 4. Outputs an audit report listing any issues
 
-**What it does NOT do:** Rewrite entry bodies or auto-fix missing fields. It reports only.
+**What it does NOT do:** Auto-fill missing fields. Canonical entries keep their bodies unchanged; header-based legacy entries are converted into the canonical entry shape.
 
 **Example output:**
 ```
@@ -143,12 +145,12 @@ Issues found: 2
 - TODO-3: Missing required field **Decisions:**
 - TODO-7: Status marker `[->]` — expected `[→]`
 
-ID gap check: OK (max=11, counter=11)
+NEXT_TODO_ID: 12 (valid)
 ```
 
 ## Audit TODOS.md for compliance
 
-Run a format compliance check without modifying any files:
+Run a format compliance check. It modifies `TODOS.md` only when it must reconcile missing, malformed, stale, duplicated, or conflicting `NEXT_TODO_ID` metadata:
 
 ```bash
 todos-manager --audit
@@ -162,9 +164,9 @@ todos-manager --audit
 
 **Cross-entry checks:**
 - ID sequence contiguity (gaps reported, not flagged as errors)
-- Counter cache (`.hermes/todo_id_counter`) matches max scanned ID
+- `NEXT_TODO_ID` is present exactly once under `## Metadata`, valid, and consistent with active and archived IDs; the counter cache (`.hermes/todo_id_counter`) is compatibility state only
 
-The skill outputs a structured report and modifies no files.
+The skill outputs a structured report and reconciles missing, malformed, stale, duplicated, or conflicting tracked metadata before reporting.
 
 ## Archive completed TODOs
 
@@ -175,8 +177,8 @@ todos-manager --archive
 ```
 
 **What it does:**
-1. Scans TODOS.md for `[x]` entries (header line plus all sub-bullets)
-2. Appends them to TODOS-archive.md, newest first by ID
+1. Scans only `## Entries` in TODOS.md for `[x]` entries (header line plus all sub-bullets)
+2. Appends them to TODOS-archive.md
 3. Removes them from TODOS.md
 4. If TODOS-archive.md doesn't exist, creates it with a header
 
@@ -185,7 +187,7 @@ todos-manager --archive
 ✓ Archived 3 entries to TODOS-archive.md.
 ```
 
-**Important:** Archived entries count toward ID computation. After archiving TODO-1 through TODO-3, the next `todos-manager --add` will use `TODO-4` — not `TODO-1`.
+**Important:** Archived entries are still considered during reconciliation. After archiving TODO-1 through TODO-3, `NEXT_TODO_ID` should still point at `TODO-4` — not `TODO-1`.
 
 **If no entries are marked `[x]`:**
 ```
@@ -201,7 +203,7 @@ todos-manager --list
 ```
 
 **What it does:**
-1. Scans TODOS.md for entry header lines (`- [ ]`, `- [→]`, `- [x]`, `- [~]`)
+1. Scans only `## Entries` in TODOS.md for entry header lines (`- [ ]`, `- [→]`, `- [x]`, `- [~]`)
 2. Extracts status, ID, title, and summary for each entry
 3. Displays a markdown table sorted by ID ascending
 
@@ -283,9 +285,9 @@ These are pre-fills — confirm or edit each in the next step.
 
 After any subcommand, verify the result:
 
-- **`--init`:** `head -10 TODOS.md` shows the preamble blockquote; `cat TODOS-archive.md` shows the header
+- **`--init`:** `head -20 TODOS.md` shows `## Metadata`, `## Entry Schema`, and `## Entries`; `cat TODOS-archive.md` shows the header
 - **`--add`:** Tail of TODOS.md contains the new entry with all required fields
-- **`--convert`:** TODOS.md has the preamble; entry bodies are unchanged
+- **`--convert`:** TODOS.md has the canonical sections; canonical entry bodies are unchanged, while header-based legacy entries are converted to the canonical format
 - **`--audit`:** A structured report with zero or more issues
 - **`--archive`:** TODOS.md has fewer entries; TODOS-archive.md has the moved entries
 - **`--list`:** A markdown table matching the current entries in TODOS.md (and TODOS-archive.md if `--all`)

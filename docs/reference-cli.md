@@ -73,7 +73,7 @@ uv run tpo approve myproject --todo TODO-5 --force --force
 
 ### `recover-counter`
 
-Scan TODOS.md and initialize `.hermes/todo_id_counter` by finding the highest TODO-N.
+Initialize `.hermes/todo_id_counter` from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files.
 
 ```bash
 uv run tpo recover-counter myproject
@@ -140,6 +140,34 @@ After install, set the assignee: `uv run tpo init myproject --assignee pipeline`
 
 ---
 
+### `skills`
+
+Install or remove the bundled `todos-manager` skill.
+
+```bash
+uv run tpo skills install
+uv run tpo skills install --target all --reinstall
+uv run tpo skills uninstall --target codex --yes
+```
+
+**Install arguments:**
+| Arg | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `--target` | No | `claude` | Install to `claude`, `codex`, or `all` skill directories |
+| `--scope` | No | `user` | Install under the user home directory or the current project |
+| `--reinstall` | No | false | Replace an existing installed copy after explicit review |
+
+**Uninstall arguments:**
+| Arg | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `--target` | No | `claude` | Remove from `claude`, `codex`, or `all` skill directories |
+| `--scope` | No | `user` | Remove from the user home directory or the current project |
+| `--yes` | Yes | false | Confirm removal without an interactive prompt |
+
+Install refuses to overwrite an existing destination unless `--reinstall` is set. Install and uninstall preflight all selected targets before replacing or removing an installed skill. Reinstall rejects symlink destinations; uninstall removes the link itself without following its target. Both commands return nonzero if rollback or cleanup leaves a recoverable backup behind.
+
+---
+
 ## tpo test
 
 Run the mock integration test harness: bootstraps a temporary git project, executes
@@ -198,6 +226,8 @@ Individual `PIPELINE_*` environment variables do not override config entries.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TPO_CONFIG_FILE` | unset | Path to an alternate complete config file |
+| `XDG_CONFIG_DIR` | `~/.config` | Base directory for the default `tpo/config.yaml` path |
+| `HERMES_HOME` | `~/.hermes` | Base for the legacy fallback config path `tpo.yaml` |
 
 ## See Also
 

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.3] - 2026-07-27
+
+### Added
+- `tpo skills install --reinstall` now gives users an explicit way to replace an installed todos-manager skill after reviewing local changes.
+- `tpo skills uninstall` can remove installed todos-manager skills for Claude, Codex, or both targets with an explicit `--yes` confirmation.
+
+### Changed
+- todos-manager now stores the next TODO ID in tracked project state and reconciles it before assigning new IDs.
+- TODO ID updates now use locked, atomic file replacement so concurrent writers cannot silently reuse or skip IDs.
+- `tpo recover-counter` now rebuilds the legacy counter cache from tracked TODO metadata when the tracked state is valid.
+
+### Fixed
+- Skill install and uninstall now preflight all selected targets before replacing or removing installed skills.
+- Failed skill replacement or uninstall cleanup now preserves recoverable backups and reports failure instead of pretending the operation fully succeeded.
+- Stale, duplicated, malformed, CRLF, and archive-only TODO ID metadata now reconcile consistently across the bundled skill docs and the executable test oracle.
+
 ## [0.6.2] - 2026-07-27
 
 ### Changed

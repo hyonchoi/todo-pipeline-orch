@@ -3,7 +3,16 @@
 Serves as both test oracle and golden-file generator.
 """
 
+import fcntl
+import json
+import os
 import re
+import shutil
+import tempfile
+import uuid
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 
@@ -16,12 +25,655 @@ def compute_next_id(todos_path: Path, archive_path: Path) -> int:
     """Compute next sequential ID from TODOS.md and TODOS-archive.md."""
     all_ids: set[int] = set()
     if todos_path.exists():
-        all_ids |= scan_ids(todos_path.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(todos_path.read_text(encoding="utf-8"))
     if archive_path.exists():
-        all_ids |= scan_ids(archive_path.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(archive_path.read_text(encoding="utf-8"))
     if not all_ids:
         return 1
     return max(all_ids) + 1
+
+
+NEXT_TODO_ID_LINE_RE = re.compile(
+    r"^(?:>[ \t]+-[ \t]+)?NEXT_TODO_ID:(?P<value>[^\r\n]*)$"
+)
+
+SECTION_HEADINGS = ("## Metadata", "## Entry Schema", "## Entries")
+
+
+@dataclass(frozen=True)
+class TodoDocumentSections:
+    metadata: str
+    schema: str
+    entries: str
+    diagnostics: list[str]
+    newline: str
+    has_canonical_layout: bool
+
+
+def _preamble_line_indexes(lines: list[str]) -> range:
+    """Return the contiguous blockquote preamble immediately after ``# TODOS``."""
+    heading = next(
+        (index for index, line in enumerate(lines) if line.rstrip("\r\n") == "# TODOS"),
+        None,
+    )
+    if heading is None:
+        return range(0)
+
+    start = heading + 1
+    while start < len(lines) and not lines[start].strip():
+        start += 1
+    if start < len(lines) and NEXT_TODO_ID_LINE_RE.fullmatch(lines[start].rstrip("\r\n")):
+        start += 1
+        while start < len(lines) and not lines[start].strip():
+            start += 1
+    if start == len(lines) or not lines[start].startswith(">"):
+        return range(0)
+
+    end = start
+    while end < len(lines):
+        line = lines[end]
+        if line.startswith(">") or not line.strip():
+            end += 1
+            continue
+        break
+    return range(start, end)
+
+
+def _detect_newline(text: str) -> str:
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _line_without_ending(line: str) -> str:
+    return line.rstrip("\r\n")
+
+
+def _metadata_line_indexes(lines: list[str]) -> list[int]:
+    return [
+        index
+        for index, line in enumerate(lines)
+        if NEXT_TODO_ID_LINE_RE.fullmatch(_line_without_ending(line))
+    ]
+
+
+def _section_spans(lines: list[str]) -> list[tuple[str, int, int]]:
+    headings: list[tuple[str, int]] = []
+    for index, line in enumerate(lines):
+        stripped = _line_without_ending(line)
+        if stripped in SECTION_HEADINGS:
+            headings.append((stripped, index))
+    spans: list[tuple[str, int, int]] = []
+    for position, (heading, index) in enumerate(headings):
+        end = headings[position + 1][1] if position + 1 < len(headings) else len(lines)
+        spans.append((heading, index + 1, end))
+    return spans
+
+
+def parse_todos_document_sections(text: str) -> TodoDocumentSections:
+    lines = text.splitlines(keepends=True)
+    newline = _detect_newline(text)
+    spans = _section_spans(lines)
+    diagnostics: list[str] = []
+    heading_positions = [
+        _line_without_ending(line)
+        for line in lines
+        if _line_without_ending(line) in SECTION_HEADINGS
+    ]
+    has_canonical_layout = heading_positions == list(SECTION_HEADINGS)
+    if not has_canonical_layout:
+        diagnostics.append("TODOS.md must contain ## Metadata, ## Entry Schema, and ## Entries in that order")
+
+    def section_text(heading: str) -> str:
+        chunks: list[list[str]] = []
+        for span_heading, start, end in spans:
+            if span_heading != heading:
+                continue
+            chunk = lines[start:end]
+            while chunk and not chunk[0].strip():
+                chunk = chunk[1:]
+            while chunk and not chunk[-1].strip():
+                chunk = chunk[:-1]
+            if chunk:
+                chunks.append(chunk)
+        if not chunks:
+            return ""
+        return newline.join("".join(chunk) for chunk in chunks)
+
+    metadata_indexes = _metadata_line_indexes(lines)
+    misplaced_indexes = []
+    metadata_spans = [
+        (start, end) for heading, start, end in spans if heading == "## Metadata"
+    ]
+    if metadata_spans:
+        misplaced_indexes = [
+            index
+            for index in metadata_indexes
+            if not any(start <= index < end for start, end in metadata_spans)
+        ]
+    else:
+        misplaced_indexes = metadata_indexes
+    if misplaced_indexes:
+        diagnostics.append("NEXT_TODO_ID appears outside ## Metadata")
+    if len(metadata_indexes) > 1:
+        diagnostics.append("NEXT_TODO_ID is duplicated")
+
+    return TodoDocumentSections(
+        metadata=section_text("## Metadata"),
+        schema=section_text("## Entry Schema"),
+        entries=section_text("## Entries"),
+        diagnostics=diagnostics,
+        newline=newline,
+        has_canonical_layout=has_canonical_layout,
+    )
+
+
+def _scan_document_ids(text: str) -> set[int]:
+    """Scan sectioned documents only within ## Entries, otherwise scan legacy text."""
+    sections = parse_todos_document_sections(text)
+    has_section_headings = bool(_section_spans(text.splitlines(keepends=True)))
+    return scan_ids(sections.entries if has_section_headings else text)
+
+
+def _repair_embedded_metadata(lines: list[str]) -> None:
+    marker = "> **Format rules (enforced by `todos-manager` skill):**"
+    for index in _preamble_line_indexes(lines):
+        line = lines[index]
+        stripped = line.rstrip("\r\n")
+        if stripped.startswith("> **Format rules") and "NEXT_TODO_ID" in stripped:
+            ending = "\r\n" if line.endswith("\r\n") else "\n" if line.endswith("\n") else ""
+            lines[index] = marker + ending
+
+
+def read_next_todo_id(text: str) -> tuple[int | None, list[str]]:
+    """Read and validate the tracked next TODO ID from the metadata section."""
+    lines = text.splitlines(keepends=True)
+    sections = parse_todos_document_sections(text)
+    metadata_indexes = _metadata_line_indexes(lines)
+    issues = list(sections.diagnostics)
+    if not metadata_indexes:
+        issues.append("NEXT_TODO_ID is missing from ## Metadata")
+        return None, issues
+    if len(metadata_indexes) > 1:
+        return None, issues
+    metadata_lines = sections.metadata.splitlines()
+    metadata_matches = [
+        line
+        for line in metadata_lines
+        if NEXT_TODO_ID_LINE_RE.fullmatch(line.rstrip("\r\n"))
+    ]
+    if len(metadata_matches) != 1 or issues:
+        return None, issues
+    match = NEXT_TODO_ID_LINE_RE.fullmatch(metadata_matches[0].rstrip("\r\n"))
+    assert match is not None
+    raw = match.group("value").strip(" \t")
+    if not re.fullmatch(r"[1-9][0-9]*", raw):
+        return None, [f"NEXT_TODO_ID must be a positive base-10 integer, got {raw!r}"]
+    return int(raw), []
+
+
+def compute_scan_next_id(todos_path: Path, archive_path: Path) -> int:
+    """Return the scan-derived next TODO ID."""
+    return compute_next_id(todos_path, archive_path)
+
+
+def convert_header_based_todos(text: str, archive_text: str = "") -> tuple[str, str]:
+    """Convert a Mode B header-based document into canonical TODO sections."""
+    section_re = re.compile(r"^##\s+(.+?)\s*$")
+    title_re = re.compile(r"^###\s+(.+?)\s*$")
+    header_field_re = re.compile(r"^\s*(?:-\s+)?\*\*([^*]+?):\*\*\s*(.*?)\s*$")
+    parsed: list[dict] = []
+    current_section = ""
+    current: dict | None = None
+    canonical_blocks = extract_entry_blocks(text)
+
+    def finish_current() -> None:
+        nonlocal current
+        if current is not None:
+            parsed.append(current)
+            current = None
+
+    for line in text.splitlines():
+        section_match = section_re.match(line)
+        if section_match:
+            finish_current()
+            current_section = section_match.group(1)
+            continue
+        title_match = title_re.match(line)
+        if title_match:
+            finish_current()
+            current = {
+                "title": title_match.group(1),
+                "section": current_section,
+                "fields": [],
+                "raw": [line],
+            }
+            continue
+        if ENTRY_HEADER_RE.match(line):
+            finish_current()
+            continue
+        if current is None:
+            continue
+        current["raw"].append(line)
+        field_match = header_field_re.match(line)
+        if field_match:
+            current["fields"].append((field_match.group(1), field_match.group(2)))
+    finish_current()
+    if not parsed:
+        return text, ""
+
+    existing_ids = scan_ids(text) | scan_ids(archive_text)
+    next_id = max(existing_ids, default=0) + 1
+    converted_blocks: list[str] = []
+    reference_blocks: list[str] = []
+    for entry in parsed:
+        fields = dict(entry["fields"])
+        if not fields.get("What") or not fields.get("Why"):
+            reference_blocks.append("\n".join(entry["raw"]).rstrip())
+            continue
+
+        raw_title = entry["title"]
+        completed_suffix = raw_title.endswith(" — Completed")
+        title = raw_title.removesuffix(" — Completed")
+        section_lower = entry["section"].lower()
+        if fields.get("Completed") or completed_suffix or section_lower == "completed":
+            status = "[x]"
+        elif section_lower == "open":
+            status = "[ ]"
+        elif any(term in section_lower for term in ("wip", "blocked", "in progress")):
+            status = "[→]"
+        elif any(term in section_lower for term in ("hold", "deferred", "parking")):
+            status = "[~]"
+        else:
+            status = "[ ]"
+
+        what = fields["What"]
+        summary = what.split(". ", 1)[0]
+        if ". " in what:
+            summary += "."
+        block = [f"- {status} **TODO-{next_id}: {title}** — {summary}"]
+        has_decisions = False
+        for field_name, value in entry["fields"]:
+            renamed = {
+                "Resolution": "Resolved design",
+                "Depends on / blocked by": "Depends on",
+            }.get(field_name, field_name)
+            if renamed == "Decisions":
+                has_decisions = True
+            block.append(f"  - **{renamed}:** {value}")
+        if not has_decisions:
+            block.append(
+                "  - **Decisions:** <<USER-REVIEW>> Priority, Effort, Phase, "
+                "Branch not yet determined"
+            )
+        converted_blocks.append("\n".join(block))
+        next_id += 1
+
+    schema = (
+        "> **Format rules (enforced by `todos-manager` skill):**\n"
+        "> - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`\n"
+        "> - Required fields: **What:**, **Why:**, **Decisions:**"
+    )
+    converted = (
+        "# TODOS\n\n"
+        "## Metadata\n\n"
+        f"NEXT_TODO_ID: {next_id}\n\n"
+        "## Entry Schema\n\n"
+        f"{schema}\n\n"
+        "## Entries\n"
+    )
+    all_entry_blocks = converted_blocks + canonical_blocks
+    if all_entry_blocks:
+        converted += "\n" + "\n\n".join(all_entry_blocks) + "\n"
+
+    reference = ""
+    if reference_blocks:
+        reference = (
+            "# TODOS Reference\n\n"
+            "Entries that could not be auto-converted (missing required fields).\n\n"
+            + "\n\n".join(reference_blocks)
+            + "\n"
+        )
+    return converted, reference
+
+
+def _sectioned_schema_from_legacy(lines: list[str]) -> list[str]:
+    preamble_indexes = set(_preamble_line_indexes(lines))
+    return [
+        line
+        for index, line in enumerate(lines)
+        if index in preamble_indexes
+        and not NEXT_TODO_ID_LINE_RE.fullmatch(_line_without_ending(line))
+    ]
+
+
+def _sectioned_entries_from_legacy(lines: list[str]) -> list[str]:
+    preamble_indexes = set(_preamble_line_indexes(lines))
+    entry_lines: list[str] = []
+    in_entries = False
+    for index, line in enumerate(lines):
+        stripped = _line_without_ending(line)
+        if stripped == "# TODOS" or index in preamble_indexes:
+            continue
+        if NEXT_TODO_ID_LINE_RE.fullmatch(stripped):
+            continue
+        if ENTRY_HEADER_RE.match(stripped):
+            in_entries = True
+        if in_entries:
+            entry_lines.append(line)
+    while entry_lines and not entry_lines[0].strip():
+        entry_lines = entry_lines[1:]
+    while entry_lines and not entry_lines[-1].strip():
+        entry_lines = entry_lines[:-1]
+    return entry_lines
+
+
+def replace_next_todo_id_line(text: str, next_id: int) -> str:
+    """Replace tracked metadata and normalize the document to three sections."""
+    newline = _detect_newline(text)
+    lines = text.splitlines(keepends=True)
+    _repair_embedded_metadata(lines)
+    sections = parse_todos_document_sections("".join(lines))
+    spans = _section_spans(lines)
+    if sections.has_canonical_layout or spans:
+        schema_lines = sections.schema.splitlines(keepends=True)
+        entries_lines = sections.entries.splitlines(keepends=True)
+        first_section_index = min(
+            index
+            for index, line in enumerate(lines)
+            if _line_without_ending(line) in SECTION_HEADINGS
+        )
+        prefix_lines = [
+            line
+            for line in lines[:first_section_index]
+            if _line_without_ending(line) != "# TODOS"
+            and not NEXT_TODO_ID_LINE_RE.fullmatch(_line_without_ending(line))
+        ]
+        metadata_lines = sections.metadata.splitlines(keepends=True)
+        schema_lines = prefix_lines + metadata_lines + schema_lines
+    else:
+        schema_lines = _sectioned_schema_from_legacy(lines)
+        entries_lines = _sectioned_entries_from_legacy(lines)
+
+    def clean(lines_to_clean: list[str]) -> list[str]:
+        return [
+            line
+            for line in lines_to_clean
+            if not NEXT_TODO_ID_LINE_RE.fullmatch(_line_without_ending(line))
+        ]
+
+    schema_lines = clean(schema_lines)
+    entries_lines = clean(entries_lines)
+    output: list[str] = [
+        "# TODOS" + newline,
+        newline,
+        "## Metadata" + newline,
+        newline,
+        f"NEXT_TODO_ID: {next_id}" + newline,
+        newline,
+        "## Entry Schema" + newline,
+        newline,
+    ]
+    output.extend(schema_lines)
+    if output[-1].strip():
+        output.append(newline)
+    output.extend([newline, "## Entries" + newline])
+    if entries_lines:
+        output.append(newline)
+        output.extend(entries_lines)
+        if not output[-1].endswith(("\n", "\r\n")):
+            output.append(newline)
+    return "".join(output)
+
+
+@contextmanager
+def _todo_lock(lock_path: Path) -> Iterator[None]:
+    """Hold the sidecar lock used to serialize TODO updates."""
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+
+def _before_todo_lock() -> None:
+    """Test synchronization point before an update attempts the sidecar lock."""
+
+
+def _before_todos_replace() -> None:
+    """Test synchronization point before committing an updated TODO file."""
+
+
+def _after_todo_transaction_replace(_target: Path) -> None:
+    """Test synchronization point after replacing one transaction target."""
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _replace_with_text(target: Path, text: str) -> None:
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", text=True)
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+            tmp.write(text)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, target)
+        _fsync_dir(target.parent)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _transaction_dir(project_dir: Path) -> Path:
+    return project_dir / ".hermes"
+
+
+def _archive_journals(project_dir: Path) -> list[Path]:
+    hermes_dir = _transaction_dir(project_dir)
+    if not hermes_dir.exists():
+        return []
+    return sorted(hermes_dir.glob("todo-archive-*.json"))
+
+
+def _apply_payload(payload: Path, target: Path) -> None:
+    fd, tmp_name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
+    tmp_path = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "wb") as tmp:
+            with payload.open("rb") as source:
+                shutil.copyfileobj(source, tmp)
+            tmp.flush()
+            os.fsync(tmp.fileno())
+        os.replace(tmp_path, target)
+        _fsync_dir(target.parent)
+        _after_todo_transaction_replace(target)
+    except BaseException:
+        try:
+            tmp_path.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _read_archive_journal(journal_path: Path) -> dict:
+    try:
+        data = json.loads(journal_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"Malformed TODO archive transaction journal: {journal_path}") from exc
+    required = {"todos_target", "archive_target", "todos_payload", "archive_payload"}
+    if not isinstance(data, dict) or set(data) < required:
+        raise RuntimeError(f"Malformed TODO archive transaction journal: {journal_path}")
+    return data
+
+
+def _resolve_journal_path(journal_path: Path, raw_path: object) -> Path:
+    if not isinstance(raw_path, str):
+        raise RuntimeError(f"Malformed TODO archive transaction journal: {journal_path}")
+    return Path(raw_path).resolve()
+
+
+def recover_pending_todo_transaction(project_dir: Path) -> None:
+    """Complete any pending TODO archive transaction under the caller's lock."""
+    project_dir = project_dir.resolve()
+    hermes_dir = _transaction_dir(project_dir).resolve()
+    expected_todos_target = (project_dir / "TODOS.md").resolve()
+    expected_archive_target = (project_dir / "TODOS-archive.md").resolve()
+    for journal_path in _archive_journals(project_dir):
+        data = _read_archive_journal(journal_path)
+        archive_payload = _resolve_journal_path(journal_path, data["archive_payload"])
+        todos_payload = _resolve_journal_path(journal_path, data["todos_payload"])
+        archive_target = _resolve_journal_path(journal_path, data["archive_target"])
+        todos_target = _resolve_journal_path(journal_path, data["todos_target"])
+        if archive_target != expected_archive_target or todos_target != expected_todos_target:
+            raise RuntimeError(f"Malformed TODO archive transaction journal: {journal_path}")
+        for payload in (archive_payload, todos_payload):
+            if payload.parent != hermes_dir or not payload.name.startswith("todo-archive-"):
+                raise RuntimeError(f"Malformed TODO archive transaction journal: {journal_path}")
+        if not archive_payload.exists() or not todos_payload.exists():
+            raise RuntimeError(f"Incomplete TODO archive transaction payloads: {journal_path}")
+        _apply_payload(archive_payload, archive_target)
+        _apply_payload(todos_payload, todos_target)
+        for path in (journal_path, archive_payload, todos_payload):
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        _fsync_dir(journal_path.parent)
+
+
+def _write_archive_transaction(
+    project_dir: Path, todos_path: Path, archive_path: Path, todos_text: str, archive_text: str
+) -> None:
+    transaction_id = uuid.uuid4().hex
+    hermes_dir = _transaction_dir(project_dir)
+    hermes_dir.mkdir(parents=True, exist_ok=True)
+    todos_payload = hermes_dir / f"todo-archive-{transaction_id}.todos.payload"
+    archive_payload = hermes_dir / f"todo-archive-{transaction_id}.archive.payload"
+    journal_path = hermes_dir / f"todo-archive-{transaction_id}.json"
+    _replace_with_text(todos_payload, todos_text)
+    _replace_with_text(archive_payload, archive_text)
+    journal = {
+        "todos_target": str(todos_path),
+        "archive_target": str(archive_path),
+        "todos_payload": str(todos_payload),
+        "archive_payload": str(archive_payload),
+    }
+    _replace_with_text(journal_path, json.dumps(journal, sort_keys=True) + "\n")
+    _fsync_dir(hermes_dir)
+    _apply_payload(archive_payload, archive_path)
+    _apply_payload(todos_payload, todos_path)
+    for path in (journal_path, archive_payload, todos_payload):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            pass
+    _fsync_dir(hermes_dir)
+
+
+def atomic_update_todos(todos_path: Path, transform: Callable[[str], str]) -> None:
+    """Apply a TODO transform under an exclusive lock using atomic replacement."""
+    lock_path = todos_path.with_suffix(todos_path.suffix + ".lock")
+    _before_todo_lock()
+    with _todo_lock(lock_path):
+        recover_pending_todo_transaction(todos_path.parent)
+        with todos_path.open("r", encoding="utf-8", newline="") as todos_file:
+            original = todos_file.read()
+        updated = transform(original)
+        fd, tmp_name = tempfile.mkstemp(dir=todos_path.parent, prefix=".TODOS.", text=True)
+        tmp_path = Path(tmp_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                tmp.write(updated)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            _before_todos_replace()
+            os.replace(tmp_path, todos_path)
+        except BaseException:
+            try:
+                tmp_path.unlink()
+            except OSError:
+                pass
+            raise
+
+
+def assign_next_todo_id(
+    project_dir: Path, entry_builder: Callable[[int], str]
+) -> tuple[int, list[str]]:
+    """Assign the next TODO ID and append its entry in one atomic update."""
+    todos_path = project_dir / "TODOS.md"
+    archive_path = project_dir / "TODOS-archive.md"
+    messages: list[str] = []
+    assigned = 1
+
+    def transform(text: str) -> str:
+        nonlocal assigned, messages
+        tracked, issues = read_next_todo_id(text)
+        scanned_next = compute_scan_next_id(todos_path, archive_path)
+        tracked_is_stale = tracked is not None and tracked != scanned_next
+        if tracked is None or issues or tracked_is_stale:
+            assigned = scanned_next
+            messages.append(f"add: corrected NEXT_TODO_ID from {tracked} to {scanned_next}")
+        else:
+            assigned = tracked
+        messages.extend(issues)
+        updated = replace_next_todo_id_line(text, assigned + 1)
+        entry = entry_builder(assigned).rstrip()
+        sections = parse_todos_document_sections(updated)
+        if sections.has_canonical_layout:
+            entry = entry.replace("\r\n", "\n").replace("\r", "\n")
+            entry = entry.replace("\n", sections.newline)
+            existing_entries = sections.entries.rstrip()
+            combined_entries = (
+                f"{existing_entries}{sections.newline}{sections.newline}{entry}"
+                if existing_entries
+                else entry
+            )
+            return _replace_entries_section(updated, combined_entries)
+        return updated.rstrip() + "\n\n" + entry + "\n"
+
+    atomic_update_todos(todos_path, transform)
+    return assigned, messages
+
+
+def reconcile_next_todo_id(project_dir: Path, mode: str) -> tuple[int, list[str]]:
+    """Repair tracked metadata so it agrees with the scan-derived ID."""
+    todos_path = project_dir / "TODOS.md"
+    archive_path = project_dir / "TODOS-archive.md"
+    messages: list[str] = []
+    reconciled_id = 1
+
+    def transform(text: str) -> str:
+        nonlocal reconciled_id
+        tracked, issues = read_next_todo_id(text)
+        reconciled_id = compute_scan_next_id(todos_path, archive_path)
+        if tracked == reconciled_id and not issues:
+            return text
+        messages.extend(issues)
+        if tracked is None:
+            messages.append(f"{mode}: inserted NEXT_TODO_ID: {reconciled_id}")
+        else:
+            messages.append(
+                f"{mode}: corrected NEXT_TODO_ID from {tracked} to {reconciled_id}"
+            )
+        return replace_next_todo_id_line(text, reconciled_id)
+
+    atomic_update_todos(todos_path, transform)
+    return reconciled_id, messages
 
 
 COUNTER_FILE = ".hermes/todo_id_counter"
@@ -44,9 +696,9 @@ def counter_matches_scan(project_dir: Path) -> bool:
     archive = project_dir / "TODOS-archive.md"
     all_ids: set[int] = set()
     if todos.exists():
-        all_ids |= scan_ids(todos.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(todos.read_text(encoding="utf-8"))
     if archive.exists():
-        all_ids |= scan_ids(archive.read_text(encoding="utf-8"))
+        all_ids |= _scan_document_ids(archive.read_text(encoding="utf-8"))
     if not all_ids:
         return read_counter_cache(project_dir) in (None, 0)
     max_id = max(all_ids)
@@ -65,12 +717,17 @@ FIELD_RE = re.compile(
 )
 
 
+def _entries_text(text: str) -> str:
+    sections = parse_todos_document_sections(text)
+    return sections.entries if sections.has_canonical_layout else text
+
+
 def parse_entries(text: str) -> list[dict]:
-    """Parse all TODO entries from TODOS.md markdown text.
+    """Parse TODO entries under ## Entries from TODOS.md markdown text.
 
     Returns a list of dicts with keys: id, status, title, summary, fields.
     """
-    lines = text.split("\n")
+    lines = _entries_text(text).split("\n")
     entries: list[dict] = []
     current: dict | None = None
 
@@ -149,12 +806,12 @@ def find_completed_entries(text: str) -> list[dict]:
 
 
 def extract_entry_blocks(text: str) -> list[str]:
-    """Extract raw markdown text blocks for each entry.
+    """Extract raw markdown blocks for entries under ## Entries.
 
     Returns a list of strings, each containing the header line and sub-bullets
     for one entry.
     """
-    lines = text.split("\n")
+    lines = _entries_text(text).split("\n")
     blocks: list[str] = []
     current_block: list[str] = []
 
@@ -175,6 +832,27 @@ def extract_entry_blocks(text: str) -> list[str]:
         blocks.append("\n".join(current_block))
 
     return blocks
+
+
+def _replace_entries_section(text: str, entries_text: str) -> str:
+    sections = parse_todos_document_sections(text)
+    if not sections.has_canonical_layout:
+        return text
+    newline = sections.newline
+    lines = text.splitlines(keepends=True)
+    entries_spans = [
+        (start, end)
+        for heading, start, end in _section_spans(lines)
+        if heading == "## Entries"
+    ]
+    assert len(entries_spans) == 1
+    start, end = entries_spans[0]
+    replacement = [newline]
+    if entries_text.strip():
+        replacement.extend(entries_text.rstrip().splitlines(keepends=True))
+        if not replacement[-1].endswith(("\n", "\r\n")):
+            replacement.append(newline)
+    return "".join(lines[:start] + replacement + lines[end:])
 
 
 def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
@@ -200,18 +878,19 @@ def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
         else:
             remaining_blocks.append(block)
 
-    # Reconstruct TODOS.md header + remaining entries
-    # Find the first actual entry (line starting with "- "), skipping blockquote lines
-    first_entry_pos = -1
-    for line in todos_text.split("\n"):
-        if ENTRY_HEADER_RE.match(line):
-            break
-        first_entry_pos += len(line) + 1  # +1 for the newline
-    if first_entry_pos == -1 or first_entry_pos >= len(todos_text):
-        new_todos = todos_text
+    if parse_todos_document_sections(todos_text).has_canonical_layout:
+        new_todos = _replace_entries_section(todos_text, "\n\n".join(remaining_blocks))
     else:
-        header = todos_text[:first_entry_pos]
-        new_todos = header + "\n".join(remaining_blocks)
+        first_entry_pos = -1
+        for line in todos_text.split("\n"):
+            if ENTRY_HEADER_RE.match(line):
+                break
+            first_entry_pos += len(line) + 1
+        if first_entry_pos == -1 or first_entry_pos >= len(todos_text):
+            new_todos = todos_text
+        else:
+            header = todos_text[:first_entry_pos]
+            new_todos = header + "\n".join(remaining_blocks)
 
     # Append to archive
     if not archive_text.strip():
@@ -225,3 +904,28 @@ def simulate_archive(todos_text: str, archive_text: str) -> tuple[str, str]:
 
     return new_todos, new_archive
 
+
+def archive_completed_todos(project_dir: Path) -> int:
+    """Move completed TODOs to the archive with a recoverable two-file write."""
+    todos_path = project_dir / "TODOS.md"
+    archive_path = project_dir / "TODOS-archive.md"
+    lock_path = todos_path.with_suffix(todos_path.suffix + ".lock")
+    _before_todo_lock()
+    with _todo_lock(lock_path):
+        recover_pending_todo_transaction(project_dir)
+        todos_text = todos_path.read_text(encoding="utf-8")
+        archive_text = (
+            archive_path.read_text(encoding="utf-8") if archive_path.exists() else ""
+        )
+        completed_count = len(find_completed_entries(todos_text))
+        if completed_count == 0:
+            return 0
+        updated_todos, updated_archive = simulate_archive(todos_text, archive_text)
+        _write_archive_transaction(
+            project_dir,
+            todos_path,
+            archive_path,
+            updated_todos,
+            updated_archive,
+        )
+        return completed_count

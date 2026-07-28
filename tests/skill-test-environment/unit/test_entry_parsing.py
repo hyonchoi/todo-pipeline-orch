@@ -78,3 +78,44 @@ class TestParseEntries:
         entry_1 = entries[0]
         assert "CLI" in entry_1["title"]
         assert entry_1["summary"] != ""
+
+    def test_ignores_schema_example_todo(self):
+        text = (
+            "# TODOS\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 8\n\n"
+            "## Entry Schema\n\n"
+            "- [ ] **TODO-99: Example** — Documentation only\n"
+            "  - **What:** Example\n"
+            "  - **Why:** Example\n"
+            "  - **Decisions:** Example\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-7: Real** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n"
+        )
+
+        entries = parse_entries(text)
+
+        assert [entry["id"] for entry in entries] == [7]
+
+    def test_ignores_todos_outside_entries_section(self):
+        text = (
+            "# TODOS\n\n"
+            "- [ ] **TODO-1: Legacy Outside** — Summary\n"
+            "  - **What:** Work\n\n"
+            "## Metadata\n\n"
+            "NEXT_TODO_ID: 3\n\n"
+            "## Entry Schema\n\n"
+            "> **Format rules:**\n\n"
+            "## Entries\n\n"
+            "- [ ] **TODO-2: Real** — Summary\n"
+            "  - **What:** Work\n"
+            "  - **Why:** Reason\n"
+            "  - **Decisions:** Priority `P1`\n"
+        )
+
+        entries = parse_entries(text)
+
+        assert [entry["id"] for entry in entries] == [2]

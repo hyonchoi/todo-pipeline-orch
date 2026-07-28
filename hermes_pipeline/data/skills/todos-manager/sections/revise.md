@@ -6,6 +6,8 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
 
 ## Constraints
 
+- Only entries under `## Entries` are active TODO entries. Ignore TODO-like text
+  under `## Entry Schema` and anywhere outside `## Entries`.
 - Only revises **active** entries in TODOS.md. TODOS-archive.md is never modified.
 - One entry at a time — user selects by TODO-ID.
 - Reuses `sections/auto-research.md` without modifying it.
@@ -21,7 +23,7 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
 
 2. **Prompt for TODO-N:** "Enter the TODO ID to revise (e.g. TODO-5):"
    - Validate the ID matches `TODO-<digits>` pattern. If not, print "Invalid TODO ID format. Expected TODO-<digits> (e.g. TODO-5)." and re-prompt.
-   - **Lookup order:** Scan TODOS.md first, then TODOS-archive.md.
+   - **Lookup order:** Scan only `## Entries` in TODOS.md first, then only `## Entries` in TODOS-archive.md when those files use the canonical layout. Ignore TODO-like examples in `## Entry Schema`.
      - If found in TODOS.md → proceed.
      - If found ONLY in TODOS-archive.md → print "TODO-N is archived. Archived entries cannot be revised." and exit.
      - If found in both files → use the TODOS.md entry (the archive copy is stale).

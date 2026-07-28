@@ -33,7 +33,12 @@ def _check_archive_header(text: str) -> bool:
     return "# TODOS Archive" in text and "Completed TODOs" in text
 
 
-def run_structural(golden: dict, todos_text: str, archive_text: str | None = None) -> dict:
+def run_structural(
+    golden: dict,
+    todos_text: str,
+    archive_text: str | None = None,
+    audit_report: str = "",
+) -> dict:
     """Run all structural assertions from a golden file.
 
     Returns {"passed": int, "failed": int, "results": list[dict]}.
@@ -91,6 +96,12 @@ def run_structural(golden: dict, todos_text: str, archive_text: str | None = Non
             actual = len(re.findall(pattern, todos_text, re.MULTILINE))
             result["pass"] = actual == expected
             result["detail"] = f"expected {expected}, found {actual}"
+
+        elif "audit_report_regex_present" in assertion:
+            pattern = assertion["audit_report_regex_present"]
+            found = bool(re.search(pattern, audit_report, re.MULTILINE))
+            result["pass"] = found
+            result["detail"] = "pattern not found" if not found else "found"
 
         elif "regex_present" in assertion:
             pattern = assertion["regex_present"]
@@ -214,10 +225,15 @@ def run_structural(golden: dict, todos_text: str, archive_text: str | None = Non
     return {"passed": passed, "failed": failed, "results": results}
 
 
-def assert_golden(golden_path: Path, todos_text: str, archive_text: str = "") -> None:
+def assert_golden(
+    golden_path: Path,
+    todos_text: str,
+    archive_text: str = "",
+    audit_report: str = "",
+) -> None:
     """Run golden assertions and raise AssertionError on first failure."""
     golden = load_golden(golden_path)
-    result = run_structural(golden, todos_text, archive_text)
+    result = run_structural(golden, todos_text, archive_text, audit_report)
     if result["failed"] > 0:
         failures = [r for r in result["results"] if not r["pass"]]
         msgs = [

@@ -60,7 +60,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 | [TODOS Manager skill](hermes_pipeline/data/skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 7 subcommands |
 | [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step: init, add, revise, archive a completed TODO |
 | [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using --init, --add, --convert, --audit, --archive, --list, --revise |
-| [Install TODOS Manager](tpo-skills-install) | How-to | Run `tpo skills install --help` to install todos-manager to user-level skill directories |
+| [Install TODOS Manager](#todos-manager-skill-v2) | How-to | Run `tpo skills install --help` to install todos-manager to user-level skill directories |
 | [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for the todos-manager skill |
 | [Skill test environment quickstart](docs/howto-skill-test-environment.md) | How-to | Adding and maintaining tests in the skill test harness |
 | [Skill test harness API](docs/reference-skill-test-harness.md) | Reference | Complete API for the todos-manager skill test environment |
@@ -80,10 +80,10 @@ The `todos-manager` skill provides schema-enforced TODOS.md management with seve
 
 | Subcommand | Purpose |
 |---|---|
-| `--init` | Initialize TODOS.md with preamble and create TODOS-archive.md |
+| `--init` | Initialize TODOS.md with Metadata, Entry Schema, and Entries sections; create TODOS-archive.md |
 | `--add` | Add new entry with schema enforcement and preview gate |
-| `--convert` | Add preamble to existing TODOS.md and validate format |
-| `--audit` | Audit TODOS.md for format compliance (no auto-fix) |
+| `--convert` | Migrate an existing TODOS.md to Metadata, Entry Schema, and Entries sections; validate format |
+| `--audit` | Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata |
 | `--archive` | Move all `[x]` completed entries to TODOS-archive.md |
 | `--list` | List active TODO entries as a table (`--all` also shows archived) |
 | `--revise` | Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions |
@@ -96,7 +96,9 @@ tpo skills install --target all
 
 This installs `todos-manager` to `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/`.
 
-The skill enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment (scanning both TODOS.md and TODOS-archive.md), and a preview/confirm gate before writing. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
+`tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
+
+The skill enforces the canonical schema (What/Why/Decisions + optional fields), tracked stable TODO-<n> ID assignment, and a preview/confirm gate before writing. `TODOS.md` uses three canonical sections: `## Metadata`, `## Entry Schema`, and `## Entries`; `NEXT_TODO_ID` lives under `## Metadata`. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, misplaced, stale, duplicated, or conflicting. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
 
 ---
 
@@ -124,7 +126,7 @@ Approve and ship a ready TODO (runs deterministic guards, bumps version, squash-
 uv run tpo approve myproject --todo TODO-5
 ```
 
-Recover the TODO ID counter by scanning TODOS.md for the highest TODO-N (useful when bootstrapping a project with hand-written TODOs but no counter file):
+Recover the TODO ID counter cache from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files:
 ```bash
 uv run tpo recover-counter <project>
 ```
@@ -181,7 +183,7 @@ tpo config path
 ```
 
 `tpo config init` creates a config file with active default values. The default
-config path is `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`.
+config path is `${XDG_CONFIG_DIR:-~/.config}/tpo/config.yaml`.
 For isolated tests or one-off runs, `TPO_CONFIG_FILE=/path/to/config.yaml`
 points `tpo` at a specific config file. Individual `PIPELINE_*` environment
 variables do not override config entries.

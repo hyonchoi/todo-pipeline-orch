@@ -1,13 +1,21 @@
 # TODOS
 
+## Metadata
+
+NEXT_TODO_ID: 8
+
+## Entry Schema
+
 > **Format rules (enforced by `todos-manager` skill):**
 > - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
 > - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
 > - Required fields: **What:**, **Why:**, **Decisions:**
 > - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
 > - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
-> - ID: sequential, immutable. Next = max(all IDs in TODOS.md + TODOS-archive.md) + 1
+> - ID: sequential, immutable TODO-<n>
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
+
+## Entries
 
 - [ ] TODO-1: Implement CLI argument parsing — Add argparse-based CLI for pipeline commands
   - **What:** Add argparse-based CLI for pipeline commands

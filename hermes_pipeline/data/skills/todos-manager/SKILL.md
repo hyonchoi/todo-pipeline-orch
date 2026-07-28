@@ -14,6 +14,21 @@ metadata:
 
 The **todos-manager** skill automates the addition and management of TODOS.md entries in gstack-format projects. It enforces the canonical schema (What/Why/Decisions + optional fields), stable TODO-<n> ID assignment, and provides a preview/confirm gate before writing to disk. Completed TODOs can be archived to keep TODOS.md clean.
 
+### Canonical entry scope
+
+Canonical TODOS.md files contain `# TODOS`, `## Metadata`, `## Entry Schema`,
+and `## Entries` in that order. Only TODO entries under `## Entries` are active
+TODOs. `## Entry Schema` is documentation only: TODO-like examples there must
+not be parsed, validated, dependency-resolved, listed, revised, archived, or
+counted. All entry consumers must use `sections/entry-boundary.md` and limit
+their scan to `## Entries` (or use the documented legacy fallback for a file
+not yet converted).
+
+Read `NEXT_TODO_ID` from `## Metadata`. Treat any `NEXT_TODO_ID:` line under
+`## Entry Schema`, under `## Entries`, or outside the canonical sections as
+invalid tracked state. `## Entry Schema` is documentation only; never count,
+list, archive, revise, validate, or use TODO-like examples in that section.
+
 ### When to use
 
 - Adding a new entry to an existing TODOS.md file (`--add`) — auto-researches the codebase to pre-fill fields
@@ -39,7 +54,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 
 | When | Read this section |
 |------|-------------------|
-| Any step references the TODOS.md schema, field definitions, or the Preamble Template | `sections/schema.md` |
+| Any step references the TODOS.md schema, field definitions, or canonical document layout | `sections/schema.md` |
 | Computing or validating TODO-<n> IDs | `sections/id-assignment.md` |
 | Executing `--add` step 4.5 (auto-research) | `sections/auto-research.md` |
 | `--convert` detects header-based format (Mode B: `## Open`/`## Completed` + `### Title` entries) | `sections/convert-mode-b.md` |
@@ -56,7 +71,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 When the user invokes `todos-manager --init` on a project with no TODOS.md:
 
 1. **Check if TODOS.md exists** at repo root.
-   - If absent, create TODOS.md with preamble blockquote (read `sections/schema.md` for the Preamble Template).
+   - If absent, create TODOS.md with the canonical three-section layout (read `sections/schema.md`).
 2. **Create TODOS-archive.md** at repo root with minimal header:
    ```markdown
    # TODOS Archive
@@ -75,7 +90,7 @@ The skill supports seven subcommands. Each has its own workflow below.
 ### `--add`: Add new entry with schema enforcement
 
 1. **Validate context:** Does TODOS.md exist? If not, prompt to run `--init` first.
-2. **Compute next TODO-<n>:** Read `sections/id-assignment.md` and scan TODOS.md + TODOS-archive.md.
+2. **Compute next TODO-<n>:** Read `sections/id-assignment.md`, then read `NEXT_TODO_ID` from `## Metadata`. Reconcile it by scanning entries under `## Entries` in TODOS.md plus TODOS-archive.md only when it is missing, malformed, misplaced, stale, duplicated, or conflicts with an active TODO; repair tracked state by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
    - **Output to user:** "Next ID will be `TODO-<n>`."
 3. **Prompt for title:** "Enter the TODO title (required):"
    - Validation: 10–200 characters, non-empty.
@@ -114,8 +129,8 @@ The skill supports seven subcommands. Each has its own workflow below.
    - `y` → proceed to step 9
    - `edit` → return to step 6 (no ID burned, no files written)
    - `cancel` → print "Entry discarded." and exit
-9. **Write to TODOS.md:** Insert formatted entry at end of file (after last entry, before trailing blank lines).
-10. **Update counter cache:** Write next_id to `.hermes/todo_id_counter` if `.hermes/` exists.
+9. **Write to TODOS.md:** Under the TODO write lock, insert the formatted entry under `## Entries` after the last active entry and increment `NEXT_TODO_ID` under `## Metadata` in the same atomic replacement. If replacement fails, leave `TODOS.md` byte-for-byte unchanged.
+10. **Update counter cache:** Only after the TODO write succeeds, `.hermes/todo_id_counter` may be updated as compatibility/cache state. It does not decide the next ID.
 11. **Confirm:** "✓ Entry added as TODO-<n>."
 
 ---
@@ -123,41 +138,41 @@ The skill supports seven subcommands. Each has its own workflow below.
 ### `--convert`: Convert existing TODOS.md to enforced format
 
 1. Read TODOS.md. If absent, print error and exit.
-2. Read `sections/schema.md` for the Preamble Template and field definitions.
+2. Read `sections/schema.md` for the canonical document layout and field definitions.
 3. **Detect format:**
-   - Canonical entries (`- [ ] TODO-N`) with no preamble → **Mode A**.
+   - Canonical entries (`- [ ] TODO-N`) without the three canonical sections → **Mode A** migration.
    - Header-based sections (`## Open`/`## Completed` with `### Title` entries, no canonical entries) → **Mode B**. Read `sections/convert-mode-b.md` and follow its steps in full.
 
 #### Mode A: Canonical format validation
 
-4a. **Validate each entry:** Scan for TODO-<n> entries. For each entry, check:
+4a. **Validate each entry:** Scan only the `## Entries` section for TODO-<n> entries. For each entry, check:
     - Required fields present: **What:**, **Why:**, **Decisions:**
     - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
     - ID matches `TODO-<digits>` pattern
-5a. **Report findings:** Output structured report (see `sections/error-messages.md`). Report only — no automatic fixes.
+5a. **Report findings:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`. Do not rewrite entry bodies.
 
 ---
 
 ### `--audit`: Audit TODOS.md for format compliance
 
-1. **Scan TODOS.md** for all TODO-<n> entries.
-2. **Scan TODOS-archive.md** (if exists) for archived TODO-<n> entries.
+1. **Scan only the `## Entries` section of TODOS.md** for active TODO-<n> entries.
+2. **Scan only the `## Entries` section of TODOS-archive.md** (if it uses the canonical layout) for archived TODO-<n> entries.
 3. **Per-entry checks:**
    - Required fields: **What:**, **Why:**, **Decisions:** present?
    - Status marker valid?
    - ID format correct?
    - Dependency references (if any) exist in TODOS.md or TODOS-archive.md?
-4. **Cross-entry checks:**
+4. **Reconcile tracked state:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
+5. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
-   - Counter cache (`.hermes/todo_id_counter`) matches max scanned ID?
-5. **Output report** per `sections/error-messages.md`.
-   Report only — no automatic fixes.
+   - Counter cache (`.hermes/todo_id_counter`) is compatibility/cache state only.
+6. **Output report** per `sections/error-messages.md`, including the `NEXT_TODO_ID` reconciliation result.
 
 ---
 
 ### `--archive`: Move completed TODOs to archive
 
-1. **Scan TODOS.md** for `[x]` entries. Use `sections/entry-boundary.md` for entry boundary detection.
+1. **Scan only the `## Entries` section of TODOS.md** for `[x]` entries. Use `sections/entry-boundary.md` for entry boundary detection.
 2. **If no `[x]` entries found:** Print "No completed TODOs to archive." and exit.
 3. **If TODOS-archive.md does not exist:** Create it with minimal header:
    ```markdown
@@ -167,10 +182,19 @@ The skill supports seven subcommands. Each has its own workflow below.
 
    Archived: <ISO-8601 timestamp>
    ```
-4. **For each `[x]` entry (newest first by ID):**
-   - Extract entry using `sections/entry-boundary.md`
-   - Append to end of TODOS-archive.md
-5. **Remove archived entries from TODOS.md.**
+4. **Under the TODO write lock, compute both final files before writing:**
+   - Extract `[x]` entries using `sections/entry-boundary.md`
+   - Build the new TODOS-archive.md text with completed entries appended
+   - Build the new TODOS.md text with those completed entries removed
+5. **Write both files as one recoverable transaction:**
+   - Write durable payload files for the intended final TODOS.md and
+     TODOS-archive.md contents
+   - Write a transaction journal only after both payloads are fsynced
+   - Replace TODOS-archive.md, then TODOS.md, using same-directory temp files and
+     atomic `os.replace`-style replacement
+   - If a journal exists at the start of any TODO write, roll it forward before
+     reading current TODO state
+   - Remove the journal and payload files only after both target files are replaced
 6. **Confirm:** "✓ Archived N entries to TODOS-archive.md."
 
 ---
@@ -203,10 +227,11 @@ Issues found: K
 - TODO-Y: Invalid dependency reference `TODO-Z` (not found)
 - TODO-W: Status marker `[->]` — expected `[→]`
 
-ID gap check: OK (max=23, counter=23)
+NEXT_TODO_ID: 24 (valid)
+ID gap check: OK (max=23)
 ```
 
-Report only — no automatic fixes.
+`--audit` reports and repairs section-layout issues before entry schema findings. It repairs missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
 
 ---
 

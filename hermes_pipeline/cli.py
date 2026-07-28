@@ -382,7 +382,27 @@ def build_parser() -> argparse.ArgumentParser:
         default="user",
         help="Install under the user's home directory or the current project (default: user)",
     )
+    skills_install_parser.add_argument(
+        "--reinstall",
+        action="store_true",
+        help="Replace an existing installed todos-manager skill after explicit review",
+    )
     skills_install_parser.set_defaults(func=_cmd_skills_install)
+
+    skills_uninstall_parser = skills_subparsers.add_parser(
+        "uninstall",
+        help="Remove the bundled todos-manager skill from selected skill directories",
+    )
+    skills_uninstall_parser.add_argument(
+        "--target", choices=["codex", "claude", "all"], default="claude"
+    )
+    skills_uninstall_parser.add_argument(
+        "--scope", choices=["user", "project"], default="user"
+    )
+    skills_uninstall_parser.add_argument(
+        "-y", "--yes", action="store_true", help="Confirm deletion without prompting"
+    )
+    skills_uninstall_parser.set_defaults(func=_cmd_skills_uninstall)
 
     # config: read/write global tpo configuration
     config_parser = subparsers.add_parser(
@@ -1369,13 +1389,151 @@ def _skills_install_targets(target: str, scope: str) -> list[tuple[str, Path]]:
     return [(name, base / _SKILLS_INSTALL_TARGET_DIRNAMES[name]) for name in names]
 
 
+def _preflight_skill_replacement(
+    name: str, dest: Path, *, allow_symlink: bool = False
+) -> str | None:
+    def probe_writable(directory: Path, prefix: str) -> None:
+        fd, probe_name = tempfile.mkstemp(prefix=prefix, dir=directory)
+        try:
+            os.close(fd)
+            Path(probe_name).unlink()
+        except BaseException:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                Path(probe_name).unlink()
+            except OSError:
+                pass
+            raise
+
+    is_symlink = dest.is_symlink()
+    if is_symlink and not allow_symlink:
+        return "the destination is a symlink"
+    if not is_symlink and dest.exists() and not dest.is_dir():
+        return "the destination exists but is not a directory"
+    if not is_symlink and dest.exists():
+        try:
+            probe_writable(dest, f".tpo-delete-probe-{name}-")
+        except OSError as e:
+            return f"the destination is not writable ({e})"
+    parent = dest.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        probe_writable(parent, f".tpo-install-probe-{name}-")
+    except OSError as e:
+        return f"the install directory is not writable ({e})"
+    return None
+
+
+def _remove_skill_path(path: Path) -> None:
+    """Remove a staged skill path without following symlinks."""
+    if path.is_symlink():
+        path.unlink()
+    else:
+        shutil.rmtree(path)
+
+
+def _skill_path_identity(path: Path) -> tuple[int, int, int] | None:
+    """Return a no-follow identity used to detect replacement races."""
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return None
+    return metadata.st_dev, metadata.st_ino, metadata.st_mode
+
+
+def _skill_backup_path(dest: Path) -> Path:
+    """Reserve a same-directory backup name without leaving a directory behind."""
+    backup = Path(tempfile.mkdtemp(prefix=".tpo-skill-backup-", dir=dest.parent))
+    backup.rmdir()
+    return backup
+
+
+def _cmd_skills_uninstall(args, config: Config | None) -> int:
+    targets = _skills_install_targets(args.target, args.scope)
+    if not bool(getattr(args, "yes", False)):
+        for name, install_dir in targets:
+            dest = install_dir / "todos-manager"
+            print(f"Problem ({name}): uninstall requires confirmation.")
+            print(f"Cause: deleting {dest} removes the installed todos-manager skill.")
+            print(
+                f"Fix: rerun with `tpo skills uninstall --target {name} --scope {args.scope} --yes` "
+                "to confirm deletion."
+            )
+        return 1
+
+    preflight_errors: list[tuple[str, Path, str]] = []
+    for name, install_dir in targets:
+        dest = install_dir / "todos-manager"
+        if dest.exists() or dest.is_symlink():
+            reason = _preflight_skill_replacement(name, dest, allow_symlink=True)
+            if reason is not None:
+                preflight_errors.append((name, dest, reason))
+    if preflight_errors:
+        for name, dest, reason in preflight_errors:
+            print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
+            print(f"Cause: {reason}.")
+            print("Fix: make the destination removable, or uninstall it manually after reviewing local changes.")
+        return 1
+
+    existing_targets = [
+        (name, install_dir / "todos-manager")
+        for name, install_dir in targets
+        if (install_dir / "todos-manager").exists()
+        or (install_dir / "todos-manager").is_symlink()
+    ]
+    staged: list[tuple[str, Path, Path]] = []
+    try:
+        for name, dest in existing_targets:
+            backup = _skill_backup_path(dest)
+            dest.rename(backup)
+            staged.append((name, dest, backup))
+    except OSError as e:
+        rollback_failures: list[tuple[str, Path, Path, OSError]] = []
+        for name, dest, backup in reversed(staged):
+            try:
+                backup.rename(dest)
+            except OSError as rollback_error:
+                rollback_failures.append((name, dest, backup, rollback_error))
+        print("Problem: could not stage every todos-manager destination for removal.")
+        print(f"Cause: {e}")
+        for name, dest, backup, rollback_error in rollback_failures:
+            print(f"Problem ({name}): rollback could not restore {dest}.")
+            print(f"Details: preserved backup at {backup}: {rollback_error}")
+        print("Fix: inspect the listed destinations and preserved backups, then retry.")
+        return 1
+
+    cleanup_warnings: list[tuple[str, Path, OSError]] = []
+    for name, _dest, backup in staged:
+        try:
+            _remove_skill_path(backup)
+        except OSError as e:
+            cleanup_warnings.append((name, backup, e))
+
+    staged_destinations = {(name, dest) for name, dest, _backup in staged}
+    for name, install_dir in targets:
+        dest = install_dir / "todos-manager"
+        if (name, dest) in staged_destinations:
+            print(f"OK ({name}): removed todos-manager from {dest}")
+        else:
+            print(f"OK ({name}): todos-manager is not installed at {dest}")
+
+    for name, backup, e in cleanup_warnings:
+        print(f"Warning ({name}): removal could not clean the staged backup at {backup}.")
+        print(f"Details: {e}")
+        print("Fix: review the leftover path and remove it manually when its contents are safe to delete.")
+    return 1 if cleanup_warnings else 0
+
+
 def _cmd_skills_install(args, config: Config | None) -> int:
     """Handle 'skills install' subcommand — copy the bundled todos-manager skill.
 
     Copies hermes_pipeline/data/skills/todos-manager/ to one or both of
     ~/.claude/skills/todos-manager/ and ~/.agents/skills/todos-manager/
-    (or their project-scoped equivalents), always overwriting existing
-    files (idempotent reinstall).
+    (or their project-scoped equivalents). Existing destinations require
+    explicit --reinstall.
 
     Exit codes: 0 all targets installed, 1 source missing / any target failed.
     """
@@ -1392,14 +1550,57 @@ def _cmd_skills_install(args, config: Config | None) -> int:
 
     targets = _skills_install_targets(args.target, args.scope)
     any_failed = False
+    reinstall = bool(getattr(args, "reinstall", False))
+    preflight_errors: list[tuple[str, Path, str]] = []
+    preflight_identities: dict[str, tuple[int, int, int] | None] = {}
     for name, install_dir in targets:
         dest = install_dir / "todos-manager"
+        preflight_identities[name] = _skill_path_identity(dest)
+        if reinstall:
+            reason = _preflight_skill_replacement(name, dest)
+            if reason is not None:
+                preflight_errors.append((name, dest, reason))
+        elif dest.exists() or dest.is_symlink():
+            preflight_errors.append((name, dest, "todos-manager is already installed"))
+    if preflight_errors:
+        for name, dest, reason in preflight_errors:
+            if not reinstall and reason == "todos-manager is already installed":
+                print(f"Problem ({name}): todos-manager is already installed at {dest}.")
+                print("Cause: reinstalling without --reinstall would overwrite local changes.")
+                print(
+                    f"Fix: rerun with `tpo skills install --target {name} --scope {args.scope} --reinstall` "
+                    "after reviewing the destination."
+                )
+                continue
+            print(f"Problem ({name}): cannot replace todos-manager at {dest}.")
+            print(f"Cause: {reason}.")
+            print(
+                "Fix: make the destination removable, or uninstall it manually "
+                "after reviewing local changes."
+            )
+        return 1
+
+    if reinstall:
+        return _reinstall_skills_transactionally(
+            source, targets, preflight_identities
+        )
+
+    for name, install_dir in targets:
+        dest = install_dir / "todos-manager"
+        if dest.exists() or dest.is_symlink():
+            any_failed = True
+            print(f"Problem ({name}): todos-manager is already installed at {dest}.")
+            print("Cause: reinstalling without --reinstall would overwrite local changes.")
+            print(
+                f"Fix: rerun with `tpo skills install --target {name} --scope {args.scope} --reinstall` "
+                "after reviewing the destination."
+            )
+            continue
         try:
             install_dir.mkdir(parents=True, exist_ok=True)
-            # Remove destination if it's a dangling symlink — copytree would fail
-            if dest.is_symlink() and not dest.exists():
-                dest.unlink()
-            shutil.copytree(source, dest, dirs_exist_ok=True)
+            if dest.exists() or dest.is_symlink():
+                raise FileExistsError(f"destination appeared before copy: {dest}")
+            shutil.copytree(source, dest)
             print(f"OK ({name}): installed todos-manager to {dest}")
         except PermissionError as e:
             any_failed = True
@@ -1417,6 +1618,85 @@ def _cmd_skills_install(args, config: Config | None) -> int:
             print(f"Fix: inspect {install_dir} and retry.")
 
     return 1 if any_failed else 0
+
+
+def _reinstall_skills_transactionally(
+    source: Path,
+    targets: list[tuple[str, Path]],
+    preflight_identities: dict[str, tuple[int, int, int] | None],
+) -> int:
+    """Replace every selected skill target or restore all original targets."""
+    prepared: list[tuple[str, Path, Path, Path | None]] = []
+    staged_paths: list[Path] = []
+    swapped: list[tuple[str, Path, Path | None]] = []
+    try:
+        for name, install_dir in targets:
+            install_dir.mkdir(parents=True, exist_ok=True)
+            dest = install_dir / "todos-manager"
+            staged = Path(
+                tempfile.mkdtemp(prefix=".tpo-skill-stage-", dir=install_dir)
+            )
+            staged.rmdir()
+            staged_paths.append(staged)
+            shutil.copytree(source, staged)
+            if _skill_path_identity(dest) != preflight_identities[name]:
+                raise OSError(f"destination changed after preflight: {dest}")
+            backup = _skill_backup_path(dest) if dest.exists() else None
+            prepared.append((name, dest, staged, backup))
+
+        for name, dest, staged, backup in prepared:
+            if _skill_path_identity(dest) != preflight_identities[name]:
+                raise OSError(f"destination changed before replacement: {dest}")
+            if backup is not None:
+                dest.rename(backup)
+            try:
+                staged.rename(dest)
+            except OSError:
+                if backup is not None:
+                    backup.rename(dest)
+                raise
+            swapped.append((name, dest, backup))
+    except OSError as error:
+        rollback_failures: list[tuple[str, Path, Path | None, OSError]] = []
+        for name, dest, backup in reversed(swapped):
+            try:
+                if dest.exists() or dest.is_symlink():
+                    _remove_skill_path(dest)
+                if backup is not None:
+                    backup.rename(dest)
+            except OSError as rollback_error:
+                rollback_failures.append((name, dest, backup, rollback_error))
+        for staged in staged_paths:
+            if staged.exists() or staged.is_symlink():
+                try:
+                    _remove_skill_path(staged)
+                except OSError:
+                    pass
+        print("Problem: could not replace every todos-manager destination.")
+        print(f"Cause: {error}")
+        for name, dest, backup, rollback_error in rollback_failures:
+            preserved = f"; preserved backup at {backup}" if backup is not None else ""
+            print(f"Problem ({name}): rollback could not restore {dest}{preserved}.")
+            print(f"Details: {rollback_error}")
+        print("Fix: inspect the listed destinations and preserved backups, then retry.")
+        return 1
+
+    cleanup_warnings: list[tuple[str, Path, OSError]] = []
+    for name, _dest, backup in swapped:
+        if backup is None:
+            continue
+        try:
+            _remove_skill_path(backup)
+        except OSError as error:
+            cleanup_warnings.append((name, backup, error))
+
+    for name, dest, _backup in swapped:
+        print(f"OK ({name}): installed todos-manager to {dest}")
+    for name, backup, error in cleanup_warnings:
+        print(f"Warning ({name}): reinstall left the prior version at {backup}.")
+        print(f"Details: {error}")
+        print("Fix: review the backup and remove it manually when safe.")
+    return 1 if cleanup_warnings else 0
 
 
 def _cmd_config_init(args, config: Config | None) -> int:

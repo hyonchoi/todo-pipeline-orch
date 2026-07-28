@@ -25,6 +25,8 @@ tpo skills install --target all
 
 This installs the todos-manager skill to `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/`. The skill source is packaged at `hermes_pipeline/data/skills/todos-manager/SKILL.md` — git-tracked and platform-neutral.
 
+`tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
+
 **Verify:**
 
 ```bash
@@ -36,7 +38,7 @@ ls -la ~/.claude/skills/todos-manager/SKILL.md
 
 ## Step 2: Initialize TODOS.md
 
-The `--init` subcommand creates TODOS.md with a schema preamble and a companion archive file. In a new Claude Code session, invoke the skill:
+The `--init` subcommand creates TODOS.md with canonical sections and a companion archive file. In a new Claude Code session, invoke the skill:
 
 ```bash
 todos-manager --init
@@ -48,7 +50,7 @@ todos-manager --init
 cat TODOS.md
 ```
 
-The file starts with `# TODOS` followed by a blockquote preamble that documents every schema rule — entry format, status markers, required fields, ID assignment. This isn't decoration. It's the contract the skill enforces.
+The file starts with `# TODOS`, then `## Metadata` containing `NEXT_TODO_ID: 1`, followed by `## Entry Schema` and `## Entries`. The schema section documents the format and is never parsed as active TODO content.
 
 A `TODOS-archive.md` is also created with a minimal header:
 
@@ -84,6 +86,8 @@ Proceed? [y / edit / cancel]
 ```
 
 Confirm with `y`. The entry appears in TODOS.md.
+
+`TODOS.md` stores tracked ID state under `## Metadata` as `NEXT_TODO_ID: <n>`. The `## Entry Schema` section documents the format and is never parsed as active TODO content. Active entries live under `## Entries`. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, misplaced, stale, duplicated, or conflicting.
 
 **Output:**
 ```
@@ -192,7 +196,7 @@ todos-manager --archive
 
 **What it does:**
 - Scans TODOS.md for `[x]` entries
-- Appends them to TODOS-archive.md (newest first by ID)
+- Appends them to TODOS-archive.md
 - Removes them from TODOS.md
 
 **Output:**
@@ -205,17 +209,17 @@ Check the result:
 cat TODOS-archive.md
 ```
 
-TODO-1 is now in the archive. The next `todos-manager --add` will still compute `max(all IDs) + 1` across both files, so the next entry becomes `TODO-3` — not `TODO-1`.
+TODO-1 is now in the archive. The tracked `NEXT_TODO_ID` remains the common-path source for the next entry, so the next entry becomes `TODO-4` — not `TODO-1`; archived IDs are consulted only when reconciliation is needed.
 
 ---
 
 ## What you built
 
 A working TODOS.md with:
-- A schema-enforced preamble that documents the entry format
+- `## Entry Schema`, which documents the entry format
 - Three entries (TODO-1 archived, TODO-2 pending, TODO-3 revised with AI-pre-filled fields)
 - An archive file with completed work
-- Stable IDs computed across both TODOS.md and TODOS-archive.md
+- Stable IDs tracked as `NEXT_TODO_ID` under `## Metadata`, with archive-aware reconciliation when needed
 
 ### Next steps
 
@@ -227,7 +231,7 @@ A working TODOS.md with:
 - [Install TODOS Manager](../README.md#todos-manager-skill-v2) — run `tpo skills install --help` to install todos-manager to user-level directories
 
 **Convert an existing TODOS.md:**
-- Run `todos-manager --convert` to add the preamble and validate entries against the enforced schema.
+- Run `todos-manager --convert` to add the canonical sections and validate entries against the enforced schema.
 
 **Audit and revise entries:**
 - Run `todos-manager --audit` to check all entries for missing required fields, invalid status markers, and broken dependency references.
