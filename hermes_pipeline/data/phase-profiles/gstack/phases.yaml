@@ -140,6 +140,14 @@ phases:
       user input. Loop through the skill's fix-and-reverify cycles for as
       long as they keep making progress — do not stop after one pass.
 
+      Open a PR and HALT — do NOT merge. The next phase's gate is where a
+      human reviews and explicitly approves merge-to-main.
+
+      Let /ship own the whole finish-branch workflow. If /ship reaches its turn
+      budget, asks for a fresh invocation, or stops before pushing/opening the
+      PR, exit non-zero. Do NOT finish the remaining /ship steps manually with
+      raw git or gh commands.
+
       If no git remote is configured, PR creation isn't possible. In that
       case, run every other step of the skill (verification, version bump
       checks, etc.) and leave the branch committed and ready, without
@@ -150,8 +158,8 @@ phases:
       from a new context is required. Do NOT attempt to simulate that
       yourself.
     tools: "Read,Write,Edit,Bash"
-    turns: 50
-    timeout: 3000
+    turns: 100
+    timeout: 7200
   - phase_key: "phase_9_ship"
     name: "Phase 9: Human Review"
     gate: true

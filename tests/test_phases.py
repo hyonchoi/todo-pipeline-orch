@@ -126,6 +126,9 @@ def test_real_phases_yaml_finish_branch_uses_ship_skill():
     finish = phases["phase_8_finish_branch"]
     assert "/ship" in finish.prompt
     assert "finishing-a-development-branch" not in finish.prompt
+    assert "Do NOT finish the remaining /ship steps manually" in finish.prompt
+    assert finish.turns >= 100
+    assert finish.timeout >= 7200
 
 
 AGENT_SKILLS_PHASE_ORDER = [
