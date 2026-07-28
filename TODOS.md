@@ -57,4 +57,6 @@ NEXT_TODO_ID: 39
   - **Pros:** Easier onboarding via a scannable, grouped doc index; no dead links; consistent CLI naming across all docs; new users get a correct install command and a clear fork for "new project" vs. "existing project" onboarding.
   - **Cons:** Touches a widely-linked file (README.md); requires re-verifying every link after restructuring to avoid introducing new breaks; Getting Started rewrite needs to stay in sync with `docs/tutorial-getting-started.md`, which may itself need the same `uv tool install` correction.
   - **Context:** README.md Documentation table (lines 37-75) and Getting Started / Run sections (lines 103-155); stale references in docs/pipeline-modularization-plan.md; CLI rename history in TODO-33 (already-committed `tpo` rename) and TODO-34/35 (skills install follow-ons); `todos-manager --convert`/`--revise` subcommands (docs/howto-todos-manager.md) as the existing-project onboarding mechanism.
+  - **Spec:** docs/superpowers/plans/2026-07-28-todo-36-readme-refresh.md
+  - **Reference:** docs/superpowers/specs/2026-07-28-todo-36-readme-refresh-design.md
   - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `docs/reorganize-readme-docs-table`, Test Coverage `not-required`, Security Review `not-required`, UI Review `not-required`
