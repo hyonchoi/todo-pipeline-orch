@@ -95,18 +95,6 @@ def _parse(raw: str) -> dict:
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
 
-    # CLI backends may prepend warning lines before otherwise-valid raw JSON.
-    decoder = json.JSONDecoder()
-    for idx, ch in enumerate(body):
-        if ch != "{":
-            continue
-        try:
-            d, _end = decoder.raw_decode(body[idx:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(d, dict):
-            return _format_result(d)
-
     # Fall back to fence extraction (CLI backends may prepend warnings).
     fence_start = body.find("```")
     if fence_start != -1:
@@ -127,6 +115,21 @@ def _parse(raw: str) -> dict:
             if len(parts) == 3:
                 inner = inner.rsplit("```", 1)[0]
             body = inner
+    else:
+        # CLI backends may prepend warning lines before otherwise-valid raw JSON.
+        # Only accept the first decoded object when it consumes the remaining
+        # response; prose can contain example JSON that must not override the
+        # final answer.
+        decoder = json.JSONDecoder()
+        for idx, ch in enumerate(body):
+            if ch != "{":
+                continue
+            try:
+                d, end = decoder.raw_decode(body[idx:])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(d, dict) and body[idx + end :].strip() == "":
+                return _format_result(d)
 
     error = None
     try:
