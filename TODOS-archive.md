@@ -4,6 +4,8 @@ Completed TODOs, archived via `todos-manager --archive`.
 
 Archived: 2026-07-14T00:00:00Z
 
+## Entries
+
 - [x] **TODO-24: Wire remaining harness kanban-scheduler checklist rows to production functions** — Complete checklist rows 1-6, 10-13 — mechanical production-function wiring left out of TODO-21's narrowed scope.
   - **What:** Refactor `harness.py::_poll_kanban_phases` and callees to call production functions for checklist rows 1-6 and 10-13 (registration, status polling, outcome persistence, contract lookup, timeout reporting) instead of local re-implementations. Also resolve the flagged follow-up: whether `_auto_complete_gate_tasks`'s predecessor/eligibility logic should move from harness.py into `phases.py`.
   - **Why:** TODO-21 was narrowed to only the two rows requiring new design decisions (gate completion routing, circuit-breaker premise correction). The remaining 11 checklist rows are still open acceptance criteria from `docs/checklist-harness-production-coverage.md` and must be wired for the harness to actually validate production behavior.
