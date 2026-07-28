@@ -1,274 +1,178 @@
 # Getting Started with tpo
 
-In this tutorial, you'll set up your first pipeline-watched project and run the core workflows: triggering a tick, reviewing TODOs, and merging one to main. By the end, you'll have a working pipeline — with an optional cron schedule for production.
+In this tutorial, you'll set up your first pipeline-watched project and run the core workflows: triggering a tick, reviewing TODOs, and approving one to ship.
 
 **Time: ~10 minutes**
 
 ## What you'll need
 
-- `todo-pipeline-orchestrator` installed (see [README prerequisites](../README.md#requirements))
-- Python 3.12+ and uv package manager
-- Hermes CLI installed and authenticated (`hermes login`)
-- Hermes kanban configured for your project
-- Write permissions on your git repositories
+- Python 3.12+
+- `uv`
+- `tpo` installed as a uv tool, or a source checkout with `uv sync`
+- A Hermes agent runtime/profile available when you run pipeline phases
+- Write permissions on the git repositories you want `tpo` to scan
+
+Provider authentication depends on the model/runtime configured for your Hermes profile. It is not required for every `tpo` installation path.
 
 If you don't have a test project yet, the setup section below will guide you through creating one.
 
----
+## Step 1: Install and verify `tpo`
 
-## Step 1: Verify installation
-
-First, confirm that `tpo` is installed and working:
+If `uv` is missing:
 
 ```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Install the CLI:
+
+```bash
+uv tool install .
+tpo --version
+```
+
+From a source checkout:
+
+```bash
+uv sync
 uv run tpo --version
 ```
 
-Expected output:
-```
-tpo 0.5.10
-```
+Use direct `tpo ...` commands for the rest of this tutorial.
 
-If you see "command not found," run:
-```bash
-uv sync
-```
+## Step 2: Install the pipeline profile and TODO skill
 
-This installs the CLI into your current uv environment.
-
----
-
-## Step 2: Set up your first project
-
-The pipeline watches directories for `TODOS.md` files. Create a test project with the required structure:
+Install the pipeline profile when you want `tpo` to register unattended phase tasks:
 
 ```bash
-# Create a test directory structure
+tpo install-profile
+```
+
+Install `todos-manager` for the agent that will edit TODOs:
+
+```bash
+tpo skills install --target all
+```
+
+For project-local Codex/agents setup, run this from the project root instead:
+
+```bash
+tpo skills install --scope project --target codex
+```
+
+`codex` installs to the `.agents/skills` convention, `claude` installs to the `.claude/skills` convention, and `all` installs both.
+
+## Step 3: Create or adopt a project
+
+Create a demo project:
+
+```bash
 mkdir -p ~/my-projects/demo-app
 cd ~/my-projects/demo-app
 git init
-mkdir .hermes
-echo "0" > .hermes/todo_id_counter
 ```
 
-Now create a minimal `TODOS.md` file:
+For a new project with no `TODOS.md`, initialize the canonical TODO files:
 
 ```bash
-cat > TODOS.md << 'EOF'
-# TODOS
-
-## TODO-1: Add user authentication
-
-**What:** Implement basic JWT authentication.
-
-**Why:** Users need to log in securely.
-
-**Status:** `[ ]` (pending)
-EOF
+todos-manager --init
+todos-manager --add
 ```
 
-Commit this to git:
+Commit the generated TODO files and first entry:
 
 ```bash
-git add .
-git commit -m "init: create project with TODOS"
+git add TODOS.md TODOS-archive.md
+git commit -m "init: create canonical TODOs"
 ```
 
-You now have a project that tpo can discover. Next, tell tpo where to find it.
+For an existing project with a hand-written `TODOS.md`, use this path instead:
 
----
+```bash
+todos-manager --convert
+todos-manager --audit
+```
 
-## Step 3: Configure tpo
+Use `todos-manager --revise` when a specific entry needs stronger required or optional fields.
 
-Pipeline-watch discovers projects by scanning the `projects_dir` from the global
-tpo config file. The default is `~/projects`. Tell it where your projects are:
+## Step 4: Configure project discovery
+
+Tell `tpo` where to find projects:
 
 ```bash
 tpo config init
 tpo config set projects_dir ~/my-projects
+tpo config get projects_dir
 ```
 
-For one-off runs, point `TPO_CONFIG_FILE` at an alternate complete config file.
+## Step 5: Write and verify the pipeline contract
 
-Verify the configuration by checking that the default pipeline contract was written:
+`tpo init <project>` writes `.hermes/pipeline.toml`. It does not create `TODOS.md`.
 
 ```bash
-cat ~/my-projects/demo-app/.hermes/pipeline.toml
+tpo init demo-app
+tpo doctor demo-app
 ```
 
-Expected output:
-```toml
-schema_version = 1
-assignee = "default"
-capabilities = ["Bash", "Edit", "Read", "Write"]
+Expected doctor output starts with:
+
+```text
+OK: schema_version=1
 ```
 
-Write the pipeline execution contract for this project — a small TOML file declaring which assignee and tool capabilities its phases require:
+## Step 6: Run a manual tick
 
 ```bash
-uv run tpo init demo-app
+tpo tick demo-app
 ```
 
-Expected output:
-```
-Wrote pipeline execution contract: /path/to/demo-app/.hermes/pipeline.toml
-```
+The tick checks project state, selects eligible TODOs, and registers phase tasks. If nothing is ready, it reports that no TODO was picked.
 
-Verify it's consistent with `phases.yaml`:
+To scan every active project under `projects_dir`:
 
 ```bash
-uv run tpo doctor demo-app
+tpo tick
 ```
 
-Expected output:
-```
-OK: schema_version=1 assignee=default capabilities=['Bash', 'Edit', 'Read', 'Write']
-```
+See [Run a manual tick](howto-pipeline-tick.md) for detailed tick behavior and recovery.
 
----
-
-## Step 4: Run a manual tick
-
-The `tick` command runs one pipeline tick immediately: it scans all active projects in your `projects_dir`, checks for in-flight work from a previous tick, observes outcomes, acquires a tick lock, runs selection via the Hermes agent, and registers phases as kanban tasks. This is the fastest way to see the pipeline in action.
-
-```bash
-uv run tpo tick
-```
-
-You'll see log output as the tick runs through each active project. The Hermes agent evaluates TODOS.md files and picks a TODO (or returns `picked=None` if nothing is ready yet).
-
-Check the decision record:
-
-```bash
-jq '{picked: .picked, rationale: .rationale}' \
-  .hermes/decisions/$(ls -t .hermes/decisions/ | head -1)
-```
-
-If you see `picked=None`, mark TODO-1 as in progress and run the tick again:
-
-```bash
-# Edit TODOS.md: change the status from `[ ]` to `[→]`
-cd ~/my-projects/demo-app
-# ... edit TODOS.md to set Status: `[→]` ...
-git add TODOS.md
-git commit -m "TODO-1: mark in progress"
-
-uv run tpo tick
-```
-
-Run the tick a second time. This tick scans all active projects, observes outcomes from the prior tick (if any), and then runs selection again.
-
-### Inspect the kanban board
-
-If a TODO was picked, phases are now registered as kanban tasks with `--parent` dependency chains. Check the board:
+## Step 7: Inspect phase progress
 
 ```bash
 hermes kanban list --tenant demo-app
 ```
 
-You should see phases like `phase_2_autoplan` (running) and `phase_4_development` (ready — blocked on its parent).
+See [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) for how phase tasks are chained.
 
-See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
+## Step 8: Approve and ship
 
----
-
-## Project Configuration
-
-Each project can have a `.hermes/project.toml` file to configure project-specific settings:
-
-```toml
-[active]
-enabled = true  # default; set to false to archive a project
-
-[notifications]
-slack_channel = "project__my-slug"  # per-project alert channel
-```
-
-If the file doesn't exist, the project is active by default. To archive a project (stop scanning it without deleting TODOS.md), create the file with `enabled = false`.
-
-**Slack channel resolution (priority):**
-1. `project.toml`'s `slack_channel`
-2. Global config `slack_channel`
-3. `#alert` (hardcoded fallback)
-
----
-
-## Step 5: Check pipeline progress
-
-Once a TODO has been selected and is progressing through phases, check the kanban board to see phase status:
+When all phases are complete and the TODO is ready to ship:
 
 ```bash
-hermes kanban list --tenant demo-app --query "todo_id=TODO-1"
+tpo approve demo-app --todo TODO-1
 ```
 
-You'll see all phases as kanban tasks with their statuses (blocked, ready, running, done, failed).
+See [Approve and ship a TODO](howto-approve-and-ship.md) for guards, exit codes, and recovery.
 
----
+## Step 9: Automate ticks later
 
-## Step 6: Approve and ship a TODO
-
-Once all phases are complete and the TODO is ready for review, ship it with the approve command. The approve command runs Phase 9 of the pipeline: it confirms the merge, bumps the version, and commits to main.
-
-```bash
-uv run tpo approve demo-app --todo TODO-1
-```
-
-The command will:
-1. Read the ship-gate sidecar to find the PR and branch
-2. Check for a clean working tree and matching PR head
-3. Bump the project's version (if a VERSION file exists)
-4. Execute `gh pr merge --squash` to merge to main
-5. Complete the ship gate task on the kanban board
-
-For a full end-to-end test, make sure you have:
-- `gh` CLI authenticated for your repository
-- A clean git working tree
-- A PR ready for merging
-
----
-
-## Step 7: Automate with Hermes cron (optional)
-
-So far you've been running `tpo tick` manually. For production, set up the Hermes cron schedule:
-
-```bash
-hermes cron set pipeline-tick '*/5 * * * *'
-```
-
-Verify the schedule is active:
-
-```bash
-hermes cron list
-```
-
-You should see an entry for `pipeline-tick` with the `*/5` schedule. The circuit breaker adjusts the interval automatically — 5-minute ticks normally, backing off to 30 minutes after repeated no-progress ticks.
-
----
+Manual ticks are enough for first setup. For scheduled operation, see [Run a manual tick](howto-pipeline-tick.md) and the Hermes cron guidance in the operations docs.
 
 ## What you built
 
-You now have a working tpo setup that:
+You now have:
 
-✅ Discovers projects with TODOS.md files via Hermes agent  
-✅ Selects TODOs and registers phases as kanban tasks with dependency chains  
-✅ Checks phase progress on the kanban board  
-✅ Ships approved TODOs to main with version bumping  
-✅ Runs automatically every 5 minutes via Hermes cron (optional)  
+- `tpo` installed and verified
+- `todos-manager` installed for your agent target
+- a canonical `TODOS.md`
+- a configured `projects_dir`
+- a pipeline contract in `.hermes/pipeline.toml`
+- a manual tick path
 
-### Next steps
+## Next steps
 
-**Explore the full feature set:**
-- Read [Configuration](../README.md#configuration) to customize `state_dir`, `slack_channel`, etc.
-- See [Troubleshooting](../README.md#troubleshooting) for common issues and fixes
-
-**Run ticks iteratively during development:**
-- See [How to run a manual tick](howto-pipeline-tick.md) for the full tick flow with verification and troubleshooting
-
-**Understand the architecture:**
-- Read [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) to understand how phases map to kanban tasks
-- Read [Architecture](../README.md#architecture) to see how tpo orchestrates the phases and ships
-- Check [docs/pipeline-modularization-plan.md](pipeline-modularization-plan.md) for the full design
-
-**When things break:**
-- Check [Troubleshooting](../README.md#troubleshooting) for solutions to "command not found: uv" and other issues
-- Check Hermes logs in `~/.hermes/`
+- [CLI reference](reference-cli.md)
+- [How to manage TODOS.md with todos-manager](howto-todos-manager.md)
+- [How to run a manual tick](howto-pipeline-tick.md)
+- [Pipeline contract setup](howto-pipeline-contract.md)
+- [Architecture overview](ARCHITECTURE.md)
