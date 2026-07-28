@@ -1,285 +1,197 @@
 # todo-pipeline-orchestrator
 
-Pipeline watcher and TODOS manager orchestration toolkit, packaged as a uv-managed Python project.
+Pipeline watcher and TODOS manager orchestration toolkit, packaged as a uv-managed Python project. The installed CLI is `tpo`.
 
-## Status
+## Overview
 
-Fully modularized `hermes-pipeline` package with CLI, watcher, status, and merge orchestration.
+`tpo` helps maintain schema-enforced `TODOS.md` files, install the bundled `todos-manager` skill, prepare pipeline contracts, run pipeline ticks, and approve ready TODOs for shipping. Pipeline phases run through Hermes agent profiles and use kanban tasks for phase scheduling.
 
-See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md) for the modularization plan and architectural design.
+Use this README as the quick map. Detailed setup, reference, and recovery guides live in the documentation index below.
 
-## Features
+## Install
 
-- **Hermes-agent selection** (v0.2): LLM-driven TODO selection via Hermes CLI (`hermes chat -q`) with SHA-pinned prompt, immutable decision records, and outcome sidecars
-- **CLI subcommands**: `tick`, `approve` for pipeline management
-- **Multi-project scan loop**: `tick` without a project argument scans all active projects in one execution
-- **Logging flags**: `--verbose` and `--debug` global flags for detailed diagnostics (selection results, lock state, agent call summaries, circuit breaker transitions)
-- **Pending records table**: Display ready-for-review records with status and age
-- **Phase 5 code review (v0.4)**: New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q`, with pre-review snapshot, post-review pytest run, deterministic commit-on-pass or restore-on-fail, and machine-verified outcomes (`review_clean`, `review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`)
-- **Circuit breaker**: no-progress counter and Slack alert dedup to stop runaway ticks (the gateway service manages tick scheduling and cron backoff)
-- **Hermes cron integration**: pipeline-tick schedule managed via `hermes cron set`
-- **TODOS Manager skill (v2.1)**: Seven subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`, `--list`, `--revise`) for managing TODOS.md entries with schema enforcement, auto-research field pre-fills, stable TODO-<n> IDs, archiving to TODOS-archive.md, and AI-assisted revision of existing entries. Install via `tpo skills install`.
-- **Skill test environment (Phase 1)**: `tests/skill-test-environment/` — structural unit tests for the `todos-manager` skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic), backed by golden YAML assertions and a demo-project fixture. Zero token cost, runs in under 5 seconds.
+Install `uv` if it is not already available:
 
-## Requirements
-
-- Python 3.12+
-- [uv](https://docs.astral.sh/uv/install/) package manager
-- **Hermes CLI** (v0.3+): selection and phase execution route through `hermes chat -q`. Install Hermes and run `hermes login` before running the pipeline.
-
-Install uv:
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-## Documentation
+Install the CLI as a uv tool:
 
-| Doc | Quadrant | When to read |
-|---|---|---|
-| [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `tpo` end-to-end |
-| [Architecture overview](docs/ARCHITECTURE.md) | Explanation | Understanding lane structure, data flow, phase execution |
-| [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
-| [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
-| [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Architecture and design history |
-| [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `tpo tick` uses kanban for phase state and ordering |
-| [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `tpo tick` for iterative development |
-| [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
-| [Recover from a prompt SHA mismatch](docs/howto-prompt-sha-mismatch.md) | How-to | Selection aborted with `prompt_sha_mismatch:` rationale |
-| [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
-| [Set up multiple projects](docs/howto-multi-project-setup.md) | How-to | Configuring per-project settings and the scan loop |
-| [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
-| [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
-| [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Why single global lock, state migration decisions, trade-offs |
-| [Set up the pipeline profile](docs/howto-pipeline-profile.md) | How-to | Installing the dedicated pipeline Hermes profile for unattended execution |
-| [Configure the pipeline contract](docs/howto-pipeline-contract.md) | How-to | Editing assignee, fixing capability drift, schema migration |
-| [Use the agent-skills profile](docs/howto-agent-skills-profile.md) | How-to | Selecting a different skill-set for pipeline phases (`gstack` or `agent-skills`) |
-| [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Design rationale: versioned contracts, drift detection, capability gates |
-| [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` replaces Anthropic SDK calls |
-| [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
-| [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works and design rationale |
-| [TODOS Manager skill](hermes_pipeline/data/skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and 7 subcommands |
-| [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step: init, add, revise, archive a completed TODO |
-| [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using --init, --add, --convert, --audit, --archive, --list, --revise |
-| [Install TODOS Manager](#todos-manager-skill-v2) | How-to | Run `tpo skills install --help` to install todos-manager to user-level skill directories |
-| [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for the todos-manager skill |
-| [Skill test environment quickstart](docs/howto-skill-test-environment.md) | How-to | Adding and maintaining tests in the skill test harness |
-| [Skill test harness API](docs/reference-skill-test-harness.md) | Reference | Complete API for the todos-manager skill test environment |
-| [Why the skill test harness is pure-Python](docs/explanation-skill-test-harness-design.md) | Explanation | Design rationale: golden-file architecture, Phase 1 vs Phase 2 |
-| [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `tpo test` against mock project data end-to-end |
-| [Harness production-code coverage checklist](docs/checklist-harness-production-coverage.md) | Reference | Acceptance criteria for maximal harness reuse of production code paths |
+```bash
+uv tool install .
+tpo --version
+```
 
-| [Approve and ship a TODO](docs/howto-approve-and-ship.md) | How-to | Running `tpo approve` — full ship workflow |
-| [CLI reference](docs/reference-cli.md) | Reference | All subcommands, arguments, exit codes, environment variables |
-| [Circuit breaker](docs/explanation-circuit-breaker.md) | Explanation | How no-progress tracking works and why it alerts |
-| [Decision module API](docs/reference-decision-api.md) | Reference | Selection schemas, outcome sidecars, plan-gate types |
-| [Handle phase 5 review outcomes](docs/howto-review-outcomes.md) | How-to | Inspecting review artifacts, handling reverted or timed-out reviews |
+From a source checkout, use the project environment instead:
 
-## TODOS Manager Skill (v2)
+```bash
+uv sync
+uv run tpo --version
+```
 
-The `todos-manager` skill provides schema-enforced TODOS.md management with seven subcommands:
+## Prerequisite setup
 
-| Subcommand | Purpose |
-|---|---|
-| `--init` | Initialize TODOS.md with Metadata, Entry Schema, and Entries sections; create TODOS-archive.md |
-| `--add` | Add new entry with schema enforcement and preview gate |
-| `--convert` | Migrate an existing TODOS.md to Metadata, Entry Schema, and Entries sections; validate format |
-| `--audit` | Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata |
-| `--archive` | Move all `[x]` completed entries to TODOS-archive.md |
-| `--list` | List active TODO entries as a table (`--all` also shows archived) |
-| `--revise` | Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions |
+For pipeline phase execution, make sure a Hermes agent runtime/profile is available. Provider authentication is model-specific and is not a baseline `tpo` prerequisite.
 
-Install the skill from the project source to your user-level skill directories:
+Install the bundled pipeline profile when you want unattended pipeline phase execution:
+
+```bash
+tpo install-profile
+```
+
+Install `todos-manager` for the agent that will edit TODOs:
 
 ```bash
 tpo skills install --target all
 ```
 
-This installs `todos-manager` to `~/.claude/skills/todos-manager/` and `~/.agents/skills/todos-manager/`.
-
-`tpo skills install` fails when `todos-manager` is already installed. Use `tpo skills install --reinstall` after reviewing the destination to replace it intentionally. Use `tpo skills uninstall --yes` to remove installed copies.
-
-The skill enforces the canonical schema (What/Why/Decisions + optional fields), tracked stable TODO-<n> ID assignment, and a preview/confirm gate before writing. `TODOS.md` uses three canonical sections: `## Metadata`, `## Entry Schema`, and `## Entries`; `NEXT_TODO_ID` lives under `## Metadata`. `todos-manager --add` uses that value on the common path, increments it after a successful write, and reconciles by scanning `TODOS.md` plus `TODOS-archive.md` only when the tracked value is missing, malformed, misplaced, stale, duplicated, or conflicting. See [skills/todos-manager/SKILL.md](hermes_pipeline/data/skills/todos-manager/SKILL.md) for the full schema and workflows.
-
----
-
-## Getting Started
-
-👉 **New to tpo?** Start with the [getting-started tutorial](docs/tutorial-getting-started.md) — walk through discovery, review, and merge in ~15 minutes.
-
-### Installation
+For project-local Codex/agents setup:
 
 ```bash
-uv sync
+tpo skills install --scope project --target codex
 ```
 
-## Run
+Skill targets:
 
-### CLI Commands
+| Target | Installs to |
+|---|---|
+| `codex` | `.agents/skills` convention |
+| `claude` | `.claude/skills` convention |
+| `all` | both conventions |
 
-Run a single pipeline tick (scans all active projects, select a TODO, register kanban phases, observe the circuit breaker):
-```bash
-uv run tpo tick
-```
+## Core workflows
 
-Approve and ship a ready TODO (runs deterministic guards, bumps version, squash-merges to main, completes the ship gate):
-```bash
-uv run tpo approve myproject --todo TODO-5
-```
-
-Recover the TODO ID counter cache from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files:
-```bash
-uv run tpo recover-counter <project>
-```
-
-Write the default pipeline execution contract for a project (idempotent — run again with `--force` to regenerate after editing `phases.yaml`). Use `--assignee` to set the Hermes profile for kanban tasks, and `--profile` to choose a pipeline skill-set (default: `gstack`):
-```bash
-uv run tpo init <project>
-uv run tpo init <project> --force
-uv run tpo init <project> --assignee pipeline
-uv run tpo init <project> --profile agent-skills
-```
-
-Install the bundled pipeline Hermes profile for unattended kanban execution:
-```bash
-uv run tpo install-profile
-uv run tpo install-profile --force  # reinstall after SOUL.md changes
-```
-
-Verify a project's pipeline execution contract against its configured profile's phases (exit 0 clean, 1 drift, 2 missing/invalid contract or profile):
-```bash
-uv run tpo doctor <project>
-```
-
-Global flags available on all subcommands:
-```bash
-uv run tpo --verbose tick   # increased log detail (selection results, lock state)
-uv run tpo --debug tick     # full debug logging (agent call summaries, circuit breaker transitions)
-```
-
-### Automated Ticks
-
-The pipeline is driven by Hermes cron, not system crontab. The Hermes CLI
-manages the tick schedule; the gateway service adjusts the interval
-automatically (normal 5-minute ticks, backoff after repeated
-no-progress ticks):
-
-```bash
-hermes cron set pipeline-tick '*/5 * * * *'
-```
-
-See [docs/hermes-state-machine.md](docs/hermes-state-machine.md) for the
-tick lifecycle.
-
-## Configuration
-
-Use the global config file for machine-level defaults, including the project
-scan directory:
+Configure the project scan directory:
 
 ```bash
 tpo config init
 tpo config set projects_dir ~/my-projects
-tpo config get projects_dir
-tpo config path
 ```
 
-`tpo config init` creates a config file with active default values. The default
-config path is `${XDG_CONFIG_DIR:-~/.config}/tpo/config.yaml`.
-For isolated tests or one-off runs, `TPO_CONFIG_FILE=/path/to/config.yaml`
-points `tpo` at a specific config file. Individual `PIPELINE_*` environment
-variables do not override config entries.
+Start a new project with no `TODOS.md`:
 
-Runtime environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TPO_CONFIG_FILE` | unset | Path to an alternate complete config file |
-
-Example:
 ```bash
-tpo config set projects_dir ~/my-projects
-hermes login  # authenticate with your provider
-hermes cron set pipeline-tick '*/5 * * * *'  # start the tick loop
+cd ~/my-projects/my-project
+todos-manager --init
+todos-manager --add
 ```
 
-### TOML overlay (`.hermes/config.toml`)
+Adopt an existing hand-written `TODOS.md`:
 
-Selection model and circuit-breaker thresholds are tunable via an optional TOML
-overlay at `.hermes/config.toml`. Unset keys fall back to defaults in
-`hermes_pipeline.config`.
-
-```toml
-[selection]
-model = "claude-opus-4-7"          # pinned model id
-max_tokens = 4000
-auto_execute = false                # false = shadow mode (decide but don't run)
-prompt_path = ".hermes/prompts/selection.md"
-expected_prompt_sha = "abc123..."  # if set, mismatch aborts the tick + alerts
-
-[circuit_breaker]
-no_progress_threshold = 3           # consecutive picked=None ticks before Slack alert
-alert_dedup_hours = 24
-max_phase_timeout_min = 120
-max_tick_duration_min = 10
+```bash
+cd ~/my-projects/my-project
+todos-manager --convert
+todos-manager --audit
 ```
 
-See [docs/hermes-state-machine.md](docs/hermes-state-machine.md) for the
-state transitions these settings gate, and the docstrings in
-`hermes_pipeline/config.py` for the authoritative field
-list.
+Use `todos-manager --revise` for individual entries that need stronger fields.
 
-### Pipeline execution contract (`.hermes/pipeline.toml`)
+Write or verify the pipeline contract for an existing project:
 
-Each project declares the assignee and tool capabilities its phases require in
-a versioned contract at `.hermes/pipeline.toml`. Run `tpo init
-<project>` once to write the default:
-
-```toml
-schema_version = 1
-assignee = "default"
-capabilities = ["Bash", "Edit", "Read", "Write"]
+```bash
+tpo init my-project
+tpo doctor my-project
 ```
 
-- `schema_version` — bumped whenever the contract's field set changes. A tick
-  against a stale version fails closed with a remediation message instead of
-  silently running with mismatched settings.
-- `assignee` — passed as `--assignee` when registering each phase's kanban task.
-- `capabilities` — the tool set phases are allowed to use. `tpo
-  doctor <project>` cross-checks this against the `tools` each phase in
-  `phases.yaml` declares and reports drift.
+Run and ship:
 
-Projects that have never run `init` tick with the defaults above — the
-contract is additive, not a migration requirement. A project's tick only
-blocks when a contract *exists* but is stale or under-declares capabilities.
+```bash
+tpo tick
+tpo tick my-project
+tpo approve my-project --todo TODO-5
+```
 
-## Troubleshooting
+## Subcommands
 
-**"command not found: uv"**
-- Uv is not installed or not in PATH
-- **Fix:** Run the installation command from [Requirements](#requirements)
+| Subcommand | Purpose |
+|---|---|
+| `tick` | Discover configured projects, select eligible TODOs, and register pipeline phases. |
+| `approve` | Ship a reviewed TODO through the approval/merge workflow. |
+| `init` | Write `.hermes/pipeline.toml` for an existing project. |
+| `doctor` | Verify a project's pipeline contract against the selected profile. |
+| `recover-counter` | Rebuild legacy TODO counter compatibility state from tracked TODO IDs. |
+| `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
+| `skills` | Install or remove the bundled `todos-manager` skill. |
+| `config` | Read and write global `tpo` configuration. |
+| `test` | Run the mock integration test harness. |
 
-**"No pending records"**
-- No TODOs are ready for review yet
-- Check `tpo config get projects_dir` points at a directory containing projects with `TODOS.md` files
-- Ensure the Hermes cron tick is running: `hermes cron list`
+See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detailed behavior.
 
-## Architecture
+## Documentation
 
-The package is organized into lanes:
+### Start here
 
-- **Lane A**: Hermes-agent selection (`decision/` — LLM-driven TODO pick via `hermes chat -q`, SHA-pinned prompt, immutable decision records + outcome sidecars). The deterministic `selection.py` was retired in v0.2.
-- **Lane B**: State management (locks, checkpoints, ready-for-review records, atomic tmp+rename writes)
-- **Lane C**: Kanban integration (kanban-as-scheduler — phases as kanban tasks with `--parent` dependency chains; see [reference-kanban-as-scheduler.md](docs/reference-kanban-as-scheduler.md))
-- **Lane D**: Runner and phases (`phases.py`, `tick.py` atomic-mkdir tick lock)
-- **Lane D.5**: Code review phase (`review_phase.py` — pre-review snapshot, hermes `/review` subprocess, post-review pytest + deterministic commit/restore, machine-verified outcomes)
-- **Lane E**: Merge orchestration (Phase 9)
-- **Lane F**: CLI, watcher, status, and installation (this lane; includes `project_config.py` for multi-project scanning and `state_migration.py` for per-project state)
-- **Lane G**: Hermes adapter (`hermes_adapter.py` — wraps `hermes chat -q` for all LLM calls, replaces direct Anthropic SDK usage)
+| Doc | Type | When to read |
+|---|---|---|
+| [Getting-started tutorial](docs/tutorial-getting-started.md) | Tutorial | First time using `tpo` end-to-end |
+| [CLI reference](docs/reference-cli.md) | Reference | All subcommands, arguments, exit codes, and environment variables |
 
-State transitions and the file layout under `.hermes/` (decisions, outcomes, phase_started, tick.lock, ready_for_review) are documented in [docs/hermes-state-machine.md](docs/hermes-state-machine.md). The selection seat contract lives in [hermes_pipeline/decision/README.md](hermes_pipeline/decision/README.md). See `docs/gstack/hermes-pipeline/design-plan.md` for the full design specification.
+### TODO management
+
+| Doc | Type | When to read |
+|---|---|---|
+| [TODOS Manager skill](hermes_pipeline/data/skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and subcommands |
+| [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step TODO lifecycle walkthrough |
+| [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using `--init`, `--add`, `--convert`, `--audit`, `--archive`, `--list`, `--revise` |
+
+### Pipeline setup and operation
+
+| Doc | Type | When to read |
+|---|---|---|
+| [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `tpo tick` for iterative development |
+| [Approve and ship a TODO](docs/howto-approve-and-ship.md) | How-to | Running `tpo approve` |
+| [Set up the pipeline profile](docs/howto-pipeline-profile.md) | How-to | Installing the dedicated pipeline Hermes profile |
+| [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
+| [Handle phase 5 review outcomes](docs/howto-review-outcomes.md) | How-to | Inspecting review artifacts and reverted/timed-out reviews |
+
+### Multi-project configuration
+
+| Doc | Type | When to read |
+|---|---|---|
+| [Configure `.hermes/config.toml`](docs/howto-config-toml.md) | How-to | Tuning selection model or circuit-breaker thresholds |
+| [Set up multiple projects](docs/howto-multi-project-setup.md) | How-to | Configuring per-project settings and the scan loop |
+| [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
+| [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Global lock, migration decisions, and trade-offs |
+| [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
+
+### Contracts, profiles, and adapters
+
+| Doc | Type | When to read |
+|---|---|---|
+| [Configure the pipeline contract](docs/howto-pipeline-contract.md) | How-to | Editing assignee, fixing capability drift, schema migration |
+| [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Design rationale for versioned contracts and capability gates |
+| [Use the agent-skills profile](docs/howto-agent-skills-profile.md) | How-to | Selecting `gstack` or `agent-skills` pipeline phases |
+| [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` routes LLM calls |
+| [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
+
+### Testing and harnesses
+
+| Doc | Type | When to read |
+|---|---|---|
+| [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
+| [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for `todos-manager` |
+| [Skill test environment quickstart](docs/howto-skill-test-environment.md) | How-to | Adding and maintaining skill harness tests |
+| [Skill test harness API](docs/reference-skill-test-harness.md) | Reference | Complete API for the skill test environment |
+| [Why the skill test harness is pure-Python](docs/explanation-skill-test-harness-design.md) | Explanation | Golden-file harness design rationale |
+| [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `tpo test` against mock project data |
+| [Harness production-code coverage checklist](docs/checklist-harness-production-coverage.md) | Reference | Acceptance criteria for production-code path reuse |
+
+### Architecture and reference
+
+| Doc | Type | When to read |
+|---|---|---|
+| [Architecture overview](docs/ARCHITECTURE.md) | Explanation | Understanding lane structure, data flow, and phase execution |
+| [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
+| [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Historical architecture and design plan |
+| [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `tpo tick` uses kanban for phase state and ordering |
+| [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works |
+| [Circuit breaker](docs/explanation-circuit-breaker.md) | Explanation | How no-progress tracking works and why it alerts |
+| [Decision module API](docs/reference-decision-api.md) | Reference | Selection schemas, outcome sidecars, and plan-gate types |
 
 ## Contributing
 
-Found a bug? Have a feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orchestrator/issues).
+Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orchestrator/issues).
 
 ## License
 
