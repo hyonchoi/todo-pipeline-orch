@@ -8,6 +8,12 @@ created blocked and detached from the parent chain. Kanban status queries (`get_
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
+For the default `gstack` profile, completion of the terminal Phase 8 task means
+the branch was handed to a PR, not merged. `tpo tick` reads
+`.hermes/pipeline_branch.txt` and skips new selection while that PR is open,
+closed without merge, or temporarily unverifiable. Once GitHub reports the PR as
+`MERGED`, the next tick may select new work.
+
 ## Types
 
 ### `PhaseStatus`
@@ -150,6 +156,9 @@ tick starts
 [all_phases_complete] -- checks if all kanban tasks are done/failed
     |
     v
+[PR handoff check] -- skips selection while recorded branch PR is not merged
+    |
+    v
 tick lock released (if complete) / skip (if in-flight)
 ```
 
@@ -187,7 +196,7 @@ register_todo_phases(
 | `tick_id` | `str` | — | ULID tick ID. Used as part of `--idempotency-key` for dedup. |
 | `board_slug` | `str` | — | Kanban board slug (project slug). Passed to `hermes kanban` commands. |
 | `project_dir` | `str \| Path` | — | Project directory. Passed as `--workspace` to `hermes kanban`. |
-| `phases_path` | `str \| Path \| None` | Bundled package data | Path to `phases.yaml`. Defaults to the in-package copy resolved via `importlib.resources` (`hermes_pipeline/data/phases.yaml`), so it works from an installed wheel. |
+| `phases_path` | `str \| Path \| None` | Bundled package data | Path to `phases.yaml`. Defaults to the active profile's in-package copy resolved via `importlib.resources` (`hermes_pipeline/data/phase-profiles/gstack/phases.yaml` for the default profile), so it works from an installed wheel. |
 
 **Returns:** List of created task IDs in phase order.
 

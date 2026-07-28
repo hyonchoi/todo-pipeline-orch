@@ -158,6 +158,9 @@ gh pr status
 ```
 
 No automatic merge is performed by `tpo tick`.
+Later ticks leave the project idle while that PR is open, closed without merge,
+or temporarily unverifiable. After the PR is merged, the next tick can select
+new TODO work.
 
 ## Step 9: Automate ticks later
 

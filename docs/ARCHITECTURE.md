@@ -61,6 +61,11 @@ hermes_pipeline/
 ### Lane E: Finish Branch
 Phase 8 runs `/ship`, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the default gstack phase profile.
 
+Phase 8 records the work branch in `.hermes/pipeline_branch.txt`. After the
+terminal kanban task completes, the next `tpo tick` checks that branch's PR and
+keeps the project in handoff until GitHub reports the PR as merged. This prevents
+cron ticks from stacking the next TODO on top of an open PR branch.
+
 ### Lane F: CLI, Multi-Project, State Migration
 `cli.py`, `project_config.py`, `state_migration.py` — User-facing commands, multi-project scanning, per-project state migration. (`watcher.py` and `status.py` were removed in v0.5.6 — the `__main__.py` event loop and `cli.py` subcommands cover their roles.)
 
@@ -103,6 +108,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ├── decisions/                 # Immutable selection decisions (write-once)
 ├── outcomes/                  # Phase completion/failure sidecars
 ├── ready_for_review/          # Legacy ship-gate sidecars
+├── pipeline_branch.txt        # Branch currently waiting at PR handoff
 ├── phase_started/             # In-flight phase markers
 ├── tick.lock/                 # Global tick lock (atomic mkdir)
 ├── todo_id_counter            # Compatibility cache for tracked TODO IDs

@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.6.5] - 2026-07-28
+## [0.6.6] - 2026-07-28
 
 ### Added
 - `tpo tick` now uses the bundled selection prompt by default, so new projects can run without creating `.hermes/prompts/selection.md`.
@@ -15,12 +15,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Missing pipeline contracts now fall back to the dedicated `pipeline` assignee and warn when that Hermes profile is unavailable.
 - Per-project TOML overlays now preserve the project-local state directory used during selection.
 - Kanban gate phases now stay manually blocked instead of inheriting parent completion.
-- The ship phase profile now keeps `/ship` responsible for completing release work.
+- The default `gstack` profile now ends at Phase 8 PR handoff: `/ship` opens or updates a PR and does not merge it.
 
 ### Fixed
 - Selection parsing now handles warning-prefixed JSON, quoted `"null"` picks, and fenced final answers without letting earlier example JSON override the real decision.
 - Picked-none ticks now log the selection rationale so operators can see why the circuit breaker observed no progress.
 - Eval docs and runner now use the bundled selection prompt by default while still allowing explicit prompt overrides.
+- Ticks now skip new TODO selection while the recorded PR handoff branch is open, closed without merge, or cannot be verified as merged.
+- Legacy/custom `phase_9_ship` profiles still create ship sidecars before the in-flight early return, so `tpo approve` can finish old gate-based ticks.
 
 ## [0.6.4] - 2026-07-28
 

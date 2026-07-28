@@ -96,6 +96,14 @@ You'll see JSONL entries like:
 See the [outcome types table](reference-kanban-as-scheduler.md#observe_outcomes)
 for all possible outcomes, including the new review outcomes: `review_clean`, `review_reverted_test_failure`, `review_timeout`, and `review_skipped_no_diff`.
 
+### 4. Inspect PR handoff
+
+The default `gstack` profile ends at Phase 8. Phase 8 runs `/ship`, pushes the
+branch, opens or updates a PR, and does not merge it. The pipeline records the
+branch in `<project>/.hermes/pipeline_branch.txt`; later ticks check that PR and
+skip new selection while it is open, closed without merge, or temporarily
+unverifiable.
+
 ### 5. Check the circuit breaker state
 
 Circuit breaker state is per-project:
@@ -126,9 +134,12 @@ in `~/.hermes/`.
 ## Troubleshooting
 
 **"tick already in flight, skipping".**
-A prior tick's kanban tasks are still running or ready. Check the board:
-`hermes kanban list --tenant demo`. If tasks are stuck in `running`,
-manually clear them via `hermes kanban update <project> <task_id> --status done`.
+A prior tick's kanban tasks are still running or ready, or a completed Phase 8
+handoff is waiting on a PR that is open, closed without merge, or temporarily
+unverifiable. Check the board with
+`hermes kanban list --tenant demo` and check the PR named by
+`.hermes/pipeline_branch.txt`. If tasks are stuck in `running`, manually clear
+them via `hermes kanban update <project> <task_id> --status done`.
 
 **"Error: tick.lock held by pid X"**.
 The tick lock is held. If the PID is alive (within `max_tick_duration_min` —
