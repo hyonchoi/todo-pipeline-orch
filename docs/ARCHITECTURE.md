@@ -39,7 +39,7 @@ hermes_pipeline/
 ├── contract.py               # Pipeline execution contract (schema, load, validate, capabilities)
 ├── hermes_adapter.py         # Hermes CLI wrapper (replaces direct Anthropic SDK)
 ├── kanban.py                 # Kanban adapter (hermes kanban commands)
-├── kanban_tasks.py           # Task registration with --parent chains
+├── kanban_tasks.py           # Task registration with --parent chains and manual gates
 ├── ship.py                   # Phase 9 ship gate: version bump, CI-green gate, squash merge
 ├── outcomes.py               # Outcome sidecar writing/reading
 ├── phases.py                 # Phase definitions + hermes subprocess invocation
@@ -53,7 +53,7 @@ hermes_pipeline/
 `state.py` — Locks, checkpoints, ready-for-review records, atomic tmp+rename writes. All state files are written atomically to prevent partial reads.
 
 ### Lane C: Kanban Integration
-`kanban.py`, `kanban_tasks.py` — Phases as kanban tasks with `--parent` dependency chains. Kanban status queries drive the tick loop.
+`kanban.py`, `kanban_tasks.py` — Executable phases as kanban tasks with `--parent` dependency chains; human gates as detached blocked tasks. Kanban status queries drive the tick loop.
 
 ### Lane D: Runner & Phases
 `phases.py`, `tick.py` — Phase execution via Hermes subprocess. Atomic-mkdir tick lock prevents duplicate ticks. Phase 5 (code review) is a plain kanban-dispatched phase like any other — the code-owned pre/post review lifecycle (`review_phase.py`) was removed in v0.5.6 as dead code; the prompt instructs `/review` directly with no code-side snapshot/restore machinery.
@@ -71,7 +71,8 @@ hermes_pipeline/
 
 Phase execution is fully kanban-dispatched — there is no in-process Python loop that invokes
 Hermes per phase. `kanban_tasks.py`'s `register_todo_phases` builds one kanban task per phase
-(`--parent` chained) with a rendered prompt as the task body, and hands it off to `hermes kanban
+with a rendered prompt as the task body, chains executable phases with `--parent`, creates gate
+phases as detached blocked tasks, and hands them off to `hermes kanban
 create`; the actual Hermes agent run happens outside this codebase, dispatched by the kanban
 system.
 
@@ -83,9 +84,9 @@ register_todo_phases(todo_id, ...)
     +-- for each phase:
     |       _render_phase_prompt(phase.prompt, todo_id, tick_id, project_slug)
     |       |
-    |       +-- hermes kanban create --tenant <slug> --parent <prev_task_id> --body <rendered prompt>
+    |       +-- hermes kanban create --tenant <slug> [--parent <prev_task_id>] --body <rendered prompt>
     |
-    +-- task_ids[] -- returned for --parent chaining of the next phase
+    +-- task_ids[] -- returned for --parent chaining of the next executable phase
 ```
 
 Phase 5 (code review) is not special-cased in code — its prompt instructs the agent to run
@@ -130,7 +131,7 @@ All pipeline state lives under `<project>/.hermes/`:
 
 ## Key Design Decisions
 
-1. **Kanban as scheduler** — Phases are kanban tasks with `--parent` chains. The orchestrator doesn't manage phase ordering.
+1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent` chains. Human gates are detached blocked tasks, so they stay manual.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review`, and the agent owns the review lifecycle end-to-end.
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.

@@ -65,13 +65,16 @@ hermes kanban list --tenant demo
 
 You should see the phases with statuses:
 - `running` — the first phase in the chain is executing
-- `ready` — subsequent phases, blocked on `--parent` completion
+- `ready` — subsequent executable phases, blocked on `--parent` completion
+- `blocked` — human gate phases, which stay blocked until manual approval
 
 The `--parent` chain means phases execute sequentially through the kanban
 board. When phase 2 completes, phase 4 transitions from `ready` to `running`
 automatically — the orchestrator doesn't need to manage the handoff. When
 phase 4 completes, phase 5 (`phase_5_review`) transitions to `running`, and
-when phase 5 completes, phase 6.1 (CSO) transitions to `running`.
+when phase 5 completes, phase 6.1 (CSO) transitions to `running`. Human gate
+phases are not parent-chained, so they cannot be auto-unblocked by the kanban
+scheduler.
 
 See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
 

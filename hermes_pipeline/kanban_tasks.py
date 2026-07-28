@@ -127,8 +127,10 @@ def register_todo_phases(
             "--json",
         ]
 
-        # Add --parent for phases after the first
-        if phase_idx > 0:
+        # Add --parent for executable phases after the first. Gate phases must
+        # remain manually blocked; Hermes unblocks parented children when their
+        # parent completes, which would bypass the human review gate.
+        if phase_idx > 0 and not getattr(phase, "gate", False):
             cmd.extend(["--parent", task_ids[phase_idx - 1]])
 
         # Gate phases are pure markers: created blocked, never dispatched to

@@ -257,6 +257,7 @@ class TestRegisterTodoPhases:
         assert "--initial-status" in gate_cmd
         assert gate_cmd[gate_cmd.index("--initial-status") + 1] == "blocked"
         assert "--goal" not in gate_cmd
+        assert "--parent" not in gate_cmd
 
         # Normal phase (index 0) should have --goal, no --initial-status
         phase8_cmd = mock_run.call_args_list[0][0][0]

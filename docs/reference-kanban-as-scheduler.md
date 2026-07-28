@@ -2,8 +2,9 @@
 
 `tpo tick` uses the Hermes kanban board as the source of truth for
 pipeline phase state. Instead of writing internal state files tracking which
-phase is active, phases are registered as kanban tasks with `--parent`
-dependency chains. Kanban status queries (`get_todo_kanban_status`,
+phase is active, executable phases are registered as kanban tasks with
+`--parent` dependency chains. Human gate phases are created blocked and
+detached from the parent chain. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
@@ -138,6 +139,8 @@ tick starts
 [register_todo_phases] -- creates kanban tasks:
     phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_5_review  <--parent--  phase_6_1_cso
     (running)                  (ready)                  (ready)                  (ready)
+    phase_9_ship
+    (blocked, no parent; manual approval only)
     |
     v  (phase_2 completes -> phase_4 transitions to running)
 [observe_outcomes] -- reads kanban status map, writes JSONL to .hermes/outcomes/
@@ -155,8 +158,10 @@ tick lock released (if complete) / skip (if in-flight)
 **Why kanban instead of internal state?**
 - The kanban board is already the operator's UI. Phase transitions are visible
   from the board, not hidden in `.hermes/phase_started/` files.
-- The `--parent` dependency chain means kanban enforces sequential phase
-  execution — the orchestrator doesn't need to manage phase ordering.
+- The `--parent` dependency chain means kanban enforces sequential executable
+  phase execution — the orchestrator doesn't need to manage phase ordering.
+- Human gate phases are not parented because parent completion would otherwise
+  auto-unblock the gate.
 - `ready` status on the board means "blocked on parent" without the
   orchestrator needing to track inter-phase dependencies.
 
@@ -164,8 +169,8 @@ tick lock released (if complete) / skip (if in-flight)
 
 ### `register_todo_phases`
 
-Registers phases as kanban tasks with `--parent` dependency chains and
-`--idempotency-key` for dedup.
+Registers executable phases as kanban tasks with `--parent` dependency chains,
+and gate phases as detached blocked tasks, with `--idempotency-key` for dedup.
 
 ```python
 register_todo_phases(
@@ -197,7 +202,8 @@ archived before raising.
    - `--tenant <board_slug>` — target board
    - `--workspace <project_dir>` — project context
    - `--idempotency-key <tick_id>:<phase_key>` — dedup key (e.g., `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`)
-   - `--parent <prev_task_id>` — dependency chain (second phase depends on first, etc.)
+   - `--parent <prev_task_id>` — dependency chain for executable phases only
+     (gate phases omit it so they stay manually blocked)
    - `--body <json_header>\n<phase_prompt>` — task body with JSON header on first line
 3. The JSON header: `{"phase_key":"phase_2_autoplan","project_slug":"demo","tick_id":"01HA","todo_id":"TODO-10"}`
 4. If a task creation fails mid-registration, already-created tasks are archived
@@ -225,7 +231,8 @@ get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]
 
 **Kanban statuses:** `running`, `ready`, `done`, `failed`, `archived`.
 - `running` — phase is actively executing
-- `ready` — phase is queued (blocked on `--parent` completion)
+- `ready` — executable phase is queued (blocked on `--parent` completion)
+- `blocked` — human gate phase is waiting for manual approval
 - `done` — phase completed successfully
 - `failed` — phase execution failed
 - `archived` — phase was archived mid-registration (abandoned)
