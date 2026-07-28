@@ -554,7 +554,7 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, b
 
     try:
         result = _cli_sp.run(
-            ["gh", "pr", "view", work_branch, "--json", "state"],
+            ["gh", "pr", "view", work_branch, "--json", "state,baseRefName"],
             cwd=str(project_dir),
             capture_output=True,
             text=True,
@@ -580,7 +580,8 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, b
         return (True, True)
 
     try:
-        state = (json.loads(result.stdout).get("state") or "").upper()
+        view = json.loads(result.stdout)
+        state = (view.get("state") or "").upper()
     except json.JSONDecodeError:
         log.warning(
             "project has PR handoff branch %s but gh pr view returned "
@@ -590,7 +591,10 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, b
         return (True, True)
 
     if state == "MERGED":
-        return (False, False)
+        base_branch = view.get("baseRefName") or "main"
+        if _sync_project_to_base_after_handoff(project_dir, base_branch):
+            return (False, False)
+        return (True, True)
     if state == "OPEN":
         return (True, False)
     log.warning(
@@ -599,6 +603,62 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, b
         state or "unknown",
     )
     return (True, True)
+
+
+def _sync_project_to_base_after_handoff(project_dir: Path, base_branch: str) -> bool:
+    """Move a clean project checkout to the merged PR's updated base branch."""
+    try:
+        status = _cli_sp.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (FileNotFoundError, _cli_sp.TimeoutExpired) as e:
+        log.warning("cannot verify project checkout cleanliness after PR handoff: %s", e)
+        return False
+
+    if status.returncode != 0:
+        log.warning(
+            "cannot verify project checkout cleanliness after PR handoff: %s",
+            status.stderr.strip()[:200],
+        )
+        return False
+    if status.stdout.strip():
+        log.warning(
+            "project checkout has uncommitted changes after PR handoff; "
+            "leaving project in handoff"
+        )
+        return False
+
+    commands = [
+        ["git", "fetch", "origin", base_branch],
+        ["git", "checkout", base_branch],
+        ["git", "merge", "--ff-only", f"origin/{base_branch}"],
+    ]
+    for cmd in commands:
+        try:
+            result = _cli_sp.run(
+                cmd,
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (FileNotFoundError, _cli_sp.TimeoutExpired) as e:
+            log.warning("failed to sync project checkout after PR handoff: %s", e)
+            return False
+        if result.returncode != 0:
+            log.warning(
+                "failed to sync project checkout after PR handoff (%s): %s",
+                " ".join(cmd),
+                result.stderr.strip()[:200],
+            )
+            return False
+    return True
 
 
 def _status_map_has_successful_pr_handoff(status_map: dict[str, str]) -> bool:
