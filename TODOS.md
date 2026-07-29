@@ -2,7 +2,7 @@
 
 ## Metadata
 
-NEXT_TODO_ID: 39
+NEXT_TODO_ID: 40
 
 ## Entry Schema
 
@@ -61,3 +61,12 @@ NEXT_TODO_ID: 39
   - **Reference:** docs/superpowers/specs/2026-07-28-todo-36-readme-refresh-design.md
   - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `docs/reorganize-readme-docs-table`, Test Coverage `not-required`, Security Review `not-required`, UI Review `not-required`
   - **Completed:** v0.6.4 (2026-07-28)
+
+- [ ] **TODO-39: Revise selection prompt for plan-gated worktree execution** — Require Plan-backed actionable TODOs and start pipeline work in `.worktrees/`
+  - **What:** Update the selection and phase-start behavior so only TODO entries with a `Plan:` field are considered actionable, and selected work starts from a linked worktree under `.worktrees/` rather than tracking only a branch name. Cover the selection prompt, prompt SHA expectations, worktree/branch handoff logic, and tests around selected vs. blocked TODOs.
+  - **Why:** Selection can currently pick under-specified TODO entries, and branch-only handoff loses the concrete workspace context needed for reliable pipeline execution.
+  - **Pros:** Reduces accidental execution of unplanned work, makes pipeline handoff reproducible, and aligns agent execution with linked worktree workflows.
+  - **Cons:** Requires a schema/prompt contract change and may block existing TODOs until they are revised with `Plan:` fields.
+  - **Context:** Relevant files include `hermes_pipeline/data/prompts/selection.md`, `hermes_pipeline/data/phase-profiles/gstack/phases.yaml`, `hermes_pipeline/kanban_tasks.py`, `hermes_pipeline/cli.py`, `tests/test_decision_agent.py`, and `tests/eval/selection/`.
+  - **Assumptions:** `Plan:` is intended as a new actionable field distinct from the current `Spec:` field, and migration/backfill of existing TODOs can be handled as part of this change or a follow-up.
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/plan-gated-worktree-selection`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
