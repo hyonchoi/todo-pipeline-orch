@@ -269,6 +269,70 @@ def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mock
     assert run.call_args_list[2].args[0][-1] == "t_deadbeef"
 
 
+@pytest.mark.parametrize(
+    "recovery_failure",
+    [
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        OSError("hermes unavailable"),
+    ],
+)
+def test_create_prepared_resolves_task_from_snapshot_when_recovery_is_uncertain(
+    tmp_path, mocker, recovery_failure
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask(
+            "phase_1",
+            "One",
+            '{"phase_key": "phase_1", "tick_id": "01CLIENT"}\nbody',
+            "Read",
+            5,
+            False,
+        )
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        recovery_failure,
+        mocker.Mock(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "id": "t_deadbeef",
+                        "body": prepared[0].body,
+                        "status": "ready",
+                    }
+                ]
+            ),
+            stderr="",
+        ),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_1.*Hermes process"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[2].args[0] == [
+        "hermes",
+        "kanban",
+        "list",
+        "--tenant",
+        "demo",
+        "--json",
+    ]
+    assert run.call_args_list[3].args[0][-1] == "t_deadbeef"
+
+
 def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
     tmp_path, mocker
 ):
@@ -511,6 +575,8 @@ class TestRegisterTodoPhases:
             mocker.MagicMock(returncode=1, stdout="", stderr="error"),
             # Idempotent recovery retry also fails
             mocker.MagicMock(returncode=1, stdout="", stderr="error"),
+            # Snapshot lookup confirms no second task was created
+            mocker.MagicMock(returncode=0, stdout="[]", stderr=""),
             # Archive call
             mocker.MagicMock(returncode=0, stdout=""),
         ]
@@ -542,7 +608,12 @@ class TestRegisterTodoPhases:
             )
 
         # Verify archive was called for t_00000001
-        archive_call = mock_run.call_args_list[3]
+        assert mock_run.call_args_list[3].args[0][:3] == [
+            "hermes",
+            "kanban",
+            "list",
+        ]
+        archive_call = mock_run.call_args_list[4]
         archive_args = archive_call[0][0]
         assert "kanban" in archive_args
         assert "archive" in archive_args

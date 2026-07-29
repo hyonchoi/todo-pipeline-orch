@@ -89,7 +89,40 @@ def _parse_task_id(stdout: str) -> str | None:
     return task_id
 
 
-def _recover_uncertain_task_id(cmd: list[str]) -> str | None:
+def _find_task_id_in_snapshot(
+    *, tenant: str, tick_id: str, phase_key: str
+) -> str | None:
+    """Resolve a task after an inconclusive idempotent create retry."""
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "list", "--tenant", tenant, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=HERMES_COMMAND_TIMEOUT,
+        )
+        if result.returncode != 0:
+            return None
+        snapshot = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return None
+
+    tasks = snapshot if isinstance(snapshot, list) else snapshot.get("tasks", [])
+    for task in tasks:
+        try:
+            header = json.loads(task.get("body", "").split("\n", 1)[0])
+        except (AttributeError, json.JSONDecodeError):
+            continue
+        if (
+            header.get("tick_id") == tick_id
+            and header.get("phase_key") == phase_key
+        ):
+            return _parse_task_id(json.dumps({"id": task.get("id")}))
+    return None
+
+
+def _recover_uncertain_task_id(
+    cmd: list[str], *, tenant: str, tick_id: str, phase_key: str
+) -> str | None:
     """Repeat an idempotent create once to recover a remotely-created task ID."""
     try:
         result = subprocess.run(
@@ -99,16 +132,36 @@ def _recover_uncertain_task_id(cmd: list[str]) -> str | None:
             timeout=KANBAN_QUERY_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, OSError):
-        return None
+        return _find_task_id_in_snapshot(
+            tenant=tenant,
+            tick_id=tick_id,
+            phase_key=phase_key,
+        )
     if result.returncode != 0:
-        return None
-    return _parse_task_id(result.stdout)
+        task_id = None
+    else:
+        task_id = _parse_task_id(result.stdout)
+    return task_id or _find_task_id_in_snapshot(
+        tenant=tenant,
+        tick_id=tick_id,
+        phase_key=phase_key,
+    )
 
 
 def _recover_and_archive_uncertain_task(
-    cmd: list[str], task_ids: list[str]
+    cmd: list[str],
+    task_ids: list[str],
+    *,
+    tenant: str,
+    tick_id: str,
+    phase_key: str,
 ) -> None:
-    uncertain_task_id = _recover_uncertain_task_id(cmd)
+    uncertain_task_id = _recover_uncertain_task_id(
+        cmd,
+        tenant=tenant,
+        tick_id=tick_id,
+        phase_key=phase_key,
+    )
     cleanup_ids = [
         *task_ids,
         *([uncertain_task_id] if uncertain_task_id is not None else []),
@@ -234,7 +287,13 @@ def create_prepared_todo_phases(
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             if isinstance(exc, subprocess.TimeoutExpired):
-                _recover_and_archive_uncertain_task(cmd, task_ids)
+                _recover_and_archive_uncertain_task(
+                    cmd,
+                    task_ids,
+                    tenant=board_slug,
+                    tick_id=tick_id,
+                    phase_key=phase.phase_key,
+                )
             else:
                 _archive_tasks(task_ids)
             raise RuntimeError(
@@ -243,7 +302,13 @@ def create_prepared_todo_phases(
             ) from exc
         if result.returncode != 0:
             # A nonzero response can still follow a successful remote mutation.
-            _recover_and_archive_uncertain_task(cmd, task_ids)
+            _recover_and_archive_uncertain_task(
+                cmd,
+                task_ids,
+                tenant=board_slug,
+                tick_id=tick_id,
+                phase_key=phase.phase_key,
+            )
             log.error(
                 "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
                 phase.phase_key,
@@ -262,7 +327,13 @@ def create_prepared_todo_phases(
         # form before it can become the next phase's --parent argument.
         task_id = _parse_task_id(result.stdout)
         if task_id is None:
-            _recover_and_archive_uncertain_task(cmd, task_ids)
+            _recover_and_archive_uncertain_task(
+                cmd,
+                task_ids,
+                tenant=board_slug,
+                tick_id=tick_id,
+                phase_key=phase.phase_key,
+            )
             idempotency_key = f"{tick_id}:{phase.phase_key}"
             raise RuntimeError(
                 f"{phase.phase_key}: failed to parse valid task ID; "
