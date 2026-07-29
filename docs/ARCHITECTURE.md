@@ -11,7 +11,7 @@ Tick Loop (Hermes cron or manual)
 [Selection] -- Hermes agent picks a TODO from TODOS.md
     |
     v
-[Kanban Registration] -- Create phases as kanban tasks with --parent chains
+[Kanban Registration] -- Build a complete chain behind a registration barrier
     |
     v
 Phase 2: Autoplan --> Phase 3: Writing Plan --> Phase 4: Development
@@ -39,7 +39,7 @@ hermes_pipeline/
 ├── contract.py               # Pipeline execution contract (schema, load, validate, capabilities)
 ├── hermes_adapter.py         # Hermes CLI wrapper (replaces direct Anthropic SDK)
 ├── kanban.py                 # Kanban adapter (hermes kanban commands)
-├── kanban_tasks.py           # Task registration with --parent chains and manual gates
+├── kanban_tasks.py           # Durable task registration, dependency chains, manual gates
 ├── ship.py                   # Legacy ship-gate helper for existing sidecars
 ├── outcomes.py               # Outcome sidecar writing/reading
 ├── phases.py                 # Phase definitions + hermes subprocess invocation
@@ -53,7 +53,11 @@ hermes_pipeline/
 `state.py` — Locks, checkpoints, ready-for-review records, atomic tmp+rename writes. All state files are written atomically to prevent partial reads.
 
 ### Lane C: Kanban Integration
-`kanban.py`, `kanban_tasks.py` — Executable phases as kanban tasks with `--parent` dependency chains; human gates as detached blocked tasks. Kanban status queries drive the tick loop.
+`kanban.py`, `kanban_tasks.py` — Executable phases as kanban tasks with `--parent`
+dependency chains; human gates as detached tasks with a sticky `needs_input`
+block. Registration creates the executable chain behind a non-spawnable barrier
+and releases it only after every task and the expected-phase sentinel are
+durable. Kanban status queries drive the tick loop.
 
 ### Lane D: Runner & Phases
 `phases.py`, `tick.py` — Phase execution via Hermes subprocess. Atomic-mkdir tick lock prevents duplicate ticks. Phase 5 (code review) is a plain kanban-dispatched phase like any other — the code-owned pre/post review lifecycle (`review_phase.py`) was removed in v0.5.6 as dead code; the rendered prompt instructs `/review` in Claude Code or `$review` in Codex, with no code-side snapshot/restore machinery.
@@ -95,8 +99,12 @@ cli._tick_project(config, contract)
     +-- _persist_tick_id() -- current_tick_id.txt + tick_started outcome
     |
     `-- create_prepared_todo_phases(...)
-            +-- hermes kanban create for each prepared body
-            `-- task_ids[] chained with --parent
+            +-- create unassigned registration barrier
+            +-- create every prepared phase behind the barrier
+            |       +-- executable tasks form a --parent chain
+            |       `-- gate tasks stay detached and receive a sticky needs_input block
+            +-- persist expected-phases sentinel
+            `-- complete barrier, making the first executable runnable
 ```
 
 `register_todo_phases` remains a compatibility wrapper that performs the prepare
@@ -148,7 +156,11 @@ All pipeline state lives under `<project>/.hermes/`:
 
 ## Key Design Decisions
 
-1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent` chains. Profiles may define detached blocked gates, but the default `gstack` profile ends at Phase 8 PR handoff.
+1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent`
+   chains. A non-spawnable registration barrier prevents partial chains from
+   running; it is completed only after the complete chain is durable. Profiles
+   may define detached gates with sticky `needs_input` blocks, but the default
+   `gstack` profile ends at Phase 8 PR handoff.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review` in Claude Code or `$review` in Codex, and the agent owns the review lifecycle end-to-end.
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.

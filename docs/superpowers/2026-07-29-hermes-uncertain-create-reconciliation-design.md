@@ -1,73 +1,118 @@
-# Hermes Uncertain Create Reconciliation Design
+# Hermes-Compatible Durable Registration Design
 
 ## Problem
 
-Hermes task creation can time out after the remote mutation succeeds. The current
-recovery path repeats the idempotent create once and then reads one task snapshot.
-If both create calls time out and the task becomes visible only after that snapshot,
-the task can remain runnable even though registration reports `failed_to_spawn`.
+Hermes task creation can time out after the remote mutation succeeds. If both
+idempotent create attempts time out and the task becomes visible only after the
+immediate snapshot, registration reports failure while a card may exist.
+Recovery must prevent that card, or any already-known parent, from becoming
+runnable before the complete registration is durable.
 
-The fix must close this late-visibility race. Merely adding more immediate retries
-or bounded polling reduces its probability but does not remove it.
+The earlier design tried to solve this with `--initial-status blocked`.
+Hermes 0.18.2 recomputes a parentless task created that way to `ready`, so the
+flag is not an executable-safety boundary. Hermes also treats an archived
+parent as a satisfied dependency, which makes parent-first cleanup unsafe.
 
-## Design
+## Verified Hermes 0.18.2 Contract
 
-Executable phase tasks are created in a non-runnable state. Registration then:
+- A parentless task created with `--initial-status blocked` becomes `ready`.
+- A `ready` task assigned to `-` is reported by
+  `hermes kanban dispatch --dry-run --json` as `skipped_nonspawnable`.
+- A child of that unassigned task remains in `todo`.
+- Completing the unassigned parent releases the child to `ready`.
+- Archiving a parent can also release its child, so cleanup must be child-first.
+- Re-archiving can print `cannot archive` while exiting zero. Current task
+  status, not archive command text or exit status alone, is the idempotent
+  cleanup truth.
 
-1. Creates the full prepared phase chain with stable idempotency keys.
-2. Persists the expected-phase sentinel after every task is known.
-3. Activates the first executable task only after registration and persistence
-   complete successfully.
+## Registration Design
 
-If a create result is uncertain, registration records enough durable information
-to reconcile the idempotency key on a later attempt. No subsequent tick may
-advance that project while unresolved task creation remains. Reconciliation looks
-up the task by tenant, tick ID, and phase key, then archives the resolved task and
-all known predecessors before clearing the durable marker.
+Registration creates one infrastructure task before any phase:
 
-The marker is atomically stored at
-`<project>/.hermes/outcomes/pending-task-create.json`; it is written before each
-remote create and cleared only after a validated task ID or confirmed cleanup.
-The same path can hold a cleanup-only record when archiving a known chain failed.
-The next tick handles either record before examining the prior tick: it archives
-the delayed or listed tasks, retains the record on any uncertainty or cleanup
-failure, and otherwise removes it. This makes the tick gate fail closed rather
-than allowing selection to race a late remote mutation.
+1. Create a registration barrier assigned to `-`, without `--goal` and without
+   `--initial-status`. Its stable idempotency key is derived from the tick and
+   its JSON header identifies `infrastructure: registration_barrier`.
+2. Parent the first executable phase to the barrier. Parent each later
+   executable phase to its executable predecessor. A parented phase begins in
+   `todo`; only the first phase becomes `ready` when the barrier completes.
+3. Create gate phases detached from that chain and assigned to `-`. Once a gate
+   ID is known, call `hermes kanban block --kind needs_input <id>` to record
+   Hermes's sticky human-input block. The brief pre-block `ready` window is safe
+   because the gate is nonspawnable.
+4. Persist `expected-phases.json` only after the barrier and every phase task are
+   known.
+5. Complete the barrier only after that sentinel is durable. Barrier completion
+   is the commit point that releases phase 1.
 
-Gate phases remain blocked markers and are never activated as executable work.
+The public return value remains the phase task IDs in profile order; the
+infrastructure barrier is intentionally omitted.
+
+## Durable Recovery State
+
+The atomic marker at
+`<project>/.hermes/outcomes/pending-task-create.json` has two forms:
+
+- Pending create: tenant, tick ID, current phase key, and known IDs in creation
+  order.
+- Cleanup-only: tenant, tick ID, and every task ID in required cleanup order.
+
+After each validated create, registration writes cleanup-only state in reverse
+creation order, which is child-first and leaves the barrier last. Before the
+next remote create it atomically replaces that record with pending-create
+state. This keeps all known tasks durably recoverable throughout registration.
+
+For an uncertain current create:
+
+1. If the current child is not visible, retain pending-create state and archive
+   nothing. Archiving a known parent could release the invisible child.
+2. Once the child is visible, replace the marker with cleanup-only state ordered
+   as current child, known phases in reverse creation order, then barrier.
+3. Issue archive commands in that order and query a snapshot with `--archived`.
+   A task already reported as `archived` counts as success.
+4. Remove the marker only after every recorded ID is confirmed `archived`.
+
+A local `OSError` from spawning Hermes is conclusive: no current create ran.
+Registration converts the marker to cleanup-only state for the known IDs,
+archives them child-first, and retains the state when confirmation is
+incomplete.
+
+At the start of every later project tick, reconciliation runs before prior-tick
+processing or selection. Unresolved creation, malformed state, incomplete
+cleanup, or marker-removal failure skips that project tick.
 
 ## Failure Handling
 
-- A conclusive create failure archives all known tasks and raises.
-- A timed-out or malformed create result attempts immediate idempotent recovery.
-- If immediate recovery is inconclusive, the unresolved marker remains durable.
-- Later project processing reconciles the marker before selection or phase
-  progression.
-- Marker write or cleanup failures do not turn uncertain registration into
-  success; the pipeline fails closed and reports the primary error.
-- While the marker remains, the project tick logs an unresolved Hermes creation
-  warning and skips prior-tick processing, selection, and new task creation.
-- Successful deferred cleanup is visible through the normal per-task archive
-  log entries before the marker is removed.
+- Sentinel, sticky-block, and barrier-completion failures use the already
+  durable child-first cleanup record.
+- Before barrier completion, registration clears the pre-commit cleanup marker.
+  If completion then fails or is uncertain, it recreates the same ordered
+  cleanup state before archiving.
+- Snapshot status is authoritative. Archive return code and stderr are logged
+  but cannot independently prove cleanup.
+- Storage failures fail closed. They never turn an uncertain registration into
+  success.
 
 ## Testing
 
-Add regression coverage for:
+Regression coverage proves:
 
-- Both idempotent create calls time out.
-- The first snapshot is empty.
-- The task appears in a later snapshot.
-- The late task is archived before the unresolved marker is cleared.
-- No executable task is activated before full registration and sentinel
-  persistence.
-- A project with unresolved creation state cannot start another tick.
-- Gate phases remain blocked and are never activated.
-
-Run the targeted kanban and tick tests first, then the complete locked pytest
-coverage suite and Ruff.
+- Barrier command shape, first-phase parent, executable chain, and
+  sentinel-before-completion ordering.
+- No executable task relies on `--initial-status blocked`.
+- Gate tasks are unassigned, detached, non-goal, and explicitly sticky-blocked.
+- A phase-2 child can remain invisible without any parent archive, later appear,
+  and then be cleaned child-first.
+- Already-archived tasks satisfy cleanup.
+- A local phase-2 `OSError` becomes cleanup-only state and later clears.
+- Barrier completion failure retains ordered cleanup state when cleanup is
+  incomplete.
+- Deferred reconciliation blocks later ticks.
+- A live optional Hermes CLI test proves the nonspawnable barrier contract in an
+  isolated `HERMES_HOME`; it skips with an explicit reason only when Hermes is
+  not installed.
 
 ## Scope
 
-This change is limited to Hermes phase registration and tick recovery. It does not
-change prompt-client selection, phase prompt rendering, profile metadata, or the
-public configuration contract.
+This change is limited to Hermes phase registration and tick recovery. It does
+not change prompt-client selection, phase prompt rendering, profile metadata,
+or the public configuration contract.

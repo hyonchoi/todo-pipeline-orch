@@ -4,7 +4,8 @@
 pipeline phase state. Instead of writing internal state files tracking which
 phase is active, executable phases are registered as kanban tasks with
 `--parent` dependency chains. Gate phases, when a profile defines them, are
-created blocked and detached from the parent chain. Kanban status queries (`get_todo_kanban_status`,
+created unassigned and detached from the parent chain, then explicitly receive a
+sticky `needs_input` block. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
@@ -59,7 +60,6 @@ class PreparedPhaseTask:
     phase_key: str
     name: str
     body: str
-    tools: str
     turns: int
     gate: bool
 ```
@@ -210,18 +210,24 @@ tick starts
 [persist current_tick_id.txt + tick_started outcome]
     |
     v
-[create_prepared_todo_phases] -- for each phase:
+[create_prepared_todo_phases]
     persist pending-task-create marker
-    -> create blocked kanban task
-    -> validate task ID and clear its marker
+    -> create unassigned, non-spawnable registration barrier
+    -> persist known cleanup IDs
+    |
+    +-- for each phase:
+    |       persist current create intent + known cleanup IDs
+    |       -> create executable task parented to barrier/previous executable
+    |          or create detached unassigned gate and apply needs_input block
+    |       -> persist the returned ID first in child-first cleanup order
     |
     v
 [persist expected-phases sentinel] -- records the complete durable chain
     |
     v
-[promote first executable task] -- only now may work become runnable:
+[complete registration barrier] -- only now may work become runnable:
     phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_5_review  <--parent--  phase_6_1_cso
-    (running)                  (ready)                  (ready)                  (ready)
+    (ready)                    (todo)                   (todo)                   (todo)
     |
     v
 tick ends; a later tick begins above and observes the prior chain. Hermes parent
@@ -235,36 +241,44 @@ dependencies allow each later executable phase to run when its predecessor ends.
   phase execution — the orchestrator doesn't need to manage phase ordering.
 - Gate phases are not parented because parent completion would otherwise
   auto-unblock the gate. The default `gstack` profile has no gate phase.
-- `ready` status on the board means "blocked on parent" without the
-  orchestrator needing to track inter-phase dependencies.
+- `todo` means an executable task is still waiting on its parent. `ready` means
+  it is runnable and queued for dispatch.
 
 ### Durable registration and uncertain-create recovery
 
-Every phase, including executable phases, is created with initial status
-`blocked`. Before each remote `hermes kanban create`, the orchestrator atomically
-writes the per-project pending marker at
+Before any phase is created, the orchestrator creates an unassigned registration
+barrier. The first executable phase is parented to the barrier, so Hermes keeps
+it in `todo`; later executable phases are parented to the preceding executable.
+Before every remote `hermes kanban create`, including the barrier, the
+orchestrator atomically writes the per-project pending marker at
 `<project>/.hermes/outcomes/pending-task-create.json`. The marker records the
-tenant, tick ID, phase key, and IDs already registered in the same chain. It is
-removed only after Hermes returns a validated task ID for that exact create.
+tenant, tick ID, current create intent, and known cleanup IDs. After Hermes
+returns a validated ID, the marker is rewritten immediately with that ID first,
+so cleanup is always child-first and the barrier is last.
 
 After every task is known, the orchestrator atomically writes
 `<project>/.hermes/outcomes/expected-phases.json`. This sentinel lists the full
-expected chain and lets completion checks reject a partial board snapshot. Only
-after that write succeeds does it run `hermes kanban promote <first-executable-id>`.
-Gate tasks remain blocked and are never promoted.
+expected chain and lets completion checks reject a partial board snapshot. It
+then clears the pre-commit cleanup marker and completes the registration
+barrier. Completing the barrier moves the first executable from `todo` to
+`ready`; the remaining executable tasks stay `todo` until their parents finish.
+Gate tasks are detached and receive `hermes kanban block --kind needs_input`, so
+their block is independent of parent completion.
 
 An inconclusive create is fail-closed. The registration call retries the same
 idempotency key and takes a snapshot; if the task is still not visible, the
-pending marker remains. At the start of every later project tick, before reading
-the prior tick, selection, or creating work, the orchestrator reads that marker.
-It searches the tenant snapshot for the recorded tick and phase, archives the
-late-visible task together with all known predecessors, and removes the marker
-only after those archives succeed. A marker that is malformed, unreadable,
-unresolved, or cannot be removed keeps the project skipped for that tick.
+pending marker remains without modifying any known parent. At the start of every
+later project tick, before reading the prior tick, selection, or creating work,
+the orchestrator reads that marker. If the current task becomes visible, its ID
+is prepended to the cleanup list; cleanup then archives tasks child-first. If it
+is still invisible, the known parents remain untouched and the project stays
+skipped. An `OSError` while creating records only IDs known to exist in
+cleanup-only mode.
 
-The same file can temporarily carry a cleanup marker when archive confirmation
-failed after a later registration or promotion error. The next tick archives its
-listed task IDs before removing it, using the same fail-closed gate.
+Archive command output is not treated as proof. Recovery refreshes a tenant
+snapshot with archived tasks included and removes the marker only when every
+listed ID has status `archived`. A malformed or unreadable marker, an unresolved
+create, or unconfirmed cleanup keeps the project skipped.
 
 Operators can follow this recovery in the tick logs: an unresolved marker emits
 `project <slug>: unresolved Hermes task creation; skipping`; successful cleanup
@@ -285,7 +299,6 @@ prepare_todo_phases(
     todo_id: str,
     tick_id: str,
     board_slug: str,
-    project_dir: str | Path,
     phases_path: str | Path | None = None,
     prompt_client: PromptClient = "claude",
 ) -> list[PreparedPhaseTask]
@@ -296,7 +309,6 @@ prepare_todo_phases(
 | `todo_id` | `str` | — | TODO ID (e.g., "TODO-10"). Embedded in task body JSON header. |
 | `tick_id` | `str` | — | ULID tick ID embedded in each task body header. |
 | `board_slug` | `str` | — | Project slug embedded in each task body header. |
-| `project_dir` | `str \| Path` | — | Project workspace associated with the prepared registration. |
 | `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is packaged `gstack`; production resolves `contract.profile` and passes its path explicitly. |
 | `prompt_client` | `PromptClient` | `"claude"` | Renders the fixed product label and verified skill invocation vocabulary. |
 
@@ -316,8 +328,9 @@ with respect to Hermes: no task is created.
 
 ### `create_prepared_todo_phases`
 
-Creates already-prepared tasks. Executable phases use `--parent` dependency
-chains; gate phases are detached and blocked.
+Creates already-prepared tasks behind a registration barrier. Executable phases
+use `--parent` dependency chains; gate phases are detached and receive a sticky
+`needs_input` block.
 
 ```python
 create_prepared_todo_phases(
@@ -338,28 +351,37 @@ create_prepared_todo_phases(
 | `project_dir` | `str \| Path` | — | Passed as `--workspace dir:<project_dir>`. |
 | `assignee` | `str` | `"default"` | Assigned to executable tasks; gate tasks always use `-`. |
 
-**Returns:** Created task IDs in phase order.
+**Returns:** Created phase-task IDs in phase order. The internal registration
+barrier ID is not returned.
 
-**Raises:** `RuntimeError` if Hermes creation fails. Tasks created earlier in
-the same call are archived before the error is raised.
+**Raises:** `RuntimeError` if Hermes creation, gate blocking, sentinel
+persistence, barrier completion, or confirmed cleanup fails. Known tasks remain
+in the durable cleanup marker until an archived snapshot confirms them.
 
-For each prepared phase, this function runs `hermes kanban create` with:
+The function first creates an unassigned, non-goal registration barrier. For
+each prepared phase, it then runs `hermes kanban create` with:
 
 - `--tenant <board_slug>` — target board
 - `--workspace dir:<project_dir>` — project context
 - `--idempotency-key <tick_id>:<phase_key>` — dedup key (e.g.,
   `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`)
-- `--parent <prev_task_id>` — dependency chain for executable phases only
-  (gate phases omit it so they stay manually blocked)
+- `--parent <prev_task_id>` — dependency chain for executable phases only; the
+  first executable uses the registration barrier (gate phases omit it)
+- `--assignee -` for the barrier and gates; executable tasks use `assignee`
 - `--body <json_header>\n<phase_prompt>` — task body with JSON header on first
   line
 
+After creating a gate, it runs
+`hermes kanban block --kind needs_input <gate-task-id>`. After the
+expected-phase sentinel is durable, it completes the barrier.
+
 **Mid-registration failure:** The kanban-as-scheduler design requires all phases
-to exist in order. If the second of four phases fails to register, the first is
-archived — it cannot run because every phase remains `blocked` until the complete
-chain and expected-phase sentinel are durable. If cleanup cannot be confirmed,
-the durable pending marker remains and later ticks skip the project until cleanup
-finishes.
+to exist in order. If the second of four phases fails to register, the first
+cannot run because its barrier remains incomplete. Known tasks are archived
+child-first, with the barrier last. If the uncertain current task is invisible,
+known parents are not archived until that task is resolved. If cleanup cannot be
+confirmed from an archived-inclusive snapshot, the durable pending marker
+remains and later ticks skip the project until cleanup finishes.
 
 ### `register_todo_phases`
 
@@ -404,10 +426,12 @@ get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]
 
 **Returns:** Dict mapping `phase_key` to status (e.g., `{"phase_2_autoplan": "done", "phase_4_development": "running"}`). Empty dict if no tasks match.
 
-**Kanban statuses:** `running`, `ready`, `done`, `failed`, `archived`.
+**Kanban statuses:** `todo`, `running`, `ready`, `blocked`, `done`, `failed`,
+`archived`.
+- `todo` — executable phase is waiting for its `--parent`
 - `running` — phase is actively executing
-- `ready` — executable phase is queued (blocked on `--parent` completion)
-- `blocked` — human gate phase is waiting for manual approval
+- `ready` — executable phase is runnable and queued
+- `blocked` — human gate phase has a sticky `needs_input` block
 - `done` — phase completed successfully
 - `failed` — phase execution failed
 - `archived` — phase was archived mid-registration (abandoned)
@@ -425,7 +449,9 @@ all_phases_complete(board_slug: str, tick_id: str) -> bool
 | `board_slug` | `str` | — | Kanban board slug |
 | `tick_id` | `str` | — | ULID tick ID |
 
-**Returns:** `True` if every task is in a completion status (`done` or `failed`). `False` if any task is still in-flight (`running`, `ready`), archived, or if the kanban CLI fails.
+**Returns:** `True` if every task is in a completion status (`done` or
+`failed`). `False` if any task is still in-flight (`todo`, `running`, `ready`,
+`blocked`), archived, or if the kanban CLI fails.
 
 **Completion statuses:** `done` and `failed`. Archived is not a completion
 status — it indicates the tick didn't finish cleanly.
@@ -462,7 +488,7 @@ observe_outcomes(
 | `done` | `phase_complete` | `{"outcome": "phase_complete", "phase_key": "phase_2_autoplan"}` |
 | `failed` | `failed_at_phase_<key>` | `{"outcome": "failed_at_phase_phase_4_development", "detail": {"kanban_status": "failed"}}` |
 | `archived` | `failed_at_phase_<key>` | `{"outcome": "failed_at_phase_phase_2_autoplan", "detail": {"kanban_status": "archived"}}` |
-| `running`, `ready` | (skipped) | In-flight phases are not written |
+| `todo`, `running`, `ready`, `blocked` | (skipped) | In-flight phases are not written |
 | all `done` | `all_phases_complete` | `{"outcome": "all_phases_complete"}` |
 
 **High-watermark dedup:** If an outcome for a phase_key already exists in the

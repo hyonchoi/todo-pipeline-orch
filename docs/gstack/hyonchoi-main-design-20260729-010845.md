@@ -321,6 +321,7 @@ Before formatting, parse the template fields and allow only:
 - `project_slug`
 - `agent_product`
 - `skill_prefix`
+- `superpowers_skill_prefix`
 
 Unknown fields, positional fields, malformed braces, unresolved allowed fields,
 conversions, format specifications, attribute/index traversal, and nested
@@ -336,7 +337,7 @@ templates is not a supported compatibility contract.
 
 The `prompt_client="claude"` default remains for direct callers; formatting
 tolerance does not. Tests must cover ordinary literal braces using escaped
-`{{` and `}}`, all five allowed fields, unknown fields, positional fields,
+`{{` and `}}`, all six allowed fields, unknown fields, positional fields,
 malformed braces, unresolved client fields, conversions, format specifications,
 attribute/index traversal, and nested fields.
 
