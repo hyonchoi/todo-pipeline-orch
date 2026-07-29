@@ -151,8 +151,8 @@ phases:
 
       If no git remote is configured, PR creation isn't possible. In that
       case, run every other step of the skill (verification, version bump
-      checks, etc.) and leave the branch committed and ready, without
-      creating a PR — this is expected, not a failure.
+      checks, etc.), leave the branch committed and ready, and exit non-zero
+      so the pipeline does not treat PR handoff as complete.
 
       Before completing, verify .hermes/pipeline_branch.txt contains the
       current branch name. If it is missing or stale, rewrite it with the

@@ -105,7 +105,7 @@ class TestTickSubcommand:
         mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
         mock_run.return_value = mocker.Mock(
             returncode=0,
-            stdout='{"state": "OPEN"}',
+            stdout='{"state": "OPEN", "headRefName": "todo-5-feat"}',
             stderr="",
         )
 
@@ -145,7 +145,11 @@ class TestTickSubcommand:
         mock_selection.return_value = _make_decision()
         mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
         mock_run.side_effect = [
-            mocker.Mock(returncode=0, stdout='{"state": "MERGED", "baseRefName": "main"}', stderr=""),
+            mocker.Mock(
+                returncode=0,
+                stdout='{"state": "MERGED", "baseRefName": "main", "headRefName": "todo-5-feat"}',
+                stderr="",
+            ),
             mocker.Mock(returncode=0, stdout="", stderr=""),
             mocker.Mock(returncode=0, stdout="", stderr=""),
             mocker.Mock(returncode=0, stdout="", stderr=""),
@@ -196,7 +200,11 @@ class TestTickSubcommand:
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
         mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
         mock_run.side_effect = [
-            mocker.Mock(returncode=0, stdout='{"state": "MERGED", "baseRefName": "main"}', stderr=""),
+            mocker.Mock(
+                returncode=0,
+                stdout='{"state": "MERGED", "baseRefName": "main", "headRefName": "todo-5-feat"}',
+                stderr="",
+            ),
             mocker.Mock(returncode=0, stdout=" M local.txt\n", stderr=""),
         ]
 
@@ -286,7 +294,92 @@ class TestTickSubcommand:
         mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
         mock_run.return_value = mocker.Mock(
             returncode=0,
-            stdout='{"state": "CLOSED"}',
+            stdout='{"state": "CLOSED", "headRefName": "todo-5-feat"}',
+            stderr="",
+        )
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        project_state = project_dir / ".hermes"
+        project_state.mkdir(parents=True)
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
+        )
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        (project_state / "pipeline_branch.txt").write_text("todo-5-feat\n")
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
+        mock_selection.assert_not_called()
+        mock_cb.observe.assert_called_once_with(
+            picked=None,
+            counts_as_no_progress=True,
+        )
+
+    def test_tick_missing_pr_handoff_branch_counts_as_no_progress(self, tmp_path, mocker):
+        """A completed Phase 8 handoff without branch state must not select new work."""
+        mocker.patch(
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
+        )
+        mocker.patch("hermes_pipeline.cli.observe_outcomes")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_8_finish_branch": "done"},
+        )
+        mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+        mock_cb = mocker.MagicMock()
+        mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=mock_cb)
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        project_state = project_dir / ".hermes"
+        project_state.mkdir(parents=True)
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
+        )
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
+        mock_selection.assert_not_called()
+        mock_cb.observe.assert_called_once_with(
+            picked=None,
+            counts_as_no_progress=True,
+        )
+
+    def test_tick_pr_handoff_rejects_mismatched_head_branch(self, tmp_path, mocker):
+        """A stale branch file must not be satisfied by an unrelated PR selector."""
+        mocker.patch(
+            "hermes_pipeline.cli.all_phases_complete", return_value=True
+        )
+        mocker.patch("hermes_pipeline.cli.observe_outcomes")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_8_finish_branch": "done"},
+        )
+        mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+        mock_cb = mocker.MagicMock()
+        mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=mock_cb)
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
+        mock_run.return_value = mocker.Mock(
+            returncode=0,
+            stdout='{"state": "MERGED", "baseRefName": "main", "headRefName": "other-branch"}',
             stderr="",
         )
 
@@ -477,7 +570,7 @@ class TestTickSubcommand:
         assert result == 0
 
     def test_tick_observe_outcomes_exception(self, tmp_path, mocker):
-        """observe_outcomes for prior tick raises -> warning, tick proceeds."""
+        """observe_outcomes for prior tick raises -> warning, tick skips."""
         mocker.patch(
             "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
@@ -485,8 +578,9 @@ class TestTickSubcommand:
             "hermes_pipeline.cli.observe_outcomes",
             side_effect=RuntimeError("kanban error"),
         )
+        mock_cb = mocker.MagicMock()
+        mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=mock_cb)
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -502,6 +596,11 @@ class TestTickSubcommand:
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
         result = _cmd_tick(FakeArgs(), config)
         assert result == 0
+        mock_selection.assert_not_called()
+        mock_cb.observe.assert_called_once_with(
+            picked=None,
+            counts_as_no_progress=True,
+        )
 
     def test_tick_picked_none_writes_sentinel(self, tmp_path, mocker):
         """picked=None -> writes picked_none sentinel in per-project state dir."""

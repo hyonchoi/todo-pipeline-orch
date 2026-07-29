@@ -546,15 +546,23 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, b
     """Return (pending, counts_as_no_progress) for a Phase 8 PR handoff."""
     branch_file = state_dir / "pipeline_branch.txt"
     if not branch_file.exists():
-        return (False, False)
+        log.warning(
+            "phase 8 handoff completed but %s is missing; leaving project in handoff",
+            branch_file,
+        )
+        return (True, True)
 
     work_branch = branch_file.read_text().strip()
     if not work_branch:
-        return (False, False)
+        log.warning(
+            "phase 8 handoff completed but %s is empty; leaving project in handoff",
+            branch_file,
+        )
+        return (True, True)
 
     try:
         result = _cli_sp.run(
-            ["gh", "pr", "view", work_branch, "--json", "state,baseRefName"],
+            ["gh", "pr", "view", work_branch, "--json", "state,baseRefName,headRefName"],
             cwd=str(project_dir),
             capture_output=True,
             text=True,
@@ -582,11 +590,21 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, b
     try:
         view = json.loads(result.stdout)
         state = (view.get("state") or "").upper()
+        head_ref = view.get("headRefName") or ""
     except json.JSONDecodeError:
         log.warning(
             "project has PR handoff branch %s but gh pr view returned "
             "non-JSON; leaving project in handoff",
             work_branch,
+        )
+        return (True, True)
+
+    if head_ref != work_branch:
+        log.warning(
+            "project has PR handoff branch %s but gh resolved head branch %s; "
+            "leaving project in handoff",
+            work_branch,
+            head_ref or "unknown",
         )
         return (True, True)
 
@@ -1030,7 +1048,7 @@ def _tick_project(
             )
             return
 
-        # Prior tick complete — observe outcomes before new selection
+        # Prior tick complete — fail closed if status/outcome observation breaks.
         try:
             from .kanban_tasks import get_todo_kanban_status
 
@@ -1067,6 +1085,8 @@ def _tick_project(
                 prior_tick_id,
                 e,
             )
+            cb.observe(picked=None, counts_as_no_progress=True)
+            return
 
     # Step 3: Build context & run selection
     todos_path = project_dir / "TODOS.md"
