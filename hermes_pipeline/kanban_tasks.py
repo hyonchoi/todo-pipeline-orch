@@ -109,6 +109,17 @@ def _recover_uncertain_task_id(cmd: list[str]) -> str | None:
     return _parse_task_id(result.stdout)
 
 
+def _recover_and_archive_uncertain_task(
+    cmd: list[str], task_ids: list[str]
+) -> None:
+    uncertain_task_id = _recover_uncertain_task_id(cmd)
+    cleanup_ids = [
+        *task_ids,
+        *([uncertain_task_id] if uncertain_task_id is not None else []),
+    ]
+    _archive_tasks(cleanup_ids)
+
+
 def prepare_todo_phases(
     *,
     todo_id: str,
@@ -226,27 +237,17 @@ def create_prepared_todo_phases(
                 timeout=KANBAN_QUERY_TIMEOUT,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
-            uncertain_task_id = (
-                _recover_uncertain_task_id(cmd)
-                if isinstance(exc, subprocess.TimeoutExpired)
-                else None
-            )
-            cleanup_ids = [
-                *task_ids,
-                *([uncertain_task_id] if uncertain_task_id is not None else []),
-            ]
-            _archive_tasks(cleanup_ids)
+            if isinstance(exc, subprocess.TimeoutExpired):
+                _recover_and_archive_uncertain_task(cmd, task_ids)
+            else:
+                _archive_tasks(task_ids)
             raise RuntimeError(
                 f"failed to register kanban task {phase.phase_key} "
                 f"for tick {tick_id}: Hermes process failed: {exc}"
             ) from exc
         if result.returncode != 0:
             # A nonzero response can still follow a successful remote mutation.
-            uncertain_task_id = _recover_uncertain_task_id(cmd)
-            cleanup_ids = [
-                *task_ids,
-                *([uncertain_task_id] if uncertain_task_id is not None else []),
-            ]
+            _recover_and_archive_uncertain_task(cmd, task_ids)
             log.error(
                 "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
                 phase.phase_key,
@@ -254,7 +255,6 @@ def create_prepared_todo_phases(
                 result.returncode,
                 result.stderr[:ERROR_MSG_MAX_LENGTH],
             )
-            _archive_tasks(cleanup_ids)
             raise RuntimeError(
                 f"failed to register kanban task {phase.phase_key} "
                 f"for tick {tick_id}: rc={result.returncode} "
@@ -266,12 +266,7 @@ def create_prepared_todo_phases(
         # form before it can become the next phase's --parent argument.
         task_id = _parse_task_id(result.stdout)
         if task_id is None:
-            uncertain_task_id = _recover_uncertain_task_id(cmd)
-            cleanup_ids = [
-                *task_ids,
-                *([uncertain_task_id] if uncertain_task_id is not None else []),
-            ]
-            _archive_tasks(cleanup_ids)
+            _recover_and_archive_uncertain_task(cmd, task_ids)
             idempotency_key = f"{tick_id}:{phase.phase_key}"
             raise RuntimeError(
                 f"{phase.phase_key}: failed to parse valid task ID; "
