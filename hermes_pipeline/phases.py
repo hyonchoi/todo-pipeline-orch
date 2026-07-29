@@ -235,7 +235,10 @@ def load_phases(config_path: Path | str | None = None) -> list[Phase]:
     config_path = Path(config_path)
     with open(config_path) as f:
         data = yaml.safe_load(f)
-    return [Phase(**p) for p in data["phases"]]
+    raw_phases = data.get("phases") if isinstance(data, dict) else None
+    if not isinstance(raw_phases, list) or not raw_phases:
+        raise ValueError(f"{config_path}: phases must contain at least one phase")
+    return [Phase(**phase) for phase in raw_phases]
 
 
 def _now_iso() -> str:

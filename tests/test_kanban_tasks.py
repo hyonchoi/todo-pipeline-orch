@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -34,7 +35,6 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
         todo_id="TODO-41",
         tick_id="01CLIENT",
         board_slug="demo",
-        project_dir=tmp_path,
         phases_path=phases_path,
         prompt_client="codex",
     )
@@ -67,7 +67,6 @@ def test_late_render_failure_creates_zero_tasks(tmp_path, mocker):
             todo_id="TODO-41",
             tick_id="01CLIENT",
             board_slug="demo",
-            project_dir=tmp_path,
             phases_path=phases_path,
         )
     run.assert_not_called()
@@ -152,6 +151,82 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     assert "--parent" in mock_run.call_args_list[1].args[0]
     assert "--body" in mock_run.call_args_list[0].args[0]
     assert "already rendered $body" in mock_run.call_args_list[0].args[0]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        OSError("hermes unavailable"),
+    ],
+)
+def test_create_prepared_archives_prior_tasks_on_process_failure(
+    tmp_path, mocker, failure
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask(f"phase_{index}", str(index), "body", "Read", 5, False)
+        for index in (1, 2)
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
+        failure,
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[2].args[0][-1] == "task-001"
+
+
+@pytest.mark.parametrize(
+    "malformed_output",
+    [
+        '{"id": null}',
+        '{"id": ""}',
+        '{"missing": "id"}',
+        "Created",
+    ],
+)
+def test_create_prepared_rejects_malformed_task_id_and_archives_prior_tasks(
+    tmp_path, mocker, malformed_output
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask(f"phase_{index}", str(index), "body", "Read", 5, False)
+        for index in (1, 2)
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
+        mocker.Mock(returncode=0, stdout=malformed_output, stderr=""),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_2.*task ID"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[2].args[0][-1] == "task-001"
 
 
 class TestRegisterTodoPhases:

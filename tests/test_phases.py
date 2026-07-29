@@ -51,6 +51,14 @@ def test_prerequisite_metadata_covers_every_bundled_skill_reference():
         assert extract_bundled_skill_references(profile, phases) == declared
 
 
+def test_load_phases_rejects_empty_profile(tmp_path):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text("phases: []\n")
+
+    with pytest.raises(ValueError, match=r"phases.*must contain at least one"):
+        load_phases(phases_path)
+
+
 def test_gstack_prerequisites_are_conditional_and_verified():
     metadata = load_profile_prerequisites("gstack")
     assert {

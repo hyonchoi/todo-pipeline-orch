@@ -1243,7 +1243,6 @@ def _tick_project(
             todo_id=picked,
             tick_id=tick_id,
             board_slug=project_slug,
-            project_dir=project_dir,
             phases_path=phases_path,
             prompt_client=config.prompt_client,
         )

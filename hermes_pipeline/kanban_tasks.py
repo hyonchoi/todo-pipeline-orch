@@ -77,7 +77,6 @@ def prepare_todo_phases(
     todo_id: str,
     tick_id: str,
     board_slug: str,
-    project_dir: str | Path,
     phases_path: str | Path | None = None,
     prompt_client: PromptClient = "claude",
 ) -> list[PreparedPhaseTask]:
@@ -182,7 +181,19 @@ def create_prepared_todo_phases(
             tick_id,
         )
 
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=KANBAN_QUERY_TIMEOUT)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=KANBAN_QUERY_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            _archive_tasks(task_ids)
+            raise RuntimeError(
+                f"failed to register kanban task {phase.phase_key} "
+                f"for tick {tick_id}: Hermes process failed: {exc}"
+            ) from exc
         if result.returncode != 0:
             # Mid-registration failure: archive already-created tasks
             log.error(
@@ -199,17 +210,32 @@ def create_prepared_todo_phases(
                 f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
             )
 
-        # Parse task ID from JSON output (--json returns {"id": "t_xxx"})
+        # Parse task ID from JSON output (--json returns {"id": "t_xxx"}).
+        # Older Hermes versions print "Created t_xxx (...)". Validate either
+        # form before it can become the next phase's --parent argument.
+        task_id = None
         try:
             task_data = json.loads(result.stdout)
-            task_id = task_data["id"]
-        except (json.JSONDecodeError, KeyError):
-            # Fallback: old CLI returns "Created t_xxx  (ready, assignee=-)"
-            line = result.stdout.strip()
-            if line.startswith("Created"):
-                task_id = line.split()[1]
-            else:
-                raise RuntimeError(f"failed to parse task ID from: {result.stdout[:ERROR_MSG_MAX_LENGTH]}")
+            if isinstance(task_data, dict):
+                task_id = task_data.get("id")
+        except json.JSONDecodeError:
+            pass
+        if task_id is None:
+            parts = result.stdout.strip().split()
+            if len(parts) >= 2 and parts[0] == "Created":
+                task_id = parts[1]
+        if (
+            not isinstance(task_id, str)
+            or not task_id
+            or any(character.isspace() for character in task_id)
+        ):
+            _archive_tasks(task_ids)
+            idempotency_key = f"{tick_id}:{phase.phase_key}"
+            raise RuntimeError(
+                f"{phase.phase_key}: failed to parse valid task ID; "
+                f"inspect Hermes task with idempotency key {idempotency_key}: "
+                f"{result.stdout[:ERROR_MSG_MAX_LENGTH]}"
+            )
         task_ids.append(task_id)
         log.info("registered kanban task: task_id=%s phase=%s", task_id, phase.phase_key)
 
@@ -235,7 +261,6 @@ def register_todo_phases(
         todo_id=todo_id,
         tick_id=tick_id,
         board_slug=board_slug,
-        project_dir=project_dir,
         phases_path=phases_path,
         prompt_client=prompt_client,
     )
