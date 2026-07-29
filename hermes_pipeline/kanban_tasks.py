@@ -13,6 +13,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from .config import PromptClient
 from .outcomes import (
     OUTCOME_ALL_COMPLETE,
     OUTCOME_PHASE_COMPLETE,
@@ -61,26 +62,75 @@ def _build_json_header(
     )
 
 
-def register_todo_phases(
+@dataclass(frozen=True)
+class PreparedPhaseTask:
+    phase_key: str
+    name: str
+    body: str
+    tools: str
+    turns: int
+    gate: bool
+
+
+def prepare_todo_phases(
     *,
     todo_id: str,
     tick_id: str,
     board_slug: str,
     project_dir: str | Path,
     phases_path: str | Path | None = None,
+    prompt_client: PromptClient = "claude",
+) -> list[PreparedPhaseTask]:
+    if not re.fullmatch(r"TODO-\d+", todo_id):
+        raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
+    phases = load_phases(phases_path)
+    return [
+        PreparedPhaseTask(
+            phase_key=phase.phase_key,
+            name=phase.name,
+            body=(
+                _build_json_header(
+                    tick_id=tick_id,
+                    phase_key=phase.phase_key,
+                    todo_id=todo_id,
+                    project_slug=board_slug,
+                )
+                + "\n"
+                + _render_phase_prompt(
+                    phase.prompt,
+                    todo_id=todo_id,
+                    tick_id=tick_id,
+                    project_slug=board_slug,
+                    prompt_client=prompt_client,
+                    template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
+                )
+            ),
+            tools=phase.tools,
+            turns=phase.turns,
+            gate=phase.gate,
+        )
+        for phase in phases
+    ]
+
+
+def create_prepared_todo_phases(
+    *,
+    prepared: list[PreparedPhaseTask],
+    tick_id: str,
+    board_slug: str,
+    project_dir: str | Path,
     assignee: str = "default",
 ) -> list[str]:
-    """Register phases as kanban tasks with --parent dependency chain.
+    """Create already-prepared phase tasks with a --parent dependency chain.
 
-    Reads phases.yaml, creates kanban tasks in order, and links each task
-    to its predecessor via --parent. Uses --idempotency-key for dedup.
+    Creates kanban tasks in order and links each executable task to its
+    predecessor via --parent. Uses --idempotency-key for dedup.
 
     Args:
-        todo_id: TODO ID (e.g., "TODO-10").
+        prepared: Fully rendered phase tasks, in registration order.
         tick_id: ULID tick ID.
         board_slug: Kanban board slug (project slug).
         project_dir: Project directory for --workspace.
-        phases_path: Optional path to phases.yaml. Defaults to repo default.
 
     Returns:
         List of created task IDs in phase order.
@@ -90,38 +140,20 @@ def register_todo_phases(
             archived before raising.
     """
     project_dir = Path(project_dir)
-    # Validate todo_id format before use in subprocess calls
-    if not re.match(r'^TODO-\d+$', todo_id):
-        raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
-    phases = load_phases(phases_path)
 
     task_ids: list[str] = []
 
-    for phase_idx, phase in enumerate(phases):
-        # Build task body: JSON header + rendered phase prompt
-        header = _build_json_header(
-            tick_id=tick_id,
-            phase_key=phase.phase_key,
-            todo_id=todo_id,
-            project_slug=board_slug,
-        )
-        body = header + "\n" + _render_phase_prompt(
-            phase.prompt,
-            todo_id=todo_id,
-            tick_id=tick_id,
-            project_slug=board_slug,
-        )
-
+    for phase_idx, phase in enumerate(prepared):
         # Build command — title is positional, use --tenant for namespacing,
         # --json for structured task ID output.
-        is_gate = getattr(phase, "gate", False)
+        is_gate = phase.gate
         cmd = [
             "hermes",
             "kanban",
             "create",
             "--tenant", board_slug,
             phase.name,
-            "--body", body,
+            "--body", phase.body,
             "--workspace", f"dir:{project_dir}",
             "--idempotency-key", f"{tick_id}:{phase.phase_key}",
             "--json",
@@ -145,9 +177,8 @@ def register_todo_phases(
             cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])
 
         log.info(
-            "registering kanban task: phase=%s todo=%s tick=%s",
+            "registering prepared kanban task: phase=%s tick=%s",
             phase.phase_key,
-            todo_id,
             tick_id,
         )
 
@@ -155,16 +186,17 @@ def register_todo_phases(
         if result.returncode != 0:
             # Mid-registration failure: archive already-created tasks
             log.error(
-                "failed to register kanban task %s for %s: rc=%d stderr=%s",
+                "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
                 phase.phase_key,
-                todo_id,
+                tick_id,
                 result.returncode,
                 result.stderr[:ERROR_MSG_MAX_LENGTH],
             )
             _archive_tasks(task_ids)
             raise RuntimeError(
                 f"failed to register kanban task {phase.phase_key} "
-                f"for {todo_id}: rc={result.returncode} stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
+                f"for tick {tick_id}: rc={result.returncode} "
+                f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
             )
 
         # Parse task ID from JSON output (--json returns {"id": "t_xxx"})
@@ -183,9 +215,37 @@ def register_todo_phases(
 
     # Persist expected phase keys so all_phases_complete can verify
     # completeness (guards against partial registration on crash).
-    _persist_expected_phases(phases, project_dir=project_dir)
+    _persist_expected_phases(prepared, project_dir=project_dir)
 
     return task_ids
+
+
+def register_todo_phases(
+    *,
+    todo_id: str,
+    tick_id: str,
+    board_slug: str,
+    project_dir: str | Path,
+    phases_path: str | Path | None = None,
+    assignee: str = "default",
+    prompt_client: PromptClient = "claude",
+) -> list[str]:
+    """Prepare and register phases as backward-compatible kanban tasks."""
+    prepared = prepare_todo_phases(
+        todo_id=todo_id,
+        tick_id=tick_id,
+        board_slug=board_slug,
+        project_dir=project_dir,
+        phases_path=phases_path,
+        prompt_client=prompt_client,
+    )
+    return create_prepared_todo_phases(
+        prepared=prepared,
+        tick_id=tick_id,
+        board_slug=board_slug,
+        project_dir=project_dir,
+        assignee=assignee,
+    )
 
 
 def _persist_expected_phases(

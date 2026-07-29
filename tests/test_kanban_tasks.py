@@ -16,6 +16,108 @@ class FakeGatePhase:
         self.turns = turns
         self.gate = gate
 
+
+def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: 'Use {skill_prefix}review in {agent_product}.'\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+    )
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        board_slug="demo",
+        project_dir=tmp_path,
+        phases_path=phases_path,
+        prompt_client="codex",
+    )
+    run.assert_not_called()
+    assert len(prepared) == 1
+    assert "Use $review in Codex." in prepared[0].body
+
+
+def test_late_render_failure_creates_zero_tasks(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.phases import PhasePromptRenderError
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: valid\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+        "  - phase_key: phase_2\n"
+        "    name: Two\n"
+        "    prompt: '{unknown}'\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+    )
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    with pytest.raises(PhasePromptRenderError, match=r"phase_2.*unknown"):
+        prepare_todo_phases(
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+            phases_path=phases_path,
+        )
+    run.assert_not_called()
+
+
+def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask(
+            phase_key="phase_1",
+            name="One",
+            body="already rendered $body",
+            tools="Read",
+            turns=5,
+            gate=False,
+        ),
+        PreparedPhaseTask(
+            phase_key="phase_2",
+            name="Two",
+            body="second body",
+            tools="Read,Write",
+            turns=10,
+            gate=False,
+        ),
+    ]
+    mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    mock_run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "task-002"}', stderr=""),
+    ]
+
+    task_ids = create_prepared_todo_phases(
+        prepared=prepared,
+        tick_id="01CLIENT",
+        board_slug="demo",
+        project_dir=tmp_path,
+    )
+
+    assert task_ids == ["task-001", "task-002"]
+    assert mock_run.call_count == 2
+    assert "--parent" not in mock_run.call_args_list[0].args[0]
+    assert "--parent" in mock_run.call_args_list[1].args[0]
+    assert "--body" in mock_run.call_args_list[0].args[0]
+    assert "already rendered $body" in mock_run.call_args_list[0].args[0]
+
+
 class TestRegisterTodoPhases:
     """Tests for register_todo_phases()."""
 
