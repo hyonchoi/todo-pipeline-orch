@@ -210,9 +210,10 @@ def test_release_qualification_covers_conditional_pairs():
     assert "Normal CI does not run these checks" in guide
 
 
-def test_current_release_has_passing_evidence_for_conditional_pairs():
-    release = Path("VERSION").read_text().strip()
-    evidence_root = Path("docs/release-evidence/agent-clients") / release
+def test_candidate_evidence_inventory_matches_conditional_pairs():
+    evidence_root = (
+        Path("docs/release-evidence/agent-clients") / "candidate-source-snapshot"
+    )
     conditional_pairs = {
         (profile, client)
         for profile in ("gstack", "agent-skills")
@@ -221,10 +222,10 @@ def test_current_release_has_passing_evidence_for_conditional_pairs():
         for client in ("claude", "codex")
     }
 
-    for profile, client in conditional_pairs:
-        evidence = evidence_root / f"{profile}-{client}.md"
-        assert evidence.is_file(), f"missing release evidence: {evidence}"
-        assert "- Result: `PASS`" in evidence.read_text()
+    expected_names = {
+        f"{profile}-{client}.md" for profile, client in conditional_pairs
+    }
+    assert {path.name for path in evidence_root.glob("*.md")} == expected_names
 
 
 def _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text):

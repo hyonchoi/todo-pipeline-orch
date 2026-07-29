@@ -22,8 +22,10 @@ isolated environment and commit only the captured evidence.
   `/writing-plans`, and the other slash-prefixed forms in package metadata.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-claude.md`.
-- Required fields: UTC timestamp, OS, client version, distribution versions,
-  discovery output, invocation forms, result, and verifier.
+- Required fields: evidence status, release, qualified source VERSION and
+  commit, profile/client pair, UTC timestamp, OS, client version, distribution
+  versions, exact skill/plugin sources, discovery commands and their captured
+  output, invocation forms, result, and verifier.
 - Blocking rule: a release advertising this Conditional pair is blocked when
   the current release has no passing artifact or the artifact records a
   failure.
@@ -41,8 +43,10 @@ isolated environment and commit only the captured evidence.
   forms in package metadata.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-codex.md`.
-- Required fields: UTC timestamp, OS, client version, distribution versions,
-  discovery output, invocation forms, result, and verifier.
+- Required fields: evidence status, release, qualified source VERSION and
+  commit, profile/client pair, UTC timestamp, OS, client version, distribution
+  versions, exact skill/plugin sources, discovery commands and their captured
+  output, invocation forms, result, and verifier.
 - Blocking rule: a release advertising this Conditional pair is blocked when
   the current release has no passing artifact or the artifact records a
   failure.
@@ -53,6 +57,27 @@ Use the [agent client evidence schema](release-evidence/agent-clients/README.md#
 and its release-directory naming convention. A passing artifact must contain
 the real commands and output captured from the stated environment. Do not copy
 an earlier release's result or create a placeholder passing artifact.
+
+Before `/ship` selects a version, store an honest qualification snapshot under
+`docs/release-evidence/agent-clients/candidate-source-snapshot/`. It must say
+`Evidence status: candidate/source-snapshot` and `Release: not selected`, and
+must record the source `VERSION` and commit that were actually qualified. A
+candidate `PASS` is useful review evidence, but it does not satisfy the
+release-specific blocking rule.
+
+During the release commit, `/ship` owns the version decision and evidence
+finalization:
+
+1. Select and synchronize the release version.
+2. Re-run qualification if the recorded environment, discovery output, or
+   qualified source has changed.
+3. Copy each current passing candidate artifact to
+   `docs/release-evidence/agent-clients/<release>/`.
+4. Set `Evidence status: release-final`, set `Release` to the selected version,
+   and ensure `Source VERSION` matches it. Preserve the exact qualified source
+   commit, commands, and captured output.
+5. Include those versioned artifacts in the same release commit and run the
+   evidence validation tests.
 
 `Unverified` pairs are unsupported and non-blocking until authoritative
 evidence promotes their package metadata. Changing only documentation or
