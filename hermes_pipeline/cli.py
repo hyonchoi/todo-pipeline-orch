@@ -1254,7 +1254,7 @@ def _tick_project(
             _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
-    # Step 4: Render every prompt before recording or creating anything.
+    # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
     from .kanban_tasks import create_prepared_todo_phases, prepare_todo_phases
 
     log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
@@ -1268,6 +1268,7 @@ def _tick_project(
         )
     except PhasePromptRenderError as exc:
         _record_failed_to_spawn(project_state, tick_id, picked, exc)
+        cb.observe(picked=None, counts_as_no_progress=True)
         log.error(
             "project %s: phase prompt preparation failed: %s",
             project_slug,

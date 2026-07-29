@@ -317,6 +317,45 @@ class TestTickPromptPreparation:
         )
         create.assert_called_once()
 
+    def test_consecutive_prompt_preparation_failures_advance_circuit_breaker(
+        self, tmp_path, mocker
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "agent-skills"\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision("TODO-10"),
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            side_effect=PhasePromptRenderError(
+                "agent-skills:phase_7_ship: unknown field"
+            ),
+        )
+        send_alert = mocker.patch("hermes_pipeline.circuit._send_slack")
+        cb_cfg = CircuitBreakerConfig(no_progress_threshold=2)
+
+        for tick_id in ("01PREPFAIL1", "01PREPFAIL2"):
+            _tick_project(
+                project_dir=project_dir,
+                project_slug=project_dir.name,
+                project_state=project_state,
+                config=Config(prompt_client="codex"),
+                cb_cfg=cb_cfg,
+                tick_id=tick_id,
+                project_toml={},
+            )
+
+        circuit_state = json.loads((project_state / "circuit.json").read_text())
+        assert circuit_state["consecutive_no_progress"] == 2
+        send_alert.assert_called_once()
+
     def test_prompt_preparation_failure_survives_outcome_write_error(
         self, tmp_path, mocker, caplog
     ):
