@@ -1247,14 +1247,17 @@ def _tick_project(
             prompt_client=config.prompt_client,
         )
     except PhasePromptRenderError as exc:
-        from .decision.store import append_outcome
+        try:
+            from .decision.store import append_outcome
 
-        append_outcome(
-            project_state,
-            tick_id,
-            outcome="failed_to_spawn",
-            detail={"todo_id": picked, "error": str(exc)[:500]},
-        )
+            append_outcome(
+                project_state,
+                tick_id,
+                outcome="failed_to_spawn",
+                detail={"todo_id": picked, "error": str(exc)[:500]},
+            )
+        except Exception as sidecar_exc:
+            log.warning("failed to write outcome sidecar: %s", sidecar_exc)
         log.error(
             "project %s: phase prompt preparation failed: %s",
             project_slug,

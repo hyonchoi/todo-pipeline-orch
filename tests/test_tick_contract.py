@@ -316,3 +316,38 @@ class TestTickPromptPreparation:
             mocker=mocker,
         )
         create.assert_called_once()
+
+    def test_prompt_preparation_failure_survives_outcome_write_error(
+        self, tmp_path, mocker, caplog
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "agent-skills"\n'
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            side_effect=PhasePromptRenderError("invalid prompt"),
+        )
+        persist = mocker.patch("hermes_pipeline.cli._persist_tick_id")
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
+        )
+        mocker.patch(
+            "hermes_pipeline.decision.store.append_outcome",
+            side_effect=OSError("disk full"),
+        )
+
+        _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id="01SIDECARFAIL",
+            mocker=mocker,
+        )
+
+        persist.assert_not_called()
+        create.assert_not_called()
+        assert "failed to write outcome sidecar: disk full" in caplog.text
