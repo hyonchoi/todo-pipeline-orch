@@ -1,11 +1,16 @@
 
+import copy
+import re
+
 import pytest
+import yaml
 
 from hermes_pipeline.contract import ContractSchemaError
 from hermes_pipeline.phases import (
     PhasePromptRenderError,
     _render_phase_prompt,
     load_phases,
+    load_profile_prerequisites,
     resolve_profile_phases_path,
 )
 
@@ -23,6 +28,178 @@ phases:
     tools: "Read,Write,Bash"
     turns: 15
 """
+
+
+def extract_bundled_skill_references(profile, phases):
+    prompt_text = "\n".join(phase.prompt for phase in phases)
+    if profile == "gstack":
+        return set(re.findall(r"\{skill_prefix\}([a-z][a-z0-9-]*)", prompt_text))
+    if profile == "agent-skills":
+        return set(re.findall(r"\bagent-skills:[a-z][a-z0-9-]*", prompt_text))
+    raise AssertionError(f"missing test-owned extraction pattern for {profile}")
+
+
+def test_prerequisite_metadata_covers_every_bundled_skill_reference():
+    for profile in ("gstack", "agent-skills"):
+        metadata = load_profile_prerequisites(profile)
+        declared = {item.skill_id for item in metadata.skills}
+        phases = load_phases(resolve_profile_phases_path(profile))
+        prompt_text = "\n".join(phase.prompt for phase in phases)
+        for skill_id in declared:
+            assert skill_id in prompt_text
+        assert extract_bundled_skill_references(profile, phases) == declared
+
+
+def test_gstack_prerequisites_are_conditional_and_verified():
+    metadata = load_profile_prerequisites("gstack")
+    assert {
+        item.skill_id: item.distribution_owner for item in metadata.skills
+    } == {
+        "autoplan": "gstack",
+        "writing-plans": "superpowers",
+        "subagent-driven-development": "superpowers",
+        "review": "gstack",
+        "cso": "gstack",
+        "qa": "gstack",
+        "document-release": "gstack",
+        "document-generate": "gstack",
+        "ship": "gstack",
+    }
+    for item in metadata.skills:
+        assert item.support == "Conditional"
+        assert item.clients["claude"].discovery_root == ".claude/skills"
+        assert item.clients["claude"].invocation == f"/{item.skill_id}"
+        assert item.clients["codex"].discovery_root == ".agents/skills"
+        assert item.clients["codex"].invocation == f"${item.skill_id}"
+
+
+def test_agent_skills_prerequisites_do_not_guess_external_contracts():
+    metadata = load_profile_prerequisites("agent-skills")
+    for item in metadata.skills:
+        assert item.distribution_owner == "agent-skills plugin"
+        assert item.support == "Unverified"
+        assert item.clients["claude"].discovery_root is None
+        assert item.clients["claude"].invocation is None
+        assert item.clients["codex"].discovery_root is None
+        assert item.clients["codex"].invocation is None
+
+
+def _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text("phases: []\n")
+    if metadata_text is not None:
+        (tmp_path / "prerequisites.yaml").write_text(metadata_text)
+    monkeypatch.setattr(
+        "hermes_pipeline.phases.resolve_profile_phases_path",
+        lambda profile: phases_path,
+    )
+    return load_profile_prerequisites("gstack")
+
+
+VALID_PREREQUISITE_METADATA = {
+    "schema_version": 1,
+    "profile": "gstack",
+    "skills": [
+        {
+            "skill_id": "review",
+            "distribution_owner": "gstack",
+            "support": "Conditional",
+            "clients": {
+                "claude": {
+                    "discovery_root": ".claude/skills",
+                    "invocation": "/review",
+                },
+                "codex": {
+                    "discovery_root": ".agents/skills",
+                    "invocation": "$review",
+                },
+            },
+        }
+    ],
+}
+_DELETE = object()
+
+
+def _metadata_with_updates(*updates):
+    metadata = copy.deepcopy(VALID_PREREQUISITE_METADATA)
+    for path, value in updates:
+        target = metadata
+        for key in path[:-1]:
+            target = target[key]
+        if value is _DELETE:
+            del target[path[-1]]
+        else:
+            target[path[-1]] = value
+    return yaml.safe_dump(metadata, sort_keys=False)
+
+
+@pytest.mark.parametrize(
+    ("updates", "field"),
+    [
+        (((("schema_version",), 2),), "schema_version"),
+        (((("profile",), "other"),), "profile"),
+        (((("skills",), {}),), "skills"),
+        (((("skills", 0, "skill_id"), ""),), "skills[0].skill_id"),
+        (
+            (
+                (
+                    ("skills",),
+                    [
+                        copy.deepcopy(VALID_PREREQUISITE_METADATA["skills"][0]),
+                        copy.deepcopy(VALID_PREREQUISITE_METADATA["skills"][0]),
+                    ],
+                ),
+            ),
+            "skills[1].skill_id",
+        ),
+        (
+            ((("skills", 0, "distribution_owner"), ""),),
+            "skills[0].distribution_owner",
+        ),
+        (((("skills", 0, "support"), "Maybe"),), "skills[0].support"),
+        (
+            ((("skills", 0, "clients", "codex"), _DELETE),),
+            "skills[0].clients",
+        ),
+        (
+            ((("skills", 0, "clients", "claude", "invocation"), _DELETE),),
+            "skills[0].clients.claude",
+        ),
+        (
+            ((("skills", 0, "clients", "claude", "discovery_root"), None),),
+            "skills[0].clients.claude.discovery_root",
+        ),
+        (
+            (
+                (("skills", 0, "support"), "Unverified"),
+                (("skills", 0, "clients", "claude", "discovery_root"), None),
+                (("skills", 0, "clients", "codex", "discovery_root"), None),
+                (("skills", 0, "clients", "codex", "invocation"), None),
+            ),
+            "skills[0].clients.claude.invocation",
+        ),
+    ],
+)
+def test_prerequisite_metadata_validation_names_path_and_field(
+    monkeypatch, tmp_path, updates, field
+):
+    metadata_text = _metadata_with_updates(*updates)
+    with pytest.raises(ValueError) as exc_info:
+        _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text)
+    message = str(exc_info.value)
+    assert str(tmp_path / "prerequisites.yaml") in message
+    assert field in message
+
+
+@pytest.mark.parametrize("metadata_text", [None, "skills: [\n"])
+def test_prerequisite_metadata_read_errors_name_path(
+    monkeypatch, tmp_path, metadata_text
+):
+    with pytest.raises(ValueError) as exc_info:
+        _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text)
+    message = str(exc_info.value)
+    assert str(tmp_path / "prerequisites.yaml") in message
+    assert "metadata" in message
 
 def test_load_phases_from_yaml(tmp_path):
     p = tmp_path / "phases.yaml"

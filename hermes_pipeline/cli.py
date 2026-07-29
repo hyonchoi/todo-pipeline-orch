@@ -1436,17 +1436,20 @@ def _cmd_doctor(args, config: Config) -> int:
         print(f"INVALID: {e}")
         return 2
 
-    # Load phases from the contract's selected profile
-    from .phases import resolve_profile_phases_path
+    # Load phases and prerequisite metadata from the selected profile.
+    from .phases import load_profile_prerequisites, resolve_profile_phases_path
 
     try:
         profile_path = resolve_profile_phases_path(contract.profile)
         phases = load_phases(profile_path)
+        prerequisites = load_profile_prerequisites(contract.profile)
     except ContractSchemaError as e:
         print(f"MISSING: {e}")
         return 2
     except Exception as e:
-        print(f"INVALID: failed to load phases for profile '{contract.profile}': {e}")
+        print(
+            f"INVALID: failed to load profile data for '{contract.profile}': {e}"
+        )
         return 2
 
     missing = missing_capabilities(contract, phases)
@@ -1488,6 +1491,29 @@ def _cmd_doctor(args, config: Config) -> int:
                 f"with `hermes profile create {contract.assignee}`."
             )
             return 2
+
+    print(
+        f"prompt client: {config.prompt_client} "
+        "(global for all projects under projects_dir)"
+    )
+    print(
+        "Mixed-client fleets require separate project roots; per-project "
+        "selection is deferred to TODO-42."
+    )
+    print(f"Prerequisites for profile '{contract.profile}':")
+    for prerequisite in prerequisites.skills:
+        client = prerequisite.clients[config.prompt_client]
+        if prerequisite.support == "Conditional":
+            print(
+                f"- {prerequisite.skill_id} [Conditional]: "
+                f"discovery root {client.discovery_root}; "
+                f"invoke as {client.invocation}; worker provisioning is required"
+            )
+        else:
+            print(
+                f"- {prerequisite.skill_id} [Unverified]: compatibility is "
+                "not advertised as supported pending evidence"
+            )
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "

@@ -1,0 +1,93 @@
+schema_version: 1
+profile: gstack
+skills:
+  - skill_id: autoplan
+    distribution_owner: gstack
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /autoplan
+      codex:
+        discovery_root: .agents/skills
+        invocation: $autoplan
+  - skill_id: writing-plans
+    distribution_owner: superpowers
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /writing-plans
+      codex:
+        discovery_root: .agents/skills
+        invocation: $writing-plans
+  - skill_id: subagent-driven-development
+    distribution_owner: superpowers
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /subagent-driven-development
+      codex:
+        discovery_root: .agents/skills
+        invocation: $subagent-driven-development
+  - skill_id: review
+    distribution_owner: gstack
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /review
+      codex:
+        discovery_root: .agents/skills
+        invocation: $review
+  - skill_id: cso
+    distribution_owner: gstack
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /cso
+      codex:
+        discovery_root: .agents/skills
+        invocation: $cso
+  - skill_id: qa
+    distribution_owner: gstack
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /qa
+      codex:
+        discovery_root: .agents/skills
+        invocation: $qa
+  - skill_id: document-release
+    distribution_owner: gstack
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /document-release
+      codex:
+        discovery_root: .agents/skills
+        invocation: $document-release
+  - skill_id: document-generate
+    distribution_owner: gstack
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /document-generate
+      codex:
+        discovery_root: .agents/skills
+        invocation: $document-generate
+  - skill_id: ship
+    distribution_owner: gstack
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: .claude/skills
+        invocation: /ship
+      codex:
+        discovery_root: .agents/skills
+        invocation: $ship

@@ -13,6 +13,7 @@ from hermes_pipeline.cli import (
     build_parser,
 )
 from hermes_pipeline.config import Config
+from hermes_pipeline.phases import load_profile_prerequisites
 
 
 def test_todos_manager_skill_is_packaged_data():
@@ -510,6 +511,29 @@ class TestCmdSkillsInstall:
         assert result == 0
         assert (tmp_path / ".claude" / "skills" / "todos-manager" / "SKILL.md").is_file()
         assert (tmp_path / ".agents" / "skills" / "todos-manager" / "SKILL.md").is_file()
+
+    def test_profile_prerequisites_do_not_expand_package_installer_scope(
+        self, tmp_path, monkeypatch
+    ):
+        metadata = load_profile_prerequisites("gstack")
+        assert {"autoplan", "review", "ship"} <= {
+            item.skill_id for item in metadata.skills
+        }
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+
+        result = _cmd_skills_install(
+            FakeArgs(target="all", scope="user"), config
+        )
+
+        assert result == 0
+        for root in (
+            tmp_path / ".claude" / "skills",
+            tmp_path / ".agents" / "skills",
+        ):
+            assert {path.name for path in root.iterdir()} == {"todos-manager"}
+            for external_skill in ("autoplan", "review", "ship"):
+                assert not (root / external_skill).exists()
 
     def test_scope_project_uses_cwd(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

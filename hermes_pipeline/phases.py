@@ -5,7 +5,7 @@ import logging
 import string
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Final
+from typing import Final, Literal
 
 import yaml
 
@@ -81,6 +81,27 @@ class Phase:
     terminal: bool = False
     gate: bool = False
 
+
+@dataclass(frozen=True)
+class ClientPrerequisite:
+    discovery_root: str | None
+    invocation: str | None
+
+
+@dataclass(frozen=True)
+class SkillPrerequisite:
+    skill_id: str
+    distribution_owner: str
+    support: Literal["Conditional", "Unverified"]
+    clients: dict[PromptClient, ClientPrerequisite]
+
+
+@dataclass(frozen=True)
+class ProfilePrerequisites:
+    schema_version: int
+    profile: str
+    skills: tuple[SkillPrerequisite, ...]
+
 def resolve_profile_phases_path(profile: str) -> Path:
     """Resolve the bundled phases.yaml for a pipeline skill-set profile.
 
@@ -104,6 +125,108 @@ def resolve_profile_phases_path(profile: str) -> Path:
             f"Use --profile to select one at init, or edit 'profile' in .hermes/pipeline.toml."
         )
     return Path(candidate)
+
+
+def load_profile_prerequisites(profile: str) -> ProfilePrerequisites:
+    phases_path = resolve_profile_phases_path(profile)
+    path = phases_path.with_name("prerequisites.yaml")
+
+    def invalid(field: str, detail: str) -> ValueError:
+        return ValueError(f"{path}: invalid {field}: {detail}")
+
+    try:
+        raw = yaml.safe_load(path.read_text())
+    except (OSError, yaml.YAMLError) as exc:
+        raise invalid("metadata", str(exc)) from exc
+    if not isinstance(raw, dict):
+        raise invalid("metadata", "expected a mapping")
+    if type(raw.get("schema_version")) is not int or raw["schema_version"] != 1:
+        raise invalid("schema_version", "expected 1")
+    if raw.get("profile") != profile:
+        raise invalid("profile", f"expected {profile!r}")
+
+    raw_skills = raw.get("skills")
+    if not isinstance(raw_skills, list):
+        raise invalid("skills", "expected a list")
+
+    skills: list[SkillPrerequisite] = []
+    seen_skill_ids: set[str] = set()
+    expected_clients = set(CLIENT_VOCABULARY)
+    expected_client_names = " and ".join(repr(name) for name in CLIENT_VOCABULARY)
+    expected_client_fields = {"discovery_root", "invocation"}
+    for index, raw_skill in enumerate(raw_skills):
+        prefix = f"skills[{index}]"
+        if not isinstance(raw_skill, dict):
+            raise invalid(prefix, "expected a mapping")
+
+        skill_id = raw_skill.get("skill_id")
+        if not isinstance(skill_id, str) or not skill_id.strip():
+            raise invalid(f"{prefix}.skill_id", "expected a non-empty string")
+        if skill_id in seen_skill_ids:
+            raise invalid(f"{prefix}.skill_id", f"duplicate value {skill_id!r}")
+        seen_skill_ids.add(skill_id)
+
+        distribution_owner = raw_skill.get("distribution_owner")
+        if not isinstance(distribution_owner, str) or not distribution_owner.strip():
+            raise invalid(
+                f"{prefix}.distribution_owner", "expected a non-empty string"
+            )
+
+        support = raw_skill.get("support")
+        if support not in ("Conditional", "Unverified"):
+            raise invalid(
+                f"{prefix}.support", "expected 'Conditional' or 'Unverified'"
+            )
+
+        raw_clients = raw_skill.get("clients")
+        if not isinstance(raw_clients, dict) or set(raw_clients) != expected_clients:
+            raise invalid(
+                f"{prefix}.clients", f"expected exactly {expected_client_names}"
+            )
+
+        clients: dict[PromptClient, ClientPrerequisite] = {}
+        for client in CLIENT_VOCABULARY:
+            raw_client = raw_clients[client]
+            client_prefix = f"{prefix}.clients.{client}"
+            if (
+                not isinstance(raw_client, dict)
+                or set(raw_client) != expected_client_fields
+            ):
+                raise invalid(
+                    client_prefix,
+                    "expected exactly 'discovery_root' and 'invocation'",
+                )
+            discovery_root = raw_client["discovery_root"]
+            invocation = raw_client["invocation"]
+            for field, value in (
+                ("discovery_root", discovery_root),
+                ("invocation", invocation),
+            ):
+                field_path = f"{client_prefix}.{field}"
+                if support == "Conditional":
+                    if not isinstance(value, str) or not value.strip():
+                        raise invalid(field_path, "must be non-null for Conditional")
+                elif value is not None:
+                    raise invalid(field_path, "must be null for Unverified")
+            clients[client] = ClientPrerequisite(
+                discovery_root=discovery_root,
+                invocation=invocation,
+            )
+
+        skills.append(
+            SkillPrerequisite(
+                skill_id=skill_id,
+                distribution_owner=distribution_owner,
+                support=support,
+                clients=clients,
+            )
+        )
+
+    return ProfilePrerequisites(
+        schema_version=raw["schema_version"],
+        profile=raw["profile"],
+        skills=tuple(skills),
+    )
 
 
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:

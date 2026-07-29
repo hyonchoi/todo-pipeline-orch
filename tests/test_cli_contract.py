@@ -34,6 +34,17 @@ def _create_project(projects_dir, name):
     return project_dir
 
 
+def _create_valid_doctor_project(projects_dir, profile="gstack"):
+    project_dir = _create_project(projects_dir, "demo")
+    (project_dir / ".hermes").mkdir(parents=True)
+    (project_dir / ".hermes" / "pipeline.toml").write_text(
+        "schema_version = 2\n"
+        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        f'profile = "{profile}"\n'
+    )
+    return FakeArgs(project="demo")
+
+
 class TestBuildParserInit:
     def test_init_help(self):
         parser = build_parser()
@@ -312,6 +323,94 @@ class TestCmdDoctor:
 
 
 class TestDoctorProfileAware:
+    def test_doctor_reports_global_prompt_client_scope(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        args = _create_valid_doctor_project(tmp_path)
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            lambda *args, **kwargs: pytest.fail(
+                "doctor must not inspect a remote worker for external skills"
+            ),
+        )
+
+        assert (
+            _cmd_doctor(
+                args,
+                Config(projects_dir=tmp_path, prompt_client="codex"),
+            )
+            == 0
+        )
+
+        output = capsys.readouterr().out
+        assert (
+            "prompt client: codex (global for all projects under projects_dir)"
+            in output
+        )
+        assert "separate project roots" in output
+        assert "TODO-42" in output
+
+    @pytest.mark.parametrize(
+        ("prompt_client", "discovery_root", "invocation"),
+        [
+            ("claude", ".claude/skills", "/autoplan"),
+            ("codex", ".agents/skills", "$autoplan"),
+        ],
+    )
+    def test_doctor_reports_conditional_prerequisites_without_local_failure(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+        prompt_client,
+        discovery_root,
+        invocation,
+    ):
+        args = _create_valid_doctor_project(tmp_path)
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            lambda *args, **kwargs: pytest.fail(
+                "doctor must not inspect a remote worker for external skills"
+            ),
+        )
+
+        assert (
+            _cmd_doctor(
+                args,
+                Config(projects_dir=tmp_path, prompt_client=prompt_client),
+            )
+            == 0
+        )
+
+        output = capsys.readouterr().out
+        assert "Conditional" in output
+        assert discovery_root in output
+        assert invocation in output
+        assert "worker provisioning is required" in output
+
+    def test_doctor_marks_unverified_profile_unsupported(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        args = _create_valid_doctor_project(tmp_path, profile="agent-skills")
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            lambda *args, **kwargs: pytest.fail(
+                "doctor must not inspect a remote worker for external skills"
+            ),
+        )
+
+        assert (
+            _cmd_doctor(
+                args,
+                Config(projects_dir=tmp_path, prompt_client="codex"),
+            )
+            == 0
+        )
+
+        output = capsys.readouterr().out
+        assert "Unverified" in output
+        assert "not advertised as supported" in output
+
     def test_doctor_loads_phases_from_contract_profile(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
