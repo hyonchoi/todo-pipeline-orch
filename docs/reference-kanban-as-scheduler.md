@@ -167,6 +167,19 @@ Retries all queued operations. Dequeues on success, leaves on failure so it can 
 tick starts
     |
     v
+[reconcile pending-task-create marker]
+    |
+    +-- unresolved, malformed, or cleanup not confirmed
+    |       |
+    |       v
+    |   log "project <slug>: unresolved Hermes task creation; skipping"
+    |       |
+    |       v
+    |   skip this project tick
+    |
+    +-- no marker or recovery archive confirmed
+            |
+            v
 [run_selection] -- picks TODO-10 or picked=None
     |
     v
