@@ -180,6 +180,27 @@ tick starts
     +-- no marker or recovery archive confirmed
             |
             v
+[process prior tick] -- read prior ID; observe completed outcomes
+    |
+    +-- prior phases still in-flight
+    |       |
+    |       v
+    |   log "project <slug>: prior tick <id> still in-flight, skipping"
+    |       |
+    |       v
+    |   skip this project tick
+    |
+    +-- PR handoff pending
+    |       |
+    |       v
+    |   log "project <slug>: prior tick <id> is waiting on PR handoff, skipping"
+    |       |
+    |       v
+    |   skip this project tick
+    |
+    +-- no prior tick, or completed/resolved prior tick
+            |
+            v
 [run_selection] -- picks TODO-10 or picked=None
     |
     v
@@ -202,20 +223,9 @@ tick starts
     phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_5_review  <--parent--  phase_6_1_cso
     (running)                  (ready)                  (ready)                  (ready)
     |
-    v  (phase_2 completes -> phase_4 transitions to running)
-[observe_outcomes] -- reads kanban status map, writes JSONL to .hermes/outcomes/
-    |
     v
-[CircuitBreaker.observe_from_outcomes] -- reads JSONL, updates no-progress counter
-    |
-    v
-[all_phases_complete] -- checks if all kanban tasks are done/failed
-    |
-    v
-[PR handoff check] -- skips selection while recorded branch PR is not merged
-    |
-    v
-tick lock released (if complete) / skip (if in-flight)
+tick ends; a later tick begins above and observes the prior chain. Hermes parent
+dependencies allow each later executable phase to run when its predecessor ends.
 ```
 
 **Why kanban instead of internal state?**
