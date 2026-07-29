@@ -68,7 +68,8 @@ The bundled profiles reference externally distributed skills. Selecting a
 prompt client does not install those skills. `Conditional` rows are supported
 only when every listed skill is installed and discoverable by the worker.
 `Unverified` rows are unsupported until their external discovery and invocation
-contracts have qualification evidence.
+contracts have qualification evidence. `tpo doctor` fails closed with exit code
+2 when the selected profile contains an `Unverified` prerequisite.
 
 | Profile | Referenced skill | Distribution owner | Claude discovery / invocation | Codex discovery / invocation | Support |
 |---|---|---|---|---|---|

@@ -404,12 +404,14 @@ class TestDoctorProfileAware:
                 args,
                 Config(projects_dir=tmp_path, prompt_client="codex"),
             )
-            == 0
+            == 2
         )
 
         output = capsys.readouterr().out
         assert "Unverified" in output
         assert "not advertised as supported" in output
+        assert "UNSUPPORTED" in output
+        assert "OK:" not in output
 
     def test_doctor_loads_phases_from_contract_profile(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"

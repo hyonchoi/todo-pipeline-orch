@@ -84,11 +84,7 @@ def _parse_task_id(stdout: str) -> str | None:
         parts = stdout.strip().split()
         if len(parts) >= 2 and parts[0] == "Created":
             task_id = parts[1]
-    if (
-        not isinstance(task_id, str)
-        or not task_id
-        or any(character.isspace() for character in task_id)
-    ):
+    if not isinstance(task_id, str) or re.fullmatch(r"t_[0-9a-f]{8}", task_id) is None:
         return None
     return task_id
 

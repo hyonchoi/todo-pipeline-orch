@@ -18,6 +18,34 @@ class FakeGatePhase:
         self.gate = gate
 
 
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        '{"id": "--help"}',
+        '{"id": "task-001"}',
+        "Created --help",
+        "Created task-001",
+    ],
+)
+def test_parse_task_id_rejects_values_outside_hermes_id_contract(stdout):
+    from hermes_pipeline.kanban_tasks import _parse_task_id
+
+    assert _parse_task_id(stdout) is None
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        ('{"id": "t_0123abcd"}', "t_0123abcd"),
+        ("Created t_deadbeef (ready, assignee=-)", "t_deadbeef"),
+    ],
+)
+def test_parse_task_id_accepts_current_and_legacy_hermes_output(stdout, expected):
+    from hermes_pipeline.kanban_tasks import _parse_task_id
+
+    assert _parse_task_id(stdout) == expected
+
+
 def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
 
@@ -154,8 +182,8 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     ]
     mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     mock_run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
-        mocker.Mock(returncode=0, stdout='{"id": "task-002"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000002"}', stderr=""),
     ]
 
     task_ids = create_prepared_todo_phases(
@@ -165,7 +193,7 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
         project_dir=tmp_path,
     )
 
-    assert task_ids == ["task-001", "task-002"]
+    assert task_ids == ["t_00000001", "t_00000002"]
     assert mock_run.call_count == 2
     assert "--parent" not in mock_run.call_args_list[0].args[0]
     assert "--parent" in mock_run.call_args_list[1].args[0]
@@ -194,7 +222,7 @@ def test_create_prepared_archives_prior_tasks_on_process_failure(
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     side_effects = [
-        mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
         failure,
     ]
     if isinstance(failure, subprocess.TimeoutExpired):
@@ -210,7 +238,7 @@ def test_create_prepared_archives_prior_tasks_on_process_failure(
             project_dir=tmp_path,
         )
 
-    assert run.call_args_list[-1].args[0][-1] == "task-001"
+    assert run.call_args_list[-1].args[0][-1] == "t_00000001"
 
 
 def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mocker):
@@ -225,7 +253,7 @@ def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mock
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
         subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        mocker.Mock(returncode=0, stdout='{"id": "task-uncertain"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_deadbeef"}', stderr=""),
         mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
 
@@ -238,7 +266,7 @@ def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mock
         )
 
     assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
-    assert run.call_args_list[2].args[0][-1] == "task-uncertain"
+    assert run.call_args_list[2].args[0][-1] == "t_deadbeef"
 
 
 def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
@@ -255,7 +283,7 @@ def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
         mocker.Mock(returncode=1, stdout="", stderr="transport failed"),
-        mocker.Mock(returncode=0, stdout='{"id": "task-uncertain"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_deadbeef"}', stderr=""),
         mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
 
@@ -268,7 +296,7 @@ def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
         )
 
     assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
-    assert run.call_args_list[2].args[0][-1] == "task-uncertain"
+    assert run.call_args_list[2].args[0][-1] == "t_deadbeef"
 
 
 def test_create_prepared_recovers_and_archives_task_after_invalid_output(
@@ -285,7 +313,7 @@ def test_create_prepared_recovers_and_archives_task_after_invalid_output(
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
         mocker.Mock(returncode=0, stdout='{"id": null}', stderr=""),
-        mocker.Mock(returncode=0, stdout='{"id": "task-uncertain"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_deadbeef"}', stderr=""),
         mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
 
@@ -298,7 +326,7 @@ def test_create_prepared_recovers_and_archives_task_after_invalid_output(
         )
 
     assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
-    assert run.call_args_list[2].args[0][-1] == "task-uncertain"
+    assert run.call_args_list[2].args[0][-1] == "t_deadbeef"
 
 
 @pytest.mark.parametrize(
@@ -325,7 +353,7 @@ def test_create_prepared_rejects_malformed_task_id_and_archives_prior_tasks(
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
         mocker.Mock(returncode=0, stdout=malformed_output, stderr=""),
         mocker.Mock(returncode=1, stdout="", stderr="failed"),
         mocker.Mock(returncode=0, stdout="", stderr=""),
@@ -339,7 +367,7 @@ def test_create_prepared_rejects_malformed_task_id_and_archives_prior_tasks(
             project_dir=tmp_path,
         )
 
-    assert run.call_args_list[-1].args[0][-1] == "task-001"
+    assert run.call_args_list[-1].args[0][-1] == "t_00000001"
 
 
 class TestRegisterTodoPhases:
@@ -351,7 +379,7 @@ class TestRegisterTodoPhases:
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
-            returncode=0, stdout=json.dumps({"id": "task-001"})
+            returncode=0, stdout=json.dumps({"id": "t_00000001"})
         )
 
         phases_cfg = tmp_path / "phases.yaml"
@@ -401,7 +429,7 @@ class TestRegisterTodoPhases:
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
-            returncode=0, stdout=json.dumps({"id": "task-001"})
+            returncode=0, stdout=json.dumps({"id": "t_00000001"})
         )
 
         phases_cfg = tmp_path / "phases.yaml"
@@ -442,7 +470,7 @@ class TestRegisterTodoPhases:
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
-            returncode=0, stdout=json.dumps({"id": "task-001"})
+            returncode=0, stdout=json.dumps({"id": "t_00000001"})
         )
 
         phases_cfg = tmp_path / "phases.yaml"
@@ -478,7 +506,7 @@ class TestRegisterTodoPhases:
         mock_run = mocker.patch("subprocess.run")
         mock_run.side_effect = [
             mocker.MagicMock(
-                returncode=0, stdout=json.dumps({"id": "task-001"})
+                returncode=0, stdout=json.dumps({"id": "t_00000001"})
             ),
             mocker.MagicMock(returncode=1, stdout="", stderr="error"),
             # Idempotent recovery retry also fails
@@ -513,12 +541,12 @@ class TestRegisterTodoPhases:
                 phases_path=str(phases_cfg),
             )
 
-        # Verify archive was called for task-001
+        # Verify archive was called for t_00000001
         archive_call = mock_run.call_args_list[3]
         archive_args = archive_call[0][0]
         assert "kanban" in archive_args
         assert "archive" in archive_args
-        assert "task-001" in archive_args
+        assert "t_00000001" in archive_args
 
     def test_returns_task_ids(self, tmp_path, mocker):
         """register_todo_phases returns a list of created task IDs."""
@@ -527,10 +555,10 @@ class TestRegisterTodoPhases:
         mock_run = mocker.patch("subprocess.run")
         mock_run.side_effect = [
             mocker.MagicMock(
-                returncode=0, stdout=json.dumps({"id": "task-001"})
+                returncode=0, stdout=json.dumps({"id": "t_00000001"})
             ),
             mocker.MagicMock(
-                returncode=0, stdout=json.dumps({"id": "task-002"})
+                returncode=0, stdout=json.dumps({"id": "t_00000002"})
             ),
         ]
 
@@ -559,7 +587,7 @@ class TestRegisterTodoPhases:
             phases_path=str(phases_cfg),
         )
 
-        assert task_ids == ["task-001", "task-002"]
+        assert task_ids == ["t_00000001", "t_00000002"]
 
     def test_gate_phase_registered_blocked_without_goal(self, tmp_path, mocker):
         """Gate phases get --initial-status blocked, no --goal flags."""
@@ -571,7 +599,7 @@ class TestRegisterTodoPhases:
         ]
         mocker.patch("hermes_pipeline.kanban_tasks.load_phases", return_value=phases)
         mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_x"}', stderr="")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_0000000a"}', stderr="")
 
         register_todo_phases(
             todo_id="TODO-5",
@@ -602,7 +630,7 @@ class TestRegisterTodoPhases:
         ]
         mocker.patch("hermes_pipeline.kanban_tasks.load_phases", return_value=phases)
         mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_x"}', stderr="")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_0000000a"}', stderr="")
 
         register_todo_phases(
             todo_id="TODO-5",
@@ -1097,7 +1125,7 @@ class TestObserveOutcomes:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(returncode=0, stdout="", stderr="")
 
-        _archive_tasks(["task-001", "task-002", "task-003"])
+        _archive_tasks(["t_00000001", "t_00000002", "t_00000003"])
 
         assert mock_run.call_count == 3
         for i, call in enumerate(mock_run.call_args_list):
@@ -1117,7 +1145,7 @@ class TestObserveOutcomes:
         ]
 
         # Should not raise — best-effort
-        _archive_tasks(["task-001", "task-002", "task-003"])
+        _archive_tasks(["t_00000001", "t_00000002", "t_00000003"])
         assert mock_run.call_count == 3
 
     def test_all_phases_complete_dict_format(self, mocker):
@@ -1214,12 +1242,12 @@ class TestCompleteTodoKanbanTask:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(returncode=0, stdout="", stderr="")
 
-        result = complete_todo_kanban_task("demo", "task-001")
+        result = complete_todo_kanban_task("demo", "t_00000001")
 
         assert result is True
         assert mock_run.call_count == 1
         args = mock_run.call_args[0][0]
-        assert args == ["hermes", "kanban", "complete", "task-001"]
+        assert args == ["hermes", "kanban", "complete", "t_00000001"]
 
     def test_swallows_nonzero_returncode(self, mocker):
         from hermes_pipeline.kanban_tasks import complete_todo_kanban_task
@@ -1227,7 +1255,7 @@ class TestCompleteTodoKanbanTask:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(returncode=1, stdout="", stderr="boom")
 
-        result = complete_todo_kanban_task("demo", "task-001")  # Should not raise
+        result = complete_todo_kanban_task("demo", "t_00000001")  # Should not raise
 
         assert result is False
 
@@ -1236,7 +1264,7 @@ class TestCompleteTodoKanbanTask:
 
         mocker.patch("subprocess.run", side_effect=FileNotFoundError)
 
-        result = complete_todo_kanban_task("demo", "task-001")  # Should not raise
+        result = complete_todo_kanban_task("demo", "t_00000001")  # Should not raise
 
         assert result is False
 

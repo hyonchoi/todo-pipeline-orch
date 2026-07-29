@@ -1503,6 +1503,7 @@ def _cmd_doctor(args, config: Config) -> int:
         "selection is deferred to TODO-42."
     )
     print(f"Prerequisites for profile '{contract.profile}':")
+    has_unverified_prerequisites = False
     for prerequisite in prerequisites.skills:
         client = prerequisite.clients[config.prompt_client]
         if prerequisite.support == "Conditional":
@@ -1512,10 +1513,18 @@ def _cmd_doctor(args, config: Config) -> int:
                 f"invoke as {client.invocation}; worker provisioning is required"
             )
         else:
+            has_unverified_prerequisites = True
             print(
                 f"- {prerequisite.skill_id} [Unverified]: compatibility is "
                 "not advertised as supported pending evidence"
             )
+
+    if has_unverified_prerequisites:
+        print(
+            f"UNSUPPORTED: profile '{contract.profile}' has Unverified "
+            f"prerequisites for prompt client '{config.prompt_client}'"
+        )
+        return 2
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "

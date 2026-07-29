@@ -12,6 +12,8 @@ Pipeline profiles let a project select an independent set of phases — the prom
 Namespaced invocation and discovery for the `agent-skills` profile remain
 `Unverified` for both Claude Code and Codex. This profile/client combination is
 unsupported, and changing `prompt_client` does not promote its support status.
+`tpo doctor` reports `UNSUPPORTED` and exits 2 for this profile until its
+client contracts are qualified.
 To remediate, use a verified profile/client pair, provide versioned
 [qualification evidence](release-qualification-agent-clients.md) that can
 promote the package metadata, or keep the row unsupported.
