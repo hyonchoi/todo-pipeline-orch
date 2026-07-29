@@ -371,8 +371,8 @@ Release qualification is versioned and auditable. For every `Conditional`
 client/profile pair it defines:
 
 - environment and installation prerequisites;
-- the discovery command;
-- one representative explicit invocation and expected result;
+- gstack skill-root and official/curated plugin discovery checks;
+- the verified invocation forms for the discovered skill IDs;
 - the evidence artifact path and timestamp;
 - the blocking rule for release.
 

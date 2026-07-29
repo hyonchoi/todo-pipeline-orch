@@ -12,38 +12,36 @@ isolated environment and commit only the captured evidence.
 
 ### `gstack` / `claude`
 
-- Environment prerequisites: record the exact Claude Code version, gstack
-  version, superpowers version, a clean discovery root, and confirmation that
-  no project-local `.claude/skills` directory was inherited.
-- Discovery command: from the clean discovery root, run the read-only command
-  `find .claude/skills -type f -name SKILL.md -print | sort`.
-- Representative invocation: explicitly invoke `/autoplan` in a disposable
-  fixture. The client must identify and start the skill without an
-  unknown-skill error.
+- Environment prerequisites: record the exact Claude Code, gstack, and
+  superpowers versions.
+- Discovery checks: follow symlinks under `~/.claude/skills` and confirm every
+  required gstack `SKILL.md`; then confirm the official
+  `claude-plugins-official/superpowers` plugin manifest and required
+  `writing-plans` and `subagent-driven-development` skills.
+- Invocation forms: confirm the discovered skill IDs map to `/autoplan`,
+  `/writing-plans`, and the other slash-prefixed forms in package metadata.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-claude.md`.
 - Required fields: UTC timestamp, OS, client version, distribution versions,
-  install commands, discovery output, invocation transcript excerpt, result,
-  and verifier.
+  discovery output, invocation forms, result, and verifier.
 - Blocking rule: a release advertising this Conditional pair is blocked when
   the current release has no passing artifact or the artifact records a
   failure.
 
 ### `gstack` / `codex`
 
-- Environment prerequisites: record the exact Codex version, gstack version,
-  superpowers version, a clean discovery root, and confirmation that no
-  project-local `.agents/skills` directory was inherited.
-- Discovery command: from the clean discovery root, run the read-only command
-  `find .agents/skills -type f -name SKILL.md -print | sort`.
-- Representative invocation: explicitly invoke `$autoplan` in a disposable
-  fixture. The client must identify and start the skill without an
-  unknown-skill error.
+- Environment prerequisites: record the exact Codex, gstack, and superpowers
+  versions.
+- Discovery checks: follow symlinks under `~/.codex/skills` and confirm every
+  required gstack `SKILL.md`; then confirm the curated
+  `openai-curated-remote/superpowers` plugin manifest and required
+  `writing-plans` and `subagent-driven-development` skills.
+- Invocation forms: confirm the discovered skill IDs map to `$autoplan`,
+  `$writing-plans`, and the other dollar-prefixed forms in package metadata.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-codex.md`.
 - Required fields: UTC timestamp, OS, client version, distribution versions,
-  install commands, discovery output, invocation transcript excerpt, result,
-  and verifier.
+  discovery output, invocation forms, result, and verifier.
 - Blocking rule: a release advertising this Conditional pair is blocked when
   the current release has no passing artifact or the artifact records a
   failure.

@@ -24,11 +24,9 @@ Each artifact must include:
 - Operating system and version
 - Exact client version
 - Exact gstack and superpowers distribution versions
-- Clean discovery root and confirmation that no project-local skill directory
-  was inherited
-- Installation commands
+- Exact gstack skill root and superpowers plugin source
 - Discovery command and complete discovery output
-- Representative invocation and transcript excerpt
+- Verified invocation forms
 - Result: `PASS` or `FAIL`
 - Verifier name or stable identity
 
