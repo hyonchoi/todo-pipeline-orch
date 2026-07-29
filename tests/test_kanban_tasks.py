@@ -173,11 +173,14 @@ def test_create_prepared_archives_prior_tasks_on_process_failure(
         for index in (1, 2)
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
+    side_effects = [
         mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
         failure,
-        mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
+    if isinstance(failure, subprocess.TimeoutExpired):
+        side_effects.append(mocker.Mock(returncode=1, stdout="", stderr="failed"))
+    side_effects.append(mocker.Mock(returncode=0, stdout="", stderr=""))
+    run.side_effect = side_effects
 
     with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
         create_prepared_todo_phases(
@@ -187,7 +190,65 @@ def test_create_prepared_archives_prior_tasks_on_process_failure(
             project_dir=tmp_path,
         )
 
-    assert run.call_args_list[2].args[0][-1] == "task-001"
+    assert run.call_args_list[-1].args[0][-1] == "task-001"
+
+
+def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        mocker.Mock(returncode=0, stdout='{"id": "task-uncertain"}', stderr=""),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_1.*Hermes process"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
+    assert run.call_args_list[2].args[0][-1] == "task-uncertain"
+
+
+def test_create_prepared_recovers_and_archives_task_after_invalid_output(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": null}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "task-uncertain"}', stderr=""),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_1.*task ID"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
+    assert run.call_args_list[2].args[0][-1] == "task-uncertain"
 
 
 @pytest.mark.parametrize(
@@ -215,6 +276,7 @@ def test_create_prepared_rejects_malformed_task_id_and_archives_prior_tasks(
     run.side_effect = [
         mocker.Mock(returncode=0, stdout='{"id": "task-001"}', stderr=""),
         mocker.Mock(returncode=0, stdout=malformed_output, stderr=""),
+        mocker.Mock(returncode=1, stdout="", stderr="failed"),
         mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
 
@@ -226,7 +288,7 @@ def test_create_prepared_rejects_malformed_task_id_and_archives_prior_tasks(
             project_dir=tmp_path,
         )
 
-    assert run.call_args_list[2].args[0][-1] == "task-001"
+    assert run.call_args_list[-1].args[0][-1] == "task-001"
 
 
 class TestRegisterTodoPhases:

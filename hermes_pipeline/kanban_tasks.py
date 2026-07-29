@@ -72,6 +72,43 @@ class PreparedPhaseTask:
     gate: bool
 
 
+def _parse_task_id(stdout: str) -> str | None:
+    task_id = None
+    try:
+        task_data = json.loads(stdout)
+        if isinstance(task_data, dict):
+            task_id = task_data.get("id")
+    except json.JSONDecodeError:
+        pass
+    if task_id is None:
+        parts = stdout.strip().split()
+        if len(parts) >= 2 and parts[0] == "Created":
+            task_id = parts[1]
+    if (
+        not isinstance(task_id, str)
+        or not task_id
+        or any(character.isspace() for character in task_id)
+    ):
+        return None
+    return task_id
+
+
+def _recover_uncertain_task_id(cmd: list[str]) -> str | None:
+    """Repeat an idempotent create once to recover a remotely-created task ID."""
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=KANBAN_QUERY_TIMEOUT,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    if result.returncode != 0:
+        return None
+    return _parse_task_id(result.stdout)
+
+
 def prepare_todo_phases(
     *,
     todo_id: str,
@@ -189,7 +226,16 @@ def create_prepared_todo_phases(
                 timeout=KANBAN_QUERY_TIMEOUT,
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
-            _archive_tasks(task_ids)
+            uncertain_task_id = (
+                _recover_uncertain_task_id(cmd)
+                if isinstance(exc, subprocess.TimeoutExpired)
+                else None
+            )
+            cleanup_ids = [
+                *task_ids,
+                *([uncertain_task_id] if uncertain_task_id is not None else []),
+            ]
+            _archive_tasks(cleanup_ids)
             raise RuntimeError(
                 f"failed to register kanban task {phase.phase_key} "
                 f"for tick {tick_id}: Hermes process failed: {exc}"
@@ -213,23 +259,14 @@ def create_prepared_todo_phases(
         # Parse task ID from JSON output (--json returns {"id": "t_xxx"}).
         # Older Hermes versions print "Created t_xxx (...)". Validate either
         # form before it can become the next phase's --parent argument.
-        task_id = None
-        try:
-            task_data = json.loads(result.stdout)
-            if isinstance(task_data, dict):
-                task_id = task_data.get("id")
-        except json.JSONDecodeError:
-            pass
+        task_id = _parse_task_id(result.stdout)
         if task_id is None:
-            parts = result.stdout.strip().split()
-            if len(parts) >= 2 and parts[0] == "Created":
-                task_id = parts[1]
-        if (
-            not isinstance(task_id, str)
-            or not task_id
-            or any(character.isspace() for character in task_id)
-        ):
-            _archive_tasks(task_ids)
+            uncertain_task_id = _recover_uncertain_task_id(cmd)
+            cleanup_ids = [
+                *task_ids,
+                *([uncertain_task_id] if uncertain_task_id is not None else []),
+            ]
+            _archive_tasks(cleanup_ids)
             idempotency_key = f"{tick_id}:{phase.phase_key}"
             raise RuntimeError(
                 f"{phase.phase_key}: failed to parse valid task ID; "
