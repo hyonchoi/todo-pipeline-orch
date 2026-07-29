@@ -4,9 +4,16 @@ Pipeline profiles let a project select an independent set of phases — the prom
 
 ## Prerequisites
 
-- `todo-pipeline-orchestrator` installed and `uv run tpo` working
+- `todo-pipeline-orchestrator` installed and `tpo` working
 - A project with a `TODOS.md` file under `tpo config get projects_dir`
 - The `agent-skills` plugin's skills (spec-driven-development, planning-and-task-breakdown, incremental-implementation, test-driven-development, code-review-and-quality, security-and-hardening, ship) available in the environment that runs the pipeline
+
+Namespaced invocation and discovery for the `agent-skills` profile remain
+`Unverified` for both Claude Code and Codex. This profile/client combination is
+unsupported, and changing `prompt_client` does not promote its support status.
+To remediate, use a verified profile/client pair, provide versioned
+[qualification evidence](release-qualification-agent-clients.md) that can
+promote the package metadata, or keep the row unsupported.
 
 ## What is a profile?
 
@@ -22,7 +29,7 @@ A project's `.hermes/pipeline.toml` contract records which profile it runs via t
 ### 1. Initialize a project with the agent-skills profile
 
 ```bash
-uv run tpo init <project> --profile agent-skills
+tpo init <project> --profile agent-skills
 ```
 
 Expected output:
@@ -41,13 +48,13 @@ profile = "agent-skills"
 If the project already has a contract, `init` is a no-op unless you pass `--force`:
 
 ```bash
-uv run tpo init <project> --force --profile agent-skills
+tpo init <project> --force --profile agent-skills
 ```
 
 ### 2. Verify the contract
 
 ```bash
-uv run tpo doctor <project>
+tpo doctor <project>
 ```
 
 Expected output:
@@ -70,7 +77,7 @@ profile = "agent-skills"
 ```
 
 ```bash
-uv run tpo doctor <project>
+tpo doctor <project>
 ```
 
 If `doctor` reports drift, regenerate the contract with `init --force --profile agent-skills` (this recomputes capabilities but discards any custom assignee/capabilities), or manually add the missing capabilities.

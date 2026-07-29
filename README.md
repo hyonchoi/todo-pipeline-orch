@@ -62,6 +62,38 @@ Skill targets:
 | `claude` | `.claude/skills` convention |
 | `all` | both conventions |
 
+### Client prerequisites
+
+The bundled profiles reference externally distributed skills. Selecting a
+prompt client does not install those skills. `Conditional` rows are supported
+only when every listed skill is installed and discoverable by the worker.
+`Unverified` rows are unsupported until their external discovery and invocation
+contracts have qualification evidence.
+
+| Profile | Referenced skill | Distribution owner | Claude discovery | Codex discovery | Support |
+|---|---|---|---|---|---|
+| `gstack` | `autoplan` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `writing-plans` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:test-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:code-review-and-quality` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:code-reviewer` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:security-and-hardening` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:security-auditor` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+
+See [agent client release qualification](docs/release-qualification-agent-clients.md)
+for the evidence required to advertise a `Conditional` pair.
+
 ## Core workflows
 
 Configure the project scan directory:
@@ -70,6 +102,29 @@ Configure the project scan directory:
 tpo config init
 tpo config set projects_dir ~/my-projects
 ```
+
+Choose the prompt vocabulary used by every project under `projects_dir`:
+
+```bash
+tpo config init
+tpo config get prompt_client
+tpo config set prompt_client codex
+tpo config get prompt_client
+tpo doctor <project>
+```
+
+One global client covers every project under `projects_dir`; use separate
+project roots for mixed Claude/Codex fleets. The settings have separate jobs:
+
+| Setting | Selects |
+|---|---|
+| Global `prompt_client` | Prompt vocabulary only (`claude` or `codex`) |
+| Contract `profile` | Bundled phase and skill workflow |
+| Contract `assignee` | Hermes profile and agent identity |
+| Hermes configuration | Models and provider authentication |
+
+See the [CLI configuration reference](docs/reference-cli.md#config) for accepted
+values, source behavior, and installed-user commands.
 
 Start a new project with no `TODOS.md` by asking your agent to invoke the installed `todos-manager` skill with `--init`, then `--add`:
 
@@ -168,6 +223,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | [Configure the pipeline contract](docs/howto-pipeline-contract.md) | How-to | Editing assignee, fixing capability drift, schema migration |
 | [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Design rationale for versioned contracts and capability gates |
 | [Use the agent-skills profile](docs/howto-agent-skills-profile.md) | How-to | Selecting `gstack` or `agent-skills` pipeline phases |
+| [Qualify agent clients for release](docs/release-qualification-agent-clients.md) | Reference | Capturing evidence for conditional profile/client support |
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` routes LLM calls |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 

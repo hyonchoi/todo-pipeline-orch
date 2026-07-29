@@ -1,6 +1,7 @@
 
 import copy
 import re
+from pathlib import Path
 
 import pytest
 import yaml
@@ -82,6 +83,28 @@ def test_agent_skills_prerequisites_do_not_guess_external_contracts():
         assert item.clients["claude"].invocation is None
         assert item.clients["codex"].discovery_root is None
         assert item.clients["codex"].invocation is None
+
+
+def test_documented_prerequisite_rows_match_package_metadata():
+    readme = Path("README.md").read_text()
+    reference = Path("docs/reference-cli.md").read_text()
+    for profile in ("gstack", "agent-skills"):
+        metadata = load_profile_prerequisites(profile)
+        for item in metadata.skills:
+            row_key = f"`{profile}` | `{item.skill_id}`"
+            assert row_key in readme
+            assert row_key in reference
+
+
+def test_release_qualification_covers_conditional_pairs():
+    guide = Path("docs/release-qualification-agent-clients.md").read_text()
+    for profile in ("gstack", "agent-skills"):
+        for item in load_profile_prerequisites(profile).skills:
+            if item.support != "Conditional":
+                continue
+            for client in ("claude", "codex"):
+                assert f"`{profile}` / `{client}`" in guide
+    assert "Normal CI does not run these checks" in guide
 
 
 def _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text):

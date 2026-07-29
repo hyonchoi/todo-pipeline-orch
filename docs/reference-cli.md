@@ -2,8 +2,11 @@
 
 Complete reference for `tpo` subcommands.
 
-- `uv run tpo <command> [args]` — Production pipeline orchestration (tick, init, doctor, ...)
-- `uv run tpo test [args]` — Mock integration test harness
+The examples below use the installed `tpo` command. In a source checkout,
+contributors can run the same commands as `uv run tpo ...`.
+
+- `tpo <command> [args]` — Production pipeline orchestration (tick, init, doctor, ...)
+- `tpo test [args]` — Mock integration test harness
 
 ## tpo Global Flags
 
@@ -13,7 +16,7 @@ Complete reference for `tpo` subcommands.
 | `--verbose` | Increased log detail: selection results, lock state, agent call summaries |
 | `--debug` | Full debug logging: circuit breaker transitions, subprocess output |
 
-Global flags apply before the subcommand: `uv run tpo --verbose tick`.
+Global flags apply before the subcommand: `tpo --verbose tick`.
 
 ## Subcommands
 
@@ -22,8 +25,8 @@ Global flags apply before the subcommand: `uv run tpo --verbose tick`.
 Run one pipeline tick: discover active projects, select TODOs, register kanban phases.
 
 ```bash
-uv run tpo tick              # scan all active projects
-uv run tpo tick myproject    # tick one project
+tpo tick              # scan all active projects
+tpo tick myproject    # tick one project
 ```
 
 **Flow per project:**
@@ -45,8 +48,8 @@ fairness.
 Legacy helper for existing ship-gate sidecars: bump version in PR, squash-merge to main, complete the ship gate.
 
 ```bash
-uv run tpo approve myproject --todo TODO-5
-uv run tpo approve myproject --todo TODO-5 --force --force
+tpo approve myproject --todo TODO-5
+tpo approve myproject --todo TODO-5 --force --force
 ```
 
 **Arguments:**
@@ -76,7 +79,7 @@ uv run tpo approve myproject --todo TODO-5 --force --force
 Initialize `.hermes/todo_id_counter` from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files.
 
 ```bash
-uv run tpo recover-counter myproject
+tpo recover-counter myproject
 ```
 
 Useful when bootstrapping a project with hand-written TODOs but no counter file.
@@ -88,10 +91,10 @@ Useful when bootstrapping a project with hand-written TODOs but no counter file.
 Write the default pipeline execution contract (`.hermes/pipeline.toml`) for a project.
 
 ```bash
-uv run tpo init myproject
-uv run tpo init myproject --force
-uv run tpo init myproject --assignee pipeline
-uv run tpo init myproject --profile agent-skills
+tpo init myproject
+tpo init myproject --force
+tpo init myproject --assignee pipeline
+tpo init myproject --profile agent-skills
 ```
 
 **Arguments:**
@@ -111,7 +114,7 @@ Capabilities are computed from `phases.yaml` at write time, not hardcoded.
 Verify a project's pipeline execution contract against `phases.yaml`.
 
 ```bash
-uv run tpo doctor myproject
+tpo doctor myproject
 ```
 
 **Exit codes:**
@@ -130,13 +133,13 @@ If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes p
 Install the bundled pipeline Hermes profile for unattended kanban execution.
 
 ```bash
-uv run tpo install-profile
-uv run tpo install-profile --force
+tpo install-profile
+tpo install-profile --force
 ```
 
 Creates a `pipeline` profile cloned from the active Hermes profile, then overlays the bundled `SOUL.md`. With `--force`, deletes an existing `pipeline` profile first.
 
-After install, set the assignee: `uv run tpo init myproject --assignee pipeline`.
+After install, set the assignee: `tpo init myproject --assignee pipeline`.
 
 ---
 
@@ -145,9 +148,9 @@ After install, set the assignee: `uv run tpo init myproject --assignee pipeline`
 Install or remove the bundled `todos-manager` skill.
 
 ```bash
-uv run tpo skills install
-uv run tpo skills install --target all --reinstall
-uv run tpo skills uninstall --target codex --yes
+tpo skills install
+tpo skills install --target all --reinstall
+tpo skills uninstall --target codex --yes
 ```
 
 **Install arguments:**
@@ -168,6 +171,66 @@ Install refuses to overwrite an existing destination unless `--reinstall` is set
 
 ---
 
+### `config`
+
+Read and write the global configuration:
+
+```bash
+tpo config init
+tpo config get prompt_client
+tpo config set prompt_client claude
+tpo config set prompt_client codex
+```
+
+`prompt_client` accepts exactly the lowercase, case-sensitive values `claude`
+and `codex`. If the field is absent, the effective default is `claude`.
+`tpo config get prompt_client` reports both the effective value and whether it
+came from the default or the active config file. `TPO_CONFIG_FILE` can select
+an alternate complete config file, but there is no individual environment
+override such as `PIPELINE_PROMPT_CLIENT`.
+
+One global `prompt_client` applies to every project under `projects_dir`.
+Mixed-client fleets need separate project roots.
+
+| Setting | Selects |
+|---|---|
+| Global `prompt_client` | Prompt vocabulary only; it does not install skills or choose a worker executable |
+| Contract `profile` | Bundled phase and skill workflow |
+| Contract `assignee` | Hermes profile and agent identity |
+| Hermes configuration | Models and provider authentication |
+
+Profile prerequisites come from the package metadata used by `tpo doctor`:
+
+| Profile | Referenced skill | Distribution owner | Claude discovery | Codex discovery | Support |
+|---|---|---|---|---|---|
+| `gstack` | `autoplan` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `writing-plans` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:test-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:code-review-and-quality` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:code-reviewer` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:security-and-hardening` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:security-auditor` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+
+`Conditional` requires the named external skill to be installed and
+discoverable by the selected client. `Unverified` is unsupported and does not
+become supported merely by setting `prompt_client`.
+
+See [agent client release qualification](release-qualification-agent-clients.md)
+for the evidence protocol.
+
+---
+
 ## tpo test
 
 Run the mock integration test harness: bootstraps a temporary git project, executes
@@ -177,9 +240,9 @@ was removed along with `runner.py`/`watcher.py` in v0.5.6; the harness now alway
 requires `hermes login` and access to the `mock-project` tenant.
 
 ```bash
-uv run tpo test --fixture happy-path
-uv run tpo test --fixture happy-path --phase phase_2_autoplan
-uv run tpo test --fixture happy-path --convergence-threshold 2
+tpo test --fixture happy-path
+tpo test --fixture happy-path --phase phase_2_autoplan
+tpo test --fixture happy-path --convergence-threshold 2
 ```
 
 **Arguments:**
