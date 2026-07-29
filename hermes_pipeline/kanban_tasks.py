@@ -149,6 +149,21 @@ def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | No
     return PendingTaskCreate(tenant, tick_id, phase_key, tuple(known_task_ids))
 
 
+def _clear_pending_task_create(
+    project_dir: str | Path, pending: PendingTaskCreate
+) -> bool:
+    """Remove a pending marker only when it still describes this create."""
+    if _load_pending_task_create(project_dir) != pending:
+        return False
+    marker = _pending_task_create_marker(project_dir)
+    try:
+        marker.unlink()
+    except OSError:
+        log.warning("failed to remove pending task-create marker: %s", marker)
+        return False
+    return True
+
+
 def reconcile_pending_task_create(project_dir: str | Path) -> bool:
     """Archive a delayed idempotent create once it becomes visible."""
     pending = _load_pending_task_create(project_dir)
@@ -264,7 +279,7 @@ def _recover_and_archive_uncertain_task(
     tenant: str,
     tick_id: str,
     phase_key: str,
-) -> None:
+) -> bool:
     uncertain_task_id = _recover_uncertain_task_id(
         cmd,
         tenant=tenant,
@@ -275,7 +290,28 @@ def _recover_and_archive_uncertain_task(
         *task_ids,
         *([uncertain_task_id] if uncertain_task_id is not None else []),
     ]
-    _archive_tasks(cleanup_ids)
+    cleanup_succeeded = _archive_tasks(cleanup_ids)
+    return uncertain_task_id is not None and cleanup_succeeded
+
+
+def _promote_task(task_id: str) -> None:
+    """Activate a blocked task after its complete chain is durable."""
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "promote", task_id],
+            capture_output=True,
+            text=True,
+            timeout=HERMES_COMMAND_TIMEOUT,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(f"failed to promote kanban task {task_id}: {exc}") from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to promote kanban task {task_id}: "
+            f"rc={result.returncode} "
+            f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
+        )
 
 
 def prepare_todo_phases(
@@ -366,6 +402,7 @@ def create_prepared_todo_phases(
             cmd.extend(["--assignee", "-"])
         else:
             cmd.extend(["--assignee", assignee])
+        cmd.extend(["--initial-status", BLOCKED])
 
         # Add --parent for executable phases after the first. Gate phases must
         # remain manually blocked; Hermes unblocks parented children when their
@@ -373,11 +410,10 @@ def create_prepared_todo_phases(
         if phase_idx > 0 and not is_gate:
             cmd.extend(["--parent", task_ids[phase_idx - 1]])
 
-        # Gate phases are pure markers: created blocked, never dispatched to
-        # an agent. Everything else runs as a goal-mode kanban task.
-        if is_gate:
-            cmd.extend(["--initial-status", BLOCKED])
-        else:
+        # Gate phases are pure markers, never dispatched to an agent.
+        # Executable phases retain goal mode while registration holds them
+        # blocked until the complete chain is durable.
+        if not is_gate:
             cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])
 
         log.info(
@@ -385,6 +421,20 @@ def create_prepared_todo_phases(
             phase.phase_key,
             tick_id,
         )
+
+        pending = PendingTaskCreate(
+            tenant=board_slug,
+            tick_id=tick_id,
+            phase_key=phase.phase_key,
+            known_task_ids=tuple(task_ids),
+        )
+        try:
+            _persist_pending_task_create(project_dir, pending)
+        except OSError as exc:
+            raise RuntimeError(
+                f"failed to persist pending kanban task {phase.phase_key} "
+                f"for tick {tick_id}: {exc}"
+            ) from exc
 
         try:
             result = subprocess.run(
@@ -395,7 +445,7 @@ def create_prepared_todo_phases(
             )
         except (subprocess.TimeoutExpired, OSError) as exc:
             if isinstance(exc, subprocess.TimeoutExpired):
-                _recover_and_archive_uncertain_task(
+                cleanup_succeeded = _recover_and_archive_uncertain_task(
                     cmd,
                     task_ids,
                     tenant=board_slug,
@@ -403,20 +453,24 @@ def create_prepared_todo_phases(
                     phase_key=phase.phase_key,
                 )
             else:
-                _archive_tasks(task_ids)
+                cleanup_succeeded = _archive_tasks(task_ids)
+            if cleanup_succeeded:
+                _clear_pending_task_create(project_dir, pending)
             raise RuntimeError(
                 f"failed to register kanban task {phase.phase_key} "
                 f"for tick {tick_id}: Hermes process failed: {exc}"
             ) from exc
         if result.returncode != 0:
             # A nonzero response can still follow a successful remote mutation.
-            _recover_and_archive_uncertain_task(
+            cleanup_succeeded = _recover_and_archive_uncertain_task(
                 cmd,
                 task_ids,
                 tenant=board_slug,
                 tick_id=tick_id,
                 phase_key=phase.phase_key,
             )
+            if cleanup_succeeded:
+                _clear_pending_task_create(project_dir, pending)
             log.error(
                 "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
                 phase.phase_key,
@@ -435,13 +489,15 @@ def create_prepared_todo_phases(
         # form before it can become the next phase's --parent argument.
         task_id = _parse_task_id(result.stdout)
         if task_id is None:
-            _recover_and_archive_uncertain_task(
+            cleanup_succeeded = _recover_and_archive_uncertain_task(
                 cmd,
                 task_ids,
                 tenant=board_slug,
                 tick_id=tick_id,
                 phase_key=phase.phase_key,
             )
+            if cleanup_succeeded:
+                _clear_pending_task_create(project_dir, pending)
             idempotency_key = f"{tick_id}:{phase.phase_key}"
             raise RuntimeError(
                 f"{phase.phase_key}: failed to parse valid task ID; "
@@ -449,11 +505,27 @@ def create_prepared_todo_phases(
                 f"{result.stdout[:ERROR_MSG_MAX_LENGTH]}"
             )
         task_ids.append(task_id)
+        if not _clear_pending_task_create(project_dir, pending):
+            raise RuntimeError(
+                f"failed to clear pending kanban task {phase.phase_key} "
+                f"for tick {tick_id}"
+            )
         log.info("registered kanban task: task_id=%s phase=%s", task_id, phase.phase_key)
 
-    # Persist expected phase keys so all_phases_complete can verify
-    # completeness (guards against partial registration on crash).
-    _persist_expected_phases(prepared, project_dir=project_dir)
+    try:
+        # Persist expected phase keys before making any executable task runnable.
+        _persist_expected_phases(prepared, project_dir=project_dir)
+        first_executable = next(
+            task_id
+            for task_id, phase in zip(task_ids, prepared, strict=True)
+            if not phase.gate
+        )
+        _promote_task(first_executable)
+    except Exception as exc:
+        _archive_tasks(task_ids)
+        raise RuntimeError(
+            f"failed to activate durable kanban chain for tick {tick_id}: {exc}"
+        ) from exc
 
     return task_ids
 
@@ -500,19 +572,18 @@ def _persist_expected_phases(
         project_dir: If given, write to <project_dir>/.hermes/outcomes/.
             Defaults to .hermes/outcomes/ for backward compatibility.
     """
+    phase_keys = [p.phase_key for p in phases]
+    if project_dir is not None:
+        outcomes_dir = Path(project_dir) / ".hermes" / "outcomes"
+    else:
+        outcomes_dir = Path(".hermes") / "outcomes"
     try:
-        phase_keys = [p.phase_key for p in phases]
-        if project_dir is not None:
-            outcomes_dir = Path(project_dir) / ".hermes" / "outcomes"
-        else:
-            outcomes_dir = Path(".hermes") / "outcomes"
         outcomes_dir.mkdir(parents=True, exist_ok=True)
         # Overwrite previous — only the latest registration matters.
         sentinel = outcomes_dir / "expected-phases.json"
-        sentinel.write_text(json.dumps(phase_keys, sort_keys=False))
-    except OSError:
-        # Best-effort — don't fail registration if we can't write the sentinel.
-        log.warning("failed to persist expected phases sentinel")
+        _atomic_write_text(sentinel, json.dumps(phase_keys, sort_keys=False))
+    except OSError as exc:
+        raise RuntimeError("failed to persist expected phases sentinel") from exc
 
 
 def _archive_tasks(task_ids: list[str]) -> bool:
