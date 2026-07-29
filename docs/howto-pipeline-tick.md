@@ -14,6 +14,10 @@ board, and verified the outcome files.
 - Hermes is installed and authenticated: `hermes login`.
 - A Hermes kanban board is configured for your project (check with `hermes kanban list`).
 - The project has a `TODOS.md` with at least one TODO in `[→]` (in progress) status.
+- Every external skill required by the selected profile is provisioned in the
+  worker client's discovery root. Check the selected client with
+  `tpo config get prompt_client` and its prerequisites with
+  `tpo doctor <project>`.
 - `.hermes/config.toml` is configured with `[selection]` and `[circuit_breaker]` sections
   — see [howto-config-toml.md](howto-config-toml.md).
 
@@ -34,9 +38,16 @@ tick:
      a. Migrate per-project state (one-time)
      b. Check prior tick (per-project)
      c. Run selection (per-project)
-     d. Register kanban phases or observe circuit breaker
+     d. Render every phase body from the selected profile for prompt_client
+     e. Persist current_tick_id.txt and the tick_started outcome
+     f. Create the prepared Hermes kanban tasks
   4. Release lock
 ```
+
+Steps 3d–3f form the production registration boundary. If any body fails to
+render, the tick records `failed_to_spawn` without persisting the current tick
+or creating a Hermes task. Persistence occurs only after all bodies are valid
+and immediately before the first task creation.
 
 ### 2. Check what the selection picked
 
@@ -76,6 +87,11 @@ when phase 5 completes, phase 6.1 (CSO) transitions to `running`. Human gate
 phases are not parent-chained, so they cannot be auto-unblocked by the kanban
 scheduler.
 
+Client-dependent gstack prompts use Claude Code slash syntax (for example,
+`/review` and `/ship`) when `prompt_client=claude`, and Codex dollar syntax
+(`$review` and `$ship`) when `prompt_client=codex`. This setting changes task
+body vocabulary only; Hermes still dispatches every task.
+
 See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
 
 After a tick completes (or you run another tick that detects the prior tick
@@ -98,11 +114,11 @@ for all possible outcomes, including the new review outcomes: `review_clean`, `r
 
 ### 4. Inspect PR handoff
 
-The default `gstack` profile ends at Phase 8. Phase 8 runs `/ship`, pushes the
-branch, opens or updates a PR, and does not merge it. The pipeline records the
-branch in `<project>/.hermes/pipeline_branch.txt`; later ticks check that PR and
-skip new selection while it is open, closed without merge, or temporarily
-unverifiable.
+The default `gstack` profile ends at Phase 8. Phase 8 runs `/ship` in Claude
+Code or `$ship` in Codex, pushes the branch, opens or updates a PR, and does not
+merge it. The pipeline records the branch in
+`<project>/.hermes/pipeline_branch.txt`; later ticks check that PR and skip new
+selection while it is open, closed without merge, or temporarily unverifiable.
 
 ### 5. Check the circuit breaker state
 

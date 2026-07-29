@@ -19,8 +19,11 @@ promote the package metadata, or keep the row unsupported.
 ## What is a profile?
 
 A profile is a directory under
-`hermes_pipeline/data/phase-profiles/<name>/` containing a `phases.yaml` file
-that defines the pipeline's phase sequence. Two profiles are bundled:
+`hermes_pipeline/data/phase-profiles/<name>/` containing both `phases.yaml` and
+`prerequisites.yaml`. The first file defines the pipeline's phase sequence; the
+second is the structured source of truth for client support, discovery, and
+invocation metadata. `tpo doctor` loads both files unconditionally. Two
+profiles are bundled:
 
 - **`gstack`** (default) — the gstack/superpowers workflow. Skills: `autoplan`,
   `writing-plans`, `subagent-driven-development`, `review`, `cso`, `qa`,
@@ -74,7 +77,11 @@ Expected output:
 OK: schema_version=2 assignee=default profile=agent-skills capabilities=['Bash', 'Edit', 'Read', 'Write']
 ```
 
-`doctor` resolves phases from the profile named in the contract, not always `gstack`. If the `profile` field names a profile that doesn't exist, `doctor` fails closed with a `MISSING` error and exit code 2. If the profile's `phases.yaml` is malformed, `doctor` fails closed with an `INVALID` error and exit code 2.
+`doctor` resolves phases from the profile named in the contract, not always
+`gstack`. If the `profile` field names a profile that doesn't exist, `doctor`
+fails closed with a `MISSING` error and exit code 2. If either profile data file
+is missing or malformed, doctor reports
+`INVALID: failed to load profile data for '<name>'` and exits 2.
 
 ### 3. Run the pipeline
 
@@ -96,9 +103,26 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
 
 ## Adding a new profile
 
-1. Create `hermes_pipeline/data/phase-profiles/<name>/phases.yaml` following the same schema as the bundled profiles (`phase_key`, `name`, `prompt`, `tools`, `turns`, `timeout` per phase; gate phases use `gate: true`).
-2. Run `tpo init <project> --profile <name>` to write a contract selecting it.
-3. Run `tpo doctor <project>` to confirm the profile resolves and capabilities are computed correctly.
+1. Create `hermes_pipeline/data/phase-profiles/<name>/phases.yaml` following
+   the same schema as the bundled profiles (`phase_key`, `name`, `prompt`,
+   `tools`, `turns`, `timeout` per phase; gate phases use `gate: true`).
+2. Create the mandatory sibling
+   `hermes_pipeline/data/phase-profiles/<name>/prerequisites.yaml`. It has this
+   schema:
+   - `schema_version`: integer `1`
+   - `profile`: the exact profile directory name
+   - `skills`: a list of mappings with `skill_id`, `distribution_owner`,
+     `support`, and `clients`
+   - `clients`: exactly `claude` and `codex`; each maps to exactly
+     `discovery_root` and `invocation`
+   - `support`: `Conditional` requires non-empty client discovery and
+     invocation strings; `Unverified` requires both client fields to be null
+3. Treat `prerequisites.yaml` as package data beside `phases.yaml`;
+   `hermes_pipeline.phases.load_profile_prerequisites()` is the validating
+   loader and `tpo doctor` is the user-facing check.
+4. Run `tpo init <project> --profile <name>` to write a contract selecting it.
+5. Run `tpo doctor <project>` to confirm both files resolve, prerequisite
+   metadata validates, and capabilities are computed correctly.
 
 ## Troubleshooting
 
@@ -110,9 +134,13 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
 - The contract's `profile` field names a profile that no longer exists (e.g. it was renamed or removed).
 - **Fix:** Edit `.hermes/pipeline.toml` to a valid profile name, or run `init --force --profile <valid-profile>`.
 
-**"INVALID: failed to load phases for profile '<name>'"**
-- The profile's `phases.yaml` is malformed (bad YAML, missing required fields).
-- **Fix:** Validate the profile's `phases.yaml` against the schema used by the bundled profiles.
+**"INVALID: failed to load profile data for '<name>'"**
+- The profile's `phases.yaml` or mandatory sibling `prerequisites.yaml` is
+  missing or malformed.
+- **Fix:** Validate `phases.yaml` against the bundled phase schema and
+  `prerequisites.yaml` against the schema above. Confirm its `profile` matches
+  the directory name and its `clients` mapping contains exactly `claude` and
+  `codex`.
 
 ## Related
 

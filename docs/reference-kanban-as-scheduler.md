@@ -40,6 +40,34 @@ Terminal outcomes passed to `clear_active_task`. Each maps to a specific kanban 
 
 Both `rejected` and `abandoned` archive the card — they differ in semantics: `rejected` is an operator decision, `abandoned` is a pipeline failure signal.
 
+### `PromptClient`
+
+```python
+PromptClient = Literal["claude", "codex"]
+```
+
+`prompt_client` selects phase-task vocabulary only. `claude` renders
+`Claude Code` with slash invocations such as `/review` and `/ship`; `codex`
+renders `Codex` with dollar invocations such as `$review` and `$ship`. It does
+not choose a worker executable, Hermes assignee, profile, or model.
+
+### `PreparedPhaseTask`
+
+```python
+@dataclass(frozen=True)
+class PreparedPhaseTask:
+    phase_key: str
+    name: str
+    body: str
+    tools: str
+    turns: int
+    gate: bool
+```
+
+An immutable, fully rendered task ready for Hermes creation. Preparation
+finishes for the entire profile before production persists an active tick or
+creates any task.
+
 ## KanbanClient Protocol
 
 The `KanbanClient` protocol defines the interface for kanban sync operations. All methods are non-blocking and return `SyncResult`.
@@ -142,7 +170,13 @@ tick starts
 [run_selection] -- picks TODO-10 or picked=None
     |
     v
-[register_todo_phases] -- creates kanban tasks:
+[prepare_todo_phases] -- renders every selected-profile body
+    |
+    v
+[persist current_tick_id.txt + tick_started outcome]
+    |
+    v
+[create_prepared_todo_phases] -- creates kanban tasks:
     phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_5_review  <--parent--  phase_6_1_cso
     (running)                  (ready)                  (ready)                  (ready)
     |
@@ -174,10 +208,96 @@ tick lock released (if complete) / skip (if in-flight)
 
 ## API
 
+### `prepare_todo_phases`
+
+Loads one phase profile and renders every body without calling Hermes or
+writing tick state.
+
+```python
+prepare_todo_phases(
+    *,
+    todo_id: str,
+    tick_id: str,
+    board_slug: str,
+    project_dir: str | Path,
+    phases_path: str | Path | None = None,
+    prompt_client: PromptClient = "claude",
+) -> list[PreparedPhaseTask]
+```
+
+| Parameter | Type | Default | Effect |
+|---|---|---|---|
+| `todo_id` | `str` | — | TODO ID (e.g., "TODO-10"). Embedded in task body JSON header. |
+| `tick_id` | `str` | — | ULID tick ID embedded in each task body header. |
+| `board_slug` | `str` | — | Project slug embedded in each task body header. |
+| `project_dir` | `str \| Path` | — | Project workspace associated with the prepared registration. |
+| `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is packaged `gstack`; production resolves `contract.profile` and passes its path explicitly. |
+| `prompt_client` | `PromptClient` | `"claude"` | Renders the fixed product label and verified skill invocation vocabulary. |
+
+**Returns:** All `PreparedPhaseTask` values in profile order.
+
+**Raises:** `ValueError` for an invalid TODO ID, or `PhasePromptRenderError`
+when any prompt has malformed or unresolved template syntax. Failure is atomic
+with respect to Hermes: no task is created.
+
+**Behavior:**
+1. Reads `phases.yaml` with `hermes_pipeline.phases.load_phases`.
+2. Strictly renders every prompt with TODO, tick, project, and client
+   vocabulary.
+3. Builds the JSON body header:
+   `{"phase_key":"phase_2_autoplan","project_slug":"demo","tick_id":"01HA","todo_id":"TODO-10"}`.
+4. Returns only after every body is valid.
+
+### `create_prepared_todo_phases`
+
+Creates already-prepared tasks. Executable phases use `--parent` dependency
+chains; gate phases are detached and blocked.
+
+```python
+create_prepared_todo_phases(
+    *,
+    prepared: list[PreparedPhaseTask],
+    tick_id: str,
+    board_slug: str,
+    project_dir: str | Path,
+    assignee: str = "default",
+) -> list[str]
+```
+
+| Parameter | Type | Default | Effect |
+|---|---|---|---|
+| `prepared` | `list[PreparedPhaseTask]` | — | Fully rendered tasks in registration order. |
+| `tick_id` | `str` | — | ULID used in each idempotency key. |
+| `board_slug` | `str` | — | Passed as the Hermes kanban tenant. |
+| `project_dir` | `str \| Path` | — | Passed as `--workspace dir:<project_dir>`. |
+| `assignee` | `str` | `"default"` | Assigned to executable tasks; gate tasks always use `-`. |
+
+**Returns:** Created task IDs in phase order.
+
+**Raises:** `RuntimeError` if Hermes creation fails. Tasks created earlier in
+the same call are archived before the error is raised.
+
+For each prepared phase, this function runs `hermes kanban create` with:
+
+- `--tenant <board_slug>` — target board
+- `--workspace dir:<project_dir>` — project context
+- `--idempotency-key <tick_id>:<phase_key>` — dedup key (e.g.,
+  `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`)
+- `--parent <prev_task_id>` — dependency chain for executable phases only
+  (gate phases omit it so they stay manually blocked)
+- `--body <json_header>\n<phase_prompt>` — task body with JSON header on first
+  line
+
+**Mid-registration failure:** The kanban-as-scheduler design requires all phases
+to exist in order. If the second of four phases fails to register, the first is
+archived — it can't run without its successor, and leaving it in `running`
+blocks the next tick from selecting the same TODO.
+
 ### `register_todo_phases`
 
-Registers executable phases as kanban tasks with `--parent` dependency chains,
-and gate phases as detached blocked tasks, with `--idempotency-key` for dedup.
+Backward-compatible convenience wrapper for callers that do not need to
+persist state between preparation and task creation. It calls
+`prepare_todo_phases`, then `create_prepared_todo_phases`.
 
 ```python
 register_todo_phases(
@@ -187,39 +307,19 @@ register_todo_phases(
     board_slug: str,
     project_dir: str | Path,
     phases_path: str | Path | None = None,
+    assignee: str = "default",
+    prompt_client: PromptClient = "claude",
 ) -> list[str]
 ```
 
-| Parameter | Type | Default | Effect |
-|---|---|---|---|
-| `todo_id` | `str` | — | TODO ID (e.g., "TODO-10"). Embedded in task body JSON header. |
-| `tick_id` | `str` | — | ULID tick ID. Used as part of `--idempotency-key` for dedup. |
-| `board_slug` | `str` | — | Kanban board slug (project slug). Passed to `hermes kanban` commands. |
-| `project_dir` | `str \| Path` | — | Project directory. Passed as `--workspace` to `hermes kanban`. |
-| `phases_path` | `str \| Path \| None` | Bundled package data | Path to `phases.yaml`. Defaults to the active profile's in-package copy resolved via `importlib.resources` (`hermes_pipeline/data/phase-profiles/gstack/phases.yaml` for the default profile), so it works from an installed wheel. |
+The wrapper accepts the union of the preparation and creation parameters and
+returns the created task IDs. A render failure occurs before the creation call,
+including when a later phase is malformed. Production `_tick_project` uses the
+two functions separately so its exact sequence is:
 
-**Returns:** List of created task IDs in phase order.
-
-**Raises:** `RuntimeError` if task creation fails — already-created tasks are
-archived before raising.
-
-**Behavior:**
-1. Reads `phases.yaml` (loaded via `hermes_pipeline.phases.load_phases`).
-2. For each phase in order, runs `hermes kanban create` with:
-   - `--tenant <board_slug>` — target board
-   - `--workspace <project_dir>` — project context
-   - `--idempotency-key <tick_id>:<phase_key>` — dedup key (e.g., `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`)
-   - `--parent <prev_task_id>` — dependency chain for executable phases only
-     (gate phases omit it so they stay manually blocked)
-   - `--body <json_header>\n<phase_prompt>` — task body with JSON header on first line
-3. The JSON header: `{"phase_key":"phase_2_autoplan","project_slug":"demo","tick_id":"01HA","todo_id":"TODO-10"}`
-4. If a task creation fails mid-registration, already-created tasks are archived
-   via `hermes kanban archive <task_id>` before raising.
-
-**Mid-registration failure:** The kanban-as-scheduler design requires all phases
-to exist in order. If the second of four phases fails to register, the first is
-archived — it can't run without its successor, and leaving it in `running`
-blocks the next tick from selecting the same TODO.
+1. prepare every rendered body;
+2. persist `current_tick_id.txt` and the `tick_started` outcome;
+3. create the prepared Hermes tasks.
 
 ### `get_todo_kanban_status`
 

@@ -73,6 +73,42 @@ def test_late_render_failure_creates_zero_tasks(tmp_path, mocker):
     run.assert_not_called()
 
 
+def test_register_todo_phases_late_render_failure_is_atomic(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import register_todo_phases
+    from hermes_pipeline.phases import PhasePromptRenderError
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: valid\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+        "  - phase_key: phase_2\n"
+        "    name: Two\n"
+        "    prompt: '{unknown}'\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+    )
+    create_prepared = mocker.patch(
+        "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
+    )
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+
+    with pytest.raises(PhasePromptRenderError, match=r"phase_2.*unknown"):
+        register_todo_phases(
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+            phases_path=phases_path,
+        )
+
+    create_prepared.assert_not_called()
+    run.assert_not_called()
+
+
 def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import (
         PreparedPhaseTask,

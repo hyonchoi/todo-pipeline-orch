@@ -147,6 +147,31 @@ def test_profile_guide_lists_exact_metadata_skill_inventories():
         assert documented == expected
 
 
+def test_profile_guide_documents_complete_profile_data_and_doctor_error():
+    guide = Path("docs/howto-agent-skills-profile.md").read_text()
+    add_profile = guide.split("## Adding a new profile", 1)[1].split(
+        "## Troubleshooting", 1
+    )[0]
+    assert "`phases.yaml`" in add_profile
+    assert "`prerequisites.yaml`" in add_profile
+    for field in (
+        "`schema_version`",
+        "`profile`",
+        "`skills`",
+        "`skill_id`",
+        "`distribution_owner`",
+        "`support`",
+        "`clients`",
+        "`discovery_root`",
+        "`invocation`",
+    ):
+        assert field in add_profile
+
+    troubleshooting = guide.split("## Troubleshooting", 1)[1]
+    assert "INVALID: failed to load profile data for '<name>'" in troubleshooting
+    assert "`prerequisites.yaml`" in troubleshooting
+
+
 def test_release_qualification_covers_conditional_pairs():
     guide = Path("docs/release-qualification-agent-clients.md").read_text()
     for profile in ("gstack", "agent-skills"):
@@ -599,6 +624,14 @@ def test_render_phase_prompt_does_not_rewrite_unrelated_text():
 def test_every_bundled_phase_renders_for_client(
     profile, client, product, forbidden_product
 ):
+    prerequisites = load_profile_prerequisites(profile)
+    opposite_client = "codex" if client == "claude" else "claude"
+    opposite_invocations = {
+        item.clients[opposite_client].invocation
+        for item in prerequisites.skills
+        if item.support == "Conditional"
+    }
+    assert None not in opposite_invocations
     phases = load_phases(resolve_profile_phases_path(profile))
     for phase in phases:
         rendered = _render_phase_prompt(
@@ -614,6 +647,26 @@ def test_every_bundled_phase_renders_for_client(
         if "agent_product" in phase.prompt:
             assert product in rendered
             assert forbidden_product not in rendered
+        for opposite_invocation in opposite_invocations:
+            assert opposite_invocation not in rendered
+        for prerequisite in prerequisites.skills:
+            invocation = prerequisite.clients[client].invocation
+            opposite_invocation = prerequisite.clients[opposite_client].invocation
+            if prerequisite.support == "Conditional":
+                if f"{{skill_prefix}}{prerequisite.skill_id}" not in phase.prompt:
+                    continue
+                assert invocation is not None
+                assert opposite_invocation is not None
+                assert invocation in rendered
+            else:
+                if prerequisite.skill_id not in phase.prompt:
+                    continue
+                assert prerequisite.support == "Unverified"
+                assert invocation is None
+                assert opposite_invocation is None
+                assert prerequisite.skill_id in rendered
+                assert f"/{prerequisite.skill_id}" not in rendered
+                assert f"${prerequisite.skill_id}" not in rendered
 
 
 @pytest.mark.parametrize(
