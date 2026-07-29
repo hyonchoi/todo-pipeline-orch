@@ -143,7 +143,12 @@ class TestRegisterTodoPhasesLegacy:
             phases_path=str(phases_cfg),
         )
 
-        call_args = mock_run.call_args_list[0][0][0]
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
         assert "--goal" in call_args
         assert "--goal-max-turns" in call_args
         idx = call_args.index("--goal-max-turns")
@@ -175,7 +180,12 @@ class TestRegisterTodoPhasesLegacy:
             phases_path=str(phases_cfg),
         )
 
-        call_args = mock_run.call_args_list[0][0][0]
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
         assert "--assignee" in call_args
         idx = call_args.index("--assignee")
         assert call_args[idx + 1] == "default"

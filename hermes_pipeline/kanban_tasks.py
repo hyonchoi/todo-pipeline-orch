@@ -25,6 +25,8 @@ from .state import _atomic_write_text
 # Sentinel written after successful registration to record expected phases.
 _EXPECTED_PHASES_FILE_SUFFIX = ".expected-phases.json"
 _PENDING_TASK_CREATE_FILE = "pending-task-create.json"
+_REGISTRATION_BARRIER_PHASE_KEY = "__registration_barrier__"
+_REGISTRATION_BARRIER_INFRASTRUCTURE = "registration_barrier"
 
 log = logging.getLogger(__name__)
 
@@ -85,7 +87,7 @@ class PendingTaskCreate:
 
 @dataclass(frozen=True)
 class PendingTaskCleanup:
-    """Known task IDs whose archive cleanup must be retried."""
+    """Task IDs whose child-first archive cleanup must be retried."""
 
     tenant: str
     tick_id: str
@@ -212,11 +214,12 @@ def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | No
     return pending if isinstance(pending, PendingTaskCreate) else None
 
 
-def _clear_pending_task_create(
-    project_dir: str | Path, pending: PendingTaskCreate
+def _clear_pending_task_state(
+    project_dir: str | Path,
+    pending: PendingTaskCreate | PendingTaskCleanup,
 ) -> bool:
-    """Remove a pending marker only when it still describes this create."""
-    if _load_pending_task_create(project_dir) != pending:
+    """Remove a pending marker only when it still describes this state."""
+    if _load_pending_task_state(project_dir) != pending:
         return False
     marker = _pending_task_create_marker(project_dir)
     try:
@@ -227,14 +230,20 @@ def _clear_pending_task_create(
     return True
 
 
+def _clear_pending_task_create(
+    project_dir: str | Path, pending: PendingTaskCreate
+) -> bool:
+    """Backward-compatible create-state-specific marker clear."""
+    return _clear_pending_task_state(project_dir, pending)
+
+
 def reconcile_pending_task_create(project_dir: str | Path) -> bool:
-    """Archive a delayed idempotent create once it becomes visible."""
+    """Resolve an uncertain create and confirm child-first archive cleanup."""
     pending = _load_pending_task_state(project_dir)
     if pending is None:
         return not _pending_task_create_marker(project_dir).exists()
     if isinstance(pending, PendingTaskCleanup):
-        if not _archive_tasks(list(pending.task_ids)):
-            return False
+        cleanup = pending
     else:
         task_id = _find_task_id_in_snapshot(
             tenant=pending.tenant,
@@ -243,15 +252,23 @@ def reconcile_pending_task_create(project_dir: str | Path) -> bool:
         )
         if task_id is None:
             return False
-        if not _archive_tasks([*pending.known_task_ids, task_id]):
+        cleanup = PendingTaskCleanup(
+            tenant=pending.tenant,
+            tick_id=pending.tick_id,
+            task_ids=(task_id, *reversed(pending.known_task_ids)),
+        )
+        try:
+            _persist_pending_task_cleanup(project_dir, cleanup)
+        except OSError:
+            log.warning(
+                "failed to persist resolved child-first cleanup for tick %s",
+                pending.tick_id,
+            )
             return False
-    marker = _pending_task_create_marker(project_dir)
-    try:
-        marker.unlink()
-    except OSError:
-        log.warning("failed to remove pending task-create marker: %s", marker)
+
+    if not _archive_tasks(list(cleanup.task_ids), tenant=cleanup.tenant):
         return False
-    return True
+    return _clear_pending_task_state(project_dir, cleanup)
 
 
 def _parse_task_id(stdout: str) -> str | None:
@@ -271,16 +288,23 @@ def _parse_task_id(stdout: str) -> str | None:
     return task_id
 
 
-def _find_task_id_in_snapshot(
-    *, tenant: str, tick_id: str, phase_key: str
-) -> str | None:
-    """Resolve a task after an inconclusive idempotent create retry."""
+def _list_task_snapshot(tenant: str) -> list[dict[str, object]] | None:
+    """Return the current Hermes task snapshot, including archived tasks."""
     try:
         result = subprocess.run(
-            ["hermes", "kanban", "list", "--tenant", tenant, "--json"],
+            [
+                "hermes",
+                "kanban",
+                "list",
+                "--tenant",
+                tenant,
+                "--archived",
+                "--json",
+            ],
             capture_output=True,
             text=True,
             timeout=HERMES_COMMAND_TIMEOUT,
+            check=False,
         )
         if result.returncode != 0:
             return None
@@ -295,6 +319,16 @@ def _find_task_id_in_snapshot(
     else:
         return None
     if not isinstance(tasks, list):
+        return None
+    return [task for task in tasks if isinstance(task, dict)]
+
+
+def _find_task_id_in_snapshot(
+    *, tenant: str, tick_id: str, phase_key: str
+) -> str | None:
+    """Resolve a task after an inconclusive idempotent create retry."""
+    tasks = _list_task_snapshot(tenant)
+    if tasks is None:
         return None
     for task in tasks:
         try:
@@ -339,43 +373,90 @@ def _recover_uncertain_task_id(
     )
 
 
+def _persist_and_archive_cleanup(
+    project_dir: str | Path,
+    cleanup: PendingTaskCleanup,
+) -> bool:
+    """Persist ordered cleanup before attempting it and clear only on proof."""
+    try:
+        _persist_pending_task_cleanup(project_dir, cleanup)
+    except OSError:
+        log.warning(
+            "failed to persist child-first cleanup for tick %s",
+            cleanup.tick_id,
+        )
+        return False
+    if not _archive_tasks(list(cleanup.task_ids), tenant=cleanup.tenant):
+        return False
+    return _clear_pending_task_state(project_dir, cleanup)
+
+
 def _recover_and_archive_uncertain_task(
     cmd: list[str],
-    task_ids: list[str],
     *,
-    tenant: str,
-    tick_id: str,
-    phase_key: str,
+    project_dir: str | Path,
+    pending: PendingTaskCreate,
 ) -> bool:
     uncertain_task_id = _recover_uncertain_task_id(
         cmd,
-        tenant=tenant,
-        tick_id=tick_id,
-        phase_key=phase_key,
+        tenant=pending.tenant,
+        tick_id=pending.tick_id,
+        phase_key=pending.phase_key,
     )
-    cleanup_ids = [
-        *task_ids,
-        *([uncertain_task_id] if uncertain_task_id is not None else []),
-    ]
-    cleanup_succeeded = _archive_tasks(cleanup_ids)
-    return uncertain_task_id is not None and cleanup_succeeded
+    if uncertain_task_id is None:
+        return False
+    cleanup = PendingTaskCleanup(
+        tenant=pending.tenant,
+        tick_id=pending.tick_id,
+        task_ids=(uncertain_task_id, *reversed(pending.known_task_ids)),
+    )
+    return _persist_and_archive_cleanup(project_dir, cleanup)
 
 
-def _promote_task(task_id: str) -> None:
-    """Activate a blocked task after its complete chain is durable."""
+def _block_gate_task(task_id: str) -> None:
+    """Write Hermes's sticky human-input block event for an unassigned gate."""
     try:
         result = subprocess.run(
-            ["hermes", "kanban", "promote", task_id],
+            [
+                "hermes",
+                "kanban",
+                "block",
+                "--kind",
+                "needs_input",
+                task_id,
+            ],
             capture_output=True,
             text=True,
             timeout=HERMES_COMMAND_TIMEOUT,
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        raise RuntimeError(f"failed to promote kanban task {task_id}: {exc}") from exc
+        raise RuntimeError(f"failed to block kanban gate {task_id}: {exc}") from exc
     if result.returncode != 0:
         raise RuntimeError(
-            f"failed to promote kanban task {task_id}: "
+            f"failed to block kanban gate {task_id}: "
+            f"rc={result.returncode} "
+            f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
+        )
+
+
+def _complete_registration_barrier(task_id: str) -> None:
+    """Commit a durable phase registration by completing its barrier."""
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "complete", task_id],
+            capture_output=True,
+            text=True,
+            timeout=HERMES_COMMAND_TIMEOUT,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(
+            f"failed to complete registration barrier {task_id}: {exc}"
+        ) from exc
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"failed to complete registration barrier {task_id}: "
             f"rc={result.returncode} "
             f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
         )
@@ -420,6 +501,140 @@ def prepare_todo_phases(
     ]
 
 
+def _registration_barrier_body(*, tick_id: str, project_slug: str) -> str:
+    header = json.dumps(
+        {
+            "infrastructure": _REGISTRATION_BARRIER_INFRASTRUCTURE,
+            "phase_key": _REGISTRATION_BARRIER_PHASE_KEY,
+            "project_slug": project_slug,
+            "tick_id": tick_id,
+        },
+        sort_keys=True,
+    )
+    return (
+        f"{header}\n"
+        "Registration infrastructure: completing this nonspawnable barrier "
+        "commits the durable phase chain."
+    )
+
+
+def _cleanup_after_local_create_error(
+    project_dir: str | Path,
+    pending: PendingTaskCreate,
+) -> bool:
+    """Convert a conclusive local create failure to known-ID cleanup state."""
+    cleanup_ids = tuple(reversed(pending.known_task_ids))
+    if not cleanup_ids:
+        return _clear_pending_task_state(project_dir, pending)
+    cleanup = PendingTaskCleanup(
+        tenant=pending.tenant,
+        tick_id=pending.tick_id,
+        task_ids=cleanup_ids,
+    )
+    return _persist_and_archive_cleanup(project_dir, cleanup)
+
+
+def _run_durable_task_create(
+    *,
+    cmd: list[str],
+    project_dir: str | Path,
+    pending: PendingTaskCreate,
+) -> tuple[str, PendingTaskCleanup]:
+    """Run one idempotent create while preserving crash-recovery state."""
+    try:
+        _persist_pending_task_create(project_dir, pending)
+    except OSError as exc:
+        cleanup = PendingTaskCleanup(
+            tenant=pending.tenant,
+            tick_id=pending.tick_id,
+            task_ids=tuple(reversed(pending.known_task_ids)),
+        )
+        if cleanup.task_ids:
+            _persist_and_archive_cleanup(project_dir, cleanup)
+        raise RuntimeError(
+            f"failed to persist pending kanban task {pending.phase_key} "
+            f"for tick {pending.tick_id}: {exc}"
+        ) from exc
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=KANBAN_QUERY_TIMEOUT,
+        )
+    except OSError as exc:
+        cleanup_succeeded = _cleanup_after_local_create_error(project_dir, pending)
+        cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
+        raise RuntimeError(
+            f"failed to register kanban task {pending.phase_key} "
+            f"for tick {pending.tick_id}: Hermes process failed: "
+            f"{exc}{cleanup_detail}"
+        ) from exc
+    except subprocess.TimeoutExpired as exc:
+        cleanup_succeeded = _recover_and_archive_uncertain_task(
+            cmd,
+            project_dir=project_dir,
+            pending=pending,
+        )
+        cleanup_detail = "" if cleanup_succeeded else "; recovery remains pending"
+        raise RuntimeError(
+            f"failed to register kanban task {pending.phase_key} "
+            f"for tick {pending.tick_id}: Hermes process failed: "
+            f"{exc}{cleanup_detail}"
+        ) from exc
+
+    if result.returncode != 0:
+        cleanup_succeeded = _recover_and_archive_uncertain_task(
+            cmd,
+            project_dir=project_dir,
+            pending=pending,
+        )
+        cleanup_detail = "" if cleanup_succeeded else "; recovery remains pending"
+        log.error(
+            "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
+            pending.phase_key,
+            pending.tick_id,
+            result.returncode,
+            result.stderr[:ERROR_MSG_MAX_LENGTH],
+        )
+        raise RuntimeError(
+            f"failed to register kanban task {pending.phase_key} "
+            f"for tick {pending.tick_id}: rc={result.returncode} "
+            f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
+            f"{cleanup_detail}"
+        )
+
+    task_id = _parse_task_id(result.stdout)
+    if task_id is None:
+        cleanup_succeeded = _recover_and_archive_uncertain_task(
+            cmd,
+            project_dir=project_dir,
+            pending=pending,
+        )
+        cleanup_detail = "" if cleanup_succeeded else "; recovery remains pending"
+        idempotency_key = f"{pending.tick_id}:{pending.phase_key}"
+        raise RuntimeError(
+            f"{pending.phase_key}: failed to parse valid task ID; "
+            f"inspect Hermes task with idempotency key {idempotency_key}: "
+            f"{result.stdout[:ERROR_MSG_MAX_LENGTH]}{cleanup_detail}"
+        )
+
+    cleanup = PendingTaskCleanup(
+        tenant=pending.tenant,
+        tick_id=pending.tick_id,
+        task_ids=(task_id, *reversed(pending.known_task_ids)),
+    )
+    try:
+        _persist_pending_task_cleanup(project_dir, cleanup)
+    except OSError as exc:
+        raise RuntimeError(
+            f"failed to persist ordered cleanup after registering "
+            f"{pending.phase_key} for tick {pending.tick_id}: {exc}"
+        ) from exc
+    return task_id, cleanup
+
+
 def create_prepared_todo_phases(
     *,
     prepared: list[PreparedPhaseTask],
@@ -428,10 +643,11 @@ def create_prepared_todo_phases(
     project_dir: str | Path,
     assignee: str = "default",
 ) -> list[str]:
-    """Create already-prepared phase tasks with a --parent dependency chain.
+    """Create a nonspawnable registration barrier and its phase task chain.
 
-    Creates kanban tasks in order and links each executable task to its
-    predecessor via --parent. Uses --idempotency-key for dedup.
+    Executable tasks depend on the barrier, gates remain detached and receive a
+    sticky Hermes block event, and barrier completion commits the registration
+    only after the expected-phase sentinel is durable.
 
     Args:
         prepared: Fully rendered phase tasks, in registration order.
@@ -443,194 +659,138 @@ def create_prepared_todo_phases(
         List of created task IDs in phase order.
 
     Raises:
-        RuntimeError: If task creation fails — already-created tasks are
-            archived before raising.
+        RuntimeError: If registration cannot commit or cleanup cannot be
+            confirmed. Unconfirmed cleanup remains durable for reconciliation.
     """
     project_dir = Path(project_dir)
+    created_task_ids: list[str] = []
+    phase_task_ids: list[str] = []
+    previous_executable_id: str | None = None
 
-    task_ids: list[str] = []
+    barrier_cmd = [
+        "hermes",
+        "kanban",
+        "create",
+        "--tenant",
+        board_slug,
+        f"Registration barrier: {tick_id}",
+        "--body",
+        _registration_barrier_body(tick_id=tick_id, project_slug=board_slug),
+        "--workspace",
+        f"dir:{project_dir}",
+        "--idempotency-key",
+        f"{tick_id}:{_REGISTRATION_BARRIER_PHASE_KEY}",
+        "--assignee",
+        "-",
+        "--json",
+    ]
+    barrier_id, cleanup = _run_durable_task_create(
+        cmd=barrier_cmd,
+        project_dir=project_dir,
+        pending=PendingTaskCreate(
+            tenant=board_slug,
+            tick_id=tick_id,
+            phase_key=_REGISTRATION_BARRIER_PHASE_KEY,
+            known_task_ids=(),
+        ),
+    )
+    created_task_ids.append(barrier_id)
 
-    for phase_idx, phase in enumerate(prepared):
-        # Build command — title is positional, use --tenant for namespacing,
-        # --json for structured task ID output.
+    for phase in prepared:
         is_gate = phase.gate
         cmd = [
             "hermes",
             "kanban",
             "create",
-            "--tenant", board_slug,
+            "--tenant",
+            board_slug,
             phase.name,
-            "--body", phase.body,
-            "--workspace", f"dir:{project_dir}",
-            "--idempotency-key", f"{tick_id}:{phase.phase_key}",
+            "--body",
+            phase.body,
+            "--workspace",
+            f"dir:{project_dir}",
+            "--idempotency-key",
+            f"{tick_id}:{phase.phase_key}",
+            "--assignee",
+            "-" if is_gate else assignee,
             "--json",
         ]
-        if is_gate:
-            cmd.extend(["--assignee", "-"])
-        else:
-            cmd.extend(["--assignee", assignee])
-        cmd.extend(["--initial-status", BLOCKED])
-
-        # Add --parent for executable phases after the first. Gate phases must
-        # remain manually blocked; Hermes unblocks parented children when their
-        # parent completes, which would bypass the human review gate.
-        if phase_idx > 0 and not is_gate:
-            cmd.extend(["--parent", task_ids[phase_idx - 1]])
-
-        # Gate phases are pure markers, never dispatched to an agent.
-        # Executable phases retain goal mode while registration holds them
-        # blocked until the complete chain is durable.
         if not is_gate:
-            cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])
+            cmd.extend(
+                [
+                    "--parent",
+                    previous_executable_id or barrier_id,
+                    "--goal",
+                    "--goal-max-turns",
+                    str(phase.turns),
+                ]
+            )
 
         log.info(
             "registering prepared kanban task: phase=%s tick=%s",
             phase.phase_key,
             tick_id,
         )
-
-        pending = PendingTaskCreate(
-            tenant=board_slug,
-            tick_id=tick_id,
-            phase_key=phase.phase_key,
-            known_task_ids=tuple(task_ids),
+        task_id, cleanup = _run_durable_task_create(
+            cmd=cmd,
+            project_dir=project_dir,
+            pending=PendingTaskCreate(
+                tenant=board_slug,
+                tick_id=tick_id,
+                phase_key=phase.phase_key,
+                known_task_ids=tuple(created_task_ids),
+            ),
         )
-        try:
-            _persist_pending_task_create(project_dir, pending)
-        except OSError as exc:
-            cleanup_succeeded = _archive_tasks(task_ids)
-            cleanup_detail = ""
-            if not cleanup_succeeded:
-                pending_cleanup = PendingTaskCleanup(
-                    tenant=board_slug,
-                    tick_id=tick_id,
-                    task_ids=tuple(task_ids),
-                )
-                try:
-                    _persist_pending_task_cleanup(project_dir, pending_cleanup)
-                except OSError as cleanup_exc:
-                    cleanup_detail = (
-                        "; cleanup could not be confirmed and durable recovery "
-                        f"state could not be persisted: {cleanup_exc}"
-                    )
-                else:
-                    cleanup_detail = (
-                        "; cleanup could not be confirmed; cleanup remains pending"
-                    )
-            raise RuntimeError(
-                f"failed to persist pending kanban task {phase.phase_key} "
-                f"for tick {tick_id}: {exc}{cleanup_detail}"
-            ) from exc
+        created_task_ids.append(task_id)
+        phase_task_ids.append(task_id)
 
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=KANBAN_QUERY_TIMEOUT,
-            )
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            if isinstance(exc, subprocess.TimeoutExpired):
-                cleanup_succeeded = _recover_and_archive_uncertain_task(
-                    cmd,
-                    task_ids,
-                    tenant=board_slug,
-                    tick_id=tick_id,
-                    phase_key=phase.phase_key,
+        if is_gate:
+            try:
+                _block_gate_task(task_id)
+            except Exception as exc:
+                cleanup_succeeded = _persist_and_archive_cleanup(
+                    project_dir,
+                    cleanup,
                 )
-            else:
-                cleanup_succeeded = _archive_tasks(task_ids)
-            if cleanup_succeeded:
-                _clear_pending_task_create(project_dir, pending)
-            raise RuntimeError(
-                f"failed to register kanban task {phase.phase_key} "
-                f"for tick {tick_id}: Hermes process failed: {exc}"
-            ) from exc
-        if result.returncode != 0:
-            # A nonzero response can still follow a successful remote mutation.
-            cleanup_succeeded = _recover_and_archive_uncertain_task(
-                cmd,
-                task_ids,
-                tenant=board_slug,
-                tick_id=tick_id,
-                phase_key=phase.phase_key,
-            )
-            if cleanup_succeeded:
-                _clear_pending_task_create(project_dir, pending)
-            log.error(
-                "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
-                phase.phase_key,
-                tick_id,
-                result.returncode,
-                result.stderr[:ERROR_MSG_MAX_LENGTH],
-            )
-            raise RuntimeError(
-                f"failed to register kanban task {phase.phase_key} "
-                f"for tick {tick_id}: rc={result.returncode} "
-                f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
-            )
-
-        # Parse task ID from JSON output (--json returns {"id": "t_xxx"}).
-        # Older Hermes versions print "Created t_xxx (...)". Validate either
-        # form before it can become the next phase's --parent argument.
-        task_id = _parse_task_id(result.stdout)
-        if task_id is None:
-            cleanup_succeeded = _recover_and_archive_uncertain_task(
-                cmd,
-                task_ids,
-                tenant=board_slug,
-                tick_id=tick_id,
-                phase_key=phase.phase_key,
-            )
-            if cleanup_succeeded:
-                _clear_pending_task_create(project_dir, pending)
-            idempotency_key = f"{tick_id}:{phase.phase_key}"
-            raise RuntimeError(
-                f"{phase.phase_key}: failed to parse valid task ID; "
-                f"inspect Hermes task with idempotency key {idempotency_key}: "
-                f"{result.stdout[:ERROR_MSG_MAX_LENGTH]}"
-            )
-        task_ids.append(task_id)
-        if not _clear_pending_task_create(project_dir, pending):
-            raise RuntimeError(
-                f"failed to clear pending kanban task {phase.phase_key} "
-                f"for tick {tick_id}"
-            )
-        log.info("registered kanban task: task_id=%s phase=%s", task_id, phase.phase_key)
+                cleanup_detail = (
+                    "" if cleanup_succeeded else "; cleanup remains pending"
+                )
+                raise RuntimeError(
+                    f"failed to apply sticky block to gate {phase.phase_key} "
+                    f"for tick {tick_id}: {exc}{cleanup_detail}"
+                ) from exc
+        else:
+            previous_executable_id = task_id
 
     try:
-        # Persist expected phase keys before making any executable task runnable.
         _persist_expected_phases(prepared, project_dir=project_dir)
-        first_executable = next(
-            task_id
-            for task_id, phase in zip(task_ids, prepared, strict=True)
-            if not phase.gate
-        )
-        _promote_task(first_executable)
     except Exception as exc:
-        cleanup_succeeded = _archive_tasks(task_ids)
-        cleanup_detail = ""
-        if not cleanup_succeeded:
-            pending_cleanup = PendingTaskCleanup(
-                tenant=board_slug,
-                tick_id=tick_id,
-                task_ids=tuple(task_ids),
-            )
-            try:
-                _persist_pending_task_cleanup(project_dir, pending_cleanup)
-            except OSError as cleanup_exc:
-                raise RuntimeError(
-                    f"failed to activate durable kanban chain for tick {tick_id}: "
-                    f"{exc}; cleanup could not be confirmed and durable recovery "
-                    f"state could not be persisted: {cleanup_exc}"
-                ) from exc
-            cleanup_detail = "; cleanup remains pending"
+        cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
+        cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
         raise RuntimeError(
-            f"failed to activate durable kanban chain for tick {tick_id}: "
+            f"failed to commit durable kanban chain for tick {tick_id}: "
             f"{exc}{cleanup_detail}"
         ) from exc
 
-    return task_ids
+    if not _clear_pending_task_state(project_dir, cleanup):
+        cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
+        cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
+        raise RuntimeError(
+            f"failed to clear pre-commit cleanup state for tick {tick_id}"
+            f"{cleanup_detail}"
+        )
+
+    try:
+        _complete_registration_barrier(barrier_id)
+    except Exception as exc:
+        cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
+        cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
+        raise RuntimeError(
+            f"failed to commit durable kanban chain for tick {tick_id}: "
+            f"{exc}{cleanup_detail}"
+        ) from exc
+
+    return phase_task_ids
 
 
 def register_todo_phases(
@@ -689,10 +849,48 @@ def _persist_expected_phases(
         raise RuntimeError("failed to persist expected phases sentinel") from exc
 
 
-def _archive_tasks(task_ids: list[str]) -> bool:
-    """Archive task IDs, returning whether every archive was confirmed."""
-    archived_all = True
+def _archive_tasks(task_ids: list[str], *, tenant: str | None = None) -> bool:
+    """Archive task IDs in order, confirming each child before its parent."""
+    if not task_ids:
+        return True
+
+    if tenant is None:
+        command_succeeded = True
+        for task_id in task_ids:
+            try:
+                result = subprocess.run(
+                    ["hermes", "kanban", "archive", task_id],
+                    capture_output=True,
+                    text=True,
+                    timeout=HERMES_COMMAND_TIMEOUT,
+                    check=False,
+                )
+                if result.returncode != 0:
+                    command_succeeded = False
+                    log.warning(
+                        "failed to archive task %s: rc=%d stderr=%s",
+                        task_id,
+                        result.returncode,
+                        result.stderr[:ERROR_MSG_MAX_LENGTH],
+                    )
+            except Exception as exc:
+                command_succeeded = False
+                log.warning("failed to archive task %s: %s", task_id, exc)
+        return command_succeeded
+
+    snapshot = _list_task_snapshot(tenant)
+    statuses = (
+        {
+            task["id"]: task.get("status")
+            for task in snapshot
+            if isinstance(task.get("id"), str)
+        }
+        if snapshot is not None
+        else {}
+    )
     for task_id in task_ids:
+        if statuses.get(task_id) == "archived":
+            continue
         try:
             result = subprocess.run(
                 ["hermes", "kanban", "archive", task_id],
@@ -701,10 +899,7 @@ def _archive_tasks(task_ids: list[str]) -> bool:
                 timeout=HERMES_COMMAND_TIMEOUT,
                 check=False,
             )
-            if result.returncode == 0:
-                log.info("archived kanban task %s", task_id)
-            else:
-                archived_all = False
+            if result.returncode != 0:
                 log.warning(
                     "failed to archive task %s: rc=%d stderr=%s",
                     task_id,
@@ -712,9 +907,20 @@ def _archive_tasks(task_ids: list[str]) -> bool:
                     result.stderr[:ERROR_MSG_MAX_LENGTH],
                 )
         except Exception as exc:
-            archived_all = False
             log.warning("failed to archive task %s: %s", task_id, exc)
-    return archived_all
+
+        snapshot = _list_task_snapshot(tenant)
+        if snapshot is None:
+            return False
+        statuses = {
+            task["id"]: task.get("status")
+            for task in snapshot
+            if isinstance(task.get("id"), str)
+        }
+        if statuses.get(task_id) != "archived":
+            return False
+        log.info("confirmed archived kanban task %s", task_id)
+    return True
 
 
 def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:

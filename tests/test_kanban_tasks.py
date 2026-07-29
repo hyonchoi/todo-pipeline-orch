@@ -69,7 +69,7 @@ def test_reconcile_pending_create_waits_for_late_visible_task(tmp_path, mocker):
     assert reconcile_pending_task_create(tmp_path) is False
     assert marker.exists()
     assert reconcile_pending_task_create(tmp_path) is True
-    archive.assert_called_once_with(["t_deadbeef"])
+    archive.assert_called_once_with(["t_deadbeef"], tenant="demo")
     assert find.call_count == 2
     assert not marker.exists()
 
@@ -125,7 +125,7 @@ def test_reconcile_pending_create_retains_marker_when_archive_fails(tmp_path, mo
 
     assert reconcile_pending_task_create(tmp_path) is False
     assert marker.exists()
-    archive.assert_called_once_with(["t_deadbeef"])
+    archive.assert_called_once_with(["t_deadbeef"], tenant="demo")
 
 
 def test_reconcile_pending_create_leaves_malformed_marker(tmp_path, mocker):
@@ -275,10 +275,11 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     ]
     mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     mock_run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "t_0000000b"}', stderr=""),
         mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
         mocker.Mock(returncode=0, stdout='{"id": "t_00000002"}', stderr=""),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
-    mocker.patch("hermes_pipeline.kanban_tasks._promote_task")
 
     task_ids = create_prepared_todo_phases(
         prepared=prepared,
@@ -288,11 +289,20 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     )
 
     assert task_ids == ["t_00000001", "t_00000002"]
-    assert mock_run.call_count == 2
-    assert "--parent" not in mock_run.call_args_list[0].args[0]
-    assert "--parent" in mock_run.call_args_list[1].args[0]
-    assert "--body" in mock_run.call_args_list[0].args[0]
-    assert "already rendered $body" in mock_run.call_args_list[0].args[0]
+    create_commands = [
+        call.args[0]
+        for call in mock_run.call_args_list
+        if call.args[0][:3] == ["hermes", "kanban", "create"]
+    ]
+    assert len(create_commands) == 3
+    assert "--parent" not in create_commands[0]
+    assert create_commands[1][create_commands[1].index("--parent") + 1] == (
+        "t_0000000b"
+    )
+    assert create_commands[2][create_commands[2].index("--parent") + 1] == (
+        "t_00000001"
+    )
+    assert "already rendered $body" in create_commands[1]
 
 
 def test_create_prepared_blocks_until_registered_and_preserves_activation_order(
@@ -316,16 +326,10 @@ def test_create_prepared_blocks_until_registered_and_preserves_activation_order(
             f"pending:{pending.phase_key}"
         ),
     )
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks._clear_pending_task_create",
-        create=True,
-        side_effect=lambda _project_dir, pending: events.append(
-            f"clear:{pending.phase_key}"
-        )
-        or True,
-    )
-
     def run_create(cmd, **_kwargs):
+        if cmd[:3] == ["hermes", "kanban", "complete"]:
+            events.append(f"complete:{cmd[-1]}")
+            return mocker.Mock(returncode=0, stdout="", stderr="")
         phase_key = cmd[cmd.index("--idempotency-key") + 1].split(":", 1)[1]
         create_commands.append(cmd)
         events.append(f"create:{phase_key}")
@@ -344,37 +348,31 @@ def test_create_prepared_blocks_until_registered_and_preserves_activation_order(
         "hermes_pipeline.kanban_tasks._persist_expected_phases",
         side_effect=lambda *_args, **_kwargs: events.append("persist-expected"),
     )
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks._promote_task",
-        create=True,
-        side_effect=lambda task_id: events.append(f"promote:{task_id}"),
-    )
-
     assert create_prepared_todo_phases(
         prepared=prepared,
         tick_id="01CLIENT",
         board_slug="demo",
         project_dir=tmp_path,
-    ) == ["t_00000001", "t_00000002"]
+    ) == ["t_00000002", "t_00000003"]
 
     assert events == [
+        "pending:__registration_barrier__",
+        "create:__registration_barrier__",
         "pending:phase_1",
         "create:phase_1",
-        "clear:phase_1",
         "pending:phase_2",
         "create:phase_2",
-        "clear:phase_2",
         "persist-expected",
-        "promote:t_00000001",
+        "complete:t_00000001",
     ]
-    assert all(
-        command[command.index("--initial-status") + 1] == "blocked"
-        for command in create_commands
-    )
-    assert "--goal" in create_commands[0]
+    assert all("--initial-status" not in command for command in create_commands)
     assert "--parent" not in create_commands[0]
+    assert "--goal" in create_commands[1]
     assert create_commands[1][create_commands[1].index("--parent") + 1] == (
         "t_00000001"
+    )
+    assert create_commands[2][create_commands[2].index("--parent") + 1] == (
+        "t_00000002"
     )
 
 
@@ -400,22 +398,136 @@ def test_pending_marker_clear_only_removes_matching_create(tmp_path):
     assert not marker.exists()
 
 
-def test_pending_marker_survives_two_timed_out_creates_and_empty_snapshot(
+def test_uncertain_create_timeout_retains_child_and_known_parents(
     tmp_path, mocker
 ):
     from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
+        PendingTaskCreate,
+        _run_durable_task_create,
     )
 
+    pending = PendingTaskCreate(
+        "demo",
+        "01CLIENT",
+        "phase_2",
+        ("t_0000000b", "t_00000001"),
+    )
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
         subprocess.TimeoutExpired(cmd=["hermes"], timeout=60),
         subprocess.TimeoutExpired(cmd=["hermes"], timeout=60),
         mocker.Mock(returncode=0, stdout="[]", stderr=""),
     ]
+    archive = mocker.patch("hermes_pipeline.kanban_tasks._archive_tasks")
 
-    with pytest.raises(RuntimeError, match=r"phase_1.*Hermes process"):
+    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
+        _run_durable_task_create(
+            cmd=[
+                "hermes",
+                "kanban",
+                "create",
+                "--idempotency-key",
+                "01CLIENT:phase_2",
+            ],
+            project_dir=tmp_path,
+            pending=pending,
+        )
+
+    archive.assert_not_called()
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "tenant": "demo",
+        "tick_id": "01CLIENT",
+        "phase_key": "phase_2",
+        "known_task_ids": ["t_0000000b", "t_00000001"],
+    }
+
+
+def test_timeout_recovery_persists_child_first_cleanup(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _run_durable_task_create,
+    )
+
+    pending = PendingTaskCreate(
+        "demo",
+        "01CLIENT",
+        "phase_2",
+        ("t_0000000b", "t_00000001"),
+    )
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=60),
+        mocker.Mock(
+            returncode=0,
+            stdout='{"id": "t_00000002"}',
+            stderr="",
+        ),
+    ]
+    archive = mocker.patch(
+        "hermes_pipeline.kanban_tasks._archive_tasks",
+        return_value=False,
+    )
+
+    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
+        _run_durable_task_create(
+            cmd=[
+                "hermes",
+                "kanban",
+                "create",
+                "--idempotency-key",
+                "01CLIENT:phase_2",
+            ],
+            project_dir=tmp_path,
+            pending=pending,
+        )
+
+    archive.assert_called_once_with(
+        ["t_00000002", "t_00000001", "t_0000000b"],
+        tenant="demo",
+    )
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "tenant": "demo",
+        "tick_id": "01CLIENT",
+        "cleanup_task_ids": [
+            "t_00000002",
+            "t_00000001",
+            "t_0000000b",
+        ],
+    }
+
+
+def test_sentinel_failure_retains_child_first_cleanup(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    ids_by_key = {
+        "__registration_barrier__": "t_0000000b",
+        "phase_1": "t_00000001",
+    }
+
+    def run(cmd, **_kwargs):
+        key = cmd[cmd.index("--idempotency-key") + 1].split(":", 1)[1]
+        return mocker.Mock(
+            returncode=0,
+            stdout=json.dumps({"id": ids_by_key[key]}),
+            stderr="",
+        )
+
+    mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run", side_effect=run)
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._persist_expected_phases",
+        side_effect=RuntimeError("sentinel write failed"),
+    )
+    archive = mocker.patch(
+        "hermes_pipeline.kanban_tasks._archive_tasks",
+        return_value=False,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup remains pending"):
         create_prepared_todo_phases(
             prepared=[
                 PreparedPhaseTask("phase_1", "One", "body", 5, False),
@@ -429,205 +541,25 @@ def test_pending_marker_survives_two_timed_out_creates_and_empty_snapshot(
     assert json.loads(marker.read_text(encoding="utf-8")) == {
         "tenant": "demo",
         "tick_id": "01CLIENT",
-        "phase_key": "phase_1",
-        "known_task_ids": [],
+        "cleanup_task_ids": ["t_00000001", "t_0000000b"],
     }
-
-
-@pytest.mark.parametrize(
-    ("cleanup_succeeded", "error_suffix"),
-    [
-        (True, ""),
-        (False, "cleanup could not be confirmed"),
-    ],
-)
-def test_pending_marker_second_write_failure_archives_prior_tasks(
-    tmp_path, mocker, cleanup_succeeded, error_suffix
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
+    archive.assert_called_once_with(
+        ["t_00000001", "t_0000000b"],
+        tenant="demo",
     )
 
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False),
-        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
-    ]
-    persist_pending = mocker.patch(
-        "hermes_pipeline.kanban_tasks._persist_pending_task_create",
-        side_effect=[None, OSError("disk full")],
-    )
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks._clear_pending_task_create",
-        return_value=True,
-    )
-    run = mocker.patch(
-        "hermes_pipeline.kanban_tasks.subprocess.run",
-        return_value=mocker.Mock(
-            returncode=0,
-            stdout='{"id": "t_00000001"}',
-            stderr="",
-        ),
-    )
-    archive = mocker.patch(
-        "hermes_pipeline.kanban_tasks._archive_tasks",
-        return_value=cleanup_succeeded,
-    )
-    promote = mocker.patch("hermes_pipeline.kanban_tasks._promote_task")
 
-    error_pattern = r"phase_2"
-    if error_suffix:
-        error_pattern += rf".*{error_suffix}"
-    with pytest.raises(RuntimeError, match=error_pattern):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert persist_pending.call_count == 2
-    run.assert_called_once()
-    archive.assert_called_once_with(["t_00000001"])
-    promote.assert_not_called()
-    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
-    if cleanup_succeeded:
-        assert not marker.exists()
-    else:
-        assert json.loads(marker.read_text(encoding="utf-8")) == {
-            "tenant": "demo",
-            "tick_id": "01CLIENT",
-            "cleanup_task_ids": ["t_00000001"],
-        }
-
-
-@pytest.mark.parametrize("failure_stage", ["persist", "promote"])
-def test_activation_order_failure_archives_all_tasks_and_never_continues(
-    tmp_path, mocker, failure_stage
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
-
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False),
-        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000002"}', stderr=""),
-    ]
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks._clear_pending_task_create",
-        create=True,
-        return_value=True,
-    )
-    persist_expected = mocker.patch(
-        "hermes_pipeline.kanban_tasks._persist_expected_phases"
-    )
-    promote = mocker.patch(
-        "hermes_pipeline.kanban_tasks._promote_task",
-        create=True,
-    )
-    if failure_stage == "persist":
-        persist_expected.side_effect = RuntimeError("sentinel write failed")
-    else:
-        promote.side_effect = RuntimeError("promotion failed")
-    archive = mocker.patch(
-        "hermes_pipeline.kanban_tasks._archive_tasks",
-        return_value=True,
-    )
-
-    with pytest.raises(RuntimeError):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    archive.assert_called_once_with(["t_00000001", "t_00000002"])
-    if failure_stage == "persist":
-        promote.assert_not_called()
-    else:
-        promote.assert_called_once_with("t_00000001")
-
-
-@pytest.mark.parametrize("failure_stage", ["persist", "promote"])
-def test_pending_marker_retains_all_tasks_when_activation_cleanup_fails(
-    tmp_path, mocker, failure_stage
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-        reconcile_pending_task_create,
-    )
-
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False),
-        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000002"}', stderr=""),
-    ]
-    persist_expected = mocker.patch(
-        "hermes_pipeline.kanban_tasks._persist_expected_phases"
-    )
-    promote = mocker.patch("hermes_pipeline.kanban_tasks._promote_task")
-    if failure_stage == "persist":
-        persist_expected.side_effect = RuntimeError("sentinel write failed")
-    else:
-        promote.side_effect = RuntimeError("promotion failed")
-    archive = mocker.patch(
-        "hermes_pipeline.kanban_tasks._archive_tasks",
-        return_value=False,
-    )
-
-    with pytest.raises(RuntimeError, match="cleanup remains pending"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
-    assert json.loads(marker.read_text(encoding="utf-8")) == {
-        "tenant": "demo",
-        "tick_id": "01CLIENT",
-        "cleanup_task_ids": ["t_00000001", "t_00000002"],
-    }
-    archive.assert_called_once_with(["t_00000001", "t_00000002"])
-    if failure_stage == "persist":
-        promote.assert_not_called()
-    else:
-        promote.assert_called_once_with("t_00000001")
-
-    archive.reset_mock()
-    archive.return_value = True
-    assert reconcile_pending_task_create(tmp_path)
-    archive.assert_called_once_with(["t_00000001", "t_00000002"])
-    assert not marker.exists()
-
-
-def test_activation_order_promote_task_invokes_hermes(tmp_path, mocker):
+def test_registration_barrier_complete_invokes_hermes(mocker):
     import hermes_pipeline.kanban_tasks as kanban_tasks
 
     run = mocker.patch(
         "hermes_pipeline.kanban_tasks.subprocess.run",
         return_value=mocker.Mock(returncode=0, stdout="", stderr=""),
     )
-    promote = getattr(kanban_tasks, "_promote_task", None)
-
-    assert promote is not None
-    promote("t_00000001")
+    kanban_tasks._complete_registration_barrier("t_0000000b")
 
     run.assert_called_once_with(
-        ["hermes", "kanban", "promote", "t_00000001"],
+        ["hermes", "kanban", "complete", "t_0000000b"],
         capture_output=True,
         text=True,
         timeout=kanban_tasks.HERMES_COMMAND_TIMEOUT,
@@ -656,74 +588,6 @@ def test_activation_order_expected_phase_write_failure_is_reported(
 
 
 @pytest.mark.parametrize(
-    "failure",
-    [
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        OSError("hermes unavailable"),
-    ],
-)
-def test_create_prepared_archives_prior_tasks_on_process_failure(
-    tmp_path, mocker, failure
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
-
-    prepared = [
-        PreparedPhaseTask(f"phase_{index}", str(index), "body", 5, False)
-        for index in (1, 2)
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    side_effects = [
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
-        failure,
-    ]
-    if isinstance(failure, subprocess.TimeoutExpired):
-        side_effects.append(mocker.Mock(returncode=1, stdout="", stderr="failed"))
-    side_effects.append(mocker.Mock(returncode=0, stdout="", stderr=""))
-    run.side_effect = side_effects
-
-    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert run.call_args_list[-1].args[0][-1] == "t_00000001"
-
-
-def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mocker):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
-
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False)
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        mocker.Mock(returncode=0, stdout='{"id": "t_deadbeef"}', stderr=""),
-        mocker.Mock(returncode=0, stdout="", stderr=""),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"phase_1.*Hermes process"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
-    assert run.call_args_list[2].args[0][-1] == "t_deadbeef"
-
-
-@pytest.mark.parametrize(
     "recovery_failure",
     [
         subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
@@ -731,25 +595,13 @@ def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mock
     ],
 )
 def test_create_prepared_resolves_task_from_snapshot_when_recovery_is_uncertain(
-    tmp_path, mocker, recovery_failure
+    mocker, recovery_failure
 ):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
+    from hermes_pipeline.kanban_tasks import _recover_uncertain_task_id
 
-    prepared = [
-        PreparedPhaseTask(
-            "phase_1",
-            "One",
-            '{"phase_key": "phase_1", "tick_id": "01CLIENT"}\nbody',
-            5,
-            False,
-        )
-    ]
+    body = '{"phase_key": "phase_1", "tick_id": "01CLIENT"}\nbody'
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
         recovery_failure,
         mocker.Mock(
             returncode=0,
@@ -757,33 +609,35 @@ def test_create_prepared_resolves_task_from_snapshot_when_recovery_is_uncertain(
                 [
                     {
                         "id": "t_deadbeef",
-                        "body": prepared[0].body,
+                        "body": body,
                         "status": "ready",
                     }
                 ]
             ),
             stderr="",
         ),
-        mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
 
-    with pytest.raises(RuntimeError, match=r"phase_1.*Hermes process"):
-        create_prepared_todo_phases(
-            prepared=prepared,
+    cmd = ["hermes", "kanban", "create", "--idempotency-key", "01CLIENT:phase_1"]
+    assert (
+        _recover_uncertain_task_id(
+            cmd,
+            tenant="demo",
             tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
+            phase_key="phase_1",
         )
+        == "t_deadbeef"
+    )
 
-    assert run.call_args_list[2].args[0] == [
+    assert run.call_args_list[1].args[0] == [
         "hermes",
         "kanban",
         "list",
         "--tenant",
         "demo",
+        "--archived",
         "--json",
     ]
-    assert run.call_args_list[3].args[0][-1] == "t_deadbeef"
 
 
 @pytest.mark.parametrize(
@@ -794,226 +648,33 @@ def test_create_prepared_resolves_task_from_snapshot_when_recovery_is_uncertain(
         "42",
         '{"tasks": null}',
         '{"tasks": "unexpected"}',
-    ],
-)
-def test_create_prepared_rejects_malformed_snapshot_and_archives_known_tasks(
-    tmp_path, mocker, snapshot_stdout
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
-
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False),
-        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        mocker.Mock(returncode=0, stdout=snapshot_stdout, stderr=""),
-        mocker.Mock(returncode=0, stdout="", stderr=""),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert run.call_args_list[4].args[0][-1] == "t_00000001"
-
-
-@pytest.mark.parametrize(
-    "snapshot_result",
-    [
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=10),
-        OSError("hermes unavailable"),
-        None,
-        "not-json",
         "[null]",
         '[{"body": null}]',
+        json.dumps([{"id": "t_deadbeef", "body": "null\nbody"}]),
+        json.dumps([{"id": "t_deadbeef", "body": "[]\nbody"}]),
+        json.dumps([{"id": "t_deadbeef", "body": '"unexpected"\nbody'}]),
     ],
 )
-def test_create_prepared_snapshot_failures_archive_only_known_tasks(
-    tmp_path, mocker, snapshot_result
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
+def test_find_task_rejects_malformed_snapshot(mocker, snapshot_stdout):
+    from hermes_pipeline.kanban_tasks import _find_task_id_in_snapshot
 
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False),
-        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
-    ]
-    if isinstance(snapshot_result, BaseException):
-        snapshot_effect = snapshot_result
-    elif snapshot_result is None:
-        snapshot_effect = mocker.Mock(returncode=1, stdout="", stderr="failed")
-    else:
-        snapshot_effect = mocker.Mock(
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(
             returncode=0,
-            stdout=snapshot_result,
-            stderr="",
-        )
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        snapshot_effect,
-        mocker.Mock(returncode=0, stdout="", stderr=""),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert run.call_args_list[-1].args[0][-1] == "t_00000001"
-
-
-@pytest.mark.parametrize("task_body", ["null\nbody", "[]\nbody", '"unexpected"\nbody'])
-def test_create_prepared_rejects_nonmapping_snapshot_headers(
-    tmp_path, mocker, task_body
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
-
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False)
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
-        mocker.Mock(
-            returncode=0,
-            stdout=json.dumps([{"id": "t_deadbeef", "body": task_body}]),
+            stdout=snapshot_stdout,
             stderr="",
         ),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"phase_1.*Hermes process"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert len(run.call_args_list) == 3
-
-
-def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
-    tmp_path, mocker
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
     )
 
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False)
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        mocker.Mock(returncode=1, stdout="", stderr="transport failed"),
-        mocker.Mock(returncode=0, stdout='{"id": "t_deadbeef"}', stderr=""),
-        mocker.Mock(returncode=0, stdout="", stderr=""),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"phase_1.*rc=1"):
-        create_prepared_todo_phases(
-            prepared=prepared,
+    assert (
+        _find_task_id_in_snapshot(
+            tenant="demo",
             tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
+            phase_key="phase_2",
         )
-
-    assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
-    assert run.call_args_list[2].args[0][-1] == "t_deadbeef"
-
-
-def test_create_prepared_recovers_and_archives_task_after_invalid_output(
-    tmp_path, mocker
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
+        is None
     )
-
-    prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False)
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": null}', stderr=""),
-        mocker.Mock(returncode=0, stdout='{"id": "t_deadbeef"}', stderr=""),
-        mocker.Mock(returncode=0, stdout="", stderr=""),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"phase_1.*task ID"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
-    assert run.call_args_list[2].args[0][-1] == "t_deadbeef"
-
-
-@pytest.mark.parametrize(
-    "malformed_output",
-    [
-        '{"id": null}',
-        '{"id": ""}',
-        '{"id": "task 002"}',
-        '{"missing": "id"}',
-        "Created",
-    ],
-)
-def test_create_prepared_rejects_malformed_task_id_and_archives_prior_tasks(
-    tmp_path, mocker, malformed_output
-):
-    from hermes_pipeline.kanban_tasks import (
-        PreparedPhaseTask,
-        create_prepared_todo_phases,
-    )
-
-    prepared = [
-        PreparedPhaseTask(f"phase_{index}", str(index), "body", 5, False)
-        for index in (1, 2)
-    ]
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.side_effect = [
-        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
-        mocker.Mock(returncode=0, stdout=malformed_output, stderr=""),
-        mocker.Mock(returncode=1, stdout="", stderr="failed"),
-        mocker.Mock(returncode=0, stdout="", stderr=""),
-    ]
-
-    with pytest.raises(RuntimeError, match=r"phase_2.*task ID"):
-        create_prepared_todo_phases(
-            prepared=prepared,
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-    assert run.call_args_list[-1].args[0][-1] == "t_00000001"
 
 
 class TestRegisterTodoPhases:
@@ -1027,7 +688,6 @@ class TestRegisterTodoPhases:
         mock_run.return_value = mocker.MagicMock(
             returncode=0, stdout=json.dumps({"id": "t_00000001"})
         )
-        mocker.patch("hermes_pipeline.kanban_tasks._promote_task")
 
         phases_cfg = tmp_path / "phases.yaml"
         phases_cfg.write_text(
@@ -1054,21 +714,19 @@ class TestRegisterTodoPhases:
             phases_path=str(phases_cfg),
         )
 
-        # Should have been called twice (2 phases)
-        assert mock_run.call_count == 2
-
-        # First call: no --parent
-        first_call_args = mock_run.call_args_list[0][0][0]
-        assert "hermes" in first_call_args
-        assert "kanban" in first_call_args
-        assert "create" in first_call_args
-        assert "--tenant" in first_call_args
-        assert "demo" in first_call_args
-        assert "--parent" not in first_call_args
-
-        # Second call: --parent with first task id
-        second_call_args = mock_run.call_args_list[1][0][0]
-        assert "--parent" in second_call_args
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        assert len(create_commands) == 3
+        assert "--parent" not in create_commands[0]
+        assert create_commands[1][create_commands[1].index("--parent") + 1] == (
+            "t_00000001"
+        )
+        assert create_commands[2][create_commands[2].index("--parent") + 1] == (
+            "t_00000001"
+        )
 
     def test_task_body_has_json_header(self, tmp_path, mocker):
         """Task body starts with a JSON header line containing tick_id, phase_key, todo_id."""
@@ -1098,8 +756,12 @@ class TestRegisterTodoPhases:
             phases_path=str(phases_cfg),
         )
 
-        # Extract the --body argument from the call
-        call_args = mock_run.call_args_list[0][0][0]
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
         body_idx = call_args.index("--body")
         body_value = call_args[body_idx + 1]
 
@@ -1139,68 +801,16 @@ class TestRegisterTodoPhases:
             phases_path=str(phases_cfg),
         )
 
-        call_args = mock_run.call_args_list[0][0][0]
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
         key_idx = call_args.index("--idempotency-key")
         key_value = call_args[key_idx + 1]
 
         assert key_value == "01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan"
-
-    def test_mid_registration_failure_archives_created_tasks(self, tmp_path, mocker):
-        """If the 2nd task fails, the 1st is archived via hermes kanban archive."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
-
-        # First call succeeds, second call fails
-        mock_run = mocker.patch("subprocess.run")
-        mock_run.side_effect = [
-            mocker.MagicMock(
-                returncode=0, stdout=json.dumps({"id": "t_00000001"})
-            ),
-            mocker.MagicMock(returncode=1, stdout="", stderr="error"),
-            # Idempotent recovery retry also fails
-            mocker.MagicMock(returncode=1, stdout="", stderr="error"),
-            # Snapshot lookup confirms no second task was created
-            mocker.MagicMock(returncode=0, stdout="[]", stderr=""),
-            # Archive call
-            mocker.MagicMock(returncode=0, stdout=""),
-        ]
-
-        phases_cfg = tmp_path / "phases.yaml"
-        phases_cfg.write_text(
-            "phases:\n"
-            '  - phase_key: "phase_2_autoplan"\n'
-            '    name: "Phase 2: Autoplan"\n'
-            '    prompt: "Plan"\n'
-            '    tools: "Read,Write"\n'
-            "    turns: 20\n"
-            "    timeout: 1800\n"
-            '  - phase_key: "phase_4_development"\n'
-            '    name: "Phase 4: Dev"\n'
-            '    prompt: "Dev"\n'
-            '    tools: "Read,Write,Edit,Bash"\n'
-            "    turns: 60\n"
-            "    timeout: 3600\n"
-        )
-
-        with pytest.raises(RuntimeError, match="failed to register"):
-            register_todo_phases(
-                todo_id="TODO-10",
-                tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
-                board_slug="demo",
-                project_dir=str(tmp_path),
-                phases_path=str(phases_cfg),
-            )
-
-        # Verify archive was called for t_00000001
-        assert mock_run.call_args_list[3].args[0][:3] == [
-            "hermes",
-            "kanban",
-            "list",
-        ]
-        archive_call = mock_run.call_args_list[4]
-        archive_args = archive_call[0][0]
-        assert "kanban" in archive_args
-        assert "archive" in archive_args
-        assert "t_00000001" in archive_args
 
     def test_returns_task_ids(self, tmp_path, mocker):
         """register_todo_phases returns a list of created task IDs."""
@@ -1209,13 +819,16 @@ class TestRegisterTodoPhases:
         mock_run = mocker.patch("subprocess.run")
         mock_run.side_effect = [
             mocker.MagicMock(
+                returncode=0, stdout=json.dumps({"id": "t_0000000b"})
+            ),
+            mocker.MagicMock(
                 returncode=0, stdout=json.dumps({"id": "t_00000001"})
             ),
             mocker.MagicMock(
                 returncode=0, stdout=json.dumps({"id": "t_00000002"})
             ),
+            mocker.MagicMock(returncode=0, stdout="", stderr=""),
         ]
-        mocker.patch("hermes_pipeline.kanban_tasks._promote_task")
 
         phases_cfg = tmp_path / "phases.yaml"
         phases_cfg.write_text(
@@ -1244,8 +857,10 @@ class TestRegisterTodoPhases:
 
         assert task_ids == ["t_00000001", "t_00000002"]
 
-    def test_gate_phase_registered_blocked_without_goal(self, tmp_path, mocker):
-        """Gate phases get --initial-status blocked, no --goal flags."""
+    def test_gate_phase_registered_with_sticky_block_without_goal(
+        self, tmp_path, mocker
+    ):
+        """Gate phases are nonspawnable and receive an explicit sticky block."""
         from hermes_pipeline.kanban_tasks import register_todo_phases
 
         phases = [
@@ -1263,17 +878,36 @@ class TestRegisterTodoPhases:
             project_dir=tmp_path,
         )
 
-        # Gate phase (index 1) should have --initial-status blocked, no --goal
-        gate_cmd = mock_run.call_args_list[1][0][0]
-        assert "--initial-status" in gate_cmd
-        assert gate_cmd[gate_cmd.index("--initial-status") + 1] == "blocked"
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        gate_cmd = create_commands[2]
+        assert "--initial-status" not in gate_cmd
         assert "--goal" not in gate_cmd
         assert "--parent" not in gate_cmd
+        assert gate_cmd[gate_cmd.index("--assignee") + 1] == "-"
 
-        # Executable phases keep goal mode but remain blocked until activation.
-        phase8_cmd = mock_run.call_args_list[0][0][0]
+        block_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "block"]
+        ]
+        assert block_commands == [
+            [
+                "hermes",
+                "kanban",
+                "block",
+                "--kind",
+                "needs_input",
+                "t_0000000a",
+            ]
+        ]
+
+        phase8_cmd = create_commands[1]
         assert "--goal" in phase8_cmd
-        assert phase8_cmd[phase8_cmd.index("--initial-status") + 1] == "blocked"
+        assert "--initial-status" not in phase8_cmd
 
     def test_gate_phase_is_not_assigned_to_pipeline_worker(self, tmp_path, mocker):
         """Gate phases are human checkpoints and must not be worker-dispatchable."""
@@ -1295,8 +929,13 @@ class TestRegisterTodoPhases:
             assignee="pipeline",
         )
 
-        phase8_cmd = mock_run.call_args_list[0][0][0]
-        gate_cmd = mock_run.call_args_list[1][0][0]
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        phase8_cmd = create_commands[1]
+        gate_cmd = create_commands[2]
         assert phase8_cmd[phase8_cmd.index("--assignee") + 1] == "pipeline"
         assert gate_cmd[gate_cmd.index("--assignee") + 1] == "-"
 
