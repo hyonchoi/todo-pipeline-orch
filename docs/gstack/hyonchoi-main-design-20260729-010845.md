@@ -49,9 +49,10 @@ worker boundary change.
 
 ## Premises
 
-1. `agent_client` is a global `Config` field with allowed values `claude` and
+1. `prompt_client` is a global `Config` field with allowed values `claude` and
    `codex`. Its default is `claude`, preserving existing configurations and
-   direct callers.
+   direct callers. The name is intentional: it selects task-body vocabulary,
+   not the worker executable or Hermes assignee.
 2. The field controls prompt vocabulary only. It does not choose or launch an
    executable.
 3. A shared phase profile is supported for a selected client only when every
@@ -67,6 +68,10 @@ worker boundary change.
    does not reread global configuration.
 6. Bundled templates must fail visibly when a required client placeholder is
    unresolved. Silently returning an unrendered template is not acceptable.
+7. One global `prompt_client` applies to every project under `projects_dir`.
+   Mixed Claude/Codex worker fleets require separate project roots or the
+   deferred per-project override in TODO-42. `tpo doctor` must report this
+   invariant.
 
 ## Profile and Client Prerequisite Matrix
 
@@ -106,6 +111,11 @@ command, discovery mechanism, and invocation syntax are verified for that
 client. That verification is a prerequisite for changing the matrix status; it
 is not guessed by TODO-41.
 
+The table is rendered from or validated against structured package metadata,
+not maintained as an independent prose-only source. Each profile declares skill
+ID, distribution owner, per-client discovery root, support status, and verified
+invocation form. Prompt tests consume the same metadata.
+
 Registration must not fail based on local skill discovery because the worker
 environment may be remote or containerized. Documentation and `tpo doctor`
 output, if doctor already has the selected worker environment in scope, may
@@ -132,7 +142,7 @@ design: a typed global client value, fixed vocabulary, shared templates, and
 explicit propagation into `_render_phase_prompt()`.
 
 Both found a second runtime path that is easy to miss: the harness also
-registers phase prompts and must receive the same `agent_client` value.
+registers phase prompts and must receive the same `prompt_client` value.
 
 The Codex review identified the strongest premise challenge: syntactically
 correct `$skill-name` prompts are still broken when the named skill is absent
@@ -187,11 +197,11 @@ Implement Approach B.
 Define:
 
 ```python
-AgentClient = Literal["claude", "codex"]
+PromptClient = Literal["claude", "codex"]
 ```
 
-Add `agent_client: AgentClient = "claude"` to `Config` and
-`agent_client: claude` to the generated global-config skeleton. The existing
+Add `prompt_client: PromptClient = "claude"` to `Config` and
+`prompt_client: claude` to the generated global-config skeleton. The existing
 dataclass-driven config key and `Literal` coercion paths power `tpo config
 init`, `get`, and `set`. Existing tests already establish accepted and rejected
 `Literal` values plus source-wrapped config errors. Add field-level tests for
@@ -199,7 +209,7 @@ YAML null, case mismatch, and CLI validation before relying on this behavior.
 
 If those tests expose a gap, improve the single shared dataclass coercion layer
 so every `Literal` field receives the same behavior. Do not create an
-`agent_client`-specific parallel validator.
+`prompt_client`-specific parallel validator.
 
 Invalid, null, or case-mismatched values fail with the config source and allowed
 values. Do not add `TPO_AGENT_CLIENT` or `PIPELINE_AGENT_CLIENT`.
@@ -226,9 +236,15 @@ prompt: |
   Use the gstack {skill_prefix}autoplan skill in {agent_product}.
 ```
 
-Apply the same treatment to secondary references such as `/review's`, `/ship`,
-and namespaced `agent-skills:*` skills. Do not alter file paths, URLs, phase
-names, tools, turns, or timeout values.
+Apply the same treatment to secondary references such as `/review's` and
+`/ship`. Do not alter file paths, URLs, phase names, tools, turns, or timeout
+values.
+
+Namespaced `agent-skills:*` references are transformed only after the external
+plugin's authoritative documentation or an executable installation proves the
+client's provisioning, discovery, and explicit invocation syntax. Until then,
+retain the current prefix-neutral reference and keep that client/profile row
+`Unverified`. Never freeze guessed syntax in snapshots.
 
 Do not duplicate whole prompt bodies by client.
 
@@ -238,7 +254,7 @@ Exact expected forms:
 |---|---|---|
 | Ordinary skill | `Use the /autoplan skill in Claude Code.` | `Use the $autoplan skill in Codex.` |
 | Possessive reference | `Follow /review's fix loop.` | `Follow $review's fix loop.` |
-| Namespaced skill | `Use /agent-skills:ship in Claude Code.` | `Use $agent-skills:ship in Codex.` |
+| Namespaced skill | Use the verified Claude form, or retain prefix-neutral text while unverified | Use the verified Codex form, or retain prefix-neutral text while unverified |
 
 These examples establish the current grammar. If a future client needs more
 than a prefix difference, add a new explicit vocabulary field or per-client
@@ -250,21 +266,48 @@ Use the existing production seam:
 
 ```text
 cli._tick_project(config)
-  -> register_todo_phases(..., agent_client=config.agent_client)
-  -> _render_phase_prompt(..., agent_client=agent_client)
+  -> resolve_profile_phases_path(contract.profile)
+  -> prepare_todo_phases(..., phases_path=resolved_path,
+                         prompt_client=config.prompt_client)
+  -> persist current_tick_id + tick_started
+  -> create_prepared_todo_phases(...)
 ```
 
 Propagate the same value through the harness path:
 
 ```text
 run_harness(config)
+  -> prompt_client = getattr(config, "prompt_client", "claude")
   -> harness polling/registration
-  -> register_todo_phases(..., agent_client=config.agent_client)
+  -> register_todo_phases(..., prompt_client=prompt_client)
 ```
 
-Keep `agent_client="claude"` defaults on lower-level rendering and registration
+Keep `prompt_client="claude"` defaults on lower-level rendering and registration
 APIs where needed for compatibility with direct callers and existing tests.
 Production callers must pass the resolved value explicitly.
+
+Production must also pass the contract-resolved `phases_path`; validating one
+profile and registering the default profile is forbidden. Add a regression test
+using the non-default `agent-skills` contract.
+
+Registration is two-pass:
+
+```text
+load profile + render every body
+          |
+          +-- failure -> failed_to_spawn outcome
+          |              current_tick_id unchanged
+          v
+persist current_tick_id + tick_started
+          |
+          v
+create Hermes tasks + expected-phases sentinel
+```
+
+The preparation pass is pure and creates no Hermes tasks. This prevents a later
+template error from leaving an incomplete task chain. Tick state is persisted
+only after every body is valid and immediately before the first external
+mutation, preserving duplicate-registration protection.
 
 ### Rendering contract
 
@@ -278,25 +321,27 @@ Before formatting, parse the template fields and allow only:
 - `agent_product`
 - `skill_prefix`
 
-Unknown fields, positional fields, malformed braces, or unresolved allowed
-fields raise `PhasePromptRenderError`, a `ValueError` subclass. The error
-message names the phase/template source when available and the offending field
-or formatting problem. Registration aborts before emitting the affected Hermes
-task.
+Unknown fields, positional fields, malformed braces, unresolved allowed fields,
+conversions, format specifications, attribute/index traversal, and nested
+replacement fields raise `PhasePromptRenderError`, a `ValueError` subclass.
+Only exact bare allowed names and escaped `{{` / `}}` braces are accepted. The
+error message names the phase/template source when available and the offending
+field or formatting problem. Preparation aborts before emitting any Hermes task.
 
 Remove the current broad `KeyError`/`IndexError` fallback that returns the
 template verbatim. `_render_phase_prompt()` is private and its documented
 templates are repository-owned, so silently preserving malformed external
 templates is not a supported compatibility contract.
 
-The `agent_client="claude"` default remains for direct callers; formatting
+The `prompt_client="claude"` default remains for direct callers; formatting
 tolerance does not. Tests must cover ordinary literal braces using escaped
 `{{` and `}}`, all five allowed fields, unknown fields, positional fields,
-malformed braces, and unresolved client fields.
+malformed braces, unresolved client fields, conversions, format specifications,
+attribute/index traversal, and nested fields.
 
 The renderer must also:
 
-- reject unknown `agent_client` values before selecting vocabulary;
+- reject unknown `prompt_client` values before selecting vocabulary;
 - never perform broad slash or product-name replacement;
 - preserve existing TODO/tick/project, Spec, and Reference rendering;
 - preserve `$` as literal task-body text without sending it through a shell.
@@ -321,6 +366,18 @@ TODO-41 tests. If current evidence cannot establish an external skill on a
 client, its matrix status remains `Unverified`; documentation must not call it
 unconditionally supported.
 
+Release qualification is versioned and auditable. For every `Conditional`
+client/profile pair it defines:
+
+- environment and installation prerequisites;
+- the discovery command;
+- one representative explicit invocation and expected result;
+- the evidence artifact path and timestamp;
+- the blocking rule for release.
+
+`Unverified` pairs are unsupported and non-blocking until evidence promotes
+them. Normal CI never requires third-party credentials or installations.
+
 ## Open Questions
 
 No product or rendering-contract decisions remain open.
@@ -332,11 +389,11 @@ separate from TODO-41.
 
 ## Success Criteria
 
-- With no `agent_client` key, effective configuration is `claude`.
-- `tpo config init` emits `agent_client: claude`.
-- `tpo config get agent_client` reports the effective value and source using
+- With no `prompt_client` key, effective configuration is `claude`.
+- `tpo config init` emits `prompt_client: claude`.
+- `tpo config get prompt_client` reports the effective value and source using
   existing CLI semantics.
-- `tpo config set agent_client codex` persists and reloads `codex`.
+- `tpo config set prompt_client codex` persists and reloads `codex`.
 - Invalid, null, and case-mismatched values fail with actionable errors.
 - Every bundled phase in both profiles renders without unresolved client
   placeholders for both allowed clients.
@@ -352,15 +409,26 @@ separate from TODO-41.
 - Existing TODO, tick, project, Spec, and Reference rendering remains correct.
 - Production tick registration and harness registration both use the configured
   client.
+- Production registration uses the contract-selected phase profile rather than
+  silently falling back to gstack.
+- `run_harness(config=None)` remains Claude-compatible; configured harness runs
+  propagate `prompt_client`.
+- Every phase body is prepared before tick persistence or Hermes mutation.
+- A preparation failure creates zero tasks, records `failed_to_spawn`, and
+  leaves `current_tick_id` unchanged so the next tick can proceed.
 - Default lower-level API behavior remains Claude-compatible for existing direct
   callers.
 - Every bundled skill reference appears in the prerequisite matrix.
+- The prerequisite matrix has a structured package-data source of truth.
 - Project-owned installer tests continue to prove both client discovery roots;
   external skill distributions remain explicit conditional prerequisites.
 - README and CLI reference distinguish agent client, pipeline profile, Hermes
   assignee/profile, and model selection.
 - Focused config/render/registration tests, the full non-eval test suite, Ruff,
   and `git diff --check` pass through RTK-prefixed commands.
+- Hermetic tests cover every bundled phase/profile/client combination whose
+  syntax is verified. Versioned release evidence covers every `Conditional`
+  external pair.
 
 ## Distribution Plan
 
@@ -380,18 +448,189 @@ existing GitHub pull-request and release process.
 - Production and harness phase-registration call paths.
 - Supported skill installers for Claude and Codex discovery roots.
 - TODO-41 has no TODO dependency.
+- TODO-42 depends on TODO-41 and tracks optional per-project prompt-client
+  overrides for mixed worker fleets.
+
+## What Already Exists
+
+| Sub-problem | Existing seam | Decision |
+|---|---|---|
+| Typed global values | `Config`, `_config_field_hints`, `_coerce_value()` | Reuse the shared `Literal` coercion path. |
+| Config CLI | Dataclass-driven `config init/get/set` | Add one field; do not add a client-specific validator or environment override. |
+| Profile selection | `resolve_profile_phases_path(contract.profile)` | Reuse it and pass its result into production registration. |
+| Prompt context | `_render_phase_prompt()` | Tighten its repository-template grammar and add fixed client vocabulary. |
+| Task registration | `register_todo_phases()` | Split preparation from mutation; preserve task creation and cleanup behavior. |
+| Harness registration | `_poll_kanban_phases()` and `run_harness()` | Resolve the compatibility default once and pass it explicitly. |
+| Failure outcomes | `_tick_project()` plus `append_outcome()` | Record preparation failure without persisting an active tick. |
+| Package data | Bundled phase-profile YAML | Add structured prerequisite metadata alongside the profiles. |
+| Test fixtures | Config, phase, kanban, tick-contract, and harness pytest modules | Extend existing fixtures; do not create a parallel test harness. |
+
+## NOT in Scope
+
+- Selecting or launching a Claude or Codex executable. Hermes remains the
+  scheduler and worker dispatcher.
+- Per-project prompt-client overrides. TODO-42 tracks mixed-client fleets.
+- Installing third-party gstack, superpowers, or agent-skills distributions
+  during rendering or normal CI.
+- Remote worker capability discovery or a worker-capability handshake.
+- Changing Hermes assignees, profiles, models, authentication, task commands,
+  timeouts, phase ordering, or gate behavior.
+- Client overlay files, regex-based prompt rewriting, or duplicated profiles.
+- Advertising an unverified external client/profile pair as supported.
+
+## Reviewed Registration Flow
+
+```text
+global config                         project contract
+prompt_client=claude|codex            profile=gstack|agent-skills
+        |                                      |
+        +------------------+-------------------+
+                           v
+                resolve profile phases path
+                           |
+                           v
+             prepare every rendered task body
+             - strict bare-field grammar
+             - verified client vocabulary
+             - zero external side effects
+                    |                 |
+                  error             success
+                    |                 |
+                    v                 v
+          failed_to_spawn       persist tick state
+          current tick          immediately before
+          unchanged             external mutation
+                                      |
+                                      v
+                              create Hermes tasks
+                                      |
+                                      v
+                           expected-phases sentinel
+```
+
+No inline code-comment diagram is required: the implementation is a short
+linear orchestration flow, and duplicating this design diagram in source would
+create maintenance drift.
+
+## Test Coverage Diagram
+
+```text
+CONFIG
+  prompt_client absent -> claude
+  claude/codex -> accepted by YAML and CLI
+  null/case/unknown -> source-aware rejection
+  init/get/set -> emit, report source, persist, reload
+
+RENDER
+  each verified profile x each client x each phase
+    -> correct product + invocation form
+    -> no stale other-client vocabulary
+    -> paths, URLs, and unrelated slashes unchanged
+  exact bare allowed fields -> render
+  escaped braces -> render
+  unknown/positional/malformed/conversion/spec/access/nested -> error
+
+REGISTRATION
+  prepare all bodies -> no Hermes calls yet
+    +-- error -> zero tasks, failed outcome, current tick unchanged
+    `-- success -> persist tick -> create tasks -> expected sentinel
+
+PROPAGATION
+  production Config + non-default contract profile
+    -> selected prompt client + selected phases_path reach task body
+  harness config=None -> Claude-compatible
+  harness configured/filtered -> selected prompt client retained
+
+PREREQUISITES
+  structured metadata -> documentation matrix
+  rendered references -> declared verified skill set
+  Conditional pair -> versioned live evidence
+  Unverified pair -> unsupported and non-blocking
+```
+
+All branches above require pytest coverage. The production and harness flows are
+integration-level pytest tests around configuration, registration arguments,
+and captured task bodies. External distributions are release-qualification
+checks, not normal-CI dependencies.
+
+## Failure Modes
+
+| Failure | Test | Handling | User/operator signal |
+|---|---|---|---|
+| Invalid/null prompt client | Config unit tests | Reject before execution | Source-aware allowed-values error |
+| Unknown or advanced formatter grammar | Renderer unit matrix | `PhasePromptRenderError` | Template source and offending construct |
+| Late phase has malformed template | Registration regression | Prepare all bodies before mutation | Zero tasks; `failed_to_spawn`; retry remains possible |
+| Contract selects non-default profile | Tick integration regression | Pass resolved `phases_path` | Captured task body proves selected profile |
+| Harness called with `config=None` | Harness regression | Default once to Claude | Existing direct caller remains functional |
+| External skill absent | Release checklist | Pair remains Conditional/Unverified | Blocking evidence failure for Conditional pairs |
+| Mixed client projects share one root | Doctor test | Warn on the global invariant | Clear remediation: split roots or implement TODO-42 |
+| Prerequisite metadata and docs drift | Package-data/doc test | Generate or validate table | CI failure names profile and skill |
+
+No silent failure remains in the reviewed flow.
+
+## Worktree Parallelization
+
+| Step | Modules touched | Depends on |
+|---|---|---|
+| Config contract and CLI tests | configuration and CLI | — |
+| Strict renderer and prerequisite metadata | phases and package data | — |
+| Transactional registration and tick propagation | kanban registration and CLI | renderer contract |
+| Harness propagation | harness | renderer contract |
+| Documentation and release qualification | docs | config naming and prerequisite metadata |
+
+```text
+Lane A: config contract + CLI tests
+Lane B: renderer + structured prerequisites
+                         |
+                         +--> Lane C: registration/tick -> harness
+                         |
+                         `--> Lane D: docs + release qualification
+```
+
+Launch lanes A and B in parallel worktrees. Merge both, then run C and D in
+parallel. Registration and harness remain sequential because they share the
+same propagation contract and tests.
+
+## Implementation Tasks
+
+- [ ] **T1 (P1, human: ~2h / CC: ~15min)** — Configuration — Add `prompt_client`
+  - Surfaced by: Architecture and outside voice — the name must not imply worker routing.
+  - Files: `hermes_pipeline/config.py`, `hermes_pipeline/config_loader.py`, config CLI tests.
+  - Verify: focused config-loader and config-CLI pytest suites.
+- [ ] **T2 (P1, human: ~4h / CC: ~25min)** — Rendering — Implement strict verified vocabulary
+  - Surfaced by: Code Quality D16 and outside voice — only bare fields and verified external syntax are legal.
+  - Files: `hermes_pipeline/phases.py`, both bundled profile directories, renderer tests.
+  - Verify: complete phase/profile/client render matrix.
+- [ ] **T3 (P1, human: ~4h / CC: ~25min)** — Registration — Add prepare/persist/mutate boundary
+  - Surfaced by: D4, D5, D10 — render failures must create zero tasks and never persist a stalled tick.
+  - Files: `hermes_pipeline/kanban_tasks.py`, `hermes_pipeline/cli.py`, registration and tick-edge tests.
+  - Verify: malformed late-phase regression plus `failed_to_spawn` and retry-state assertions.
+- [ ] **T4 (P1, human: ~2h / CC: ~15min)** — Propagation — Preserve profile and harness compatibility
+  - Surfaced by: D2 and D14 — production must register the selected profile and harness must accept `None`.
+  - Files: `hermes_pipeline/cli.py`, `hermes_pipeline/harness.py`, tick-contract and harness tests.
+  - Verify: non-default production profile and configured/`None` harness cases.
+- [ ] **T5 (P2, human: ~1d / CC: ~25min)** — Prerequisites — Add structured compatibility metadata
+  - Surfaced by: D11 and D15 — documentation and tests need one source of truth.
+  - Files: bundled profile package data, profile loader/tests, README/reference docs.
+  - Verify: every declared/rendered reference and documentation row agree.
+- [ ] **T6 (P2, human: ~4h / CC: ~20min)** — Release — Define external qualification evidence
+  - Surfaced by: D7 and D17 — Conditional support needs deterministic live evidence.
+  - Files: release-qualification documentation and evidence template.
+  - Verify: run one representative discovery/invocation check per Conditional pair.
+- [ ] **T7 (P2, human: ~3h / CC: ~20min)** — Documentation — Explain prompt client boundaries
+  - Surfaced by: D12 and D13 — users must distinguish vocabulary, profile, assignee, model, and global scope.
+  - Files: README, CLI reference, profile how-to, architecture documentation.
+  - Verify: executable CLI walkthrough and fragment-aware link check.
 
 ## Next Steps
 
-1. Run `/plan-eng-review` against this design to enumerate exact call sites and
-   lock the compatibility and prerequisite matrices.
-2. Write config and rendering tests first, including invalid values and complete
+1. Write config and rendering tests first, including invalid values and complete
    profile render matrices for both clients.
-3. Add the typed field, fixed vocabulary, explicit propagation, and profile
+2. Add the typed field, fixed vocabulary, explicit propagation, and profile
    placeholders.
-4. Add project-owned discovery coverage and document external conditional
+3. Add project-owned discovery coverage and document external conditional
    prerequisites honestly.
-5. Update README and CLI reference, then run focused and full verification using
+4. Update README and CLI reference, then run focused and full verification using
    RTK-prefixed commands.
 
 ## The Assignment
@@ -408,3 +647,21 @@ profile-by-client skill-discovery matrix before implementation begins.
 - You accepted the client-support prerequisite even though it adds acceptance
   work. Correct-looking prompts were not enough; the selected client must
   actually discover the named skills.
+
+## GSTACK REVIEW REPORT
+
+| Review | Trigger | Why | Runs | Status | Findings |
+|--------|---------|-----|------|--------|----------|
+| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | Not required for this bounded prompt-rendering change |
+| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | No diff-stage Codex review |
+| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 5 | CLEAR | 42 issues/test paths reviewed, 0 critical gaps |
+| Design Review | `/plan-design-review` | UI/UX gaps | 0 | — | No UI scope |
+| DX Review | `/plan-devex-review` | Developer experience gaps | 0 | — | CLI behavior covered by eng review |
+
+**CODEX:** Outside plan review found eight issues; all eight were accepted and folded into this design.
+
+**CROSS-MODEL:** Both reviews require explicit propagation, verified external contracts, exhaustive deterministic tests, and visible failure handling.
+
+**VERDICT:** ENG CLEARED — ready to implement.
+
+NO UNRESOLVED DECISIONS
