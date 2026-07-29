@@ -23,7 +23,7 @@ phases:
   - phase_key: "phase_3_writing_plan"
     name: "Phase 3: Writing Plan"
     prompt: |
-      Use the superpowers {skill_prefix}writing-plans skill in {agent_product}. Read the plan
+      Use the superpowers {superpowers_skill_prefix}writing-plans skill in {agent_product}. Read the plan
       from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan
       format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the
       generated docs.
@@ -33,7 +33,7 @@ phases:
   - phase_key: "phase_4_development"
     name: "Phase 4: Development"
     prompt: |
-      Use the superpowers {skill_prefix}subagent-driven-development skill in {agent_product}. Read the
+      Use the superpowers {superpowers_skill_prefix}subagent-driven-development skill in {agent_product}. Read the
       implementation plan from docs/pipeline/{todo_id}-impl-plan.md and
       implement it. Commit all changes.
 

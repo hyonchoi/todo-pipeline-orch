@@ -14,11 +14,26 @@ from .config import PromptClient
 log = logging.getLogger(__name__)
 
 CLIENT_VOCABULARY: Final[dict[PromptClient, dict[str, str]]] = {
-    "claude": {"agent_product": "Claude Code", "skill_prefix": "/"},
-    "codex": {"agent_product": "Codex", "skill_prefix": "$"},
+    "claude": {
+        "agent_product": "Claude Code",
+        "skill_prefix": "/",
+        "superpowers_skill_prefix": "/",
+    },
+    "codex": {
+        "agent_product": "Codex",
+        "skill_prefix": "$",
+        "superpowers_skill_prefix": "$superpowers:",
+    },
 }
 _ALLOWED_PROMPT_FIELDS = frozenset(
-    {"todo_id", "tick_id", "project_slug", "agent_product", "skill_prefix"}
+    {
+        "todo_id",
+        "tick_id",
+        "project_slug",
+        "agent_product",
+        "skill_prefix",
+        "superpowers_skill_prefix",
+    }
 )
 
 

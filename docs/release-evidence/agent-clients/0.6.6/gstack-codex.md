@@ -38,5 +38,5 @@ required skills were verified at:
 ## Invocation forms
 
 The discovered skill IDs match the package metadata forms `$autoplan`,
-`$writing-plans`, `$subagent-driven-development`, `$review`, `$cso`, `$qa`,
+`$superpowers:writing-plans`, `$superpowers:subagent-driven-development`, `$review`, `$cso`, `$qa`,
 `$document-release`, `$document-generate`, and `$ship`.

@@ -37,7 +37,8 @@ isolated environment and commit only the captured evidence.
   `openai-curated-remote/superpowers` plugin manifest and required
   `writing-plans` and `subagent-driven-development` skills.
 - Invocation forms: confirm the discovered skill IDs map to `$autoplan`,
-  `$writing-plans`, and the other dollar-prefixed forms in package metadata.
+  `$superpowers:writing-plans`, and the other package-qualified or dollar-prefixed
+  forms in package metadata.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-codex.md`.
 - Required fields: UTC timestamp, OS, client version, distribution versions,

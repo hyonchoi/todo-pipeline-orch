@@ -34,7 +34,13 @@ phases:
 def extract_bundled_skill_references(profile, phases):
     prompt_text = "\n".join(phase.prompt for phase in phases)
     if profile == "gstack":
-        return set(re.findall(r"\{skill_prefix\}([a-z][a-z0-9-]*)", prompt_text))
+        return set(
+            re.findall(
+                r"\{(?:skill_prefix|superpowers_skill_prefix)\}"
+                r"([a-z][a-z0-9-]*)",
+                prompt_text,
+            )
+        )
     if profile == "agent-skills":
         return set(re.findall(r"\bagent-skills:[a-z][a-z0-9-]*", prompt_text))
     raise AssertionError(f"missing test-owned extraction pattern for {profile}")
@@ -77,7 +83,12 @@ def test_gstack_prerequisites_are_conditional_and_verified():
     for item in metadata.skills:
         assert item.support == "Conditional"
         assert item.clients["claude"].invocation == f"/{item.skill_id}"
-        assert item.clients["codex"].invocation == f"${item.skill_id}"
+        expected_codex_invocation = (
+            f"$superpowers:{item.skill_id}"
+            if item.distribution_owner == "superpowers"
+            else f"${item.skill_id}"
+        )
+        assert item.clients["codex"].invocation == expected_codex_invocation
         if item.distribution_owner == "gstack":
             assert item.clients["claude"].discovery_root == ".claude/skills"
             assert item.clients["codex"].discovery_root == ".codex/skills"
@@ -700,6 +711,31 @@ def test_every_bundled_phase_renders_for_client(
                 assert prerequisite.skill_id in rendered
                 assert f"/{prerequisite.skill_id}" not in rendered
                 assert f"${prerequisite.skill_id}" not in rendered
+
+
+def test_codex_gstack_profile_uses_namespaced_superpowers_skills():
+    phases = {
+        phase.phase_key: phase
+        for phase in load_phases(resolve_profile_phases_path("gstack"))
+    }
+
+    writing_plan = _render_phase_prompt(
+        phases["phase_3_writing_plan"].prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+    development = _render_phase_prompt(
+        phases["phase_4_development"].prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+
+    assert "$superpowers:writing-plans" in writing_plan
+    assert "$superpowers:subagent-driven-development" in development
 
 
 @pytest.mark.parametrize(
