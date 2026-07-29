@@ -86,9 +86,15 @@ def _coerce_value(value, target_type, key: str, source: Path):
     else:
         valid = _get_literal_values(target_type, key)
         if valid is not None:
+            if value is None:
+                raise ValueError(
+                    f"YAML `null` is not valid; must be one of {sorted(valid)}"
+                )
             str_val = str(value)
             if str_val not in valid:
-                raise ValueError(f"must be one of {valid}, got {str_val!r}")
+                raise ValueError(
+                    f"must be one of {sorted(valid)}, got {str_val!r}"
+                )
             return str_val
         return value
 
@@ -206,4 +212,5 @@ state_dir: ~/.hermes
 log_file_subpath: pipeline.log
 log_retention_days: 7
 slack_channel: ""
+prompt_client: claude
 """

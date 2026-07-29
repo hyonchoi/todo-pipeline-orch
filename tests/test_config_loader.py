@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 
-from hermes_pipeline.config import Config
+from hermes_pipeline.config import Config, PromptClient
 from hermes_pipeline.config_loader import (
     SKELETON,
     _coerce_value,
@@ -260,6 +261,33 @@ def test_load_global_config_no_file_returns_default(monkeypatch, tmp_path):
     assert config == Config.default()
 
 
+def test_prompt_client_type_and_default():
+    assert PromptClient == get_type_hints(Config)["prompt_client"]
+    assert Config.default().prompt_client == "claude"
+
+
+@pytest.mark.parametrize("value", ["claude", "codex"])
+def test_load_global_config_accepts_prompt_client(monkeypatch, tmp_path, value):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"prompt_client: {value}\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert load_global_config().prompt_client == value
+
+
+@pytest.mark.parametrize("yaml_value", ["null", "Claude", "CODEX", "cursor"])
+def test_load_global_config_rejects_invalid_prompt_client(
+    monkeypatch, tmp_path, yaml_value
+):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"prompt_client: {yaml_value}\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    with pytest.raises(
+        ValueError,
+        match=r"invalid value for 'prompt_client'.*must be one of.*claude.*codex",
+    ):
+        load_global_config()
+
+
 def test_load_global_config_empty_file_returns_default(monkeypatch, tmp_path):
     cfg = tmp_path / "empty.yaml"
     cfg.write_text("")
@@ -383,6 +411,10 @@ def test_skeleton_has_header():
     assert "# tpo global configuration" in SKELETON
 
 
+def test_skeleton_contains_prompt_client_default():
+    assert "prompt_client: claude\n" in SKELETON
+
+
 def test_skeleton_includes_all_fields():
     for field in dataclasses.fields(Config):
         assert field.name in SKELETON
@@ -401,6 +433,7 @@ def test_skeleton_has_active_default_fields():
         "log_file_subpath": "pipeline.log",
         "log_retention_days": 7,
         "slack_channel": "",
+        "prompt_client": "claude",
     }
 
 

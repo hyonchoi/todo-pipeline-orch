@@ -1,4 +1,7 @@
+import pytest
+
 from hermes_pipeline.cli import main
+from hermes_pipeline.config_loader import load_global_config
 
 try:
     import yaml
@@ -319,3 +322,39 @@ def test_config_set_path_special_chars_quoted(monkeypatch, tmp_path):
     assert exit_code == 0
     raw = yaml.safe_load(f.read_text())
     assert raw["projects_dir"] == "/tmp/foo #bar"
+
+
+def test_config_init_emits_prompt_client(monkeypatch, tmp_path):
+    path = tmp_path / "config.yaml"
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert main(["config", "init"]) == 0
+    assert "prompt_client: claude\n" in path.read_text()
+
+
+def test_config_get_prompt_client_reports_default_source(
+    monkeypatch, tmp_path, capsys
+):
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "missing.yaml"))
+    assert main(["config", "get", "prompt_client"]) == 0
+    output = capsys.readouterr().out
+    assert "claude" in output
+    assert "default" in output
+
+
+def test_config_set_prompt_client_round_trips(monkeypatch, tmp_path, capsys):
+    path = tmp_path / "config.yaml"
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert main(["config", "set", "prompt_client", "codex"]) == 0
+    assert load_global_config().prompt_client == "codex"
+    assert main(["config", "get", "prompt_client"]) == 0
+    output = capsys.readouterr().out
+    assert "codex" in output
+    assert str(path) in output
+
+
+@pytest.mark.parametrize("value", ["Claude", "CODEX", "cursor", "null"])
+def test_config_set_rejects_invalid_prompt_client(monkeypatch, tmp_path, value):
+    path = tmp_path / "config.yaml"
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert main(["config", "set", "prompt_client", value]) == 2
+    assert not path.exists()
