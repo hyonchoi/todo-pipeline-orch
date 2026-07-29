@@ -290,6 +290,7 @@ def test_render_phase_prompt_all_allowed_fields(client, product, prefix):
         ("{0}", "positional"),
         ("{todo_id", "malformed"),
         ("{agent_product!r}", "conversion"),
+        ("{todo_id:}", "format specification"),
         ("{todo_id:>10}", "format specification"),
         ("{todo_id.value}", "traversal"),
         ("{todo_id[0]}", "traversal"),

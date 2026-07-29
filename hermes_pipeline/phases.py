@@ -30,11 +30,21 @@ def _validate_prompt_template(template: str, source: str) -> None:
     formatter = string.Formatter()
     try:
         parsed = list(formatter.parse(template))
+        # Formatter collapses both ``{field}`` and ``{field:}`` to an empty
+        # format_spec. A marker makes the explicit empty construct observable
+        # without disturbing escaped braces or literal colons.
+        format_spec_probe = list(
+            formatter.parse(template.replace(":}", ":__format_spec__}"))
+        )
     except ValueError as exc:
         raise PhasePromptRenderError(
             f"{source}: malformed braces: {exc}"
         ) from exc
-    for _literal, field_name, format_spec, conversion in parsed:
+    for parsed_field, probed_field in zip(parsed, format_spec_probe, strict=True):
+        _literal, field_name, format_spec, conversion = parsed_field
+        _probed_literal, _probed_name, probed_format_spec, _probed_conversion = (
+            probed_field
+        )
         if field_name is None:
             continue
         if field_name == "" or field_name.isdecimal():
@@ -53,7 +63,7 @@ def _validate_prompt_template(template: str, source: str) -> None:
             raise PhasePromptRenderError(
                 f"{source}: conversion on {field_name!r} is not allowed"
             )
-        if format_spec:
+        if format_spec or probed_format_spec:
             kind = "nested replacement field" if "{" in format_spec else "format specification"
             raise PhasePromptRenderError(
                 f"{source}: {kind} on {field_name!r} is not allowed"
