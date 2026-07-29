@@ -10,7 +10,6 @@ import logging
 import os
 import re
 import subprocess
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +20,7 @@ from .outcomes import (
     OUTCOME_PICKED_NONE,
 )
 from .phases import _render_phase_prompt, load_phases
+from .state import _atomic_write_text
 
 # Sentinel written after successful registration to record expected phases.
 _EXPECTED_PHASES_FILE_SUFFIX = ".expected-phases.json"
@@ -115,22 +115,7 @@ def _persist_pending_task_create(
     marker = _pending_task_create_marker(project_dir)
     payload = json.dumps(_pending_task_create_payload(pending), sort_keys=True)
     marker.parent.mkdir(parents=True, exist_ok=True)
-    file_descriptor, temporary_name = tempfile.mkstemp(
-        dir=marker.parent,
-        prefix=f".{marker.name}.",
-        suffix=".tmp",
-        text=True,
-    )
-    temporary_marker = Path(temporary_name)
-    try:
-        with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
-            temporary_file.write(payload)
-            temporary_file.flush()
-            os.fsync(temporary_file.fileno())
-        os.replace(temporary_marker, marker)
-    except OSError:
-        temporary_marker.unlink(missing_ok=True)
-        raise
+    _atomic_write_text(marker, payload)
 
 
 def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | None:
@@ -176,7 +161,8 @@ def reconcile_pending_task_create(project_dir: str | Path) -> bool:
     )
     if task_id is None:
         return False
-    _archive_tasks([*pending.known_task_ids, task_id])
+    if not _archive_tasks([*pending.known_task_ids, task_id]):
+        return False
     marker = _pending_task_create_marker(project_dir)
     try:
         marker.unlink()
@@ -529,20 +515,32 @@ def _persist_expected_phases(
         log.warning("failed to persist expected phases sentinel")
 
 
-def _archive_tasks(task_ids: list[str]) -> None:
-    """Archive a list of kanban task IDs (best-effort)."""
+def _archive_tasks(task_ids: list[str]) -> bool:
+    """Archive task IDs, returning whether every archive was confirmed."""
+    archived_all = True
     for task_id in task_ids:
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["hermes", "kanban", "archive", task_id],
                 capture_output=True,
                 text=True,
                 timeout=HERMES_COMMAND_TIMEOUT,
                 check=False,
             )
-            log.info("archived kanban task %s", task_id)
-        except Exception as e:
-            log.warning("failed to archive task %s: %s", task_id, e)
+            if result.returncode == 0:
+                log.info("archived kanban task %s", task_id)
+            else:
+                archived_all = False
+                log.warning(
+                    "failed to archive task %s: rc=%d stderr=%s",
+                    task_id,
+                    result.returncode,
+                    result.stderr[:ERROR_MSG_MAX_LENGTH],
+                )
+        except Exception as exc:
+            archived_all = False
+            log.warning("failed to archive task %s: %s", task_id, exc)
+    return archived_all
 
 
 def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:

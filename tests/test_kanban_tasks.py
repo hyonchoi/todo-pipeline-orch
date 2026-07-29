@@ -62,7 +62,9 @@ def test_reconcile_pending_create_waits_for_late_visible_task(tmp_path, mocker):
         "hermes_pipeline.kanban_tasks._find_task_id_in_snapshot",
         side_effect=[None, "t_deadbeef"],
     )
-    archive = mocker.patch("hermes_pipeline.kanban_tasks._archive_tasks")
+    archive = mocker.patch(
+        "hermes_pipeline.kanban_tasks._archive_tasks", return_value=True
+    )
 
     assert reconcile_pending_task_create(tmp_path) is False
     assert marker.exists()
@@ -70,6 +72,54 @@ def test_reconcile_pending_create_waits_for_late_visible_task(tmp_path, mocker):
     archive.assert_called_once_with(["t_deadbeef"])
     assert find.call_count == 2
     assert not marker.exists()
+
+
+def test_persist_pending_create_delegates_to_shared_atomic_writer(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _persist_pending_task_create,
+    )
+
+    atomic_write = mocker.patch("hermes_pipeline.kanban_tasks._atomic_write_text")
+    _persist_pending_task_create(
+        tmp_path,
+        PendingTaskCreate("demo", "01CLIENT", "phase_1", ("t_00000001",)),
+    )
+
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    atomic_write.assert_called_once()
+    assert atomic_write.call_args.args[0] == marker
+    assert json.loads(atomic_write.call_args.args[1]) == {
+        "tenant": "demo",
+        "tick_id": "01CLIENT",
+        "phase_key": "phase_1",
+        "known_task_ids": ["t_00000001"],
+    }
+
+
+def test_reconcile_pending_create_retains_marker_when_archive_fails(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _persist_pending_task_create,
+        reconcile_pending_task_create,
+    )
+
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    _persist_pending_task_create(
+        tmp_path,
+        PendingTaskCreate("demo", "01CLIENT", "phase_1", ()),
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._find_task_id_in_snapshot",
+        return_value="t_deadbeef",
+    )
+    archive = mocker.patch(
+        "hermes_pipeline.kanban_tasks._archive_tasks", return_value=False
+    )
+
+    assert reconcile_pending_task_create(tmp_path) is False
+    assert marker.exists()
+    archive.assert_called_once_with(["t_deadbeef"])
 
 
 def test_reconcile_pending_create_leaves_malformed_marker(tmp_path, mocker):
@@ -1361,7 +1411,7 @@ class TestObserveOutcomes:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(returncode=0, stdout="", stderr="")
 
-        _archive_tasks(["t_00000001", "t_00000002", "t_00000003"])
+        assert _archive_tasks(["t_00000001", "t_00000002", "t_00000003"])
 
         assert mock_run.call_count == 3
         for i, call in enumerate(mock_run.call_args_list):
@@ -1381,8 +1431,17 @@ class TestObserveOutcomes:
         ]
 
         # Should not raise — best-effort
-        _archive_tasks(["t_00000001", "t_00000002", "t_00000003"])
+        assert not _archive_tasks(["t_00000001", "t_00000002", "t_00000003"])
         assert mock_run.call_count == 3
+
+    def test_archive_task_exception_returns_failure(self, mocker):
+        """_archive_tasks reports an exception after attempting the archive."""
+        from hermes_pipeline.kanban_tasks import _archive_tasks
+
+        mock_run = mocker.patch("subprocess.run", side_effect=OSError("unavailable"))
+
+        assert not _archive_tasks(["t_00000001"])
+        assert mock_run.call_count == 1
 
     def test_all_phases_complete_dict_format(self, mocker):
         """all_phases_complete handles dict format {'tasks': [...]}."""
