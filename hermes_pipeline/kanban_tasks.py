@@ -83,6 +83,15 @@ class PendingTaskCreate:
     known_task_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PendingTaskCleanup:
+    """Known task IDs whose archive cleanup must be retried."""
+
+    tenant: str
+    tick_id: str
+    task_ids: tuple[str, ...]
+
+
 def _pending_task_create_marker(project_dir: str | Path) -> Path:
     return Path(project_dir) / ".hermes" / "outcomes" / _PENDING_TASK_CREATE_FILE
 
@@ -118,14 +127,62 @@ def _persist_pending_task_create(
     _atomic_write_text(marker, payload)
 
 
-def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | None:
-    """Load a valid pending-create marker, failing closed for malformed data."""
+def _pending_task_cleanup_payload(pending: PendingTaskCleanup) -> dict[str, object]:
+    """Validate and serialize an incomplete cleanup for a later retry."""
+    if not all(
+        isinstance(value, str) and value for value in (pending.tenant, pending.tick_id)
+    ):
+        raise ValueError("pending task-cleanup fields must be nonempty strings")
+    if not pending.task_ids or not all(
+        isinstance(task_id, str)
+        and re.fullmatch(r"t_[0-9a-f]{8}", task_id) is not None
+        for task_id in pending.task_ids
+    ):
+        raise ValueError("pending task-cleanup IDs must be valid Hermes IDs")
+    return {
+        "tenant": pending.tenant,
+        "tick_id": pending.tick_id,
+        "cleanup_task_ids": list(pending.task_ids),
+    }
+
+
+def _persist_pending_task_cleanup(
+    project_dir: str | Path, pending: PendingTaskCleanup
+) -> None:
+    """Atomically persist known task IDs whose cleanup was not confirmed."""
+    marker = _pending_task_create_marker(project_dir)
+    payload = json.dumps(_pending_task_cleanup_payload(pending), sort_keys=True)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(marker, payload)
+
+
+def _load_pending_task_state(
+    project_dir: str | Path,
+) -> PendingTaskCreate | PendingTaskCleanup | None:
+    """Load valid pending create or cleanup state, failing closed if malformed."""
     marker = _pending_task_create_marker(project_dir)
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(payload, dict) or set(payload) != {
+    if not isinstance(payload, dict):
+        return None
+    if set(payload) == {"tenant", "tick_id", "cleanup_task_ids"}:
+        tenant = payload["tenant"]
+        tick_id = payload["tick_id"]
+        task_ids = payload["cleanup_task_ids"]
+        if not all(
+            isinstance(value, str) and value for value in (tenant, tick_id)
+        ) or not isinstance(task_ids, list):
+            return None
+        if not task_ids or not all(
+            isinstance(task_id, str)
+            and re.fullmatch(r"t_[0-9a-f]{8}", task_id) is not None
+            for task_id in task_ids
+        ):
+            return None
+        return PendingTaskCleanup(tenant, tick_id, tuple(task_ids))
+    if set(payload) != {
         "tenant",
         "tick_id",
         "phase_key",
@@ -149,6 +206,12 @@ def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | No
     return PendingTaskCreate(tenant, tick_id, phase_key, tuple(known_task_ids))
 
 
+def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | None:
+    """Load pending-create state, excluding cleanup-only markers."""
+    pending = _load_pending_task_state(project_dir)
+    return pending if isinstance(pending, PendingTaskCreate) else None
+
+
 def _clear_pending_task_create(
     project_dir: str | Path, pending: PendingTaskCreate
 ) -> bool:
@@ -166,18 +229,22 @@ def _clear_pending_task_create(
 
 def reconcile_pending_task_create(project_dir: str | Path) -> bool:
     """Archive a delayed idempotent create once it becomes visible."""
-    pending = _load_pending_task_create(project_dir)
+    pending = _load_pending_task_state(project_dir)
     if pending is None:
         return False
-    task_id = _find_task_id_in_snapshot(
-        tenant=pending.tenant,
-        tick_id=pending.tick_id,
-        phase_key=pending.phase_key,
-    )
-    if task_id is None:
-        return False
-    if not _archive_tasks([*pending.known_task_ids, task_id]):
-        return False
+    if isinstance(pending, PendingTaskCleanup):
+        if not _archive_tasks(list(pending.task_ids)):
+            return False
+    else:
+        task_id = _find_task_id_in_snapshot(
+            tenant=pending.tenant,
+            tick_id=pending.tick_id,
+            phase_key=pending.phase_key,
+        )
+        if task_id is None:
+            return False
+        if not _archive_tasks([*pending.known_task_ids, task_id]):
+            return False
     marker = _pending_task_create_marker(project_dir)
     try:
         marker.unlink()
@@ -431,9 +498,28 @@ def create_prepared_todo_phases(
         try:
             _persist_pending_task_create(project_dir, pending)
         except OSError as exc:
+            cleanup_succeeded = _archive_tasks(task_ids)
+            cleanup_detail = ""
+            if not cleanup_succeeded:
+                pending_cleanup = PendingTaskCleanup(
+                    tenant=board_slug,
+                    tick_id=tick_id,
+                    task_ids=tuple(task_ids),
+                )
+                try:
+                    _persist_pending_task_cleanup(project_dir, pending_cleanup)
+                except OSError as cleanup_exc:
+                    cleanup_detail = (
+                        "; cleanup could not be confirmed and durable recovery "
+                        f"state could not be persisted: {cleanup_exc}"
+                    )
+                else:
+                    cleanup_detail = (
+                        "; cleanup could not be confirmed; cleanup remains pending"
+                    )
             raise RuntimeError(
                 f"failed to persist pending kanban task {phase.phase_key} "
-                f"for tick {tick_id}: {exc}"
+                f"for tick {tick_id}: {exc}{cleanup_detail}"
             ) from exc
 
         try:
@@ -522,9 +608,26 @@ def create_prepared_todo_phases(
         )
         _promote_task(first_executable)
     except Exception as exc:
-        _archive_tasks(task_ids)
+        cleanup_succeeded = _archive_tasks(task_ids)
+        cleanup_detail = ""
+        if not cleanup_succeeded:
+            pending_cleanup = PendingTaskCleanup(
+                tenant=board_slug,
+                tick_id=tick_id,
+                task_ids=tuple(task_ids),
+            )
+            try:
+                _persist_pending_task_cleanup(project_dir, pending_cleanup)
+            except OSError as cleanup_exc:
+                raise RuntimeError(
+                    f"failed to activate durable kanban chain for tick {tick_id}: "
+                    f"{exc}; cleanup could not be confirmed and durable recovery "
+                    f"state could not be persisted: {cleanup_exc}"
+                ) from exc
+            cleanup_detail = "; cleanup remains pending"
         raise RuntimeError(
-            f"failed to activate durable kanban chain for tick {tick_id}: {exc}"
+            f"failed to activate durable kanban chain for tick {tick_id}: "
+            f"{exc}{cleanup_detail}"
         ) from exc
 
     return task_ids

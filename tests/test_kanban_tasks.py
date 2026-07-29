@@ -428,6 +428,73 @@ def test_pending_marker_survives_two_timed_out_creates_and_empty_snapshot(
     }
 
 
+@pytest.mark.parametrize(
+    ("cleanup_succeeded", "error_suffix"),
+    [
+        (True, ""),
+        (False, "cleanup could not be confirmed"),
+    ],
+)
+def test_pending_marker_second_write_failure_archives_prior_tasks(
+    tmp_path, mocker, cleanup_succeeded, error_suffix
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", 5, False),
+        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
+    ]
+    persist_pending = mocker.patch(
+        "hermes_pipeline.kanban_tasks._persist_pending_task_create",
+        side_effect=[None, OSError("disk full")],
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._clear_pending_task_create",
+        return_value=True,
+    )
+    run = mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(
+            returncode=0,
+            stdout='{"id": "t_00000001"}',
+            stderr="",
+        ),
+    )
+    archive = mocker.patch(
+        "hermes_pipeline.kanban_tasks._archive_tasks",
+        return_value=cleanup_succeeded,
+    )
+    promote = mocker.patch("hermes_pipeline.kanban_tasks._promote_task")
+
+    error_pattern = r"phase_2"
+    if error_suffix:
+        error_pattern += rf".*{error_suffix}"
+    with pytest.raises(RuntimeError, match=error_pattern):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert persist_pending.call_count == 2
+    run.assert_called_once()
+    archive.assert_called_once_with(["t_00000001"])
+    promote.assert_not_called()
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    if cleanup_succeeded:
+        assert not marker.exists()
+    else:
+        assert json.loads(marker.read_text(encoding="utf-8")) == {
+            "tenant": "demo",
+            "tick_id": "01CLIENT",
+            "cleanup_task_ids": ["t_00000001"],
+        }
+
+
 @pytest.mark.parametrize("failure_stage", ["persist", "promote"])
 def test_activation_order_failure_archives_all_tasks_and_never_continues(
     tmp_path, mocker, failure_stage
@@ -480,6 +547,65 @@ def test_activation_order_failure_archives_all_tasks_and_never_continues(
         promote.assert_not_called()
     else:
         promote.assert_called_once_with("t_00000001")
+
+
+@pytest.mark.parametrize("failure_stage", ["persist", "promote"])
+def test_pending_marker_retains_all_tasks_when_activation_cleanup_fails(
+    tmp_path, mocker, failure_stage
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+        reconcile_pending_task_create,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", 5, False),
+        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000002"}', stderr=""),
+    ]
+    persist_expected = mocker.patch(
+        "hermes_pipeline.kanban_tasks._persist_expected_phases"
+    )
+    promote = mocker.patch("hermes_pipeline.kanban_tasks._promote_task")
+    if failure_stage == "persist":
+        persist_expected.side_effect = RuntimeError("sentinel write failed")
+    else:
+        promote.side_effect = RuntimeError("promotion failed")
+    archive = mocker.patch(
+        "hermes_pipeline.kanban_tasks._archive_tasks",
+        return_value=False,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup remains pending"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    assert json.loads(marker.read_text(encoding="utf-8")) == {
+        "tenant": "demo",
+        "tick_id": "01CLIENT",
+        "cleanup_task_ids": ["t_00000001", "t_00000002"],
+    }
+    archive.assert_called_once_with(["t_00000001", "t_00000002"])
+    if failure_stage == "persist":
+        promote.assert_not_called()
+    else:
+        promote.assert_called_once_with("t_00000001")
+
+    archive.reset_mock()
+    archive.return_value = True
+    assert reconcile_pending_task_create(tmp_path)
+    archive.assert_called_once_with(["t_00000001", "t_00000002"])
+    assert not marker.exists()
 
 
 def test_activation_order_promote_task_invokes_hermes(tmp_path, mocker):
