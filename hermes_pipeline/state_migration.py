@@ -1,9 +1,9 @@
 """Per-project state migration from global ~/.hermes/ to <project>/.hermes/.
 
 One-time migration that copies state files (current_tick_id.txt, circuit.json,
-outcomes/) from the global state directory into each project's own .hermes/
-directory. Copies (not moves) so every project gets its own copy.
-No-op if files are already absent or already migrated.
+outcomes/) from the global state directory into a project's own .hermes/
+directory only when that per-project state directory does not already exist.
+Copies (not moves) so the global state remains available for manual recovery.
 
 Uses atomic temp+rename: a partially-written state directory must not be
 visible to the next tick, which could interpret an incomplete circuit.json
@@ -32,12 +32,14 @@ def _get_project_state_dir(project_dir: Path) -> Path:
 
 def needs_migration(config: Config, dst: Path) -> bool:
     """Return True if any source file exists that the destination lacks."""
+    if dst.exists():
+        return False
     for filename in _STATE_FILES:
         src = config.state_dir / filename
-        if src.is_file() and not dst.joinpath(filename).exists():
+        if src.is_file():
             return True
     outcomes_src = config.state_dir / _OUTCOMES_DIR
-    if outcomes_src.is_dir() and not dst.joinpath(_OUTCOMES_DIR).exists():
+    if outcomes_src.is_dir():
         return True
     return False
 
@@ -46,7 +48,8 @@ def _migrate_global_state(project_dir: Path, config: Config) -> None:
     """Copy state files from the global state dir to the per-project dir.
 
     Files are only copied when the source exists in *config.state_dir* and the
-    destination does not already exist in the per-project directory.
+    per-project state directory does not already exist.  Existing project state
+    is authoritative and is never overwritten by legacy global state.
 
     Uses atomic temp+rename so a concurrent tick can't observe a partially
     written state directory and interpret it as "in-flight".
@@ -78,31 +81,9 @@ def _migrate_global_state(project_dir: Path, config: Config) -> None:
             for _item in outcomes_src.iterdir():
                 shutil.copy2(str(_item), str(outcomes_dst / _item.name))
 
-        # Atomic swap: temp dir -> target dir.  If dst already exists,
-        # rmdir it first (it should only contain stale files we're replacing).
-        if dst.exists():
-            try:
-                dst.rmdir()
-            except OSError:
-                dst = _force_atomic_rename(tmp_dir, dst)
-                return
         os.rename(tmp_dir, dst)
 
     except OSError:
         # Best-effort cleanup of the temp directory on failure.
         shutil.rmtree(tmp_dir, ignore_errors=True)
         raise
-
-
-def _force_atomic_rename(tmp_dir: str, target: Path) -> Path:
-    """Rename *tmp_dir* to *target* by removing *target* first.
-
-    This is a last-resort fallback when *target* is not an empty directory
-    (the normal ``os.rename`` would either overwrite on POSIX or fail on
-    Windows).  We don't need to preserve any data in *target* because the
-    migration guard already checked that the source files existed at migration
-    time.
-    """
-    shutil.rmtree(target)
-    os.rename(tmp_dir, target)
-    return target

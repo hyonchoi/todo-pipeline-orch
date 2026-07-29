@@ -542,17 +542,20 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
     )
 
 
-def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, bool]:
+def _has_pending_pr_handoff(
+    project_dir: Path, state_dir: Path, *, work_branch: str | None = None
+) -> tuple[bool, bool]:
     """Return (pending, counts_as_no_progress) for a Phase 8 PR handoff."""
     branch_file = state_dir / "pipeline_branch.txt"
-    if not branch_file.exists():
+    if work_branch is None and not branch_file.exists():
         log.warning(
             "phase 8 handoff completed but %s is missing; leaving project in handoff",
             branch_file,
         )
         return (True, True)
 
-    work_branch = branch_file.read_text().strip()
+    if work_branch is None:
+        work_branch = branch_file.read_text().strip()
     if not work_branch:
         log.warning(
             "phase 8 handoff completed but %s is empty; leaving project in handoff",
@@ -1036,6 +1039,7 @@ def _tick_project(
     cb = _make_circuit_breaker(project_state, cb_cfg, slack_channel)
 
     if prior_tick_id is not None:
+        pr_handoff_resolved = False
         # Legacy ship-gate compatibility: custom/older profiles can still have
         # a blocked phase_9_ship. Detect and write the sidecar before the
         # in-flight early return so `tpo approve` can finish those ticks.
@@ -1049,7 +1053,25 @@ def _tick_project(
             slack_channel=slack_channel,
         )
 
-        if not all_phases_complete(
+        ship_sidecar = ship.read_sidecar(project_state, prior_tick_id)
+        if ship_sidecar is not None:
+            pending, counts_as_no_progress = _has_pending_pr_handoff(
+                project_dir, project_state, work_branch=ship_sidecar.work_branch
+            )
+            if pending:
+                cb.observe(
+                    picked=None,
+                    counts_as_no_progress=counts_as_no_progress,
+                )
+                log.info(
+                    "project %s: prior tick %s is waiting on PR handoff, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
+                return
+            pr_handoff_resolved = True
+
+        if not pr_handoff_resolved and not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
         ):
             log.info(
@@ -1069,7 +1091,10 @@ def _tick_project(
                 tick_id=prior_tick_id,
                 status_map=status_map,
             )
-            if _status_map_has_successful_pr_handoff(status_map):
+            if (
+                not pr_handoff_resolved
+                and _status_map_has_successful_pr_handoff(status_map)
+            ):
                 pending, counts_as_no_progress = _has_pending_pr_handoff(
                     project_dir, project_state
                 )

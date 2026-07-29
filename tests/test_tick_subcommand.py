@@ -130,6 +130,124 @@ class TestTickSubcommand:
         assert result == 0
         mock_selection.assert_not_called()
 
+    def test_tick_ship_sidecar_waits_for_open_pr_before_completeness(
+        self, tmp_path, mocker
+    ):
+        """A recorded ship handoff must not be masked by a missing gate task."""
+        mock_all_complete = mocker.patch(
+            "hermes_pipeline.cli.all_phases_complete", return_value=False
+        )
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
+        mock_run.return_value = mocker.Mock(
+            returncode=0,
+            stdout='{"state": "OPEN", "headRefName": "todo-5-feat"}',
+            stderr="",
+        )
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        project_state = project_dir / ".hermes"
+        project_state.mkdir(parents=True)
+        outcomes_dir = project_state / "outcomes"
+        outcomes_dir.mkdir()
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
+        )
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        (outcomes_dir / "01HA6PH2V0ZJ7GK0S39D243TQX-ship.json").write_text(
+            json.dumps(
+                {
+                    "tick_id": "01HA6PH2V0ZJ7GK0S39D243TQX",
+                    "todo_id": 5,
+                    "pr_number": 12,
+                    "pr_head_sha": "abc123",
+                    "base_branch": "main",
+                    "work_branch": "todo-5-feat",
+                    "phase_8_task_id": "t_phase8",
+                    "bump_version": None,
+                }
+            )
+        )
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
+        mock_selection.assert_not_called()
+        mock_all_complete.assert_not_called()
+        mock_run.assert_called_once()
+
+    def test_tick_ship_sidecar_merged_pr_bypasses_missing_gate_task(
+        self, tmp_path, mocker
+    ):
+        """A merged sidecar handoff should release even if phase_9 is absent."""
+        mock_all_complete = mocker.patch(
+            "hermes_pipeline.cli.all_phases_complete", return_value=False
+        )
+        mocker.patch("hermes_pipeline.cli.observe_outcomes")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_8_finish_branch": "done"},
+        )
+        mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        mock_selection.return_value = _make_decision()
+        mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
+        mock_run.side_effect = [
+            mocker.Mock(
+                returncode=0,
+                stdout='{"state": "MERGED", "baseRefName": "main", "headRefName": "todo-5-feat"}',
+                stderr="",
+            ),
+            mocker.Mock(returncode=0, stdout="", stderr=""),
+            mocker.Mock(returncode=0, stdout="", stderr=""),
+            mocker.Mock(returncode=0, stdout="", stderr=""),
+            mocker.Mock(returncode=0, stdout="", stderr=""),
+            mocker.Mock(returncode=0, stdout="[]", stderr=""),
+        ]
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        project_state = project_dir / ".hermes"
+        project_state.mkdir(parents=True)
+        outcomes_dir = project_state / "outcomes"
+        outcomes_dir.mkdir()
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
+        )
+        (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
+        (outcomes_dir / "01HA6PH2V0ZJ7GK0S39D243TQX-ship.json").write_text(
+            json.dumps(
+                {
+                    "tick_id": "01HA6PH2V0ZJ7GK0S39D243TQX",
+                    "todo_id": 5,
+                    "pr_number": 12,
+                    "pr_head_sha": "abc123",
+                    "base_branch": "main",
+                    "work_branch": "todo-5-feat",
+                    "phase_8_task_id": "t_phase8",
+                    "bump_version": None,
+                }
+            )
+        )
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+        assert result == 0
+        mock_selection.assert_called_once()
+        mock_all_complete.assert_not_called()
+
     def test_tick_prior_complete_proceeds_after_merged_pr_handoff(self, tmp_path, mocker):
         """Once the handoff PR is merged, the next tick may select new work."""
         mocker.patch(
