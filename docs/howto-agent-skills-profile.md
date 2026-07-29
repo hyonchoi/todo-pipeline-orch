@@ -6,7 +6,8 @@ Pipeline profiles let a project select an independent set of phases — the prom
 
 - `todo-pipeline-orchestrator` installed and `tpo` working
 - A project with a `TODOS.md` file under `tpo config get projects_dir`
-- The `agent-skills` plugin's skills (spec-driven-development, planning-and-task-breakdown, incremental-implementation, test-driven-development, code-review-and-quality, security-and-hardening, ship) available in the environment that runs the pipeline
+- The `agent-skills` plugin's skills listed below available in the environment
+  that runs the pipeline
 
 Namespaced invocation and discovery for the `agent-skills` profile remain
 `Unverified` for both Claude Code and Codex. This profile/client combination is
@@ -17,10 +18,21 @@ promote the package metadata, or keep the row unsupported.
 
 ## What is a profile?
 
-A profile is a directory under `hermes_pipeline/data/phase-profiles/<name>/` containing a `phases.yaml` file that defines the pipeline's phase sequence. Two profiles are bundled:
+A profile is a directory under
+`hermes_pipeline/data/phase-profiles/<name>/` containing a `phases.yaml` file
+that defines the pipeline's phase sequence. Two profiles are bundled:
 
-- **`gstack`** (default) — spec → plan → implement → review → security → document → ship, using gstack skills (`/spec`, `/plan-eng-review`, `/build`, `/review`, `/ship`)
-- **`agent-skills`** — the same shape, using the `agent-skills` plugin's skills instead
+- **`gstack`** (default) — the gstack/superpowers workflow. Skills: `autoplan`,
+  `writing-plans`, `subagent-driven-development`, `review`, `cso`, `qa`,
+  `document-release`, `document-generate`, `ship`.
+- **`agent-skills`** — the agent-skills plugin workflow. Skills:
+  `agent-skills:spec-driven-development`,
+  `agent-skills:planning-and-task-breakdown`,
+  `agent-skills:incremental-implementation`,
+  `agent-skills:test-driven-development`,
+  `agent-skills:code-review-and-quality`, `agent-skills:code-reviewer`,
+  `agent-skills:security-and-hardening`, `agent-skills:security-auditor`,
+  `agent-skills:ship`.
 
 A project's `.hermes/pipeline.toml` contract records which profile it runs via the `profile` field. Switching profiles changes the prompts and required tool capabilities for every phase.
 

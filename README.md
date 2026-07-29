@@ -70,17 +70,17 @@ only when every listed skill is installed and discoverable by the worker.
 `Unverified` rows are unsupported until their external discovery and invocation
 contracts have qualification evidence.
 
-| Profile | Referenced skill | Distribution owner | Claude discovery | Codex discovery | Support |
+| Profile | Referenced skill | Distribution owner | Claude discovery / invocation | Codex discovery / invocation | Support |
 |---|---|---|---|---|---|
-| `gstack` | `autoplan` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `writing-plans` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `review` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `cso` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `qa` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-release` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-generate` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `ship` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `autoplan` | gstack | `.claude/skills` / `/autoplan` | `.agents/skills` / `$autoplan` | Conditional |
+| `gstack` | `writing-plans` | superpowers | `.claude/skills` / `/writing-plans` | `.agents/skills` / `$writing-plans` | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` / `/subagent-driven-development` | `.agents/skills` / `$subagent-driven-development` | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` / `/review` | `.agents/skills` / `$review` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` / `/cso` | `.agents/skills` / `$cso` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` / `/qa` | `.agents/skills` / `$qa` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` / `/document-release` | `.agents/skills` / `$document-release` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` / `/document-generate` | `.agents/skills` / `$document-generate` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` / `/ship` | `.agents/skills` / `$ship` | Conditional |
 | `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
@@ -96,17 +96,11 @@ for the evidence required to advertise a `Conditional` pair.
 
 ## Core workflows
 
-Configure the project scan directory:
+Configure the project scan directory and prompt vocabulary:
 
 ```bash
 tpo config init
 tpo config set projects_dir ~/my-projects
-```
-
-Choose the prompt vocabulary used by every project under `projects_dir`:
-
-```bash
-tpo config init
 tpo config get prompt_client
 tpo config set prompt_client codex
 tpo config get prompt_client

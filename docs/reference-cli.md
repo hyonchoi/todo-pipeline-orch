@@ -201,17 +201,17 @@ Mixed-client fleets need separate project roots.
 
 Profile prerequisites come from the package metadata used by `tpo doctor`:
 
-| Profile | Referenced skill | Distribution owner | Claude discovery | Codex discovery | Support |
+| Profile | Referenced skill | Distribution owner | Claude discovery / invocation | Codex discovery / invocation | Support |
 |---|---|---|---|---|---|
-| `gstack` | `autoplan` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `writing-plans` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `review` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `cso` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `qa` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-release` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-generate` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `ship` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `autoplan` | gstack | `.claude/skills` / `/autoplan` | `.agents/skills` / `$autoplan` | Conditional |
+| `gstack` | `writing-plans` | superpowers | `.claude/skills` / `/writing-plans` | `.agents/skills` / `$writing-plans` | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` / `/subagent-driven-development` | `.agents/skills` / `$subagent-driven-development` | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` / `/review` | `.agents/skills` / `$review` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` / `/cso` | `.agents/skills` / `$cso` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` / `/qa` | `.agents/skills` / `$qa` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` / `/document-release` | `.agents/skills` / `$document-release` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` / `/document-generate` | `.agents/skills` / `$document-generate` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` / `/ship` | `.agents/skills` / `$ship` | Conditional |
 | `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |

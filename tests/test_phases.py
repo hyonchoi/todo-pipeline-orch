@@ -85,15 +85,66 @@ def test_agent_skills_prerequisites_do_not_guess_external_contracts():
         assert item.clients["codex"].invocation is None
 
 
-def test_documented_prerequisite_rows_match_package_metadata():
+def _documented_client_contract(client):
+    if client.discovery_root is None:
+        return "Unverified external plugin mechanism"
+    return f"`{client.discovery_root}` / `{client.invocation}`"
+
+
+def _documented_prerequisite_row(profile, item):
+    return (
+        f"| `{profile}` | `{item.skill_id}` | {item.distribution_owner} | "
+        f"{_documented_client_contract(item.clients['claude'])} | "
+        f"{_documented_client_contract(item.clients['codex'])} | "
+        f"{item.support} |"
+    )
+
+
+def test_documented_prerequisite_rows_match_all_package_metadata_fields():
     readme = Path("README.md").read_text()
     reference = Path("docs/reference-cli.md").read_text()
     for profile in ("gstack", "agent-skills"):
         metadata = load_profile_prerequisites(profile)
         for item in metadata.skills:
-            row_key = f"`{profile}` | `{item.skill_id}`"
-            assert row_key in readme
-            assert row_key in reference
+            row = _documented_prerequisite_row(profile, item)
+            assert row in readme
+            assert row in reference
+
+
+def test_readme_config_walkthrough_initializes_once_and_runs_sequentially():
+    readme = Path("README.md").read_text()
+    core_workflows = readme.split("## Core workflows", 1)[1].split(
+        "## Subcommands", 1
+    )[0]
+    expected = """\
+```bash
+tpo config init
+tpo config set projects_dir ~/my-projects
+tpo config get prompt_client
+tpo config set prompt_client codex
+tpo config get prompt_client
+tpo doctor <project>
+```"""
+    assert expected in core_workflows
+    assert core_workflows.count("tpo config init") == 1
+
+
+def test_profile_guide_lists_exact_metadata_skill_inventories():
+    guide = Path("docs/howto-agent-skills-profile.md").read_text()
+    for profile in ("gstack", "agent-skills"):
+        marker = f"- **`{profile}`**"
+        start = guide.index(marker)
+        boundaries = (
+            guide.find("\n- **", start + len(marker)),
+            guide.find("\n\n", start + len(marker)),
+        )
+        end = min(boundary for boundary in boundaries if boundary != -1)
+        inventory = guide[start:end].split("Skills:", 1)[1]
+        documented = re.findall(r"`([^`]+)`", inventory)
+        expected = [
+            item.skill_id for item in load_profile_prerequisites(profile).skills
+        ]
+        assert documented == expected
 
 
 def test_release_qualification_covers_conditional_pairs():
