@@ -106,11 +106,20 @@ def _find_task_id_in_snapshot(
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
         return None
 
-    tasks = snapshot if isinstance(snapshot, list) else snapshot.get("tasks", [])
+    if isinstance(snapshot, list):
+        tasks = snapshot
+    elif isinstance(snapshot, dict):
+        tasks = snapshot.get("tasks", [])
+    else:
+        return None
+    if not isinstance(tasks, list):
+        return None
     for task in tasks:
         try:
             header = json.loads(task.get("body", "").split("\n", 1)[0])
         except (AttributeError, json.JSONDecodeError):
+            continue
+        if not isinstance(header, dict):
             continue
         if (
             header.get("tick_id") == tick_id

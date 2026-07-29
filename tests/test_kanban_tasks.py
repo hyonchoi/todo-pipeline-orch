@@ -333,6 +333,82 @@ def test_create_prepared_resolves_task_from_snapshot_when_recovery_is_uncertain(
     assert run.call_args_list[3].args[0][-1] == "t_deadbeef"
 
 
+@pytest.mark.parametrize(
+    "snapshot_stdout",
+    [
+        "null",
+        '"unexpected"',
+        "42",
+        '{"tasks": null}',
+        '{"tasks": "unexpected"}',
+    ],
+)
+def test_create_prepared_rejects_malformed_snapshot_and_archives_known_tasks(
+    tmp_path, mocker, snapshot_stdout
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False),
+        PreparedPhaseTask("phase_2", "Two", "body", "Read", 5, False),
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        mocker.Mock(returncode=0, stdout=snapshot_stdout, stderr=""),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[4].args[0][-1] == "t_00000001"
+
+
+@pytest.mark.parametrize("task_body", ["null\nbody", "[]\nbody", '"unexpected"\nbody'])
+def test_create_prepared_rejects_nonmapping_snapshot_headers(
+    tmp_path, mocker, task_body
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        mocker.Mock(
+            returncode=0,
+            stdout=json.dumps([{"id": "t_deadbeef", "body": task_body}]),
+            stderr="",
+        ),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_1.*Hermes process"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert len(run.call_args_list) == 3
+
+
 def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
     tmp_path, mocker
 ):
