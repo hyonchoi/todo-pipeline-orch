@@ -2,7 +2,7 @@
 
 ## Metadata
 
-NEXT_TODO_ID: 40
+NEXT_TODO_ID: 41
 
 ## Entry Schema
 
@@ -70,3 +70,13 @@ NEXT_TODO_ID: 40
   - **Context:** Relevant files include `hermes_pipeline/data/prompts/selection.md`, `hermes_pipeline/data/phase-profiles/gstack/phases.yaml`, `hermes_pipeline/kanban_tasks.py`, `hermes_pipeline/cli.py`, `tests/test_decision_agent.py`, and `tests/eval/selection/`.
   - **Assumptions:** `Plan:` is intended as a new actionable field distinct from the current `Spec:` field, and migration/backfill of existing TODOs can be handled as part of this change or a follow-up.
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/plan-gated-worktree-selection`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+
+- [ ] **TODO-40: Add Plan field prompt to todos-manager --add** — Ask to attach detected plan files as `Plan:` when adding a TODO
+  - **What:** Revise the bundled and installed `todos-manager` `--add` workflow so auto-research detects relevant written plan files in the current context and asks whether to add one as the TODO entry's `Plan:` field value. Update the schema/instructions to document `Plan:` as an optional field, define how it differs from `Spec:`/`Reference:`, and cover the behavior in skill test fixtures or acceptance scenarios.
+  - **Why:** If TODO selection becomes plan-gated, `todos-manager --add` must help users preserve the plan path at creation time instead of making them remember to revise the entry afterward.
+  - **Pros:** Makes newly added TODOs pipeline-actionable when a plan already exists, reduces missed metadata, and keeps the add flow aligned with plan-gated selection.
+  - **Cons:** Adds another optional-field prompt to `--add`; plan detection must avoid guessing stale or unrelated files.
+  - **Context:** Relevant files include `hermes_pipeline/data/skills/todos-manager/SKILL.md`, `hermes_pipeline/data/skills/todos-manager/sections/schema.md`, `hermes_pipeline/data/skills/todos-manager/sections/auto-research.md`, installed skill mirror `/Users/hyonchoi/.agents/skills/todos-manager/`, and tests under `tests/skill-test-environment/`.
+  - **Depends on:** `TODO-39`
+  - **Assumptions:** `Plan:` should be user-confirmed like `Spec:`/`Reference:` paths, not silently guessed; if multiple candidate plan files exist, `--add` should ask the user which one, including an option to leave it blank.
+  - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/todos-add-plan-field`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
