@@ -46,6 +46,45 @@ def test_parse_task_id_accepts_current_and_legacy_hermes_output(stdout, expected
     assert _parse_task_id(stdout) == expected
 
 
+def test_reconcile_pending_create_waits_for_late_visible_task(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _persist_pending_task_create,
+        reconcile_pending_task_create,
+    )
+
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    _persist_pending_task_create(
+        tmp_path,
+        PendingTaskCreate("demo", "01CLIENT", "phase_1", ()),
+    )
+    find = mocker.patch(
+        "hermes_pipeline.kanban_tasks._find_task_id_in_snapshot",
+        side_effect=[None, "t_deadbeef"],
+    )
+    archive = mocker.patch("hermes_pipeline.kanban_tasks._archive_tasks")
+
+    assert reconcile_pending_task_create(tmp_path) is False
+    assert marker.exists()
+    assert reconcile_pending_task_create(tmp_path) is True
+    archive.assert_called_once_with(["t_deadbeef"])
+    assert find.call_count == 2
+    assert not marker.exists()
+
+
+def test_reconcile_pending_create_leaves_malformed_marker(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import reconcile_pending_task_create
+
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    marker.parent.mkdir(parents=True)
+    marker.write_text("not valid JSON")
+    find = mocker.patch("hermes_pipeline.kanban_tasks._find_task_id_in_snapshot")
+
+    assert reconcile_pending_task_create(tmp_path) is False
+    assert marker.exists()
+    find.assert_not_called()
+
+
 def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
 

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -23,6 +24,7 @@ from .phases import _render_phase_prompt, load_phases
 
 # Sentinel written after successful registration to record expected phases.
 _EXPECTED_PHASES_FILE_SUFFIX = ".expected-phases.json"
+_PENDING_TASK_CREATE_FILE = "pending-task-create.json"
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +71,119 @@ class PreparedPhaseTask:
     body: str
     turns: int
     gate: bool
+
+
+@dataclass(frozen=True)
+class PendingTaskCreate:
+    """A create whose remote task ID was not visible during recovery."""
+
+    tenant: str
+    tick_id: str
+    phase_key: str
+    known_task_ids: tuple[str, ...]
+
+
+def _pending_task_create_marker(project_dir: str | Path) -> Path:
+    return Path(project_dir) / ".hermes" / "outcomes" / _PENDING_TASK_CREATE_FILE
+
+
+def _pending_task_create_payload(pending: PendingTaskCreate) -> dict[str, object]:
+    """Validate and serialize a pending-create marker's durable fields."""
+    if not all(
+        isinstance(value, str) and value
+        for value in (pending.tenant, pending.tick_id, pending.phase_key)
+    ):
+        raise ValueError("pending task-create fields must be nonempty strings")
+    if not all(
+        isinstance(task_id, str)
+        and re.fullmatch(r"t_[0-9a-f]{8}", task_id) is not None
+        for task_id in pending.known_task_ids
+    ):
+        raise ValueError("pending task-create known task IDs must be valid Hermes IDs")
+    return {
+        "tenant": pending.tenant,
+        "tick_id": pending.tick_id,
+        "phase_key": pending.phase_key,
+        "known_task_ids": list(pending.known_task_ids),
+    }
+
+
+def _persist_pending_task_create(
+    project_dir: str | Path, pending: PendingTaskCreate
+) -> None:
+    """Atomically persist an uncertain task create for a later retry."""
+    marker = _pending_task_create_marker(project_dir)
+    payload = json.dumps(_pending_task_create_payload(pending), sort_keys=True)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    file_descriptor, temporary_name = tempfile.mkstemp(
+        dir=marker.parent,
+        prefix=f".{marker.name}.",
+        suffix=".tmp",
+        text=True,
+    )
+    temporary_marker = Path(temporary_name)
+    try:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(payload)
+            temporary_file.flush()
+            os.fsync(temporary_file.fileno())
+        os.replace(temporary_marker, marker)
+    except OSError:
+        temporary_marker.unlink(missing_ok=True)
+        raise
+
+
+def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | None:
+    """Load a valid pending-create marker, failing closed for malformed data."""
+    marker = _pending_task_create_marker(project_dir)
+    try:
+        payload = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or set(payload) != {
+        "tenant",
+        "tick_id",
+        "phase_key",
+        "known_task_ids",
+    }:
+        return None
+    tenant = payload["tenant"]
+    tick_id = payload["tick_id"]
+    phase_key = payload["phase_key"]
+    known_task_ids = payload["known_task_ids"]
+    if not all(
+        isinstance(value, str) and value for value in (tenant, tick_id, phase_key)
+    ) or not isinstance(known_task_ids, list):
+        return None
+    if not all(
+        isinstance(task_id, str)
+        and re.fullmatch(r"t_[0-9a-f]{8}", task_id) is not None
+        for task_id in known_task_ids
+    ):
+        return None
+    return PendingTaskCreate(tenant, tick_id, phase_key, tuple(known_task_ids))
+
+
+def reconcile_pending_task_create(project_dir: str | Path) -> bool:
+    """Archive a delayed idempotent create once it becomes visible."""
+    pending = _load_pending_task_create(project_dir)
+    if pending is None:
+        return False
+    task_id = _find_task_id_in_snapshot(
+        tenant=pending.tenant,
+        tick_id=pending.tick_id,
+        phase_key=pending.phase_key,
+    )
+    if task_id is None:
+        return False
+    _archive_tasks([*pending.known_task_ids, task_id])
+    marker = _pending_task_create_marker(project_dir)
+    try:
+        marker.unlink()
+    except OSError:
+        log.warning("failed to remove pending task-create marker: %s", marker)
+        return False
+    return True
 
 
 def _parse_task_id(stdout: str) -> str | None:
