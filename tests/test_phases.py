@@ -2,7 +2,12 @@
 import pytest
 
 from hermes_pipeline.contract import ContractSchemaError
-from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+from hermes_pipeline.phases import (
+    PhasePromptRenderError,
+    _render_phase_prompt,
+    load_phases,
+    resolve_profile_phases_path,
+)
 
 FIXTURE = """
 phases:
@@ -129,13 +134,34 @@ def test_real_phases_yaml_records_pipeline_branch_for_pr_handoff():
 def test_real_phases_yaml_finish_branch_uses_ship_skill():
     phases = {p.phase_key: p for p in load_phases()}
     finish = phases["phase_8_finish_branch"]
-    assert "/ship" in finish.prompt
+    assert "{skill_prefix}ship" in finish.prompt
     assert "finishing-a-development-branch" not in finish.prompt
     assert "complete\nthis task normally" in finish.prompt
     assert "Do NOT merge the PR" in finish.prompt
     assert "Do not block this task because a PR is ready" in finish.prompt
     assert "human review" not in finish.prompt.lower()
-    assert "Do NOT finish the remaining /ship steps manually" in finish.prompt
+    assert (
+        "Do NOT finish the remaining {skill_prefix}ship steps manually"
+        in finish.prompt
+    )
+    claude_prompt = _render_phase_prompt(
+        finish.prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="claude",
+    )
+    codex_prompt = _render_phase_prompt(
+        finish.prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+    assert "Use the gstack /ship skill in Claude Code." in claude_prompt
+    assert "Do NOT finish the remaining /ship steps manually" in claude_prompt
+    assert "Use the gstack $ship skill in Codex." in codex_prompt
+    assert "Do NOT finish the remaining $ship steps manually" in codex_prompt
     assert finish.turns >= 100
     assert finish.timeout >= 7200
 
@@ -235,3 +261,124 @@ def test_render_phase_prompt_empty_reference_list_omitted():
         reference_paths=[],
     )
     assert "Reference material:" not in out
+
+
+@pytest.mark.parametrize(
+    ("client", "product", "prefix"),
+    [("claude", "Claude Code", "/"), ("codex", "Codex", "$")],
+)
+def test_render_phase_prompt_all_allowed_fields(client, product, prefix):
+    out = _render_phase_prompt(
+        "{todo_id}|{tick_id}|{project_slug}|{agent_product}|"
+        "{skill_prefix}review|{{literal}}",
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client=client,
+        template_source="test-profile:phase_x",
+    )
+    assert out.endswith(
+        f"TODO-41|01CLIENT|demo|{product}|{prefix}review|{{literal}}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("template", "message"),
+    [
+        ("{unknown}", "unknown"),
+        ("{}", "positional"),
+        ("{0}", "positional"),
+        ("{todo_id", "malformed"),
+        ("{agent_product!r}", "conversion"),
+        ("{todo_id:>10}", "format specification"),
+        ("{todo_id.value}", "traversal"),
+        ("{todo_id[0]}", "traversal"),
+        ("{todo_id:{tick_id}}", "nested"),
+    ],
+)
+def test_render_phase_prompt_rejects_advanced_formatting(template, message):
+    with pytest.raises(
+        PhasePromptRenderError,
+        match=rf"test-profile:phase_x.*{message}",
+    ):
+        _render_phase_prompt(
+            template,
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            project_slug="demo",
+            template_source="test-profile:phase_x",
+        )
+
+
+def test_render_phase_prompt_rejects_unknown_client():
+    with pytest.raises(
+        PhasePromptRenderError,
+        match=r"prompt_client.*claude.*codex",
+    ):
+        _render_phase_prompt(
+            "{agent_product}",
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            project_slug="demo",
+            prompt_client="Claude",
+        )
+
+
+def test_render_phase_prompt_does_not_rewrite_unrelated_text():
+    template = "Read docs/a/b.md and https://example.test/a; literal $HOME."
+    out = _render_phase_prompt(
+        template,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+    assert out.endswith(template)
+
+
+@pytest.mark.parametrize("profile", ["gstack", "agent-skills"])
+@pytest.mark.parametrize(
+    ("client", "product", "forbidden_product"),
+    [
+        ("claude", "Claude Code", "Codex"),
+        ("codex", "Codex", "Claude Code"),
+    ],
+)
+def test_every_bundled_phase_renders_for_client(
+    profile, client, product, forbidden_product
+):
+    phases = load_phases(resolve_profile_phases_path(profile))
+    for phase in phases:
+        rendered = _render_phase_prompt(
+            phase.prompt,
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            project_slug="demo",
+            prompt_client=client,
+            template_source=f"{profile}:{phase.phase_key}",
+        )
+        assert "{agent_product}" not in rendered
+        assert "{skill_prefix}" not in rendered
+        if "agent_product" in phase.prompt:
+            assert product in rendered
+            assert forbidden_product not in rendered
+
+
+@pytest.mark.parametrize(
+    ("client", "ordinary", "possessive"),
+    [
+        ("claude", "Use the /autoplan skill in Claude Code.", "Follow /review's fix loop."),
+        ("codex", "Use the $autoplan skill in Codex.", "Follow $review's fix loop."),
+    ],
+)
+def test_gstack_exact_client_grammar(client, ordinary, possessive):
+    assert ordinary in _render_phase_prompt(
+        "Use the {skill_prefix}autoplan skill in {agent_product}.",
+        todo_id="TODO-41", tick_id="01CLIENT", project_slug="demo",
+        prompt_client=client,
+    )
+    assert possessive in _render_phase_prompt(
+        "Follow {skill_prefix}review's fix loop.",
+        todo_id="TODO-41", tick_id="01CLIENT", project_slug="demo",
+        prompt_client=client,
+    )

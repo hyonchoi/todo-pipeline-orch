@@ -2,12 +2,63 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import string
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Final
 
 import yaml
 
+from .config import PromptClient
+
 log = logging.getLogger(__name__)
+
+CLIENT_VOCABULARY: Final[dict[PromptClient, dict[str, str]]] = {
+    "claude": {"agent_product": "Claude Code", "skill_prefix": "/"},
+    "codex": {"agent_product": "Codex", "skill_prefix": "$"},
+}
+_ALLOWED_PROMPT_FIELDS = frozenset(
+    {"todo_id", "tick_id", "project_slug", "agent_product", "skill_prefix"}
+)
+
+
+class PhasePromptRenderError(ValueError):
+    """A repository-owned phase prompt violates the strict template grammar."""
+
+
+def _validate_prompt_template(template: str, source: str) -> None:
+    formatter = string.Formatter()
+    try:
+        parsed = list(formatter.parse(template))
+    except ValueError as exc:
+        raise PhasePromptRenderError(
+            f"{source}: malformed braces: {exc}"
+        ) from exc
+    for _literal, field_name, format_spec, conversion in parsed:
+        if field_name is None:
+            continue
+        if field_name == "" or field_name.isdecimal():
+            raise PhasePromptRenderError(
+                f"{source}: positional field {field_name!r} is not allowed"
+            )
+        if "." in field_name or "[" in field_name or "]" in field_name:
+            raise PhasePromptRenderError(
+                f"{source}: attribute/index traversal {field_name!r} is not allowed"
+            )
+        if field_name not in _ALLOWED_PROMPT_FIELDS:
+            raise PhasePromptRenderError(
+                f"{source}: unknown field {field_name!r}"
+            )
+        if conversion is not None:
+            raise PhasePromptRenderError(
+                f"{source}: conversion on {field_name!r} is not allowed"
+            )
+        if format_spec:
+            kind = "nested replacement field" if "{" in format_spec else "format specification"
+            raise PhasePromptRenderError(
+                f"{source}: {kind} on {field_name!r} is not allowed"
+            )
+
 
 @dataclass(frozen=True)
 class Phase:
@@ -97,17 +148,23 @@ class UnknownPhaseError(KeyError):
     """phase_key is not defined in phases.yaml."""
 
 def _render_phase_prompt(
-    template: str, *, todo_id: str, tick_id: str, project_slug: str,
-    spec_path: str | None = None, reference_paths: list[str] | None = None,
+    template: str,
+    *,
+    todo_id: str,
+    tick_id: str,
+    project_slug: str,
+    spec_path: str | None = None,
+    reference_paths: list[str] | None = None,
+    prompt_client: PromptClient = "claude",
+    template_source: str | None = None,
 ) -> str:
     """Inject the pipeline context the phase prompt needs.
 
     A picked TODO must be visible to the LLM — otherwise a TODO-7 pick can
     silently produce work for whatever TODO the LLM latches onto next. We
-    prepend a non-templated context header and ALSO support `{todo_id}` /
-    `{tick_id}` / `{project_slug}` substitution for phases that want to
-    weave the values into prose. `.format()` with named-only fields is safe
-    here because every prompt in configs/phases.yaml is repo-owned.
+    prepend a non-templated context header and ALSO support strict named
+    substitution for phases that want to weave pipeline and client vocabulary
+    into prose.
 
     `spec_path`/`reference_paths` are optional, pre-validated (existence +
     project_dir containment already checked by the caller) TODOS.md
@@ -115,6 +172,7 @@ def _render_phase_prompt(
     entirely when absent so prompt output for TODOs without these fields
     stays byte-identical to before this feature existed.
     """
+    source = template_source or "<phase prompt>"
     header = (
         f"Pipeline context:\n"
         f"- todo_id: {todo_id}\n"
@@ -130,9 +188,17 @@ def _render_phase_prompt(
     if spec_reference_block:
         header += spec_reference_block + "\n"
     try:
-        body = template.format(todo_id=todo_id, tick_id=tick_id, project_slug=project_slug)
-    except (KeyError, IndexError):
-        # Template uses a `{name}` we don't supply — fall back to verbatim
-        # body. The header still scopes the run to this TODO.
-        body = template
+        vocabulary = CLIENT_VOCABULARY[prompt_client]
+    except KeyError as exc:
+        raise PhasePromptRenderError(
+            f"{source}: prompt_client must be one of "
+            f"{sorted(CLIENT_VOCABULARY)}, got {prompt_client!r}"
+        ) from exc
+    _validate_prompt_template(template, source)
+    body = template.format(
+        todo_id=todo_id,
+        tick_id=tick_id,
+        project_slug=project_slug,
+        **vocabulary,
+    )
     return header + body
