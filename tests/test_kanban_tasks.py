@@ -241,6 +241,36 @@ def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mock
     assert run.call_args_list[2].args[0][-1] == "task-uncertain"
 
 
+def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+    ]
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        mocker.Mock(returncode=1, stdout="", stderr="transport failed"),
+        mocker.Mock(returncode=0, stdout='{"id": "task-uncertain"}', stderr=""),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_1.*rc=1"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[1].args[0] == run.call_args_list[0].args[0]
+    assert run.call_args_list[2].args[0][-1] == "task-uncertain"
+
+
 def test_create_prepared_recovers_and_archives_task_after_invalid_output(
     tmp_path, mocker
 ):
@@ -451,6 +481,8 @@ class TestRegisterTodoPhases:
                 returncode=0, stdout=json.dumps({"id": "task-001"})
             ),
             mocker.MagicMock(returncode=1, stdout="", stderr="error"),
+            # Idempotent recovery retry also fails
+            mocker.MagicMock(returncode=1, stdout="", stderr="error"),
             # Archive call
             mocker.MagicMock(returncode=0, stdout=""),
         ]
@@ -482,7 +514,7 @@ class TestRegisterTodoPhases:
             )
 
         # Verify archive was called for task-001
-        archive_call = mock_run.call_args_list[2]
+        archive_call = mock_run.call_args_list[3]
         archive_args = archive_call[0][0]
         assert "kanban" in archive_args
         assert "archive" in archive_args

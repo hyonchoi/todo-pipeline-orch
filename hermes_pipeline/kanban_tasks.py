@@ -241,7 +241,12 @@ def create_prepared_todo_phases(
                 f"for tick {tick_id}: Hermes process failed: {exc}"
             ) from exc
         if result.returncode != 0:
-            # Mid-registration failure: archive already-created tasks
+            # A nonzero response can still follow a successful remote mutation.
+            uncertain_task_id = _recover_uncertain_task_id(cmd)
+            cleanup_ids = [
+                *task_ids,
+                *([uncertain_task_id] if uncertain_task_id is not None else []),
+            ]
             log.error(
                 "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
                 phase.phase_key,
@@ -249,7 +254,7 @@ def create_prepared_todo_phases(
                 result.returncode,
                 result.stderr[:ERROR_MSG_MAX_LENGTH],
             )
-            _archive_tasks(task_ids)
+            _archive_tasks(cleanup_ids)
             raise RuntimeError(
                 f"failed to register kanban task {phase.phase_key} "
                 f"for tick {tick_id}: rc={result.returncode} "
