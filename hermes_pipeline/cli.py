@@ -1055,6 +1055,15 @@ def _tick_project(
         project_dir, env_channel=config.slack_channel, toml_data=project_toml
     )
 
+    from .kanban_tasks import reconcile_pending_task_create
+
+    if not reconcile_pending_task_create(project_dir):
+        log.warning(
+            "project %s: unresolved Hermes task creation; skipping",
+            project_slug,
+        )
+        return
+
     # Step 1: Check prior tick
     prior_tick_id = _read_prior_tick_id(project_state)
 

@@ -231,7 +231,7 @@ def reconcile_pending_task_create(project_dir: str | Path) -> bool:
     """Archive a delayed idempotent create once it becomes visible."""
     pending = _load_pending_task_state(project_dir)
     if pending is None:
-        return False
+        return not _pending_task_create_marker(project_dir).exists()
     if isinstance(pending, PendingTaskCleanup):
         if not _archive_tasks(list(pending.task_ids)):
             return False

@@ -74,6 +74,12 @@ def test_reconcile_pending_create_waits_for_late_visible_task(tmp_path, mocker):
     assert not marker.exists()
 
 
+def test_reconcile_pending_create_without_marker_allows_tick(tmp_path):
+    from hermes_pipeline.kanban_tasks import reconcile_pending_task_create
+
+    assert reconcile_pending_task_create(tmp_path) is True
+
+
 def test_persist_pending_create_delegates_to_shared_atomic_writer(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import (
         PendingTaskCreate,
