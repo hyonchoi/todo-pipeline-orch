@@ -25,6 +25,15 @@ advance that project while unresolved task creation remains. Reconciliation look
 up the task by tenant, tick ID, and phase key, then archives the resolved task and
 all known predecessors before clearing the durable marker.
 
+The marker is atomically stored at
+`<project>/.hermes/outcomes/pending-task-create.json`; it is written before each
+remote create and cleared only after a validated task ID or confirmed cleanup.
+The same path can hold a cleanup-only record when archiving a known chain failed.
+The next tick handles either record before examining the prior tick: it archives
+the delayed or listed tasks, retains the record on any uncertainty or cleanup
+failure, and otherwise removes it. This makes the tick gate fail closed rather
+than allowing selection to race a late remote mutation.
+
 Gate phases remain blocked markers and are never activated as executable work.
 
 ## Failure Handling
@@ -36,6 +45,10 @@ Gate phases remain blocked markers and are never activated as executable work.
   progression.
 - Marker write or cleanup failures do not turn uncertain registration into
   success; the pipeline fails closed and reports the primary error.
+- While the marker remains, the project tick logs an unresolved Hermes creation
+  warning and skips prior-tick processing, selection, and new task creation.
+- Successful deferred cleanup is visible through the normal per-task archive
+  log entries before the marker is removed.
 
 ## Testing
 

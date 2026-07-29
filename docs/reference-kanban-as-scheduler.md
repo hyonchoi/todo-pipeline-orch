@@ -176,7 +176,16 @@ tick starts
 [persist current_tick_id.txt + tick_started outcome]
     |
     v
-[create_prepared_todo_phases] -- creates kanban tasks:
+[create_prepared_todo_phases] -- for each phase:
+    persist pending-task-create marker
+    -> create blocked kanban task
+    -> validate task ID and clear its marker
+    |
+    v
+[persist expected-phases sentinel] -- records the complete durable chain
+    |
+    v
+[promote first executable task] -- only now may work become runnable:
     phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_5_review  <--parent--  phase_6_1_cso
     (running)                  (ready)                  (ready)                  (ready)
     |
@@ -205,6 +214,40 @@ tick lock released (if complete) / skip (if in-flight)
   auto-unblock the gate. The default `gstack` profile has no gate phase.
 - `ready` status on the board means "blocked on parent" without the
   orchestrator needing to track inter-phase dependencies.
+
+### Durable registration and uncertain-create recovery
+
+Every phase, including executable phases, is created with initial status
+`blocked`. Before each remote `hermes kanban create`, the orchestrator atomically
+writes the per-project pending marker at
+`<project>/.hermes/outcomes/pending-task-create.json`. The marker records the
+tenant, tick ID, phase key, and IDs already registered in the same chain. It is
+removed only after Hermes returns a validated task ID for that exact create.
+
+After every task is known, the orchestrator atomically writes
+`<project>/.hermes/outcomes/expected-phases.json`. This sentinel lists the full
+expected chain and lets completion checks reject a partial board snapshot. Only
+after that write succeeds does it run `hermes kanban promote <first-executable-id>`.
+Gate tasks remain blocked and are never promoted.
+
+An inconclusive create is fail-closed. The registration call retries the same
+idempotency key and takes a snapshot; if the task is still not visible, the
+pending marker remains. At the start of every later project tick, before reading
+the prior tick, selection, or creating work, the orchestrator reads that marker.
+It searches the tenant snapshot for the recorded tick and phase, archives the
+late-visible task together with all known predecessors, and removes the marker
+only after those archives succeed. A marker that is malformed, unreadable,
+unresolved, or cannot be removed keeps the project skipped for that tick.
+
+The same file can temporarily carry a cleanup marker when archive confirmation
+failed after a later registration or promotion error. The next tick archives its
+listed task IDs before removing it, using the same fail-closed gate.
+
+Operators can follow this recovery in the tick logs: an unresolved marker emits
+`project <slug>: unresolved Hermes task creation; skipping`; successful cleanup
+logs `archived kanban task <task_id>` for each archived card. The on-disk marker
+and the expected-phase sentinel are the durable evidence to inspect between
+ticks.
 
 ## API
 
@@ -290,8 +333,10 @@ For each prepared phase, this function runs `hermes kanban create` with:
 
 **Mid-registration failure:** The kanban-as-scheduler design requires all phases
 to exist in order. If the second of four phases fails to register, the first is
-archived — it can't run without its successor, and leaving it in `running`
-blocks the next tick from selecting the same TODO.
+archived — it cannot run because every phase remains `blocked` until the complete
+chain and expected-phase sentinel are durable. If cleanup cannot be confirmed,
+the durable pending marker remains and later ticks skip the project until cleanup
+finishes.
 
 ### `register_todo_phases`
 

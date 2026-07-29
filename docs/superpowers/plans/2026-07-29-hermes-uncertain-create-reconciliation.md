@@ -294,11 +294,11 @@ rtk git commit -m "fix: reconcile uncertain tasks before ticking"
 - Documents: blocked create → durable chain → first-task promotion.
 - Documents: pending marker → later snapshot → archive → marker removal.
 
-- [ ] **Step 1: Update the scheduler reference**
+- [x] **Step 1: Update the scheduler reference**
 
 Document the pending marker path, fail-closed tick behavior, blocked registration, sentinel persistence, promotion ordering, and operator-visible recovery log.
 
-- [ ] **Step 2: Run documentation and metadata checks**
+- [x] **Step 2: Run documentation and metadata checks**
 
 Run:
 
@@ -309,7 +309,7 @@ rtk uv run --locked ruff check .
 
 Expected: PASS.
 
-- [ ] **Step 3: Run complete fresh verification**
+- [x] **Step 3: Run complete fresh verification**
 
 Run:
 
@@ -321,7 +321,7 @@ rtk uv build
 
 Expected: all tests pass, Ruff reports no findings, and sdist/wheel build succeeds.
 
-- [ ] **Step 4: Commit documentation**
+- [x] **Step 4: Commit documentation**
 
 ```bash
 rtk git add docs/reference-kanban-as-scheduler.md docs/superpowers/2026-07-29-hermes-uncertain-create-reconciliation-design.md docs/superpowers/plans/2026-07-29-hermes-uncertain-create-reconciliation.md
