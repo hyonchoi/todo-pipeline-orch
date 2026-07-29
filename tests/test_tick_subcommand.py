@@ -182,6 +182,8 @@ class TestTickSubcommand:
         assert ["git", "fetch", "origin", "main"] in commands
         assert ["git", "checkout", "main"] in commands
         assert ["git", "merge", "--ff-only", "origin/main"] in commands
+        assert not (project_state / "pipeline_branch.txt").exists()
+        assert (project_state / "current_tick_id.txt").read_text() != "01HA6PH2V0ZJ7GK0S39D243TQX"
 
     def test_tick_merged_pr_handoff_dirty_checkout_counts_as_no_progress(
         self, tmp_path, mocker

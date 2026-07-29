@@ -611,6 +611,7 @@ def _has_pending_pr_handoff(project_dir: Path, state_dir: Path) -> tuple[bool, b
     if state == "MERGED":
         base_branch = view.get("baseRefName") or "main"
         if _sync_project_to_base_after_handoff(project_dir, base_branch):
+            _clear_pr_handoff_state(state_dir)
             return (False, False)
         return (True, True)
     if state == "OPEN":
@@ -677,6 +678,16 @@ def _sync_project_to_base_after_handoff(project_dir: Path, base_branch: str) -> 
             )
             return False
     return True
+
+
+def _clear_pr_handoff_state(state_dir: Path) -> None:
+    """Clear completed PR-handoff markers after the checkout is synced to base."""
+    for filename in ("pipeline_branch.txt", CURRENT_TICK_ID_FILE):
+        path = state_dir / filename
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("failed to clear completed PR handoff marker %s: %s", path, e)
 
 
 def _status_map_has_successful_pr_handoff(status_map: dict[str, str]) -> bool:
