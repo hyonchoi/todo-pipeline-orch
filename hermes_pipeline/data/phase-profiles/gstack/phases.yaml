@@ -2,7 +2,7 @@ phases:
   - phase_key: "phase_2_autoplan"
     name: "Phase 2: Autoplan"
     prompt: |
-      Use the gstack autoplan skill in claude code.
+      Use the gstack /autoplan skill in claude code.
 
       The selected TODO is {todo_id} — it is already marked in-flight in the
       kanban board (not in TODOS.md text). Work on {todo_id} only; do not
@@ -22,14 +22,18 @@ phases:
     timeout: 1800
   - phase_key: "phase_3_writing_plan"
     name: "Phase 3: Writing Plan"
-    prompt: "Use the writing-plans skill in claude code. Read the plan from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the generated docs."
+    prompt: |
+      Use the superpowers /writing-plans skill in claude code. Read the plan
+      from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan
+      format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the
+      generated docs.
     tools: "Read,Write,Bash"
     turns: 15
     timeout: 1800
   - phase_key: "phase_4_development"
     name: "Phase 4: Development"
     prompt: |
-      Use subagent-driven-development in claude code. Read the
+      Use the superpowers /subagent-driven-development skill in claude code. Read the
       implementation plan from docs/pipeline/{todo_id}-impl-plan.md and
       implement it. Commit all changes.
 
@@ -73,7 +77,7 @@ phases:
       Decisions line. If it says `not-required`, exit 0 immediately — do not
       run any review.
 
-      If `required`: use the gstack cso skill in claude code. Run a security
+      If `required`: use the gstack /cso skill in claude code. Run a security
       review of the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
@@ -92,7 +96,7 @@ phases:
       Decisions line. If it says `not-required`, exit 0 immediately — do not
       run any QA.
 
-      If `required`: use the gstack qa skill in claude code. Test the web UI
+      If `required`: use the gstack /qa skill in claude code. Test the web UI
       changes on the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
@@ -107,10 +111,10 @@ phases:
   - phase_key: "phase_7_document_release"
     name: "Phase 7: Document Release"
     prompt: |
-      1. Use the gstack document-release skill in claude code to update
+      1. Use the gstack /document-release skill in claude code to update
          existing docs (CHANGELOG.md, README.md, and others), which will
-         identify any docs that are missing entirely. Then use the
-         document-generate skill in claude code to create those missing
+         identify any docs that are missing entirely. Then use the gstack
+         /document-generate skill in claude code to create those missing
          docs.
 
       2. Determine the version bump level from {todo_id}'s TODOS.md Decisions
