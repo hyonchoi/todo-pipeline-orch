@@ -264,6 +264,31 @@ class TestRegisterTodoPhases:
         assert "--goal" in phase8_cmd
         assert "--initial-status" not in phase8_cmd
 
+    def test_gate_phase_is_not_assigned_to_pipeline_worker(self, tmp_path, mocker):
+        """Gate phases are human checkpoints and must not be worker-dispatchable."""
+        from hermes_pipeline.kanban_tasks import register_todo_phases
+
+        phases = [
+            FakeGatePhase("phase_8_finish_branch", name="P8", turns=15),
+            FakeGatePhase("phase_9_ship", name="Ship Gate", gate=True),
+        ]
+        mocker.patch("hermes_pipeline.kanban_tasks.load_phases", return_value=phases)
+        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_x"}', stderr="")
+
+        register_todo_phases(
+            todo_id="TODO-5",
+            tick_id="01TICK",
+            board_slug="demo",
+            project_dir=tmp_path,
+            assignee="pipeline",
+        )
+
+        phase8_cmd = mock_run.call_args_list[0][0][0]
+        gate_cmd = mock_run.call_args_list[1][0][0]
+        assert phase8_cmd[phase8_cmd.index("--assignee") + 1] == "pipeline"
+        assert gate_cmd[gate_cmd.index("--assignee") + 1] == "-"
+
 
 class TestAllPhasesComplete:
     """Tests for all_phases_complete() and get_todo_kanban_status()."""

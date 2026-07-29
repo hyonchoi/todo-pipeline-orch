@@ -106,6 +106,28 @@ def test_migrate_skips_if_already_migrated(tmp_path: Path):
     assert (per_project_state / "current_tick_id.txt").read_text().strip() == "existing"
 
 
+def test_migrate_skips_existing_project_state_without_tick_id(tmp_path: Path):
+    """Initialized project state must not inherit stale global tick state."""
+    global_state = tmp_path / "global"
+    global_state.mkdir()
+    project_dir = tmp_path / "myproject"
+    project_dir.mkdir()
+    per_project_state = project_dir / ".hermes"
+    per_project_state.mkdir()
+    config = Config(
+        projects_dir=tmp_path,
+        state_dir=global_state,
+    )
+
+    (per_project_state / "pipeline.toml").write_text("schema_version = 2\n")
+    (global_state / "current_tick_id.txt").write_text("global\n")
+
+    _migrate_global_state(project_dir, config)
+
+    assert not (per_project_state / "current_tick_id.txt").exists()
+    assert (per_project_state / "pipeline.toml").exists()
+
+
 def test_migrate_no_op_when_no_global_state(tmp_path: Path):
     """Migration does nothing when global state files don't exist."""
     global_state = tmp_path / "global"

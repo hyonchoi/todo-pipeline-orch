@@ -137,13 +137,12 @@ class TestFilterPhases:
         with pytest.raises(ValueError, match="phase_99"):
             filter_phases(phases, "phase_99")
 
-    def test_with_real_phase_list(self):
-        from hermes_pipeline.phases import load_phases
-        all_phases = load_phases()
-        gate_phases = [p for p in all_phases if p.gate]
-        assert len(gate_phases) >= 1
-        target = gate_phases[0].phase_key
-        filtered = filter_phases(all_phases, target)
+    def test_with_gate_phase_list(self):
+        all_phases = [
+            Phase(phase_key="phase_8_finish_branch", name="Phase 8", prompt="p8", tools="", turns=0),
+            Phase(phase_key="phase_9_ship", name="Phase 9", prompt="", tools="", turns=0, gate=True),
+        ]
+        filtered = filter_phases(all_phases, "phase_9_ship")
         assert len(filtered) == 1
         assert filtered[0].gate is True
 
@@ -638,7 +637,14 @@ class TestAutoCompleteGateTasks:
         mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
         mock_complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
 
-        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_8_finish_branch")
+        phases = [
+            Phase(phase_key="phase_8_finish_branch", name="Phase 8", prompt="p8", tools="", turns=0),
+            Phase(phase_key="phase_9_ship", name="Phase 9", prompt="", tools="", turns=0, gate=True),
+        ]
+
+        _auto_complete_gate_tasks(
+            "demo", "01TICK", completed_phase_key="phase_8_finish_branch", phases=phases
+        )
 
         mock_complete.assert_called_once_with("demo", "t_gate")
 
@@ -661,7 +667,13 @@ class TestAutoCompleteGateTasks:
         mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
 
         with caplog.at_level("INFO"):
-            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_8_finish_branch")
+            phases = [
+                Phase(phase_key="phase_8_finish_branch", name="Phase 8", prompt="p8", tools="", turns=0),
+                Phase(phase_key="phase_9_ship", name="Phase 9", prompt="", tools="", turns=0, gate=True),
+            ]
+            _auto_complete_gate_tasks(
+                "demo", "01TICK", completed_phase_key="phase_8_finish_branch", phases=phases
+            )
 
         assert "auto-completed gate task" not in caplog.text
 
@@ -684,7 +696,13 @@ class TestAutoCompleteGateTasks:
         mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
 
         with caplog.at_level("WARNING"):
-            _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_8_finish_branch")
+            phases = [
+                Phase(phase_key="phase_8_finish_branch", name="Phase 8", prompt="p8", tools="", turns=0),
+                Phase(phase_key="phase_9_ship", name="Phase 9", prompt="", tools="", turns=0, gate=True),
+            ]
+            _auto_complete_gate_tasks(
+                "demo", "01TICK", completed_phase_key="phase_8_finish_branch", phases=phases
+            )
 
         assert "t_gate" in caplog.text
         assert "phase_9_ship" in caplog.text

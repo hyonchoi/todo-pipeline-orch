@@ -114,6 +114,7 @@ def register_todo_phases(
 
         # Build command — title is positional, use --tenant for namespacing,
         # --json for structured task ID output.
+        is_gate = getattr(phase, "gate", False)
         cmd = [
             "hermes",
             "kanban",
@@ -123,19 +124,22 @@ def register_todo_phases(
             "--body", body,
             "--workspace", f"dir:{project_dir}",
             "--idempotency-key", f"{tick_id}:{phase.phase_key}",
-            "--assignee", assignee,
             "--json",
         ]
+        if is_gate:
+            cmd.extend(["--assignee", "-"])
+        else:
+            cmd.extend(["--assignee", assignee])
 
         # Add --parent for executable phases after the first. Gate phases must
         # remain manually blocked; Hermes unblocks parented children when their
         # parent completes, which would bypass the human review gate.
-        if phase_idx > 0 and not getattr(phase, "gate", False):
+        if phase_idx > 0 and not is_gate:
             cmd.extend(["--parent", task_ids[phase_idx - 1]])
 
         # Gate phases are pure markers: created blocked, never dispatched to
         # an agent. Everything else runs as a goal-mode kanban task.
-        if getattr(phase, "gate", False):
+        if is_gate:
             cmd.extend(["--initial-status", BLOCKED])
         else:
             cmd.extend(["--goal", "--goal-max-turns", str(phase.turns)])

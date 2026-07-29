@@ -149,15 +149,18 @@ hermes kanban list --tenant demo-app
 
 See [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) for how phase tasks are chained.
 
-## Step 8: Approve and ship
+## Step 8: Inspect PR handoff
 
-When all phases are complete and the TODO is ready to ship:
+The default `gstack` profile finishes at Phase 8. That phase runs `/ship`, pushes all intended branch changes, and opens or updates a PR without merging it. Inspect the PR in GitHub or from the project worktree:
 
 ```bash
-tpo approve demo-app --todo TODO-1
+gh pr status
 ```
 
-See [Approve and ship a TODO](howto-approve-and-ship.md) for guards, exit codes, and recovery.
+No automatic merge is performed by `tpo tick`.
+Later ticks leave the project idle while that PR is open, closed without merge,
+or temporarily unverifiable. After the PR is merged, the next tick can select
+new TODO work.
 
 ## Step 9: Automate ticks later
 

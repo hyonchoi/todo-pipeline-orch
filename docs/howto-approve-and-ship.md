@@ -1,6 +1,6 @@
-# How to Approve and Ship a TODO
+# Legacy: Approve and Ship a TODO
 
-Ship a TODO that has passed all pipeline phases and is waiting at the Phase 9 ship gate.
+Use this only for existing sidecars from older/default-overridden profiles that include a `phase_9_ship` gate. The current default `gstack` profile ends at Phase 8 PR handoff and does not run `tpo approve`.
 
 ## Prerequisites
 

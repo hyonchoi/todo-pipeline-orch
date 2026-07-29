@@ -6,23 +6,22 @@ file writes / file deletes.
 | Trigger | Pre-state | Post-state | Writes | Deletes |
 |---|---|---|---|---|
 | `pipeline-tick` starts | — | tick lock held | `.hermes/tick.lock/holder.json` | — |
-| `run_selection` returns picked=None | tick lock held | tick lock released | `.hermes/decisions/<tick>.json` | `.hermes/tick.lock/` |
-| `run_selection` returns picked=TODO-N (shadow) | tick lock held | tick lock released | `.hermes/decisions/<tick>.json` | `.hermes/tick.lock/` |
-| `run_selection` returns picked=TODO-N (live) | tick lock held | phase running | `.hermes/decisions/<tick>.json`, `.hermes/phase_started/TODO-N.json` | `.hermes/tick.lock/` |
-| hermes chat success (non-terminal phase) | phase running | phase running (next) | (nothing externally visible) | — |
-| phase_5_review success (tests pass) | phase running | phase running (next) | `.hermes/outcomes/<tick>.json` (review_clean), review artifacts in `docs/pipeline/` | `.hermes/phase_started/TODO-N.json` |
-| phase_5_review failure (tests fail) | phase running | phase running (next) | `.hermes/outcomes/<tick>.json` (review_reverted_test_failure), worktree restored to pre-review HEAD | `.hermes/phase_started/TODO-N.json` |
-| phase_5_review timeout/error | phase running | failed | `.hermes/outcomes/<tick>.json` (review_timeout), worktree restored to pre-review HEAD, review artifacts | `.hermes/phase_started/TODO-N.json` |
-| hermes chat success (terminal phase) | phase running | ready_for_review | `.hermes/ready_for_review/todo-N.json` (carries tick_id) | `.hermes/phase_started/TODO-N.json` |
-| hermes chat failure | phase running | failed | `.hermes/ready_for_review/todo-N.json` with merge_status=failed, `.hermes/outcomes/<tick>.json` (failed_at_phase_*) | `.hermes/phase_started/TODO-N.json` |
-| Phase 9 typed-confirm match | ready_for_review (pending) | merged | RFR updated to merged, `.hermes/outcomes/<tick>.json` (merged) | — |
-| Phase 9 typed-confirm mismatch | ready_for_review (pending) | unchanged | — | — |
-| Stale marker sweep (read time) | phase running (orphaned) | absent | — | `.hermes/phase_started/TODO-N.json` |
+| prior tick has running/ready kanban tasks | tick lock held | tick lock released | — | `.hermes/tick.lock/` |
+| prior tick complete, recorded PR branch not merged | tick lock held | tick lock released | observed outcomes in `.hermes/outcomes/<tick>-phases.json` | `.hermes/tick.lock/` |
+| prior tick complete, recorded PR branch merged | tick lock held | selection allowed | observed outcomes in `.hermes/outcomes/<tick>-phases.json` | — |
+| `run_selection` returns picked=None | tick lock held | tick lock released | `.hermes/decisions/<tick>.json`, `.hermes/outcomes/<tick>-phases.json` (`picked_none`) | `.hermes/tick.lock/` |
+| `run_selection` returns picked=TODO-N | tick lock held | kanban phases registered | `.hermes/decisions/<tick>.json`, `.hermes/current_tick_id.txt`, `.hermes/outcomes/<tick>-phases.json` (`tick_started`) | `.hermes/tick.lock/` |
+| kanban phase reaches `done` | kanban task active | next task unblocked by kanban | `.hermes/outcomes/<tick>-phases.json` (`phase_complete`) | — |
+| kanban phase reaches `failed` or `archived` | kanban task active | tick failed | `.hermes/outcomes/<tick>-phases.json` (`failed_at_phase_*`) | — |
+| default Phase 8 completes PR handoff | final kanban task active | waiting for PR merge | `.hermes/pipeline_branch.txt`, `.hermes/outcomes/<tick>-phases.json` (`all_phases_complete`) | — |
+| legacy `phase_9_ship` gate is blocked and pre-gate work is done | prior tick in-flight | waiting for `tpo approve` | `.hermes/outcomes/<tick>-ship.json` | — |
+| legacy `tpo approve` succeeds | ship sidecar pending | merged | version files on PR branch, kanban gate task completed | `.hermes/outcomes/<tick>-ship.json` |
 | Prompt SHA mismatch | tick lock held | tick lock released | `.hermes/decisions/<tick>.json` (rationale=prompt_sha_mismatch), Slack alert | `.hermes/tick.lock/` |
 
 **Immutability invariant:** `.hermes/decisions/<tick>.json` is written exactly
 once. Outcomes attach via the sidecar; never edit the decision file.
 
-**No-progress definition:** a decision with `picked=None` AND
-`rationale` NOT starting with `prompt_sha_mismatch:` AND NOT starting with
-`tick_lock_held:`. These two reasons are config/race faults, not stalls.
+**No-progress definition:** a decision with `picked=None` writes a
+`picked_none` outcome and leaves the pipeline idle rather than stalled. A
+`tick_started` outcome without later terminal phase outcomes is treated as a
+stall so the circuit breaker can alert.

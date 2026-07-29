@@ -3,10 +3,16 @@
 `tpo tick` uses the Hermes kanban board as the source of truth for
 pipeline phase state. Instead of writing internal state files tracking which
 phase is active, executable phases are registered as kanban tasks with
-`--parent` dependency chains. Human gate phases are created blocked and
-detached from the parent chain. Kanban status queries (`get_todo_kanban_status`,
+`--parent` dependency chains. Gate phases, when a profile defines them, are
+created blocked and detached from the parent chain. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
+
+For the default `gstack` profile, completion of the terminal Phase 8 task means
+the branch was handed to a PR, not merged. `tpo tick` reads
+`.hermes/pipeline_branch.txt` and skips new selection while that PR is open,
+closed without merge, or temporarily unverifiable. Once GitHub reports the PR as
+`MERGED`, the next tick may select new work.
 
 ## Types
 
@@ -28,7 +34,7 @@ Terminal outcomes passed to `clear_active_task`. Each maps to a specific kanban 
 
 | Outcome | Kanban action | When used |
 |---------|---------------|-----------|
-| `merged` | `hermes kanban complete <task_id>` | TODO shipped successfully (Phase 9 merge) |
+| `merged` | `hermes kanban complete <task_id>` | TODO completed successfully |
 | `rejected` | `hermes kanban archive <task_id>` | TODO explicitly rejected by operator |
 | `abandoned` | `hermes kanban archive <task_id>` | Pipeline failed mid-execution (phase failure, convergence halt, timeout) |
 
@@ -76,7 +82,7 @@ Update the phase status for the active task. Called as pipeline progresses.
 
 ### `clear_active_task(project, *, outcome) -> SyncResult`
 
-Clear the active task. Called after Phase 8/9 or on pipeline failure.
+Clear the active task. Called after the terminal phase or on pipeline failure.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -139,8 +145,6 @@ tick starts
 [register_todo_phases] -- creates kanban tasks:
     phase_2_autoplan  <--parent--  phase_4_development  <--parent--  phase_5_review  <--parent--  phase_6_1_cso
     (running)                  (ready)                  (ready)                  (ready)
-    phase_9_ship
-    (blocked, no parent; manual approval only)
     |
     v  (phase_2 completes -> phase_4 transitions to running)
 [observe_outcomes] -- reads kanban status map, writes JSONL to .hermes/outcomes/
@@ -152,6 +156,9 @@ tick starts
 [all_phases_complete] -- checks if all kanban tasks are done/failed
     |
     v
+[PR handoff check] -- skips selection while recorded branch PR is not merged
+    |
+    v
 tick lock released (if complete) / skip (if in-flight)
 ```
 
@@ -160,8 +167,8 @@ tick lock released (if complete) / skip (if in-flight)
   from the board, not hidden in `.hermes/phase_started/` files.
 - The `--parent` dependency chain means kanban enforces sequential executable
   phase execution — the orchestrator doesn't need to manage phase ordering.
-- Human gate phases are not parented because parent completion would otherwise
-  auto-unblock the gate.
+- Gate phases are not parented because parent completion would otherwise
+  auto-unblock the gate. The default `gstack` profile has no gate phase.
 - `ready` status on the board means "blocked on parent" without the
   orchestrator needing to track inter-phase dependencies.
 
@@ -189,7 +196,7 @@ register_todo_phases(
 | `tick_id` | `str` | — | ULID tick ID. Used as part of `--idempotency-key` for dedup. |
 | `board_slug` | `str` | — | Kanban board slug (project slug). Passed to `hermes kanban` commands. |
 | `project_dir` | `str \| Path` | — | Project directory. Passed as `--workspace` to `hermes kanban`. |
-| `phases_path` | `str \| Path \| None` | Bundled package data | Path to `phases.yaml`. Defaults to the in-package copy resolved via `importlib.resources` (`hermes_pipeline/data/phases.yaml`), so it works from an installed wheel. |
+| `phases_path` | `str \| Path \| None` | Bundled package data | Path to `phases.yaml`. Defaults to the active profile's in-package copy resolved via `importlib.resources` (`hermes_pipeline/data/phase-profiles/gstack/phases.yaml` for the default profile), so it works from an installed wheel. |
 
 **Returns:** List of created task IDs in phase order.
 

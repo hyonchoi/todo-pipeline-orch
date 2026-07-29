@@ -472,6 +472,7 @@ def test_approve_refuses_when_no_gate_task(tmp_path, mocker):
 
 # --- Task 14: wire maybe_ship_ready into _tick_project ---
 
+
 def test_tick_project_calls_maybe_ship_ready_before_early_return(mocker, tmp_path):
     """maybe_ship_ready must run even when all_phases_complete is False."""
     import hermes_pipeline.cli as cli
@@ -500,6 +501,7 @@ def test_tick_project_calls_maybe_ship_ready_before_early_return(mocker, tmp_pat
     kwargs = called.call_args.kwargs
     assert kwargs["prior_tick_id"] == "01TICK"
     assert kwargs["project_slug"] == "demo"
+
 
 # --- Task 15: uncovered codepaths ---
 

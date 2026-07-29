@@ -1,7 +1,7 @@
 """Hermes pipeline orchestrator CLI.
 
-Subcommands: merge, approve, status, kill.
-Scheduling is owned by the Hermes command repo.
+Subcommands: tick, approve, init, doctor, config, skills, recover-counter, test.
+Scheduling is owned by Hermes kanban tasks.
 """
 
 from __future__ import annotations
@@ -226,7 +226,7 @@ def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
     parser = argparse.ArgumentParser(
         prog="tpo",
-        description="Hermes pipeline orchestrator: merge, approve, status, and kill commands.",
+        description="Hermes pipeline orchestrator: tick projects, manage pipeline setup, and handle legacy approval gates.",
     )
     parser.add_argument(
         "--version", action="version", version=f"%(prog)s {__version__}"
@@ -234,10 +234,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     subparsers = parser.add_subparsers(dest="command", help="Subcommand to execute")
 
-    # approve: Phase 9 ship gate — bump-in-PR, merge, complete gate
+    # approve: legacy ship gate — bump-in-PR, merge, complete gate
     approve_parser = subparsers.add_parser(
         "approve",
-        help="Ship a ready TODO: bump version in PR, merge to main, complete the gate",
+        help="Legacy helper: ship a TODO from an existing ship-gate sidecar",
     )
     approve_parser.add_argument("project", help="Project name")
     approve_parser.add_argument(
@@ -540,6 +540,162 @@ def _make_circuit_breaker(state_dir: Path, cb_cfg, slack_channel: str):
         alert_dedup_hours=cb_cfg.alert_dedup_hours,
         slack_channel=slack_channel,
     )
+
+
+def _has_pending_pr_handoff(
+    project_dir: Path, state_dir: Path, *, work_branch: str | None = None
+) -> tuple[bool, bool]:
+    """Return (pending, counts_as_no_progress) for a Phase 8 PR handoff."""
+    branch_file = state_dir / "pipeline_branch.txt"
+    if work_branch is None and not branch_file.exists():
+        log.warning(
+            "phase 8 handoff completed but %s is missing; leaving project in handoff",
+            branch_file,
+        )
+        return (True, True)
+
+    if work_branch is None:
+        work_branch = branch_file.read_text().strip()
+    if not work_branch:
+        log.warning(
+            "phase 8 handoff completed but %s is empty; leaving project in handoff",
+            branch_file,
+        )
+        return (True, True)
+
+    try:
+        result = _cli_sp.run(
+            ["gh", "pr", "view", work_branch, "--json", "state,baseRefName,headRefName"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (FileNotFoundError, _cli_sp.TimeoutExpired) as e:
+        log.info(
+            "project has PR handoff branch %s but merge state could not be "
+            "verified (%s); leaving project in handoff",
+            work_branch,
+            e,
+        )
+        return (True, True)
+
+    if result.returncode != 0:
+        log.warning(
+            "project has PR handoff branch %s but gh pr view failed: %s; "
+            "leaving project in handoff",
+            work_branch,
+            result.stderr.strip()[:200],
+        )
+        return (True, True)
+
+    try:
+        view = json.loads(result.stdout)
+        state = (view.get("state") or "").upper()
+        head_ref = view.get("headRefName") or ""
+    except json.JSONDecodeError:
+        log.warning(
+            "project has PR handoff branch %s but gh pr view returned "
+            "non-JSON; leaving project in handoff",
+            work_branch,
+        )
+        return (True, True)
+
+    if head_ref != work_branch:
+        log.warning(
+            "project has PR handoff branch %s but gh resolved head branch %s; "
+            "leaving project in handoff",
+            work_branch,
+            head_ref or "unknown",
+        )
+        return (True, True)
+
+    if state == "MERGED":
+        base_branch = view.get("baseRefName") or "main"
+        if _sync_project_to_base_after_handoff(project_dir, base_branch):
+            _clear_pr_handoff_state(state_dir)
+            return (False, False)
+        return (True, True)
+    if state == "OPEN":
+        return (True, False)
+    log.warning(
+        "project has PR handoff branch %s but PR state is %s; leaving project in handoff",
+        work_branch,
+        state or "unknown",
+    )
+    return (True, True)
+
+
+def _sync_project_to_base_after_handoff(project_dir: Path, base_branch: str) -> bool:
+    """Move a clean project checkout to the merged PR's updated base branch."""
+    try:
+        status = _cli_sp.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(project_dir),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (FileNotFoundError, _cli_sp.TimeoutExpired) as e:
+        log.warning("cannot verify project checkout cleanliness after PR handoff: %s", e)
+        return False
+
+    if status.returncode != 0:
+        log.warning(
+            "cannot verify project checkout cleanliness after PR handoff: %s",
+            status.stderr.strip()[:200],
+        )
+        return False
+    if status.stdout.strip():
+        log.warning(
+            "project checkout has uncommitted changes after PR handoff; "
+            "leaving project in handoff"
+        )
+        return False
+
+    commands = [
+        ["git", "fetch", "origin", base_branch],
+        ["git", "checkout", base_branch],
+        ["git", "merge", "--ff-only", f"origin/{base_branch}"],
+    ]
+    for cmd in commands:
+        try:
+            result = _cli_sp.run(
+                cmd,
+                cwd=str(project_dir),
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+            )
+        except (FileNotFoundError, _cli_sp.TimeoutExpired) as e:
+            log.warning("failed to sync project checkout after PR handoff: %s", e)
+            return False
+        if result.returncode != 0:
+            log.warning(
+                "failed to sync project checkout after PR handoff (%s): %s",
+                " ".join(cmd),
+                result.stderr.strip()[:200],
+            )
+            return False
+    return True
+
+
+def _clear_pr_handoff_state(state_dir: Path) -> None:
+    """Clear completed PR-handoff markers after the checkout is synced to base."""
+    for filename in ("pipeline_branch.txt", CURRENT_TICK_ID_FILE):
+        path = state_dir / filename
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as e:
+            log.warning("failed to clear completed PR handoff marker %s: %s", path, e)
+
+
+def _status_map_has_successful_pr_handoff(status_map: dict[str, str]) -> bool:
+    """True only after the default finish-branch phase completed successfully."""
+    return status_map.get("phase_8_finish_branch") == "done"
 
 
 def _persist_tick_id(
@@ -883,8 +1039,10 @@ def _tick_project(
     cb = _make_circuit_breaker(project_state, cb_cfg, slack_channel)
 
     if prior_tick_id is not None:
-        # Ship-gate: a blocked phase_9_ship makes all_phases_complete return
-        # False, so detect/alert "ready to ship" BEFORE the early-return below.
+        pr_handoff_resolved = False
+        # Legacy ship-gate compatibility: custom/older profiles can still have
+        # a blocked phase_9_ship. Detect and write the sidecar before the
+        # in-flight early return so `tpo approve` can finish those ticks.
         from . import ship
 
         ship.maybe_ship_ready(
@@ -895,7 +1053,25 @@ def _tick_project(
             slack_channel=slack_channel,
         )
 
-        if not all_phases_complete(
+        ship_sidecar = ship.read_sidecar(project_state, prior_tick_id)
+        if ship_sidecar is not None:
+            pending, counts_as_no_progress = _has_pending_pr_handoff(
+                project_dir, project_state, work_branch=ship_sidecar.work_branch
+            )
+            if pending:
+                cb.observe(
+                    picked=None,
+                    counts_as_no_progress=counts_as_no_progress,
+                )
+                log.info(
+                    "project %s: prior tick %s is waiting on PR handoff, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
+                return
+            pr_handoff_resolved = True
+
+        if not pr_handoff_resolved and not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
         ):
             log.info(
@@ -905,7 +1081,7 @@ def _tick_project(
             )
             return
 
-        # Prior tick complete — observe outcomes before new selection
+        # Prior tick complete — fail closed if status/outcome observation breaks.
         try:
             from .kanban_tasks import get_todo_kanban_status
 
@@ -915,6 +1091,25 @@ def _tick_project(
                 tick_id=prior_tick_id,
                 status_map=status_map,
             )
+            if (
+                not pr_handoff_resolved
+                and _status_map_has_successful_pr_handoff(status_map)
+            ):
+                pending, counts_as_no_progress = _has_pending_pr_handoff(
+                    project_dir, project_state
+                )
+                if pending:
+                    cb.observe(
+                        picked=None,
+                        counts_as_no_progress=counts_as_no_progress,
+                    )
+                    log.info(
+                        "project %s: prior tick %s is waiting on PR handoff, skipping",
+                        project_slug,
+                        prior_tick_id,
+                    )
+                    return
+
             cb.observe_from_outcomes(
                 state_dir=project_state,
                 prior_tick_id=prior_tick_id,
@@ -926,6 +1121,8 @@ def _tick_project(
                 prior_tick_id,
                 e,
             )
+            cb.observe(picked=None, counts_as_no_progress=True)
+            return
 
     # Step 3: Build context & run selection
     todos_path = project_dir / "TODOS.md"
