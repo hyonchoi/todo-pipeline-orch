@@ -167,7 +167,6 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
             phase_key="phase_1",
             name="One",
             body="already rendered $body",
-            tools="Read",
             turns=5,
             gate=False,
         ),
@@ -175,7 +174,6 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
             phase_key="phase_2",
             name="Two",
             body="second body",
-            tools="Read,Write",
             turns=10,
             gate=False,
         ),
@@ -217,7 +215,7 @@ def test_create_prepared_archives_prior_tasks_on_process_failure(
     )
 
     prepared = [
-        PreparedPhaseTask(f"phase_{index}", str(index), "body", "Read", 5, False)
+        PreparedPhaseTask(f"phase_{index}", str(index), "body", 5, False)
         for index in (1, 2)
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
@@ -248,7 +246,7 @@ def test_create_prepared_recovers_and_archives_task_after_timeout(tmp_path, mock
     )
 
     prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+        PreparedPhaseTask("phase_1", "One", "body", 5, False)
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
@@ -289,7 +287,6 @@ def test_create_prepared_resolves_task_from_snapshot_when_recovery_is_uncertain(
             "phase_1",
             "One",
             '{"phase_key": "phase_1", "tick_id": "01CLIENT"}\nbody',
-            "Read",
             5,
             False,
         )
@@ -352,8 +349,8 @@ def test_create_prepared_rejects_malformed_snapshot_and_archives_known_tasks(
     )
 
     prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False),
-        PreparedPhaseTask("phase_2", "Two", "body", "Read", 5, False),
+        PreparedPhaseTask("phase_1", "One", "body", 5, False),
+        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
@@ -375,6 +372,59 @@ def test_create_prepared_rejects_malformed_snapshot_and_archives_known_tasks(
     assert run.call_args_list[4].args[0][-1] == "t_00000001"
 
 
+@pytest.mark.parametrize(
+    "snapshot_result",
+    [
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=10),
+        OSError("hermes unavailable"),
+        None,
+        "not-json",
+        "[null]",
+        '[{"body": null}]',
+    ],
+)
+def test_create_prepared_snapshot_failures_archive_only_known_tasks(
+    tmp_path, mocker, snapshot_result
+):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", "body", 5, False),
+        PreparedPhaseTask("phase_2", "Two", "body", 5, False),
+    ]
+    if isinstance(snapshot_result, BaseException):
+        snapshot_effect = snapshot_result
+    elif snapshot_result is None:
+        snapshot_effect = mocker.Mock(returncode=1, stdout="", stderr="failed")
+    else:
+        snapshot_effect = mocker.Mock(
+            returncode=0,
+            stdout=snapshot_result,
+            stderr="",
+        )
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        subprocess.TimeoutExpired(cmd=["hermes"], timeout=30),
+        snapshot_effect,
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+
+    with pytest.raises(RuntimeError, match=r"phase_2.*Hermes process"):
+        create_prepared_todo_phases(
+            prepared=prepared,
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+        )
+
+    assert run.call_args_list[-1].args[0][-1] == "t_00000001"
+
+
 @pytest.mark.parametrize("task_body", ["null\nbody", "[]\nbody", '"unexpected"\nbody'])
 def test_create_prepared_rejects_nonmapping_snapshot_headers(
     tmp_path, mocker, task_body
@@ -385,7 +435,7 @@ def test_create_prepared_rejects_nonmapping_snapshot_headers(
     )
 
     prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+        PreparedPhaseTask("phase_1", "One", "body", 5, False)
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
@@ -418,7 +468,7 @@ def test_create_prepared_recovers_and_archives_task_after_nonzero_result(
     )
 
     prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+        PreparedPhaseTask("phase_1", "One", "body", 5, False)
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
@@ -448,7 +498,7 @@ def test_create_prepared_recovers_and_archives_task_after_invalid_output(
     )
 
     prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", "Read", 5, False)
+        PreparedPhaseTask("phase_1", "One", "body", 5, False)
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
     run.side_effect = [
@@ -488,7 +538,7 @@ def test_create_prepared_rejects_malformed_task_id_and_archives_prior_tasks(
     )
 
     prepared = [
-        PreparedPhaseTask(f"phase_{index}", str(index), "body", "Read", 5, False)
+        PreparedPhaseTask(f"phase_{index}", str(index), "body", 5, False)
         for index in (1, 2)
     ]
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")

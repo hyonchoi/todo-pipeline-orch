@@ -67,7 +67,6 @@ class PreparedPhaseTask:
     phase_key: str
     name: str
     body: str
-    tools: str
     turns: int
     gate: bool
 
@@ -210,7 +209,6 @@ def prepare_todo_phases(
                     template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
                 )
             ),
-            tools=phase.tools,
             turns=phase.turns,
             gate=phase.gate,
         )
