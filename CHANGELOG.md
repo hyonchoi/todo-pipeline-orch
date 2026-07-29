@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Picked-none ticks now log the selection rationale so operators can see why the circuit breaker observed no progress.
 - Eval docs and runner now use the bundled selection prompt by default while still allowing explicit prompt overrides.
 - Ticks now skip new TODO selection while the recorded PR handoff branch is open, closed without merge, or cannot be verified as merged.
+- Completed PR handoffs now fail closed when branch state is missing, stale, or unreadable, preventing new TODO work from stacking on an unverified PR branch.
 - Legacy/custom `phase_9_ship` profiles still create ship sidecars before the in-flight early return, so `tpo approve` can finish old gate-based ticks.
 
 ## [0.6.4] - 2026-07-28
