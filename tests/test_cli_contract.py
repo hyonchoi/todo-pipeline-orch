@@ -354,7 +354,7 @@ class TestDoctorProfileAware:
         ("prompt_client", "discovery_root", "invocation"),
         [
             ("claude", ".claude/skills", "/autoplan"),
-            ("codex", ".agents/skills", "$autoplan"),
+            ("codex", ".codex/skills", "$autoplan"),
         ],
     )
     def test_doctor_reports_conditional_prerequisites_without_local_failure(

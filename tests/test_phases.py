@@ -76,10 +76,18 @@ def test_gstack_prerequisites_are_conditional_and_verified():
     }
     for item in metadata.skills:
         assert item.support == "Conditional"
-        assert item.clients["claude"].discovery_root == ".claude/skills"
         assert item.clients["claude"].invocation == f"/{item.skill_id}"
-        assert item.clients["codex"].discovery_root == ".agents/skills"
         assert item.clients["codex"].invocation == f"${item.skill_id}"
+        if item.distribution_owner == "gstack":
+            assert item.clients["claude"].discovery_root == ".claude/skills"
+            assert item.clients["codex"].discovery_root == ".codex/skills"
+        else:
+            assert "claude-plugins-official/superpowers" in (
+                item.clients["claude"].discovery_root or ""
+            )
+            assert "openai-curated-remote/superpowers" in (
+                item.clients["codex"].discovery_root or ""
+            )
 
 
 def test_agent_skills_prerequisites_do_not_guess_external_contracts():
@@ -217,7 +225,7 @@ VALID_PREREQUISITE_METADATA = {
                     "invocation": "/review",
                 },
                 "codex": {
-                    "discovery_root": ".agents/skills",
+                    "discovery_root": ".codex/skills",
                     "invocation": "$review",
                 },
             },

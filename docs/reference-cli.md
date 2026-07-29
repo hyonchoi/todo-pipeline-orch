@@ -203,15 +203,15 @@ Profile prerequisites come from the package metadata used by `tpo doctor`:
 
 | Profile | Referenced skill | Distribution owner | Claude discovery / invocation | Codex discovery / invocation | Support |
 |---|---|---|---|---|---|
-| `gstack` | `autoplan` | gstack | `.claude/skills` / `/autoplan` | `.agents/skills` / `$autoplan` | Conditional |
-| `gstack` | `writing-plans` | superpowers | `.claude/skills` / `/writing-plans` | `.agents/skills` / `$writing-plans` | Conditional |
-| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` / `/subagent-driven-development` | `.agents/skills` / `$subagent-driven-development` | Conditional |
-| `gstack` | `review` | gstack | `.claude/skills` / `/review` | `.agents/skills` / `$review` | Conditional |
-| `gstack` | `cso` | gstack | `.claude/skills` / `/cso` | `.agents/skills` / `$cso` | Conditional |
-| `gstack` | `qa` | gstack | `.claude/skills` / `/qa` | `.agents/skills` / `$qa` | Conditional |
-| `gstack` | `document-release` | gstack | `.claude/skills` / `/document-release` | `.agents/skills` / `$document-release` | Conditional |
-| `gstack` | `document-generate` | gstack | `.claude/skills` / `/document-generate` | `.agents/skills` / `$document-generate` | Conditional |
-| `gstack` | `ship` | gstack | `.claude/skills` / `/ship` | `.agents/skills` / `$ship` | Conditional |
+| `gstack` | `autoplan` | gstack | `.claude/skills` / `/autoplan` | `.codex/skills` / `$autoplan` | Conditional |
+| `gstack` | `writing-plans` | superpowers | `~/.claude/plugins/cache/claude-plugins-official/superpowers/*/skills` / `/writing-plans` | `~/.config/codex/plugins/cache/openai-curated-remote/superpowers/*/skills` / `$writing-plans` | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | `~/.claude/plugins/cache/claude-plugins-official/superpowers/*/skills` / `/subagent-driven-development` | `~/.config/codex/plugins/cache/openai-curated-remote/superpowers/*/skills` / `$subagent-driven-development` | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` / `/review` | `.codex/skills` / `$review` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` / `/cso` | `.codex/skills` / `$cso` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` / `/qa` | `.codex/skills` / `$qa` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` / `/document-release` | `.codex/skills` / `$document-release` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` / `/document-generate` | `.codex/skills` / `$document-generate` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` / `/ship` | `.codex/skills` / `$ship` | Conditional |
 | `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |

@@ -82,15 +82,15 @@ cannot turn their external installation into a hermetic package test.
 
 | Profile | Referenced skill | Distribution owner | Claude discovery | Codex discovery | Support |
 |---|---|---|---|---|---|
-| `gstack` | `autoplan` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `writing-plans` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `review` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `cso` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `qa` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-release` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-generate` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `ship` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `autoplan` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `writing-plans` | superpowers | official Claude plugin | curated Codex plugin | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | official Claude plugin | curated Codex plugin | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
 | `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
@@ -129,7 +129,8 @@ explicitly or by matching their descriptions. Their explicit invocation and
 repository discovery conventions differ:
 
 - Claude Code: `/skill-name`, with project skills under `.claude/skills/`.
-- Codex: `$skill-name`, with repository skills under `.agents/skills/`.
+- Codex: `$skill-name`, with gstack skills under `.codex/skills/` and curated
+  plugins in Codex's plugin registry.
 
 The common skill standard supports a shared phase workflow. The differing
 invocation vocabulary justifies render-time client fields rather than duplicate
