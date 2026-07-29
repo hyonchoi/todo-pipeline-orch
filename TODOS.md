@@ -2,7 +2,7 @@
 
 ## Metadata
 
-NEXT_TODO_ID: 42
+NEXT_TODO_ID: 43
 
 ## Entry Schema
 
@@ -90,3 +90,12 @@ NEXT_TODO_ID: 42
   - **Depends on:** (none)
   - **Assumptions:** Initial supported values are `claude` and `codex`; the setting is global, while phase profile and Hermes assignee/profile concepts retain their existing meanings.
   - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/global-agent-client-selection`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+
+- [ ] **TODO-42: Add per-project prompt client overrides** — Support mixed Claude/Codex worker fleets in one project scan
+  - **What:** Add an optional per-project `prompt_client` override, with the global value as default; define contract precedence, migration, doctor output, and multi-project tests.
+  - **Why:** Allow one TPO scan to support projects whose workers expect different Claude/Codex prompt vocabulary.
+  - **Pros:** Supports mixed worker estates without separate TPO installations or separate `projects_dir` roots.
+  - **Cons:** Adds contract schema/version and migration decisions plus another configuration-precedence layer.
+  - **Context:** `docs/gstack/hyonchoi-main-design-20260729-010845.md`
+  - **Depends on:** `TODO-41`
+  - **Decisions:** Priority `P3`, Effort `M`, Phase `2 (Design)`, Branch `feature/per-project-prompt-client`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
