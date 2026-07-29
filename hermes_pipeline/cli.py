@@ -740,6 +740,26 @@ def _persist_tick_id(
         log.warning("failed to write tick_started sentinel: %s", e)
 
 
+def _record_failed_to_spawn(
+    project_state: Path,
+    tick_id: str,
+    todo_id: str,
+    error: Exception,
+) -> None:
+    """Record a failed phase spawn without masking the primary failure."""
+    try:
+        from .decision.store import append_outcome
+
+        append_outcome(
+            project_state,
+            tick_id,
+            outcome="failed_to_spawn",
+            detail={"todo_id": todo_id, "error": str(error)[:500]},
+        )
+    except Exception as sidecar_exc:
+        log.warning("failed to write outcome sidecar: %s", sidecar_exc)
+
+
 def _rotate_projects(
     projects: list[tuple[Path, dict | None]],
     state_dir: Path,
@@ -1247,17 +1267,7 @@ def _tick_project(
             prompt_client=config.prompt_client,
         )
     except PhasePromptRenderError as exc:
-        try:
-            from .decision.store import append_outcome
-
-            append_outcome(
-                project_state,
-                tick_id,
-                outcome="failed_to_spawn",
-                detail={"todo_id": picked, "error": str(exc)[:500]},
-            )
-        except Exception as sidecar_exc:
-            log.warning("failed to write outcome sidecar: %s", sidecar_exc)
+        _record_failed_to_spawn(project_state, tick_id, picked, exc)
         log.error(
             "project %s: phase prompt preparation failed: %s",
             project_slug,
@@ -1287,18 +1297,7 @@ def _tick_project(
         )
     except RuntimeError as e:
         log.error("project %s: kanban registration failed: %s", project_slug, e)
-        # Write failure outcome so the circuit breaker knows
-        try:
-            from .decision.store import append_outcome
-
-            append_outcome(
-                project_state,
-                tick_id,
-                outcome="failed_to_spawn",
-                detail={"todo_id": picked, "error": str(e)[:500]},
-            )
-        except Exception as se:
-            log.warning("failed to write outcome sidecar: %s", se)
+        _record_failed_to_spawn(project_state, tick_id, picked, e)
         raise
 
     # Observe circuit breaker
