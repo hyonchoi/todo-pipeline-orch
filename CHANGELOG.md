@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-29
+
+### Added
+- Phase prompts can target Claude or Codex while preserving strict, client-aware skill invocation syntax.
+- Agent-client prerequisites and release qualification evidence now cover supported gstack and Superpowers workflows.
+- Hermes phase registration now uses a non-spawnable barrier with durable crash recovery.
+
+### Changed
+- Phase prompts are fully rendered before tick persistence or Hermes task creation.
+- Release qualification evidence distinguishes candidate source snapshots from release-final artifacts.
+
+### Fixed
+- Uncertain Hermes task creation, cleanup, and barrier completion now fail closed without releasing partial task chains.
+- Prior-tick reconciliation runs before new TODO selection and safely retries interrupted registration commits.
+
 ## [0.6.6] - 2026-07-28
 
 ### Added

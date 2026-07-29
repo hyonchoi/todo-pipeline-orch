@@ -147,3 +147,24 @@ def test_candidate_evidence_does_not_claim_a_final_release():
         assert "`/ship`" in document
         assert "candidate/source-snapshot" in document
         assert "release commit" in document
+
+
+@pytest.mark.parametrize("client", ("claude", "codex"))
+def test_release_final_artifact_matches_selected_version_and_candidate(client: str):
+    version = Path("VERSION").read_text().strip()
+    assert re.fullmatch(r"\d+\.\d+\.\d+", version)
+
+    candidate = (CANDIDATE_ROOT / f"gstack-{client}.md").read_text()
+    release = (EVIDENCE_ROOT / version / f"gstack-{client}.md").read_text()
+
+    assert _field(release, "Evidence status") == "release-final"
+    assert _field(release, "Release") == version
+    assert _field(release, "Source VERSION") == version
+    assert _field(release, "Source commit") == _field(candidate, "Source commit")
+    assert _field(release, "Profile/client") == f"gstack / {client}"
+    assert _field(release, "Result") == "PASS"
+    for heading in ("gstack skills", "superpowers plugin"):
+        assert _section(release, heading) == _section(candidate, heading)
+    assert release.split("## Invocation forms", 1)[1] == candidate.split(
+        "## Invocation forms", 1
+    )[1]
