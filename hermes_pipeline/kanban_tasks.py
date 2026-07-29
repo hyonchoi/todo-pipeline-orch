@@ -94,6 +94,16 @@ class PendingTaskCleanup:
     task_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class PendingBarrierCommit:
+    """A durable phase chain whose registration barrier still needs commit."""
+
+    tenant: str
+    tick_id: str
+    barrier_task_id: str
+    cleanup_task_ids: tuple[str, ...]
+
+
 def _pending_task_create_marker(project_dir: str | Path) -> Path:
     return Path(project_dir) / ".hermes" / "outcomes" / _PENDING_TASK_CREATE_FILE
 
@@ -158,9 +168,42 @@ def _persist_pending_task_cleanup(
     _atomic_write_text(marker, payload)
 
 
+def _pending_barrier_commit_payload(
+    pending: PendingBarrierCommit,
+) -> dict[str, object]:
+    """Validate and serialize a registration commit awaiting confirmation."""
+    if not all(
+        isinstance(value, str) and value for value in (pending.tenant, pending.tick_id)
+    ):
+        raise ValueError("pending barrier-commit fields must be nonempty strings")
+    task_ids = (pending.barrier_task_id, *pending.cleanup_task_ids)
+    if not pending.cleanup_task_ids or not all(
+        isinstance(task_id, str)
+        and re.fullmatch(r"t_[0-9a-f]{8}", task_id) is not None
+        for task_id in task_ids
+    ):
+        raise ValueError("pending barrier-commit IDs must be valid Hermes IDs")
+    return {
+        "tenant": pending.tenant,
+        "tick_id": pending.tick_id,
+        "barrier_task_id": pending.barrier_task_id,
+        "cleanup_task_ids": list(pending.cleanup_task_ids),
+    }
+
+
+def _persist_pending_barrier_commit(
+    project_dir: str | Path, pending: PendingBarrierCommit
+) -> None:
+    """Persist the commit intent before completing the remote barrier."""
+    marker = _pending_task_create_marker(project_dir)
+    payload = json.dumps(_pending_barrier_commit_payload(pending), sort_keys=True)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(marker, payload)
+
+
 def _load_pending_task_state(
     project_dir: str | Path,
-) -> PendingTaskCreate | PendingTaskCleanup | None:
+) -> PendingTaskCreate | PendingTaskCleanup | PendingBarrierCommit | None:
     """Load valid pending create or cleanup state, failing closed if malformed."""
     marker = _pending_task_create_marker(project_dir)
     try:
@@ -169,6 +212,30 @@ def _load_pending_task_state(
         return None
     if not isinstance(payload, dict):
         return None
+    if set(payload) == {
+        "tenant",
+        "tick_id",
+        "barrier_task_id",
+        "cleanup_task_ids",
+    }:
+        tenant = payload["tenant"]
+        tick_id = payload["tick_id"]
+        barrier_task_id = payload["barrier_task_id"]
+        task_ids = payload["cleanup_task_ids"]
+        if not all(
+            isinstance(value, str) and value
+            for value in (tenant, tick_id, barrier_task_id)
+        ) or not isinstance(task_ids, list):
+            return None
+        if not task_ids or not all(
+            isinstance(task_id, str)
+            and re.fullmatch(r"t_[0-9a-f]{8}", task_id) is not None
+            for task_id in (barrier_task_id, *task_ids)
+        ):
+            return None
+        return PendingBarrierCommit(
+            tenant, tick_id, barrier_task_id, tuple(task_ids)
+        )
     if set(payload) == {"tenant", "tick_id", "cleanup_task_ids"}:
         tenant = payload["tenant"]
         tick_id = payload["tick_id"]
@@ -216,7 +283,7 @@ def _load_pending_task_create(project_dir: str | Path) -> PendingTaskCreate | No
 
 def _clear_pending_task_state(
     project_dir: str | Path,
-    pending: PendingTaskCreate | PendingTaskCleanup,
+    pending: PendingTaskCreate | PendingTaskCleanup | PendingBarrierCommit,
 ) -> bool:
     """Remove a pending marker only when it still describes this state."""
     if _load_pending_task_state(project_dir) != pending:
@@ -242,6 +309,27 @@ def reconcile_pending_task_create(project_dir: str | Path) -> bool:
     pending = _load_pending_task_state(project_dir)
     if pending is None:
         return not _pending_task_create_marker(project_dir).exists()
+    if isinstance(pending, PendingBarrierCommit):
+        barrier_status = _task_status_in_snapshot(
+            tenant=pending.tenant,
+            task_id=pending.barrier_task_id,
+        )
+        if barrier_status == "done":
+            return _clear_pending_task_state(project_dir, pending)
+        if barrier_status in {"ready", "todo"}:
+            try:
+                _complete_registration_barrier(pending.barrier_task_id)
+            except RuntimeError:
+                return False
+            return _clear_pending_task_state(project_dir, pending)
+        if barrier_status in {"failed", "archived"}:
+            cleanup = PendingTaskCleanup(
+                pending.tenant,
+                pending.tick_id,
+                pending.cleanup_task_ids,
+            )
+            return _persist_and_archive_cleanup(project_dir, cleanup)
+        return False
     if isinstance(pending, PendingTaskCleanup):
         cleanup = pending
     else:
@@ -321,6 +409,18 @@ def _list_task_snapshot(tenant: str) -> list[dict[str, object]] | None:
     if not isinstance(tasks, list):
         return None
     return [task for task in tasks if isinstance(task, dict)]
+
+
+def _task_status_in_snapshot(*, tenant: str, task_id: str) -> str | None:
+    """Return a task's status from a complete snapshot, or None if uncertain."""
+    tasks = _list_task_snapshot(tenant)
+    if tasks is None:
+        return None
+    for task in tasks:
+        if task.get("id") == task_id:
+            status = task.get("status")
+            return status if isinstance(status, str) else None
+    return None
 
 
 def _find_task_id_in_snapshot(
@@ -772,23 +872,35 @@ def create_prepared_todo_phases(
             f"{exc}{cleanup_detail}"
         ) from exc
 
-    if not _clear_pending_task_state(project_dir, cleanup):
+    commit_pending = PendingBarrierCommit(
+        tenant=board_slug,
+        tick_id=tick_id,
+        barrier_task_id=barrier_id,
+        cleanup_task_ids=cleanup.task_ids,
+    )
+    try:
+        _persist_pending_barrier_commit(project_dir, commit_pending)
+    except OSError as exc:
         cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
         cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
         raise RuntimeError(
-            f"failed to clear pre-commit cleanup state for tick {tick_id}"
-            f"{cleanup_detail}"
-        )
+            f"failed to persist barrier commit state for tick {tick_id}: "
+            f"{exc}{cleanup_detail}"
+        ) from exc
 
     try:
         _complete_registration_barrier(barrier_id)
     except Exception as exc:
-        cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
-        cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
         raise RuntimeError(
             f"failed to commit durable kanban chain for tick {tick_id}: "
-            f"{exc}{cleanup_detail}"
+            f"{exc}; barrier commit remains pending"
         ) from exc
+
+    if not _clear_pending_task_state(project_dir, commit_pending):
+        raise RuntimeError(
+            f"committed durable kanban chain for tick {tick_id}, but failed "
+            "to clear barrier commit state; reconciliation remains pending"
+        )
 
     return phase_task_ids
 

@@ -50,11 +50,13 @@ infrastructure barrier is intentionally omitted.
 ## Durable Recovery State
 
 The atomic marker at
-`<project>/.hermes/outcomes/pending-task-create.json` has two forms:
+`<project>/.hermes/outcomes/pending-task-create.json` has three forms:
 
 - Pending create: tenant, tick ID, current phase key, and known IDs in creation
   order.
 - Cleanup-only: tenant, tick ID, and every task ID in required cleanup order.
+- Barrier-commit pending: tenant, tick ID, barrier ID, and the child-first
+  cleanup IDs retained until remote completion is confirmed.
 
 After each validated create, registration writes cleanup-only state in reverse
 creation order, which is child-first and leaves the barrier last. Before the
@@ -78,15 +80,18 @@ incomplete.
 
 At the start of every later project tick, reconciliation runs before prior-tick
 processing or selection. Unresolved creation, malformed state, incomplete
-cleanup, or marker-removal failure skips that project tick.
+cleanup, uncertain barrier status, or marker-removal failure skips that project
+tick. A `done` barrier clears commit-pending state; a `ready` or `todo` barrier
+retries completion.
 
 ## Failure Handling
 
-- Sentinel, sticky-block, and barrier-completion failures use the already
-  durable child-first cleanup record.
-- Before barrier completion, registration clears the pre-commit cleanup marker.
-  If completion then fails or is uncertain, it recreates the same ordered
-  cleanup state before archiving.
+- Sentinel and sticky-block failures use the already durable child-first cleanup
+  record.
+- Before barrier completion, registration atomically replaces cleanup state
+  with barrier-commit-pending state. It clears that state only after completion
+  succeeds. An uncertain completion remains retryable instead of risking cleanup
+  of a chain whose barrier may already be done.
 - Snapshot status is authoritative. Archive return code and stderr are logged
   but cannot independently prove cleanup.
 - Storage failures fail closed. They never turn an uncertain registration into
@@ -104,8 +109,8 @@ Regression coverage proves:
   and then be cleaned child-first.
 - Already-archived tasks satisfy cleanup.
 - A local phase-2 `OSError` becomes cleanup-only state and later clears.
-- Barrier completion failure retains ordered cleanup state when cleanup is
-  incomplete.
+- Barrier completion failure retains commit-pending state and later retries or
+  accepts an already completed barrier.
 - Deferred reconciliation blocks later ticks.
 - A live optional Hermes CLI test proves the nonspawnable barrier contract in an
   isolated `HERMES_HOME`; it skips with an explicit reason only when Hermes is

@@ -259,11 +259,13 @@ so cleanup is always child-first and the barrier is last.
 After every task is known, the orchestrator atomically writes
 `<project>/.hermes/outcomes/expected-phases.json`. This sentinel lists the full
 expected chain and lets completion checks reject a partial board snapshot. It
-then clears the pre-commit cleanup marker and completes the registration
-barrier. Completing the barrier moves the first executable from `todo` to
-`ready`; the remaining executable tasks stay `todo` until their parents finish.
-Gate tasks are detached and receive `hermes kanban block --kind needs_input`, so
-their block is independent of parent completion.
+then replaces the cleanup marker with a barrier-commit-pending marker and
+completes the registration barrier. The marker spans that remote mutation and
+is cleared only after success. Completing the barrier moves the first executable
+from `todo` to `ready`; the remaining executable tasks stay `todo` until their
+parents finish. Gate tasks are detached and receive
+`hermes kanban block --kind needs_input`, so their block is independent of
+parent completion.
 
 An inconclusive create is fail-closed. The registration call retries the same
 idempotency key and takes a snapshot; if the task is still not visible, the
@@ -273,7 +275,9 @@ the orchestrator reads that marker. If the current task becomes visible, its ID
 is prepended to the cleanup list; cleanup then archives tasks child-first. If it
 is still invisible, the known parents remain untouched and the project stays
 skipped. An `OSError` while creating records only IDs known to exist in
-cleanup-only mode.
+cleanup-only mode. For barrier-commit-pending state, reconciliation accepts a
+snapshot-confirmed `done` barrier, retries completion from `ready` or `todo`,
+and otherwise fails closed.
 
 Archive command output is not treated as proof. Recovery refreshes a tenant
 snapshot with archived tasks included and removes the marker only when every
@@ -356,7 +360,7 @@ barrier ID is not returned.
 
 **Raises:** `RuntimeError` if Hermes creation, gate blocking, sentinel
 persistence, barrier completion, or confirmed cleanup fails. Known tasks remain
-in the durable cleanup marker until an archived snapshot confirms them.
+in durable cleanup or barrier-commit-pending state until recovery is confirmed.
 
 The function first creates an unassigned, non-goal registration barrier. For
 each prepared phase, it then runs `hermes kanban create` with:

@@ -317,8 +317,8 @@ def test_local_phase_two_oserror_becomes_cleanup_only_and_later_clears(
     assert not marker.exists()
 
 
-def test_barrier_completion_failure_retains_ordered_cleanup(tmp_path, mocker):
-    """A failed commit point must leave child-first durable recovery state."""
+def test_barrier_completion_failure_retains_commit_pending(tmp_path, mocker):
+    """An inconclusive commit call must remain retryable without cleanup."""
     from hermes_pipeline.kanban_tasks import (
         PreparedPhaseTask,
         create_prepared_todo_phases,
@@ -361,9 +361,145 @@ def test_barrier_completion_failure_retains_ordered_cleanup(tmp_path, mocker):
     assert json.loads(marker.read_text(encoding="utf-8")) == {
         "tenant": "demo",
         "tick_id": "01CLIENT",
+        "barrier_task_id": "t_0000000b",
         "cleanup_task_ids": ["t_00000001", "t_0000000b"],
     }
-    archive.assert_called_once_with(
-        ["t_00000001", "t_0000000b"],
-        tenant="demo",
+    archive.assert_not_called()
+
+
+def test_registration_persists_commit_pending_until_barrier_completes(
+    tmp_path, mocker
+):
+    """The crash-recovery marker must span the remote commit mutation."""
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
     )
+
+    marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    ids_by_key = {
+        "__registration_barrier__": "t_0000000b",
+        "phase_1": "t_00000001",
+    }
+
+    def run(cmd, **_kwargs):
+        if cmd[:3] == ["hermes", "kanban", "create"]:
+            key = cmd[cmd.index("--idempotency-key") + 1].split(":", 1)[1]
+            return mocker.Mock(
+                returncode=0,
+                stdout=json.dumps({"id": ids_by_key[key]}),
+                stderr="",
+            )
+        if cmd[:3] == ["hermes", "kanban", "complete"]:
+            assert json.loads(marker.read_text(encoding="utf-8")) == {
+                "tenant": "demo",
+                "tick_id": "01CLIENT",
+                "barrier_task_id": "t_0000000b",
+                "cleanup_task_ids": ["t_00000001", "t_0000000b"],
+            }
+            return mocker.Mock(returncode=0, stdout="", stderr="")
+        raise AssertionError(f"unexpected Hermes command: {cmd}")
+
+    mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run", side_effect=run)
+
+    assert create_prepared_todo_phases(
+        prepared=[PreparedPhaseTask("phase_1", "One", "body", 5, False)],
+        tick_id="01CLIENT",
+        board_slug="demo",
+        project_dir=tmp_path,
+    ) == ["t_00000001"]
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("barrier_status", ["ready", "todo"])
+def test_reconcile_commit_pending_retries_ready_barrier(
+    tmp_path, mocker, barrier_status
+):
+    """A crash before completion is recovered by retrying the commit point."""
+    from hermes_pipeline.kanban_tasks import (
+        PendingBarrierCommit,
+        _persist_pending_barrier_commit,
+        reconcile_pending_task_create,
+    )
+
+    pending = PendingBarrierCommit(
+        "demo",
+        "01CLIENT",
+        "t_0000000b",
+        ("t_00000001", "t_0000000b"),
+    )
+    _persist_pending_barrier_commit(tmp_path, pending)
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._task_status_in_snapshot",
+        return_value=barrier_status,
+    )
+    complete = mocker.patch(
+        "hermes_pipeline.kanban_tasks._complete_registration_barrier"
+    )
+
+    assert reconcile_pending_task_create(tmp_path)
+    complete.assert_called_once_with("t_0000000b")
+    assert not (
+        tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    ).exists()
+
+
+def test_reconcile_commit_pending_accepts_already_completed_barrier(
+    tmp_path, mocker
+):
+    """A crash after remote completion clears the durable marker on retry."""
+    from hermes_pipeline.kanban_tasks import (
+        PendingBarrierCommit,
+        _persist_pending_barrier_commit,
+        reconcile_pending_task_create,
+    )
+
+    pending = PendingBarrierCommit(
+        "demo",
+        "01CLIENT",
+        "t_0000000b",
+        ("t_00000001", "t_0000000b"),
+    )
+    _persist_pending_barrier_commit(tmp_path, pending)
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._task_status_in_snapshot",
+        return_value="done",
+    )
+    complete = mocker.patch(
+        "hermes_pipeline.kanban_tasks._complete_registration_barrier"
+    )
+
+    assert reconcile_pending_task_create(tmp_path)
+    complete.assert_not_called()
+
+
+def test_reconcile_commit_pending_fails_closed_on_uncertain_status(
+    tmp_path, mocker
+):
+    """An unreadable or unexpected barrier state must retain recovery state."""
+    from hermes_pipeline.kanban_tasks import (
+        PendingBarrierCommit,
+        _persist_pending_barrier_commit,
+        reconcile_pending_task_create,
+    )
+
+    pending = PendingBarrierCommit(
+        "demo",
+        "01CLIENT",
+        "t_0000000b",
+        ("t_00000001", "t_0000000b"),
+    )
+    _persist_pending_barrier_commit(tmp_path, pending)
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._task_status_in_snapshot",
+        return_value=None,
+    )
+    complete = mocker.patch(
+        "hermes_pipeline.kanban_tasks._complete_registration_barrier"
+    )
+
+    assert not reconcile_pending_task_create(tmp_path)
+    complete.assert_not_called()
+    assert (
+        tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
+    ).exists()
