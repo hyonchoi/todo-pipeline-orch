@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .config import PromptClient
+
 log = logging.getLogger(__name__)
 
 
@@ -263,6 +265,7 @@ def _poll_kanban_phases(
     poll_interval: float = 5.0,
     max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
     phases: list[Phase] | None = None,
+    prompt_client: PromptClient = "claude",
 ) -> bool:
     """Poll kanban-as-scheduler phases to completion.
 
@@ -296,6 +299,7 @@ def _poll_kanban_phases(
         project_dir=project_dir,
         phases_path=phases_path,
         assignee=assignee,
+        prompt_client=prompt_client,
     )
 
     # Intentionally unguarded — fail fast before polling begins, matching
@@ -550,7 +554,7 @@ def run_harness(
     keep_dir: bool,
     timeout: int,
     convergence_threshold: int,
-    config: Any,
+    config: Any = None,
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
     from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
@@ -562,6 +566,8 @@ def run_harness(
         summarize_diff,
         summarize_report,
     )
+
+    prompt_client = getattr(config, "prompt_client", "claude")
 
     preflight_check()
 
@@ -624,6 +630,7 @@ def run_harness(
                     monitor=monitor,
                     detector=detector,
                     phases=phases,
+                    prompt_client=prompt_client,
                 )
 
             success, timed_out, result_box = _run_with_timeout(_poll, timeout=timeout)

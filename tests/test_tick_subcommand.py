@@ -680,7 +680,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         mocker.patch(
-            "hermes_pipeline.cli.register_todo_phases",
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             side_effect=RuntimeError("kanban error"),
         )
 
@@ -851,7 +851,7 @@ class TestTickSubcommand:
             return_value=_make_decision(picked="TODO-42"),
         )
         mocker.patch(
-            "hermes_pipeline.cli.register_todo_phases",
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             return_value=["task-001"],
         )
 

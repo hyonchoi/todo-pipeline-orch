@@ -9,6 +9,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hermes_pipeline.config import Config
 from hermes_pipeline.harness import (
     ConvergenceDetector,
     ConvergenceHaltError,
@@ -585,7 +586,7 @@ class TestKanbanModeHermes:
 
     @patch("hermes_pipeline.harness.subprocess.run")
     def test_kanban_hermes_single_phase_registers_filtered(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
-        """--phase with --kanban hermes should pass phases_path to register_todo_phases."""
+        """--phase retains the filtered path and selected prompt client."""
 
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
         mock_harness_sp.return_value = preflight_result
@@ -602,11 +603,44 @@ class TestKanbanModeHermes:
             fixture_name="happy-path", loop=False,
             phase_only="phase_2_autoplan", keep_dir=True,
             timeout=60, convergence_threshold=3,
- config=None,
+            config=Config(prompt_client="codex"),
         )
 
         call_kwargs = mock_register.call_args
         assert call_kwargs.kwargs.get("phases_path") is not None
+        assert call_kwargs.kwargs["prompt_client"] == "codex"
+
+    @pytest.mark.parametrize(
+        ("config", "expected"),
+        [(None, "claude"), (Config(prompt_client="codex"), "codex")],
+    )
+    def test_run_harness_resolves_prompt_client_once(
+        self, config, expected, monkeypatch, mocker
+    ):
+        mock_sp = mocker.patch("hermes_pipeline.harness.subprocess.run")
+        mock_sp.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        poll = mocker.patch(
+            "hermes_pipeline.harness._poll_kanban_phases",
+            return_value=True,
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "done"},
+        )
+
+        result = run_harness(
+            fixture_name="happy-path",
+            loop=False,
+            phase_only=None,
+            keep_dir=False,
+            timeout=60,
+            convergence_threshold=3,
+            config=config,
+        )
+
+        assert result.exit_code == 0
+        assert poll.call_args.kwargs["prompt_client"] == expected
 
 
 class TestAutoCompleteGateTasks:
@@ -791,6 +825,47 @@ class TestPollKanbanPhases:
         event_types = [e["event_type"] for e in events]
         assert "phase_started" in event_types
         assert "phase_completed" in event_types
+
+    def test_passes_prompt_client_to_registration(self, tmp_path, mocker):
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
+
+        register = mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            return_value=["task-1"],
+        )
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "done"},
+        )
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(
+            HarnessMonitor(tmp_path / "events.jsonl"),
+            detector,
+            {},
+        )
+
+        _poll_kanban_phases(
+            project_slug="demo",
+            tick_id="01CLIENT",
+            state_dir=tmp_path / ".hermes",
+            todo_id="TODO-41",
+            project_dir=tmp_path,
+            phases_path=None,
+            monitor=monitor,
+            detector=detector,
+            prompt_client="codex",
+            poll_interval=0,
+        )
+
+        assert register.call_args.kwargs["prompt_client"] == "codex"
 
     def test_emits_phase_failed_event_on_kanban_failure(self, tmp_path, mocker):
         import json as _json

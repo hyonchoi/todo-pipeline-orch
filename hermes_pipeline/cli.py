@@ -28,7 +28,7 @@ from .circuit import CircuitBreaker
 from .config import CircuitBreakerConfig, Config, _validate_project_slug
 from .decision import run_selection
 from .decision.context import build_context
-from .kanban_tasks import all_phases_complete, observe_outcomes, register_todo_phases
+from .kanban_tasks import all_phases_complete, observe_outcomes
 from .logging_setup import configure as configure_logging
 from .logging_setup import new_tick_id as _new_tick_id
 from .outcomes import CURRENT_TICK_ID_FILE, OUTCOME_PICKED_NONE
@@ -967,16 +967,18 @@ def _tick_project(
         missing_capabilities,
         required_capabilities,
     )
-    from .phases import resolve_profile_phases_path
+    from .phases import PhasePromptRenderError, resolve_profile_phases_path
 
     try:
         contract = load_contract(project_state)
-        phases = load_phases(resolve_profile_phases_path(contract.profile))
+        phases_path = resolve_profile_phases_path(contract.profile)
+        phases = load_phases(phases_path)
     except ContractMissingError:
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
-        phases = load_phases()
+        phases_path = resolve_profile_phases_path("gstack")
+        phases = load_phases(phases_path)
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
             assignee="pipeline",
@@ -1232,19 +1234,43 @@ def _tick_project(
             _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
-    # Step 4: Persist tick_id before registering kanban phases.
-    # This prevents a crash window: if register_todo_phases succeeds but
-    # persist fails (or we crash between them), the next tick has no
-    # record of this tick and cold-starts → duplicate agent spawn.
-    # The tick_started sentinel tells all_phases_complete that this tick
-    # was legitimate even if registration crashed before creating kanban tasks.
-    _persist_tick_id(project_state, tick_id)
+    # Step 4: Render every prompt before recording or creating anything.
+    from .kanban_tasks import create_prepared_todo_phases, prepare_todo_phases
 
-    # Step 5: Register kanban phases
     log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
     try:
-        task_ids = register_todo_phases(
+        prepared = prepare_todo_phases(
             todo_id=picked,
+            tick_id=tick_id,
+            board_slug=project_slug,
+            project_dir=project_dir,
+            phases_path=phases_path,
+            prompt_client=config.prompt_client,
+        )
+    except PhasePromptRenderError as exc:
+        from .decision.store import append_outcome
+
+        append_outcome(
+            project_state,
+            tick_id,
+            outcome="failed_to_spawn",
+            detail={"todo_id": picked, "error": str(exc)[:500]},
+        )
+        log.error(
+            "project %s: phase prompt preparation failed: %s",
+            project_slug,
+            exc,
+        )
+        return
+
+    # Step 5: Persist immediately before the first Hermes mutation. The
+    # tick_started sentinel preserves the existing registration-crash recovery.
+    _persist_tick_id(project_state, tick_id)
+
+    # Step 6: Create the already-rendered kanban phases.
+    try:
+        task_ids = create_prepared_todo_phases(
+            prepared=prepared,
             tick_id=tick_id,
             board_slug=project_slug,
             project_dir=project_dir,
