@@ -43,6 +43,26 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
     assert "Use $review in Codex." in prepared[0].body
 
 
+def test_prepare_todo_phases_rejects_invalid_todo_before_loading_phases(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    load_phases = mocker.patch("hermes_pipeline.kanban_tasks.load_phases")
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+
+    with pytest.raises(ValueError, match=r"invalid todo_id format"):
+        prepare_todo_phases(
+            todo_id="not-a-todo",
+            tick_id="01CLIENT",
+            board_slug="demo",
+            phases_path=tmp_path / "missing.yaml",
+        )
+
+    load_phases.assert_not_called()
+    run.assert_not_called()
+
+
 def test_late_render_failure_creates_zero_tasks(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
     from hermes_pipeline.phases import PhasePromptRenderError
@@ -256,6 +276,7 @@ def test_create_prepared_recovers_and_archives_task_after_invalid_output(
     [
         '{"id": null}',
         '{"id": ""}',
+        '{"id": "task 002"}',
         '{"missing": "id"}',
         "Created",
     ],

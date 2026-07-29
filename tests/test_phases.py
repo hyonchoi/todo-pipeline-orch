@@ -282,6 +282,7 @@ def _metadata_with_updates(*updates):
         (((("schema_version",), 2),), "schema_version"),
         (((("profile",), "other"),), "profile"),
         (((("skills",), {}),), "skills"),
+        (((("skills",), ["review"]),), "skills[0]"),
         (((("skills", 0, "skill_id"), ""),), "skills[0].skill_id"),
         (
             (
@@ -334,7 +335,7 @@ def test_prerequisite_metadata_validation_names_path_and_field(
     assert field in message
 
 
-@pytest.mark.parametrize("metadata_text", [None, "skills: [\n"])
+@pytest.mark.parametrize("metadata_text", [None, "skills: [\n", "- review\n"])
 def test_prerequisite_metadata_read_errors_name_path(
     monkeypatch, tmp_path, metadata_text
 ):
