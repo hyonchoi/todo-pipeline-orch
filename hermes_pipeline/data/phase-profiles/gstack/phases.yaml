@@ -4,8 +4,7 @@ phases:
     prompt: |
       Use the gstack {skill_prefix}autoplan skill.
 
-      The selected TODO is {todo_id} — it is already marked in-flight in the
-      kanban board (not in TODOS.md text). Work on {todo_id} only; do not
+      The selected TODO is {todo_id} Work on {todo_id} only; do not
       pick a different TODO.
 
       1. Run CEO/Eng/UI/DX reviews for {todo_id}.
@@ -33,14 +32,11 @@ phases:
   - phase_key: "phase_4_development"
     name: "Phase 4: Development"
     prompt: |
-      Use the superpowers {superpowers_skill_prefix}subagent-driven-development skill. Read the
-      implementation plan from docs/pipeline/{todo_id}-impl-plan.md and
-      implement it. Commit all changes.
+      Use the superpowers {superpowers_skill_prefix}subagent-driven-development skill with
+      the implementation plan from docs/pipeline/{todo_id}-impl-plan.md
 
       Follow the subagent-driven-development task loop. Do not replace or
-      short-circuit it with direct inline implementation. Use a fresh
-      implementer subagent per plan task, run the task review after each task,
-      and run the final whole-branch review as the skill directs.
+      short-circuit it with direct inline implementation.
 
       If the implementation plan is unworkable or contradicts the
       codebase, or you hit any other blocker, do NOT ask for clarification
