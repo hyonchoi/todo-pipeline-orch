@@ -149,7 +149,7 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
         "phases:\n"
         "  - phase_key: phase_1\n"
         "    name: One\n"
-        "    prompt: 'Use {skill_prefix}review in {agent_product}.'\n"
+        "    prompt: 'Use {skill_prefix}review.'\n"
         "    tools: Read\n"
         "    turns: 5\n"
     )
@@ -163,7 +163,8 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
     )
     run.assert_not_called()
     assert len(prepared) == 1
-    assert "Use $review in Codex." in prepared[0].body
+    assert "selected external client (Codex)" in prepared[0].body
+    assert "Use $review." in prepared[0].body
 
 
 @pytest.mark.parametrize(
@@ -183,7 +184,7 @@ def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
         "phases:\n"
         "  - phase_key: phase_1\n"
         "    name: One\n"
-        "    prompt: 'Use {skill_prefix}review in {agent_product}.'\n"
+        "    prompt: 'Use {skill_prefix}review.'\n"
         "    tools: Read,Bash\n"
         "    turns: 5\n"
     )
@@ -199,10 +200,51 @@ def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
 
     run.assert_not_called()
     assert "You are the Hermes dispatcher" in prepared[0].body
+    assert "Build the external-agent prompt" in prepared[0].body
+    assert "pass only that prompt to the external client" in prepared[0].body
     assert command in prepared[0].body
     assert forbidden not in prepared[0].body
     assert "Do not implement this phase directly with Hermes tools" in prepared[0].body
     assert "external_agent_command" in prepared[0].body
+
+
+def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: 'Use {skill_prefix}review.'\n"
+        "    tools: Read,Bash\n"
+        "    turns: 5\n"
+    )
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        board_slug="demo",
+        phases_path=phases_path,
+        prompt_client="codex",
+    )
+
+    run.assert_not_called()
+    body = prepared[0].body
+    assert "Hermes phase instructions:" not in body
+    assert body.count("BEGIN EXTERNAL AGENT PROMPT") == 1
+    assert body.count("END EXTERNAL AGENT PROMPT") == 1
+    assert (
+        "BEGIN EXTERNAL AGENT PROMPT\n"
+        "Pipeline context:\n"
+        "- todo_id: TODO-41\n"
+        "- tick_id: 01CLIENT\n"
+        "- project_slug: demo\n"
+        "Work on TODO-41 ONLY. Do not pick a different TODO.\n\n"
+        "Use $review.\n"
+        "END EXTERNAL AGENT PROMPT"
+    ) in body
 
 
 def test_prepare_todo_phases_does_not_wrap_gate_phase_with_client_delegation(
@@ -228,6 +270,7 @@ def test_prepare_todo_phases_does_not_wrap_gate_phase_with_client_delegation(
 
     assert "You are the Hermes dispatcher" not in prepared[0].body
     assert "codex exec" not in prepared[0].body
+    assert "BEGIN EXTERNAL AGENT PROMPT" not in prepared[0].body
 
 
 def test_prepare_todo_phases_rejects_invalid_todo_before_loading_phases(

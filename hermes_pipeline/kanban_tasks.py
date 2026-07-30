@@ -19,7 +19,7 @@ from .outcomes import (
     OUTCOME_PHASE_COMPLETE,
     OUTCOME_PICKED_NONE,
 )
-from .phases import _render_phase_prompt, load_phases
+from .phases import CLIENT_VOCABULARY, _render_phase_prompt, load_phases
 from .state import _atomic_write_text
 
 # Sentinel written after successful registration to record expected phases.
@@ -114,11 +114,14 @@ def _external_client_delegation_block(prompt_client: PromptClient) -> str:
         raise ValueError(
             f"prompt_client must be one of ('claude', 'codex'), got {prompt_client!r}"
         )
+    agent_product = CLIENT_VOCABULARY[prompt_client]["agent_product"]
     return (
         "External client delegation:\n"
         "You are the Hermes dispatcher, not the implementation agent.\n"
-        "Use the Hermes `ai-coding-agents` skill and invoke the selected "
-        "external client with the phase instructions below.\n"
+        "Use the Hermes `ai-coding-agents` skill to invoke the selected "
+        f"external client ({agent_product}). Build the external-agent prompt "
+        "from the delimited block below and pass only that prompt to the "
+        "external client.\n"
         f"Required external command: `{command}`\n"
         "Do not implement this phase directly with Hermes tools. Use Hermes "
         "tools only to invoke, monitor, and inspect the external client run.\n"
@@ -126,6 +129,17 @@ def _external_client_delegation_block(prompt_client: PromptClient) -> str:
         "fail this task with the exact reason.\n"
         "When completing the task, include result metadata with "
         "`external_agent_command` and any external session identifier.\n\n"
+    )
+
+
+def _external_agent_prompt_block(
+    rendered_prompt: str, *, prompt_client: PromptClient
+) -> str:
+    """Wrap rendered phase work as the prompt Hermes should pass onward."""
+    return (
+        "BEGIN EXTERNAL AGENT PROMPT\n"
+        f"{rendered_prompt.rstrip()}\n"
+        "END EXTERNAL AGENT PROMPT\n"
     )
 
 
@@ -608,6 +622,12 @@ def prepare_todo_phases(
             prompt_client=prompt_client,
             template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
         )
+        if phase.gate:
+            body_prompt = rendered_prompt
+        else:
+            body_prompt = _external_agent_prompt_block(
+                rendered_prompt, prompt_client=prompt_client
+            )
         delegation = "" if phase.gate else _external_client_delegation_block(
             prompt_client
         )
@@ -624,7 +644,7 @@ def prepare_todo_phases(
                     )
                     + "\n"
                     + delegation
-                    + rendered_prompt
+                    + body_prompt
                 ),
                 turns=phase.turns,
                 gate=phase.gate,

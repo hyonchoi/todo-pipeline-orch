@@ -431,6 +431,16 @@ def test_real_phases_yaml_development_defers_to_sdd_task_loop():
     assert "TDD" not in dev.prompt
 
 
+def test_gstack_phase_prompts_do_not_duplicate_hermes_wrapper():
+    phases = load_phases(resolve_profile_phases_path("gstack"))
+
+    for phase in phases:
+        assert not phase.prompt.startswith("Hermes phase instructions:\n")
+        assert "BEGIN EXTERNAL AGENT PROMPT" not in phase.prompt
+        assert "END EXTERNAL AGENT PROMPT" not in phase.prompt
+        assert "{agent_product}" not in phase.prompt
+
+
 def test_real_phases_yaml_order_unchanged_for_existing_phases():
     keys = [p.phase_key for p in load_phases()]
     assert keys == [
@@ -498,9 +508,9 @@ def test_real_phases_yaml_finish_branch_uses_ship_skill():
         project_slug="demo",
         prompt_client="codex",
     )
-    assert "Use the gstack /ship skill in Claude Code." in claude_prompt
+    assert "Use the gstack /ship skill." in claude_prompt
     assert "Do NOT finish the remaining /ship steps manually" in claude_prompt
-    assert "Use the gstack $ship skill in Codex." in codex_prompt
+    assert "Use the gstack $ship skill." in codex_prompt
     assert "Do NOT finish the remaining $ship steps manually" in codex_prompt
     assert finish.turns >= 100
     assert finish.timeout >= 7200

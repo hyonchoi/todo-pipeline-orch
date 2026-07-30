@@ -2,7 +2,7 @@ phases:
   - phase_key: "phase_2_autoplan"
     name: "Phase 2: Autoplan"
     prompt: |
-      Use the gstack {skill_prefix}autoplan skill in {agent_product}.
+      Use the gstack {skill_prefix}autoplan skill.
 
       The selected TODO is {todo_id} — it is already marked in-flight in the
       kanban board (not in TODOS.md text). Work on {todo_id} only; do not
@@ -23,7 +23,7 @@ phases:
   - phase_key: "phase_3_writing_plan"
     name: "Phase 3: Writing Plan"
     prompt: |
-      Use the superpowers {superpowers_skill_prefix}writing-plans skill in {agent_product}. Read the plan
+      Use the superpowers {superpowers_skill_prefix}writing-plans skill. Read the plan
       from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan
       format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the
       generated docs.
@@ -33,7 +33,7 @@ phases:
   - phase_key: "phase_4_development"
     name: "Phase 4: Development"
     prompt: |
-      Use the superpowers {superpowers_skill_prefix}subagent-driven-development skill in {agent_product}. Read the
+      Use the superpowers {superpowers_skill_prefix}subagent-driven-development skill. Read the
       implementation plan from docs/pipeline/{todo_id}-impl-plan.md and
       implement it. Commit all changes.
 
@@ -51,7 +51,7 @@ phases:
   - phase_key: "phase_5_review"
     name: "Phase 5: Code Review"
     prompt: |
-      Use the gstack {skill_prefix}review skill in {agent_product} on the current branch.
+      Use the gstack {skill_prefix}review skill on the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. When the skill's Step 5c would normally batch-ask about
@@ -82,7 +82,7 @@ phases:
       Decisions line. If it says `not-required`, exit 0 immediately — do not
       run any review.
 
-      If `required`: use the gstack {skill_prefix}cso skill in {agent_product}. Run a security
+      If `required`: use the gstack {skill_prefix}cso skill. Run a security
       review of the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
@@ -101,7 +101,7 @@ phases:
       Decisions line. If it says `not-required`, exit 0 immediately — do not
       run any QA.
 
-      If `required`: use the gstack {skill_prefix}qa skill in {agent_product}. Test the web UI
+      If `required`: use the gstack {skill_prefix}qa skill. Test the web UI
       changes on the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
@@ -116,10 +116,10 @@ phases:
   - phase_key: "phase_7_document_release"
     name: "Phase 7: Document Release"
     prompt: |
-      1. Use the gstack {skill_prefix}document-release skill in {agent_product} to update
+      1. Use the gstack {skill_prefix}document-release skill to update
          existing docs (CHANGELOG.md, README.md, and others), which will
          identify any docs that are missing entirely. Then use the gstack
-         {skill_prefix}document-generate skill in {agent_product} to create those missing
+         {skill_prefix}document-generate skill to create those missing
          docs.
 
       2. Determine the version bump level from {todo_id}'s TODOS.md Decisions
@@ -144,7 +144,7 @@ phases:
   - phase_key: "phase_8_finish_branch"
     name: "Phase 8: Finish Branch"
     prompt: |
-      Use the gstack {skill_prefix}ship skill in {agent_product}.
+      Use the gstack {skill_prefix}ship skill.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. Loop through the skill's fix-and-reverify cycles for as
