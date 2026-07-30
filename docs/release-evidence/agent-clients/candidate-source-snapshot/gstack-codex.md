@@ -3,9 +3,9 @@
 - Evidence status: `candidate/source-snapshot`
 - Release: `not selected`
 - Source VERSION: `0.7.0`
-- Source commit: `d150862b2430b083122145de85b8264fac43f7bd`
+- Source commit: `c904daacfefe05a0ee9e65ac2c93196005cfec7b`
 - Profile/client: `gstack / codex`
-- Timestamp: `2026-07-30T07:24:46Z`
+- Timestamp: `2026-07-30T07:34:29Z`
 - Environment: `macOS 26.5.2 (25F84), arm64`
 - Client: `Codex CLI 0.146.0`
 - gstack: `1.60.1.0`
