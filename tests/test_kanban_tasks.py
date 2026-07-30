@@ -9,13 +9,23 @@ import pytest
 
 
 class FakeGatePhase:
-    def __init__(self, phase_key, name="P", prompt="", tools="", turns=0, gate=False):
+    def __init__(
+        self,
+        phase_key,
+        name="P",
+        prompt="",
+        tools="",
+        turns=0,
+        gate=False,
+        timeout=1800,
+    ):
         self.phase_key = phase_key
         self.name = name
         self.prompt = prompt
         self.tools = tools
         self.turns = turns
         self.gate = gate
+        self.timeout = timeout
 
 
 @pytest.mark.parametrize(
@@ -387,6 +397,7 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
             body="already rendered $body",
             turns=5,
             gate=False,
+            timeout=2400,
         ),
         PreparedPhaseTask(
             phase_key="phase_2",
@@ -394,6 +405,7 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
             body="second body",
             turns=10,
             gate=False,
+            timeout=7200,
         ),
     ]
     mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
@@ -426,6 +438,9 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
         "t_00000001"
     )
     assert "already rendered $body" in create_commands[1]
+    assert "--max-runtime" not in create_commands[0]
+    assert create_commands[1][create_commands[1].index("--max-runtime") + 1] == "2400"
+    assert create_commands[2][create_commands[2].index("--max-runtime") + 1] == "7200"
 
 
 def test_create_prepared_blocks_until_registered_and_preserves_activation_order(

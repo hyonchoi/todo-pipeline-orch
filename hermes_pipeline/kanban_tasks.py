@@ -888,6 +888,8 @@ def create_prepared_todo_phases(
         if not is_gate:
             cmd.extend(
                 [
+                    "--max-runtime",
+                    str(phase.timeout),
                     "--goal",
                     "--goal-max-turns",
                     str(phase.turns),

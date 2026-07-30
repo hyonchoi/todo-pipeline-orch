@@ -11,9 +11,9 @@ def _prepared_phases():
     from hermes_pipeline.kanban_tasks import PreparedPhaseTask
 
     return [
-        PreparedPhaseTask("phase_1", "One", "body one", 5, False),
-        PreparedPhaseTask("phase_gate", "Gate", "gate body", 0, True),
-        PreparedPhaseTask("phase_2", "Two", "body two", 10, False),
+        PreparedPhaseTask("phase_1", "One", "body one", 5, False, 2400),
+        PreparedPhaseTask("phase_gate", "Gate", "gate body", 0, True, 9999),
+        PreparedPhaseTask("phase_2", "Two", "body two", 10, False, 7200),
     ]
 
 
@@ -85,6 +85,7 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     }
     assert barrier[barrier.index("--assignee") + 1] == "-"
     assert "--goal" not in barrier
+    assert "--max-runtime" not in barrier
     assert "--parent" not in barrier
     assert "--initial-status" not in barrier
 
@@ -92,16 +93,25 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     assert first[first.index("--parent") + 1] == "t_0000000b"
     assert first[first.index("--assignee") + 1] == "pipeline"
     assert "--goal" in first
+    assert (
+        first[first.index("--max-runtime") + 1]
+        == "2400"
+    )
     assert "--initial-status" not in first
 
     gate = create_commands["phase_gate"]
     assert gate[gate.index("--assignee") + 1] == "-"
     assert "--goal" not in gate
+    assert "--max-runtime" not in gate
     assert gate[gate.index("--parent") + 1] == "t_00000001"
     assert "--initial-status" not in gate
 
     second = create_commands["phase_2"]
     assert second[second.index("--parent") + 1] == "t_0000000a"
+    assert (
+        second[second.index("--max-runtime") + 1]
+        == "7200"
+    )
     assert "--initial-status" not in second
 
 
