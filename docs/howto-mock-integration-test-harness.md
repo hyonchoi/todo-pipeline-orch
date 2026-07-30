@@ -161,11 +161,15 @@ python -m json.tool \
   "$HARNESS_DIR/artifacts/reports/report.json"
 ```
 
-**`HermesCallError` / `ClaudeCallError` from a phase**
-The harness invokes real `hermes chat -q` subprocesses (not stubs). Verify:
+**External-agent failure from a phase**
+The harness invokes real `hermes chat -q` and configured external-agent
+subprocesses (not stubs). Verify Hermes, then the command for `prompt_client`:
 ```bash
 hermes chat -q "echo hello"
+# prompt_client: claude
 claude --version
+# prompt_client: codex
+codex --version
 ```
 
 **Workspace retained after `--timeout`**

@@ -1295,6 +1295,63 @@ def _task_run_terminated(task_id: str, *, require_kill_confirmation: bool) -> bo
     return isinstance(metadata, dict) and metadata.get("terminated") is True
 
 
+def _child_first_task_order(tasks: list[dict[str, object]]) -> list[dict[str, object]] | None:
+    """Return selected tasks in child-before-parent order from Hermes topology."""
+    tasks_by_id: dict[str, dict[str, object]] = {}
+    parents_by_id: dict[str, list[str]] = {}
+    for task in tasks:
+        task_id = task["id"]
+        if not isinstance(task_id, str) or task_id in tasks_by_id:
+            return None
+        try:
+            result = subprocess.run(
+                ["hermes", "kanban", "show", task_id, "--json"],
+                capture_output=True,
+                text=True,
+                timeout=HERMES_COMMAND_TIMEOUT,
+                check=False,
+            )
+            if result.returncode != 0:
+                return None
+            payload = json.loads(result.stdout)
+        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        shown_task = payload.get("task")
+        parents = payload.get("parents")
+        runs = payload.get("runs")
+        if (
+            not isinstance(shown_task, dict)
+            or shown_task.get("id") != task_id
+            or not isinstance(parents, list)
+            or not all(isinstance(parent_id, str) for parent_id in parents)
+            or not isinstance(runs, list)
+            or not all(isinstance(run, dict) for run in runs)
+        ):
+            return None
+        tasks_by_id[task_id] = task
+        parents_by_id[task_id] = parents
+
+    child_count = {task_id: 0 for task_id in tasks_by_id}
+    for task_id, parents in parents_by_id.items():
+        for parent_id in parents:
+            if parent_id not in tasks_by_id:
+                return None
+            child_count[parent_id] += 1
+
+    ordered_ids = [task_id for task_id in tasks_by_id if child_count[task_id] == 0]
+    for task_id in ordered_ids:
+        for parent_id in parents_by_id[task_id]:
+            child_count[parent_id] -= 1
+            if child_count[parent_id] == 0:
+                ordered_ids.append(parent_id)
+    if len(ordered_ids) != len(tasks_by_id):
+        return None
+    return [tasks_by_id[task_id] for task_id in ordered_ids]
+
+
 def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
     """Stop and archive every task for a timed-out harness tick.
 
@@ -1318,8 +1375,11 @@ def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
             tasks.append(task)
     if not tasks:
         return True
+    ordered_tasks = _child_first_task_order(tasks)
+    if ordered_tasks is None:
+        return False
 
-    for task in reversed(tasks):
+    for task in ordered_tasks:
         task_id = task["id"]
         if task.get("status") != "running":
             continue
@@ -1346,7 +1406,7 @@ def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
         ):
             return False
 
-    for task in reversed(tasks):
+    for task in ordered_tasks:
         if task.get("status") == "archived":
             continue
         task_id = task["id"]
