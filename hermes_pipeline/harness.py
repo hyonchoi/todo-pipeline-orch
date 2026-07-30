@@ -23,7 +23,6 @@ log = logging.getLogger(__name__)
 
 _MOCK_PROJECT_GITIGNORE = """\
 # Harness runtime artifacts
-events.jsonl
 .hermes/outcomes/
 .hermes/tpo-config.yaml
 
@@ -616,13 +615,16 @@ def run_harness(
     # --kanban hermes mode to crash-loop on writes inside the mock project.
     harness_tmp_root = Path("~/.hermes/tmp").expanduser()
     harness_tmp_root.mkdir(parents=True, exist_ok=True)
-    temp_dir = Path(tempfile.mkdtemp(prefix="harness-", dir=harness_tmp_root))
+    workspace_dir = Path(tempfile.mkdtemp(prefix="harness-", dir=harness_tmp_root))
+    project_dir = workspace_dir / "project"
+    artifacts_dir = workspace_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True)
     try:
-        fixture = create_mock_project(temp_dir, fixture_name)
+        fixture = create_mock_project(project_dir, fixture_name)
 
-        state_dir = temp_dir / ".hermes"
+        state_dir = project_dir / ".hermes"
 
-        events_log = temp_dir / "events.jsonl"
+        events_log = artifacts_dir / "events.jsonl"
         base_monitor = HarnessMonitor(events_log)
         detector = ConvergenceDetector(threshold=convergence_threshold)
         error_holder: dict[str, Any] = {}
@@ -641,7 +643,7 @@ def run_harness(
         _phases_path_override: Path | None = None
         if phase_only:
             import yaml as _yaml
-            _phases_path_override = temp_dir / "filtered-phases.yaml"
+            _phases_path_override = artifacts_dir / "filtered-phases.yaml"
             _phases_path_override.write_text(
                 _yaml.dump({"phases": [asdict(p) for p in phases]})
             )
@@ -663,7 +665,7 @@ def run_harness(
                     tick_id=tick_id,
                     state_dir=state_dir,
                     todo_id=todo_id_str,
-                    project_dir=temp_dir,
+                    project_dir=project_dir,
                     phases_path=_phases_path_override,
                     monitor=monitor,
                     detector=detector,
@@ -695,7 +697,7 @@ def run_harness(
         if timed_out and monitor.current_phase_key:
             base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
 
-        output_dir = temp_dir / "reports"
+        output_dir = artifacts_dir / "reports"
         generate_report(events_log, output_dir)
         report_json = output_dir / "report.json"
         summary = summarize_report(report_json)
@@ -728,7 +730,7 @@ def run_harness(
         return HarnessResult(
             exit_code=exit_code,
             report_path=report_json,
-            temp_dir=temp_dir if keep_dir else None,
+            temp_dir=workspace_dir if keep_dir else None,
             summary=summary,
         )
 
@@ -737,4 +739,4 @@ def run_harness(
 
     finally:
         if not keep_dir:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            shutil.rmtree(workspace_dir, ignore_errors=True)

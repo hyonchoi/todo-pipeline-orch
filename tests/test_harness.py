@@ -95,8 +95,7 @@ class TestCreateMockProject:
             text=True,
         ).stdout
 
-        assert "??" not in status
-        assert "!! events.jsonl" in status
+        assert "?? events.jsonl" in status
         assert "!! .hermes/outcomes/" in status
         assert "!! .hermes/tpo-config.yaml" in status
         assert "!! .superpowers/" in status
@@ -719,6 +718,80 @@ class TestKanbanModeHermes:
 
         assert result.exit_code == 0
         assert poll.call_args.kwargs["prompt_client"] == expected
+
+    def test_run_harness_separates_project_from_artifacts(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        """The retained workspace keeps the Git fixture separate from run output."""
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        poll = mocker.patch(
+            "hermes_pipeline.harness._poll_kanban_phases",
+            return_value=True,
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "done"},
+        )
+
+        result = run_harness(
+            fixture_name="happy-path",
+            loop=False,
+            phase_only=None,
+            keep_dir=True,
+            timeout=60,
+            convergence_threshold=3,
+            config=None,
+        )
+
+        project_dir = workspace / "project"
+        artifacts_dir = workspace / "artifacts"
+        assert result.temp_dir == workspace
+        assert result.report_path == artifacts_dir / "reports" / "report.json"
+        assert (project_dir / ".git").exists()
+        assert (artifacts_dir / "events.jsonl").exists()
+        assert not (project_dir / "events.jsonl").exists()
+        assert not (project_dir / "reports").exists()
+        assert poll.call_args.kwargs["project_dir"] == project_dir
+        assert poll.call_args.kwargs["state_dir"] == project_dir / ".hermes"
+
+    def test_run_harness_stores_loop_reports_in_artifacts(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        """Loop snapshots are retained beside artifacts, outside the Git fixture."""
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.harness._poll_kanban_phases",
+            return_value=True,
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "done"},
+        )
+
+        run_harness(
+            fixture_name="happy-path",
+            loop=True,
+            phase_only=None,
+            keep_dir=True,
+            timeout=60,
+            convergence_threshold=3,
+            config=None,
+        )
+
+        assert (workspace / "artifacts" / "happy-path-report.1.json").exists()
+        assert not (workspace / "project" / "happy-path-report.1.json").exists()
 
 
 class TestAutoCompleteGateTasks:
