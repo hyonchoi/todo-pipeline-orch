@@ -23,7 +23,6 @@ log = logging.getLogger(__name__)
 
 _MOCK_PROJECT_GITIGNORE = """\
 # Harness runtime artifacts
-events.jsonl
 .hermes/outcomes/
 .hermes/tpo-config.yaml
 
@@ -54,7 +53,6 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
 
     hermes_dir = path / ".hermes"
     hermes_dir.mkdir()
-    (path / ".hermes" / "todo_id_counter").write_text("0")
 
     # Create pipeline.toml contract for assignee configuration
     pipeline_toml = (

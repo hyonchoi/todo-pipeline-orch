@@ -49,38 +49,24 @@ class TestCreateMockProject:
         assert result["todo_id"] == 1
         assert result["fixture_name"] == "happy-path"
 
-    def test_create_mock_project_ignores_harness_runtime_artifacts(self, tmp_path: Path):
+    def test_create_mock_project_omits_harness_owned_and_legacy_state(
+        self, tmp_path: Path
+    ):
         create_mock_project(tmp_path, "happy-path")
 
-        assert (tmp_path / ".gitignore").exists()
-
-        (tmp_path / "events.jsonl").write_text("{}\n")
-        (tmp_path / ".hermes" / "tpo-config.yaml").write_text("state_dir: .hermes\n")
-        (tmp_path / ".hermes" / "outcomes").mkdir()
-        (tmp_path / ".hermes" / "outcomes" / "expected-phases.json").write_text("{}\n")
-        (tmp_path / ".superpowers").mkdir()
-        (tmp_path / ".superpowers" / "scratch.md").write_text("scratch\n")
-        (tmp_path / ".code-review-graph").mkdir()
-        (tmp_path / ".code-review-graph" / "cache.json").write_text("{}\n")
-        (tmp_path / "src").mkdir()
-        (tmp_path / "src" / "__pycache__").mkdir()
-        (tmp_path / "src" / "__pycache__" / "mock_feature_a.cpython-312.pyc").write_bytes(b"cache")
+        assert (tmp_path / ".hermes" / "pipeline.toml").exists()
+        assert not (tmp_path / ".hermes" / "todo_id_counter").exists()
+        assert not (tmp_path / "events.jsonl").exists()
+        assert not (tmp_path / "reports").exists()
 
         status = subprocess.run(
-            ["git", "status", "--short", "--ignored"],
+            ["git", "status", "--short"],
             cwd=tmp_path,
             check=True,
             capture_output=True,
             text=True,
         ).stdout
-
-        assert "??" not in status
-        assert "!! events.jsonl" in status
-        assert "!! .hermes/outcomes/" in status
-        assert "!! .hermes/tpo-config.yaml" in status
-        assert "!! .superpowers/" in status
-        assert "!! .code-review-graph/" in status
-        assert "!! src/" in status
+        assert status == ""
 
 
 class TestPreflightCheck:
