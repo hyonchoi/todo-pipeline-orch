@@ -68,6 +68,40 @@ class TestCreateMockProject:
         ).stdout
         assert status == ""
 
+    def test_create_mock_project_ignores_runtime_and_scratch_artifacts(
+        self, tmp_path: Path
+    ):
+        create_mock_project(tmp_path, "happy-path")
+
+        (tmp_path / "events.jsonl").write_text("{}\n")
+        (tmp_path / ".hermes" / "tpo-config.yaml").write_text("state_dir: .hermes\n")
+        (tmp_path / ".hermes" / "outcomes").mkdir()
+        (tmp_path / ".hermes" / "outcomes" / "expected-phases.json").write_text("{}\n")
+        (tmp_path / ".superpowers").mkdir()
+        (tmp_path / ".superpowers" / "scratch.md").write_text("scratch\n")
+        (tmp_path / ".code-review-graph").mkdir()
+        (tmp_path / ".code-review-graph" / "cache.json").write_text("{}\n")
+        (tmp_path / "src" / "__pycache__").mkdir(parents=True)
+        (tmp_path / "src" / "__pycache__" / "cache.py").write_text("cache = True\n")
+        (tmp_path / "compiled.pyc").write_bytes(b"cache")
+
+        status = subprocess.run(
+            ["git", "status", "--short", "--ignored"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        assert "??" not in status
+        assert "!! events.jsonl" in status
+        assert "!! .hermes/outcomes/" in status
+        assert "!! .hermes/tpo-config.yaml" in status
+        assert "!! .superpowers/" in status
+        assert "!! .code-review-graph/" in status
+        assert "!! compiled.pyc" in status
+        assert "!! src/" in status
+
 
 class TestPreflightCheck:
     def test_preflight_check_git_not_found(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

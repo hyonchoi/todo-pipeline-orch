@@ -23,6 +23,7 @@ log = logging.getLogger(__name__)
 
 _MOCK_PROJECT_GITIGNORE = """\
 # Harness runtime artifacts
+events.jsonl
 .hermes/outcomes/
 .hermes/tpo-config.yaml
 
