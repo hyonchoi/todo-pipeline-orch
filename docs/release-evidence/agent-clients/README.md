@@ -36,10 +36,16 @@ Each artifact must include:
 - Profile/client pair
 - UTC timestamp
 - Operating system and version
+- Exact Hermes version
 - Exact client version
 - Exact gstack and superpowers distribution versions
 - Exact gstack skill root and superpowers plugin source
 - Discovery command and complete discovery output
+- Hermes `skills list --enabled-only` command and output proving that
+  `ai-coding-agents` is enabled
+- A Hermes dispatcher command and transcript proving that `ai-coding-agents`
+  invoked the selected external client, the external process exited zero, and
+  the expected stdout marker was returned
 - Verified invocation forms
 - Disposable fixture command and isolation output
 - Representative invocation command and transcript excerpt proving discovery
@@ -52,6 +58,9 @@ environment. It is review evidence, not release-final evidence. A release-final
 `PASS` is valid only for the recorded release, source, and environment. A
 `FAIL` blocks a release that advertises the corresponding `Conditional` pair.
 Missing release-final evidence also blocks that advertised pair.
+An artifact that cannot prove either Hermes skill enablement or dispatcher
+execution must record `Result: FAIL`; direct client invocation alone is not a
+substitute.
 
 ## Release commit finalization
 

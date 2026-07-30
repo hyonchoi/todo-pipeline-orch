@@ -15,7 +15,9 @@ isolated environment and commit only the captured evidence.
 - Environment prerequisites: record the exact Hermes, Claude Code, gstack, and
   superpowers versions.
 - Hermes dispatcher check: confirm the `ai-coding-agents` skill is available
-  in the Hermes skill registry and can invoke `claude -p`.
+  in `hermes skills list --enabled-only`, then invoke `claude -p` through a
+  bounded `hermes chat -q` probe. Capture the Hermes version, command, session
+  id, external command, external exit code, and stdout marker.
 - Discovery checks: follow symlinks under `~/.claude/skills` and confirm every
   required gstack `SKILL.md`; then confirm the official
   `claude-plugins-official/superpowers` plugin manifest and required
@@ -41,7 +43,9 @@ isolated environment and commit only the captured evidence.
 - Environment prerequisites: record the exact Hermes, Codex, gstack, and
   superpowers versions.
 - Hermes dispatcher check: confirm the `ai-coding-agents` skill is available
-  in the Hermes skill registry and can invoke `codex exec`.
+  in `hermes skills list --enabled-only`, then invoke `codex exec` through a
+  bounded `hermes chat -q` probe. Capture the Hermes version, command, session
+  id, external command, external exit code, and stdout marker.
 - Discovery checks: follow symlinks under `~/.codex/skills` and confirm every
   required gstack `SKILL.md`; then confirm the curated
   `openai-curated-remote/superpowers` plugin manifest and required
@@ -68,7 +72,10 @@ isolated environment and commit only the captured evidence.
 Use the [agent client evidence schema](release-evidence/agent-clients/README.md#required-artifact-fields)
 and its release-directory naming convention. A passing artifact must contain
 the real commands and output captured from the stated environment. Do not copy
-an earlier release's result or create a placeholder passing artifact.
+an earlier release's result or create a placeholder passing artifact. If skill
+enablement, Hermes dispatch, or external-client completion cannot be verified
+for either matrix cell, record that cell as `FAIL` with the exact limitation.
+A direct client probe does not qualify the Hermes dispatcher.
 
 Before `/ship` selects a version, store an honest qualification snapshot under
 `docs/release-evidence/agent-clients/candidate-source-snapshot/`. It must say

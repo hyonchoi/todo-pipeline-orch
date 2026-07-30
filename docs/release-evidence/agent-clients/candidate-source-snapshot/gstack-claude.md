@@ -3,10 +3,11 @@
 - Evidence status: `candidate/source-snapshot`
 - Release: `not selected`
 - Source VERSION: `0.7.0`
-- Source commit: `c904daacfefe05a0ee9e65ac2c93196005cfec7b`
+- Source commit: `32c108f754abe4fd8d1b54575d0a155455fc9be2`
 - Profile/client: `gstack / claude`
-- Timestamp: `2026-07-30T07:34:29Z`
+- Timestamp: `2026-07-30T23:07:18Z`
 - Environment: `macOS 26.5.2 (25F84), arm64`
+- Hermes: `Hermes Agent v0.18.2 (2026.7.7.2)`
 - Client: `Claude Code 2.1.220`
 - gstack: `1.60.1.0`
 - superpowers: `6.2.0`
@@ -54,6 +55,41 @@ Captured output:
 /Users/hyonchoi/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0/.claude-plugin/plugin.json  497B
 /Users/hyonchoi/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0/skills/subagent-driven-development/SKILL.md  27.4K
 /Users/hyonchoi/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0/skills/writing-plans/SKILL.md  6.7K
+```
+
+### Hermes enabled-skill discovery
+
+Command:
+
+```bash
+rtk hermes skills list --enabled-only
+```
+
+Captured output:
+
+```text
+Installed Skills (enabled only)
+Name              Category  Source  Trust  Status
+ai-coding-agents            local   local  enabled
+0 hub-installed, 0 builtin, 1 local — 1 enabled shown
+```
+
+### Hermes dispatcher invocation
+
+Command:
+
+```bash
+rtk hermes chat -q 'Qualification only. Load the ai-coding-agents skill, then use the terminal tool to invoke Claude Code exactly once in non-interactive print mode. Run: claude -p "Respond with exactly CLAUDE_DISPATCH_OK" --max-turns 1 --output-format text. Do not edit files. Return a concise transcript containing the exact command, the external process exit code, and the external stdout marker. If the command cannot be verified, say FAIL with the exact reason.' -Q --source tool
+```
+
+Captured output:
+
+```text
+Warning: Unknown toolsets: messaging
+session_id: 20260730_190540_fd0254
+Command: claude -p "Respond with exactly CLAUDE_DISPATCH_OK" --max-turns 1 --output-format text
+Exit code: 0
+Stdout marker: CLAUDE_DISPATCH_OK
 ```
 
 ## Disposable fixture and representative invocation

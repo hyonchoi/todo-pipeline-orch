@@ -85,6 +85,10 @@ def test_candidate_artifact_has_every_required_field(client: str):
         _field(document, "Timestamp"),
     )
     assert _field(document, "Environment")
+    assert re.fullmatch(
+        r"Hermes Agent v\d+\.\d+\.\d+ \(\d+\.\d+\.\d+\.\d+\)",
+        _field(document, "Hermes"),
+    )
     assert _field(document, "Client")
     assert re.fullmatch(r"\d+\.\d+\.\d+\.\d+", _field(document, "gstack"))
     assert re.fullmatch(r"\d+\.\d+\.\d+", _field(document, "superpowers"))
@@ -160,6 +164,30 @@ def test_candidate_artifact_captures_complete_discovery_commands_and_output(
     assert "started" in invocation_output.lower()
     assert "unknown-skill" not in invocation_output.lower()
 
+    hermes_discovery = _section(document, "Hermes enabled-skill discovery")
+    discovery_command = _fenced(hermes_discovery, "Command", "bash")
+    discovery_output = _fenced(hermes_discovery, "Captured output", "text")
+    assert discovery_command == "rtk hermes skills list --enabled-only"
+    assert "ai-coding-agents" in discovery_output
+    assert "enabled" in discovery_output
+
+    dispatcher = _section(document, "Hermes dispatcher invocation")
+    dispatcher_command = _fenced(dispatcher, "Command", "bash")
+    dispatcher_output = _fenced(dispatcher, "Captured output", "text")
+    expected_command = (
+        'claude -p "Respond with exactly CLAUDE_DISPATCH_OK"'
+        if client == "claude"
+        else 'codex exec -s read-only "Respond with exactly CODEX_DISPATCH_OK"'
+    )
+    expected_marker = (
+        "CLAUDE_DISPATCH_OK" if client == "claude" else "CODEX_DISPATCH_OK"
+    )
+    assert dispatcher_command.startswith("rtk hermes chat -q ")
+    assert "ai-coding-agents" in dispatcher_command
+    assert expected_command in dispatcher_output
+    assert "Exit code: 0" in dispatcher_output
+    assert f"Stdout marker: {expected_marker}" in dispatcher_output
+
 
 def test_candidate_evidence_does_not_claim_a_final_release():
     assert not (EVIDENCE_ROOT / "0.6.6").exists()
@@ -197,7 +225,12 @@ def test_release_final_artifact_matches_selected_version_and_candidate(client: s
         capture_output=True,
         text=True,
     )
-    for heading in ("gstack skills", "superpowers plugin"):
+    for heading in (
+        "gstack skills",
+        "superpowers plugin",
+        "Hermes enabled-skill discovery",
+        "Hermes dispatcher invocation",
+    ):
         assert _section(release, heading) == _section(candidate, heading)
     assert release.split("## Invocation forms", 1)[1] == candidate.split(
         "## Invocation forms", 1

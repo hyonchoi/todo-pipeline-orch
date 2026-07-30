@@ -3,10 +3,11 @@
 - Evidence status: `release-final`
 - Release: `0.7.0`
 - Source VERSION: `0.7.0`
-- Source commit: `c904daacfefe05a0ee9e65ac2c93196005cfec7b`
+- Source commit: `32c108f754abe4fd8d1b54575d0a155455fc9be2`
 - Profile/client: `gstack / codex`
-- Timestamp: `2026-07-30T07:34:29Z`
+- Timestamp: `2026-07-30T23:07:18Z`
 - Environment: `macOS 26.5.2 (25F84), arm64`
+- Hermes: `Hermes Agent v0.18.2 (2026.7.7.2)`
 - Client: `Codex CLI 0.146.0`
 - gstack: `1.60.1.0`
 - superpowers: `6.2.0`
@@ -15,8 +16,8 @@
 - Verifier: `Codex final-fix session on the maintainer's workstation`
 - Result: `PASS`
 
-This release-final artifact promotes the passing candidate qualification after
-`/ship` selected release `0.7.0`. The recorded discovery facts were unchanged.
+This release-final artifact records the passing qualification refreshed at the
+source commit above after `/ship` selected release `0.7.0`.
 
 ## Discovery commands and captured output
 
@@ -54,6 +55,41 @@ Captured output:
 /Users/hyonchoi/.config/codex/plugins/cache/openai-curated-remote/superpowers/6.2.0/.codex-plugin/plugin.json  1.7K
 /Users/hyonchoi/.config/codex/plugins/cache/openai-curated-remote/superpowers/6.2.0/skills/subagent-driven-development/SKILL.md  27.4K
 /Users/hyonchoi/.config/codex/plugins/cache/openai-curated-remote/superpowers/6.2.0/skills/writing-plans/SKILL.md  6.7K
+```
+
+### Hermes enabled-skill discovery
+
+Command:
+
+```bash
+rtk hermes skills list --enabled-only
+```
+
+Captured output:
+
+```text
+Installed Skills (enabled only)
+Name              Category  Source  Trust  Status
+ai-coding-agents            local   local  enabled
+0 hub-installed, 0 builtin, 1 local — 1 enabled shown
+```
+
+### Hermes dispatcher invocation
+
+Command:
+
+```bash
+rtk hermes chat -q 'Qualification only. Load the ai-coding-agents skill, then use the terminal tool to invoke Codex exactly once in non-interactive exec mode. Run: codex exec -s read-only "Respond with exactly CODEX_DISPATCH_OK". Do not edit files. Return a concise transcript containing the exact command, the external process exit code, and the external stdout marker. If the command cannot be verified, say FAIL with the exact reason.' -Q --source tool
+```
+
+Captured output:
+
+```text
+Warning: Unknown toolsets: messaging
+session_id: 20260730_190611_c689f5
+Command: codex exec -s read-only "Respond with exactly CODEX_DISPATCH_OK"
+Exit code: 0
+Stdout marker: CODEX_DISPATCH_OK
 ```
 
 ## Disposable fixture and representative invocation
