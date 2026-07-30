@@ -41,6 +41,9 @@ Each artifact must include:
 - Exact gstack skill root and superpowers plugin source
 - Discovery command and complete discovery output
 - Verified invocation forms
+- Disposable fixture command and isolation output
+- Representative invocation command and transcript excerpt proving discovery
+  and start without an unknown-skill error
 - Result: `PASS` or `FAIL`
 - Verifier name or stable identity
 

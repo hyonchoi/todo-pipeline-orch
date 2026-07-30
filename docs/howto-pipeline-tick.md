@@ -146,8 +146,9 @@ selection, temporarily set all other projects to `enabled = false` in their
 ## State Directory
 
 Per-project state (selection decisions, outcomes, circuit breaker) now lives
-at `<project>/.hermes/`. Global state (`tick.lock`, `config.toml`) remains
-in `~/.hermes/`.
+at `<project>/.hermes/`, including that project's `tick.lock`. Global
+configuration remains in the configured `state_dir` (normally `~/.hermes/`),
+but there is deliberately no single global tick lock.
 
 ## Troubleshooting
 
@@ -157,7 +158,7 @@ handoff is waiting on a PR that is open, closed without merge, or temporarily
 unverifiable. Check the board with
 `hermes kanban list --tenant demo` and check the PR named by
 `.hermes/pipeline_branch.txt`. If tasks are stuck in `running`, manually clear
-them via `hermes kanban update <project> <task_id> --status done`.
+them via `hermes kanban complete <task_id>`.
 
 **"Error: tick.lock held by pid X"**.
 The tick lock is held. If the PID is alive (within `max_tick_duration_min` —

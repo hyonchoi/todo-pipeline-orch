@@ -129,7 +129,8 @@ tpo init demo-app
 tpo doctor demo-app
 ```
 
-Expected doctor output starts with:
+For the supported `gstack` profile, doctor first prints the selected prompt
+client and prerequisite diagnostics. Successful output ends with:
 
 ```text
 OK: schema_version=2

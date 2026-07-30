@@ -3,9 +3,9 @@
 - Evidence status: `release-final`
 - Release: `0.7.0`
 - Source VERSION: `0.7.0`
-- Source commit: `9d47c5ff42ce1e925a65f2d401da12e3b0020019`
+- Source commit: `e34ae19fe89efbbe950fe492328ed320189fe1a0`
 - Profile/client: `gstack / codex`
-- Timestamp: `2026-07-29T22:04:55Z`
+- Timestamp: `2026-07-30T01:28:08Z`
 - Environment: `macOS 26.5.2 (25F84), arm64`
 - Client: `Codex CLI 0.146.0`
 - gstack: `1.60.1.0`
@@ -54,6 +54,42 @@ Captured output:
 /Users/hyonchoi/.config/codex/plugins/cache/openai-curated-remote/superpowers/6.2.0/.codex-plugin/plugin.json  1.7K
 /Users/hyonchoi/.config/codex/plugins/cache/openai-curated-remote/superpowers/6.2.0/skills/subagent-driven-development/SKILL.md  27.4K
 /Users/hyonchoi/.config/codex/plugins/cache/openai-curated-remote/superpowers/6.2.0/skills/writing-plans/SKILL.md  6.7K
+```
+
+## Disposable fixture and representative invocation
+
+Fixture isolation command:
+
+```bash
+QUAL_DIR=$(mktemp -d /tmp/tpo-agent-client-qualification-XXXXXXXX)
+git -C "$QUAL_DIR" init -q
+printf "# Qualification Fixture\n\nRead-only disposable project.\n" > "$QUAL_DIR/README.md"
+cd "$QUAL_DIR"
+test ! -d .claude && echo ".claude: absent"
+test ! -d .agents && echo ".agents: absent"
+git status --short
+```
+
+Captured isolation output:
+
+```text
+.claude: absent
+.agents: absent
+?? README.md
+```
+
+Representative invocation command:
+
+```bash
+codex exec "\$autoplan Qualification only: identify the autoplan skill you discovered and state that it started. Do not edit files, run project commands, or continue the review pipeline." -s read-only -c 'model_reasoning_effort="low"'
+```
+
+Captured transcript excerpt:
+
+```text
+Discovered skill: `autoplan` at `/Users/hyonchoi/.local/share/gstack/autoplan/SKILL.md`.
+
+`/autoplan` started. I am stopping here per qualification instructions: no file edits, no project commands, no review pipeline.
 ```
 
 ## Invocation forms

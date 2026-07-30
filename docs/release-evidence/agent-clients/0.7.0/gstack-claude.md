@@ -3,9 +3,9 @@
 - Evidence status: `release-final`
 - Release: `0.7.0`
 - Source VERSION: `0.7.0`
-- Source commit: `9d47c5ff42ce1e925a65f2d401da12e3b0020019`
+- Source commit: `e34ae19fe89efbbe950fe492328ed320189fe1a0`
 - Profile/client: `gstack / claude`
-- Timestamp: `2026-07-29T22:04:55Z`
+- Timestamp: `2026-07-30T01:28:08Z`
 - Environment: `macOS 26.5.2 (25F84), arm64`
 - Client: `Claude Code 2.1.220`
 - gstack: `1.60.1.0`
@@ -54,6 +54,40 @@ Captured output:
 /Users/hyonchoi/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0/.claude-plugin/plugin.json  497B
 /Users/hyonchoi/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0/skills/subagent-driven-development/SKILL.md  27.4K
 /Users/hyonchoi/.claude/plugins/cache/claude-plugins-official/superpowers/6.2.0/skills/writing-plans/SKILL.md  6.7K
+```
+
+## Disposable fixture and representative invocation
+
+Fixture isolation command:
+
+```bash
+QUAL_DIR=$(mktemp -d /tmp/tpo-agent-client-qualification-XXXXXXXX)
+git -C "$QUAL_DIR" init -q
+printf "# Qualification Fixture\n\nRead-only disposable project.\n" > "$QUAL_DIR/README.md"
+cd "$QUAL_DIR"
+test ! -d .claude && echo ".claude: absent"
+test ! -d .agents && echo ".agents: absent"
+git status --short
+```
+
+Captured isolation output:
+
+```text
+.claude: absent
+.agents: absent
+?? README.md
+```
+
+Representative invocation command:
+
+```bash
+claude -p "/autoplan Qualification only: identify the autoplan skill you discovered and state that it started. Do not edit files, run project commands, or continue the review pipeline." --max-turns 1 --output-format text
+```
+
+Captured transcript excerpt:
+
+```text
+The autoplan skill has been discovered and started. It's the `/autoplan` skill located at `/Users/hyonchoi/.claude/skills/autoplan/SKILL.md`.
 ```
 
 ## Invocation forms

@@ -1,8 +1,8 @@
 # How the multi-project scan loop works
 
 The multi-project scan loop replaces per-project cron entries with one
-global lock and one selection per project. This doc explains why it was
-built this way and what was traded off.
+discovery pass, per-project locks, and one selection per project. This doc
+explains why it was built this way and what was traded off.
 
 ## The problem
 
@@ -16,15 +16,14 @@ Before multi-project scanning, each project needed its own cron entry:
 
 Three problems:
 1. **Hard to manage** — adding or removing projects means editing the crontab.
-2. **Race conditions** — two cron entries fire at the same time, each tries to
-   acquire the same global tick lock, one fails. The cron doesn't know the
-   other project is running.
+2. **Race conditions** — overlapping cron entries make it hard to tell which
+   project is already running and which projects remain eligible.
 3. **State drift** — the old global `~/.hermes/` directory held state for one
    project. When a second project started, its state overwrote the first
    project's state.
 
 The scan loop solves all three by making the tick itself discover the projects
-and iterate over them under one lock.
+and iterate over them with a lock scoped to each project.
 
 ## The approach
 
@@ -33,29 +32,28 @@ four phases:
 
 ```
 Tick:
-  1. Acquire global TickLock (atomic mkdir)
-  2. Discover active projects
-  3. One-time global state migration (if exactly one project)
-  4. Per-project tick loop
-  5. Release lock
+  1. Discover active projects
+  2. One-time global state migration (if exactly one project)
+  3. For each project:
+     a. Acquire the project's TickLock (atomic mkdir)
+     b. Run the project tick, or skip if already locked
+     c. Release the project's lock
 ```
 
-### Phase 1: Single global lock
+### Phase 1: Per-project locks
 
-The tick lock lives in the global state directory (`~/.hermes/tick.lock/`),
-not per-project. There is one lock because the scan loop needs to serialize
-access to the global state migration step and prevent two cron entries from
-running at the same time.
+Each tick lock lives in its project's state directory
+(`<project>/.hermes/tick.lock/`). Two overlapping cron invocations cannot
+advance the same project simultaneously, while an invocation that encounters a
+locked project can skip it and continue scanning other projects.
 
-If the lock is held, the tick exits early with "tick already in flight,
-skipping". The stale-lock sweep checks the holder's PID and releases the lock
-after `max_tick_duration_min` (default: 10 minutes).
+If a project's lock is held, that project is skipped with "tick already in
+flight, skipping". The stale-lock sweep checks the holder's PID and releases
+the project lock after `max_tick_duration_min` (default: 10 minutes).
 
-**Trade-off:** If one project's selection takes a long time (e.g., a large
-TODOS.md with many candidates), the other projects wait for it. This is
-acceptable because the lock is only held during selection and kanban
-registration — not during phase execution. Phase execution runs outside the
-lock via the kanban adapter.
+**Trade-off:** Projects are visited sequentially within one scan, so one slow
+selection can delay later projects in that invocation. A concurrent invocation
+can still skip the busy project and progress other unlocked projects.
 
 ### Phase 2: Project discovery
 
@@ -140,11 +138,11 @@ other projects. The circuit breaker is per-project — it lives in
 
 ## Alternatives considered
 
-**Per-project locks.** Instead of one global lock, each project has its own
-lock. Pro: projects run in parallel. Con: requires concurrent execution
-(e.g., spawning subprocesses per project), which adds complexity and makes
-error handling harder. The current design is sequential — simple and
-predictable.
+**Single global lock.** One lock for the entire scan would make overlapping
+invocations easy to serialize. However, one busy project would prevent every
+unrelated project from being considered. Per-project locks preserve
+same-project exclusion without putting all projects in one failure and latency
+domain.
 
 **Global selection, per-project state.** One Hermes agent call evaluates all
 TODOS.md files together and picks one TODO across all projects. Pro: single

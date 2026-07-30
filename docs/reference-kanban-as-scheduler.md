@@ -445,13 +445,19 @@ get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]
 Checks if every kanban task for a tick is in a terminal status.
 
 ```python
-all_phases_complete(board_slug: str, tick_id: str) -> bool
+all_phases_complete(
+    tenant: str,
+    tick_id: str,
+    *,
+    state_dir: str | Path | None = None,
+) -> bool
 ```
 
 | Parameter | Type | Default | Effect |
 |---|---|---|---|
-| `board_slug` | `str` | — | Kanban board slug |
+| `tenant` | `str` | — | Kanban tenant (project slug) |
 | `tick_id` | `str` | — | ULID tick ID |
+| `state_dir` | `str \| Path \| None` | `None` | State directory used to inspect the no-work outcome when no tasks exist. |
 
 **Returns:** `True` if every task is in a completion status (`done` or
 `failed`). `False` if any task is still in-flight (`todo`, `running`, `ready`,
@@ -460,9 +466,11 @@ all_phases_complete(board_slug: str, tick_id: str) -> bool
 **Completion statuses:** `done` and `failed`. Archived is not a completion
 status — it indicates the tick didn't finish cleanly.
 
-**Conservative on failure:** If the `hermes kanban list` CLI call fails or
-returns no tasks, returns `False`. This prevents accidentally releasing the
-tick lock on transient kanban failures.
+**No-task and failure behavior:** If no tasks exist and `state_dir` contains a
+`picked_none` outcome for the tick, returns `True` because the tick completed
+without work. Otherwise an empty snapshot or failed `hermes kanban list` call
+returns `False`, preventing accidental lock release on an incomplete tick or
+transient kanban failure.
 
 ### `observe_outcomes`
 

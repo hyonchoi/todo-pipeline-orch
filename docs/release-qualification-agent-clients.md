@@ -20,6 +20,10 @@ isolated environment and commit only the captured evidence.
   `writing-plans` and `subagent-driven-development` skills.
 - Invocation forms: confirm the discovered skill IDs map to `/autoplan`,
   `/writing-plans`, and the other slash-prefixed forms in package metadata.
+- Representative invocation: from a disposable Git fixture with no
+  project-local skill directory, invoke `/autoplan` in qualification-only mode
+  and capture output proving the client discovered and started the skill
+  without an unknown-skill error.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-claude.md`.
 - Required fields: evidence status, release, qualified source VERSION and
@@ -41,6 +45,10 @@ isolated environment and commit only the captured evidence.
 - Invocation forms: confirm the discovered skill IDs map to `$autoplan`,
   `$superpowers:writing-plans`, and the other package-qualified or dollar-prefixed
   forms in package metadata.
+- Representative invocation: from a disposable Git fixture with no
+  project-local skill directory, invoke `$autoplan` in qualification-only mode
+  and capture output proving the client discovered and started the skill
+  without an unknown-skill error.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-codex.md`.
 - Required fields: evidence status, release, qualified source VERSION and
@@ -75,7 +83,8 @@ finalization:
    `docs/release-evidence/agent-clients/<release>/`.
 4. Set `Evidence status: release-final`, set `Release` to the selected version,
    and ensure `Source VERSION` matches it. Preserve the exact qualified source
-   commit, commands, and captured output.
+commit, discovery commands/output, representative invocation command/transcript,
+and fixture-isolation evidence.
 5. Include those versioned artifacts in the same release commit and run the
    evidence validation tests.
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -138,6 +139,27 @@ def test_candidate_artifact_captures_complete_discovery_commands_and_output(
         for invocation in INVOCATIONS[client]
     )
 
+    fixture = document.split(
+        "## Disposable fixture and representative invocation", 1
+    )[1].split("## Invocation forms", 1)[0]
+    fixture_command = _fenced(fixture, "Fixture isolation command", "bash")
+    fixture_output = _fenced(fixture, "Captured isolation output", "text")
+    invocation_command = _fenced(
+        fixture, "Representative invocation command", "bash"
+    )
+    invocation_output = _fenced(
+        fixture, "Captured transcript excerpt", "text"
+    )
+    assert "mktemp -d" in fixture_command
+    assert "git -C" in fixture_command
+    assert ".claude: absent" in fixture_output
+    assert ".agents: absent" in fixture_output
+    expected_invocation = "/autoplan" if client == "claude" else r"\$autoplan"
+    assert expected_invocation in invocation_command
+    assert "autoplan" in invocation_output.lower()
+    assert "started" in invocation_output.lower()
+    assert "unknown-skill" not in invocation_output.lower()
+
 
 def test_candidate_evidence_does_not_claim_a_final_release():
     assert not (EVIDENCE_ROOT / "0.6.6").exists()
@@ -163,6 +185,18 @@ def test_release_final_artifact_matches_selected_version_and_candidate(client: s
     assert _field(release, "Source commit") == _field(candidate, "Source commit")
     assert _field(release, "Profile/client") == f"gstack / {client}"
     assert _field(release, "Result") == "PASS"
+    subprocess.run(
+        [
+            "git",
+            "merge-base",
+            "--is-ancestor",
+            _field(release, "Source commit"),
+            "HEAD",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
     for heading in ("gstack skills", "superpowers plugin"):
         assert _section(release, heading) == _section(candidate, heading)
     assert release.split("## Invocation forms", 1)[1] == candidate.split(

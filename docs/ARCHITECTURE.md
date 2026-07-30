@@ -129,7 +129,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ├── ready_for_review/          # Legacy ship-gate sidecars
 ├── pipeline_branch.txt        # Branch currently waiting at PR handoff
 ├── phase_started/             # In-flight phase markers
-├── tick.lock/                 # Global tick lock (atomic mkdir)
+├── tick.lock/                 # Per-project tick lock (atomic mkdir)
 ├── todo_id_counter            # Compatibility cache for tracked TODO IDs
 ├── config.toml                # Per-project config overlay
 ├── project.toml               # Project marker (enabled/slack_channel)
@@ -164,7 +164,8 @@ All pipeline state lives under `<project>/.hermes/`:
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review` in Claude Code or `$review` in Codex, and the agent owns the review lifecycle end-to-end.
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.
-5. **Multi-project scan** — Single global lock, per-project selection under one tick execution.
+5. **Multi-project scan** — Each project has its own lock, so a slow or
+   overlapping tick skips only that project while the scan continues.
 
 ### TODOS Manager Skill (v2.1)
 
@@ -193,4 +194,4 @@ The skill's deterministic logic (ID sequencing, entry parsing, format validation
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state
 - [Pipeline State Machine](hermes-state-machine.md) — Full tick lifecycle transitions
 - [Modularization Plan](pipeline-modularization-plan.md) — Design history and rationale
-- [Multi-Project Scan](explanation-multi-project-scan.md) — Why single global lock, state migration decisions
+- [Multi-Project Scan](explanation-multi-project-scan.md) — Per-project locking and state migration decisions
