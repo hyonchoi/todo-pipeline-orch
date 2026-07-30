@@ -10,8 +10,9 @@ phases on a real Hermes kanban board, polls for phase transitions, and produces
 - `uv sync` has run at the repo root (installs `pytest`, `pytest-cov`, `pytest-mock`)
 - `git` on PATH
 - `hermes` CLI installed and authenticated (`hermes login`)
-- `claude` CLI installed and authenticated
-- Hermes and Claude Code must be on PATH — the preflight check verifies all three
+- The configured prompt client (`claude` or `codex`) installed and authenticated
+- Hermes and the selected client must be on PATH — preflight does not require
+  the unselected client
 
 ## Steps
 
@@ -24,6 +25,11 @@ uv run tpo test --fixture happy-path --timeout 120
 This creates a temporary project with a single TODO entry, registers all pipeline
 phases on the kanban board, and polls until completion. Expect ~30 seconds with
 `claude-haiku-4-5` pinned in the fixture config.
+
+The fixture intentionally has no Git remote. Its explicit harness phase profile
+keeps every production phase key but replaces `phase_8_finish_branch` with a
+local terminal workflow: test, commit, record the branch, and verify a clean
+worktree without invoking `/ship`, pushing, or opening a PR.
 
 Output:
 ```
@@ -127,14 +133,20 @@ A run that hit convergence halt:
 
 A run that hit the overall timeout:
 - Exit code 1
-- The in-flight phase is killed via `killpg`
+- The poll wait is cooperatively cancelled and its thread is joined
+- Running Hermes tasks are reclaimed, their run metadata must confirm worker
+  termination, and the task chain is archived child-first
 - `phase_timed_out` event written to `artifacts/events.jsonl`
+- Report generation and workspace deletion occur only after termination is
+  confirmed. Otherwise the command fails closed and reports the retained
+  workspace path.
 
 ## Troubleshooting
 
-**`Missing dependency: git/hermes/claude`**
+**`Missing dependency: git/hermes/<selected client>`**
 Preflight check failed. Install the missing tool and ensure it is on PATH. Run
-`which git`, `which hermes`, `which claude` to verify.
+`which git`, `which hermes`, and either `which claude` or `which codex` to
+verify the configured `prompt_client`.
 
 **`Unknown fixture: my-fixture`**
 Only `happy-path` is currently implemented. To add new fixtures, edit
@@ -156,10 +168,10 @@ hermes chat -q "echo hello"
 claude --version
 ```
 
-**Stale subprocesses after --timeout kill**
-`_kill_hung_phase_subprocess()` uses `killpg` to clean up the session group of
-the in-flight phase subprocess. If the PID has already exited or been reused, the
-LSP-safe `os.kill(pid, 0)` check prevents hitting an unrelated process.
+**Workspace retained after `--timeout`**
+The harness could not prove that every Hermes worker and run stopped. Inspect
+the retained path from the error, then use `hermes kanban show <task> --json`
+and `hermes kanban runs <task> --json` before removing it.
 
 ## Architecture Overview
 
@@ -173,7 +185,8 @@ kanban board and polls for transitions rather than dispatching phases directly.
 | `cli.py` | `test` subcommand — argparse wiring, exit code dispatch |
 
 Key flow:
-1. `preflight_check()` verifies git/hermes/claude on PATH
+1. `preflight_check(prompt_client=...)` verifies git, Hermes, and the selected
+   Claude/Codex executable on PATH
 2. `create_mock_project()` initializes a temp git repo with TODOS.md + .hermes config
 3. `isolate_config()` writes a temporary config file and points `TPO_CONFIG_FILE` at it
 4. `register_todo_phases()` creates kanban tasks for all pipeline phases
@@ -188,8 +201,11 @@ Key flow:
 11. Temp directory is cleaned up unless `--keep` is set
 
 The entire run is threaded with a `--timeout` watchdog (default 86400s / 24h).
-If the worker thread is still alive after the timeout, the subprocess is killed
-via `killpg` and a `phase_timed_out` event is recorded before report generation.
+At timeout, a cancellation event interrupts the poll wait and the thread is
+joined. Hermes running tasks are reclaimed and checked for ended runs and
+confirmed worker termination before the chain is archived. Only then is
+`phase_timed_out` reported and the report generated. Unconfirmed cleanup
+retains the workspace and raises an error instead of deleting live state.
 
 ## Kanban Integration
 

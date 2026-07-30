@@ -11,7 +11,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -103,9 +103,9 @@ def _get_todo_id_for_fixture(fixture_name: str) -> int:
     return 1
 
 
-def preflight_check() -> None:
+def preflight_check(*, prompt_client: PromptClient = "claude") -> None:
     """Verify required CLI tools are available."""
-    from .hermes_adapter import ClaudeDependencyError, HermesDependencyError
+    from .hermes_adapter import AgentClientDependencyError, HermesDependencyError
 
     if shutil.which("git") is None:
         raise RuntimeError(
@@ -116,9 +116,14 @@ def preflight_check() -> None:
         raise HermesDependencyError(
             "Hermes CLI is not installed or not on PATH. Install: https://hermos.dev"
         )
-    if shutil.which("claude") is None:
-        raise ClaudeDependencyError(
-            "Claude Code CLI is not installed or not on PATH. Install: https://claude.ai/code"
+    selected_product = {
+        "claude": "Claude Code",
+        "codex": "Codex",
+    }[prompt_client]
+    if shutil.which(prompt_client) is None:
+        raise AgentClientDependencyError(
+            f"{prompt_client} CLI for the selected prompt client "
+            f"({selected_product}) is not installed or not on PATH."
         )
 
 
@@ -176,14 +181,42 @@ class KanbanPreflightError(RuntimeError):
     """Raised when --kanban hermes is selected but the tenant is not accessible."""
 
 
+class HarnessCleanupError(RuntimeError):
+    """Raised when timeout cleanup cannot prove the workspace is quiescent."""
+
+
+class PollCancellationError(RuntimeError):
+    """Raised when the polling thread ignores cooperative cancellation."""
+
+
 # Preflight timeout for hermes kanban list (seconds)
 _PREFLIGHT_TIMEOUT = 15
 
 # Maximum poll interval for kanban-as-scheduler phase polling (seconds)
 _KANBAN_POLL_MAX_INTERVAL = 30.0
 
+# Maximum cooperative join after the overall timeout.
+_POLL_CANCELLATION_TIMEOUT = 30.0
+
 # Maximum characters in error messages captured by the harness
 _ERROR_MESSAGE_MAX = 500
+
+_OFFLINE_TERMINAL_PHASE_KEY = "phase_8_finish_branch"
+_OFFLINE_TERMINAL_PROMPT = """\
+Run the harness local terminal workflow.
+
+This disposable fixture intentionally has no Git remote. Do not invoke the
+ship skill, and do not push or open a pull request.
+
+1. Run the TODO acceptance tests and any repository tests added by prior phases.
+2. Inspect the complete local diff and commit every intended fixture change.
+3. Write the current branch name to `.hermes/pipeline_branch.txt` if needed and
+   include that state in the final local commit.
+4. Verify `git status --porcelain` is empty.
+
+Complete this task only when the local branch is tested, clean, and fully
+committed. Exit non-zero if any local verification or commit cannot complete.
+"""
 
 
 def _kanban_preflight(*, tenant: str) -> None:
@@ -282,6 +315,7 @@ def _poll_kanban_phases(
     max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
     phases: list[Phase] | None = None,
     prompt_client: PromptClient = "claude",
+    cancel_event: Any = None,
 ) -> bool:
     """Poll kanban-as-scheduler phases to completion.
 
@@ -344,7 +378,11 @@ def _poll_kanban_phases(
         return status == "blocked" and not getattr(phase, "gate", False)
 
     while not all_terminal:
-        time.sleep(current_interval)
+        if cancel_event is not None:
+            if cancel_event.wait(current_interval):
+                return False
+        else:
+            time.sleep(current_interval)
         current_interval = min(current_interval * 1.5, max_poll_interval)
 
         try:
@@ -438,13 +476,17 @@ def _poll_kanban_phases(
 def _classify_error_class(exc: Exception) -> str:
     """Bucket an exception into a coarse error class for convergence tracking / reports."""
     from .hermes_adapter import (
+        AgentClientDependencyError,
         ClaudeCallError,
         ClaudeDependencyError,
         HermesCallError,
         HermesDependencyError,
     )
 
-    if isinstance(exc, (HermesDependencyError, ClaudeDependencyError)):
+    if isinstance(
+        exc,
+        (HermesDependencyError, AgentClientDependencyError, ClaudeDependencyError),
+    ):
         return "dependency_error"
     if isinstance(exc, HermesCallError):
         return "hermes_error"
@@ -511,6 +553,16 @@ def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
     )
 
 
+def _with_offline_terminal_workflow(phases: list[Phase]) -> list[Phase]:
+    """Replace the network-only final phase for the no-remote harness fixture."""
+    return [
+        replace(phase, prompt=_OFFLINE_TERMINAL_PROMPT)
+        if phase.phase_key == _OFFLINE_TERMINAL_PHASE_KEY
+        else phase
+        for phase in phases
+    ]
+
+
 @contextmanager
 def isolate_config(*, state_dir: Path):
     """Context manager that points tpo at an isolated config file.
@@ -573,7 +625,7 @@ def _prune_retained_state(state_dir: Path) -> None:
 
 
 def _run_with_timeout(
-    fn: Callable[[], bool], *, timeout: int
+    fn: Callable[[], bool], *, timeout: int, cancel_event: Any = None
 ) -> tuple[bool, bool, dict[str, Any]]:
     """Run `fn` on a daemon worker thread, joined with `timeout`.
 
@@ -598,6 +650,16 @@ def _run_with_timeout(
     worker.join(timeout=timeout)
 
     if worker.is_alive():
+        if cancel_event is None:
+            raise PollCancellationError(
+                "poll worker exceeded the overall timeout without cancellation"
+            )
+        cancel_event.set()
+        worker.join(timeout=_POLL_CANCELLATION_TIMEOUT)
+        if worker.is_alive():
+            raise PollCancellationError(
+                "poll worker did not stop after cooperative cancellation"
+            )
         return False, True, result_box
     if "convergence_error" in result_box:
         log.warning(str(result_box["convergence_error"]))
@@ -630,7 +692,7 @@ def run_harness(
 
     prompt_client = getattr(config, "prompt_client", "claude")
 
-    preflight_check()
+    preflight_check(prompt_client=prompt_client)
 
     # Allocate under ~/.hermes/tmp rather than the OS default temp root: on
     # macOS, tempfile.mkdtemp() resolves under /var/folders/..., which is a
@@ -643,6 +705,7 @@ def run_harness(
     project_dir = workspace_dir / "project"
     artifacts_dir = workspace_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
+    workspace_quiescent = True
     try:
         fixture = create_mock_project(project_dir, fixture_name)
 
@@ -658,19 +721,21 @@ def run_harness(
         phases = all_phases
         if phase_only:
             phases = filter_phases(all_phases, phase_only)
+        phases = _with_offline_terminal_workflow(phases)
 
         tick_id = new_tick_id()
 
         _kanban_preflight(tenant=fixture["project_slug"])
 
-        # For --phase flag: create a temporary phases YAML for registration
-        _phases_path_override: Path | None = None
-        if phase_only:
-            import yaml as _yaml
-            _phases_path_override = artifacts_dir / "filtered-phases.yaml"
-            _phases_path_override.write_text(
-                _yaml.dump({"phases": [asdict(p) for p in phases]})
-            )
+        # Always register an explicit harness profile. The full profile keeps
+        # every production phase key while substituting the offline terminal
+        # workflow for the no-remote fixture.
+        import yaml as _yaml
+
+        _phases_path_override = artifacts_dir / "harness-phases.yaml"
+        _phases_path_override.write_text(
+            _yaml.dump({"phases": [asdict(p) for p in phases]})
+        )
 
         checkpoint_dir = state_dir / "pipeline_checkpoints"
         ready_dir = state_dir / "ready_for_review"
@@ -678,9 +743,14 @@ def run_harness(
         ready_dir.mkdir(parents=True, exist_ok=True)
 
         timed_out = False
+        timed_out_phase: str | None = None
         with isolate_config(state_dir=state_dir):
             # Emit initial event so the events log file exists for report generation
             base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
+
+            import threading
+
+            cancel_event = threading.Event()
 
             def _poll() -> bool:
                 todo_id_str = f"TODO-{fixture['todo_id']}"
@@ -695,31 +765,54 @@ def run_harness(
                     detector=detector,
                     phases=phases,
                     prompt_client=prompt_client,
+                    cancel_event=cancel_event,
                 )
 
-            success, timed_out, result_box = _run_with_timeout(_poll, timeout=timeout)
+            try:
+                success, timed_out, result_box = _run_with_timeout(
+                    _poll,
+                    timeout=timeout,
+                    cancel_event=cancel_event,
+                )
+            except PollCancellationError as exc:
+                workspace_quiescent = False
+                raise HarnessCleanupError(
+                    f"{exc}; workspace retained at {workspace_dir}"
+                ) from exc
 
             if timed_out:
                 try:
                     in_flight = get_todo_kanban_status(fixture["project_slug"], tick_id)
-                    running_phase = next(
+                    timed_out_phase = next(
                         (k for k, v in in_flight.items()
                          if v not in TERMINAL_STATUSES),
                         None,
                     )
-                    if running_phase and monitor.current_phase_key is None:
-                        base_monitor("phase_timed_out", {"phase_key": running_phase})
                 except Exception:
                     pass
+                from .kanban_tasks import cancel_todo_kanban_tasks
+
+                if not cancel_todo_kanban_tasks(
+                    fixture["project_slug"],
+                    tick_id,
+                ):
+                    workspace_quiescent = False
+                    raise HarnessCleanupError(
+                        "Hermes task or worker termination could not be "
+                        f"confirmed; workspace retained at {workspace_dir}"
+                    )
+                timed_out_phase = timed_out_phase or monitor.current_phase_key
+                if timed_out_phase:
+                    base_monitor(
+                        "phase_timed_out",
+                        {"phase_key": timed_out_phase},
+                    )
             elif "convergence_error" in result_box:
                 # Convergence-halt fired during polling. The poll loop already
                 # exited with all_terminal=True, so phases are already in terminal
                 # state on the kanban board — no additional cleanup needed beyond
                 # surfacing the convergence error in the result.
                 log.warning("convergence-halt: %s", result_box["convergence_error"])
-
-        if timed_out and monitor.current_phase_key:
-            base_monitor("phase_timed_out", {"phase_key": monitor.current_phase_key})
 
         output_dir = artifacts_dir / "reports"
         generate_report(events_log, output_dir)
@@ -765,5 +858,5 @@ def run_harness(
         raise
 
     finally:
-        if not keep_dir:
+        if not keep_dir and workspace_quiescent:
             shutil.rmtree(workspace_dir, ignore_errors=True)

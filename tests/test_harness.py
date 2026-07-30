@@ -142,6 +142,35 @@ class TestPreflightCheck:
         with pytest.raises(HermesDependencyError, match="[Hh]ermes"):
             preflight_check()
 
+    @pytest.mark.parametrize(
+        ("prompt_client", "selected_executable", "unselected_executable"),
+        (("claude", "claude", "codex"), ("codex", "codex", "claude")),
+    )
+    def test_preflight_requires_only_the_selected_client(
+        self,
+        monkeypatch,
+        prompt_client,
+        selected_executable,
+        unselected_executable,
+    ):
+        available = {"git", "hermes", selected_executable}
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.shutil.which",
+            lambda executable: f"/bin/{executable}" if executable in available else None,
+        )
+
+        preflight_check(prompt_client=prompt_client)
+
+        available.remove(selected_executable)
+        available.add(unselected_executable)
+        from hermes_pipeline.hermes_adapter import AgentClientDependencyError
+
+        with pytest.raises(
+            AgentClientDependencyError,
+            match=rf"{selected_executable}.*selected prompt client",
+        ):
+            preflight_check(prompt_client=prompt_client)
+
 
 class TestConvergenceDetector:
     def test_halts_after_threshold(self):
@@ -283,12 +312,14 @@ class TestHarnessResult:
 class TestClassifyErrorClass:
     def test_dependency_errors(self):
         from hermes_pipeline.hermes_adapter import (
+            AgentClientDependencyError,
             ClaudeDependencyError,
             HermesDependencyError,
         )
 
         assert _classify_error_class(HermesDependencyError("x")) == "dependency_error"
         assert _classify_error_class(ClaudeDependencyError("x")) == "dependency_error"
+        assert _classify_error_class(AgentClientDependencyError("x")) == "dependency_error"
 
     def test_call_errors(self):
         from hermes_pipeline.hermes_adapter import ClaudeCallError, HermesCallError
@@ -538,7 +569,7 @@ class TestRunHarnessTimeout:
         self, tmp_path, monkeypatch, mocker
     ):
         workspace = tmp_path / "harness-run"
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
         monkeypatch.setattr(
             "hermes_pipeline.harness.tempfile.mkdtemp",
             lambda prefix=None, dir=None: str(workspace),
@@ -551,6 +582,10 @@ class TestRunHarnessTimeout:
         mocker.patch(
             "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
             return_value={"phase_2_autoplan": "running"},
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            return_value=True,
         )
 
         result = run_harness(
@@ -570,19 +605,55 @@ class TestRunHarnessTimeout:
         assert (state_dir / "pipeline_checkpoints").exists()
         assert (state_dir / "ready_for_review").exists()
 
-    @pytest.mark.skip(reason="phases.run deleted in Task 4; restored when Task 5 rewrites harness dispatch")
-    def test_hung_phase_times_out_and_reports_partial_progress(self, tmp_path, monkeypatch):
-        import time as _time
-
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
-
-        def _hang_forever(*args, **kwargs):
-            _time.sleep(3)
-
-        monkeypatch.setattr("hermes_pipeline.phases.run", _hang_forever)
+    def test_timeout_stops_poll_and_remote_run_before_report(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        lifecycle = []
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.preflight_check",
+            lambda **_kwargs: None,
+        )
         monkeypatch.setattr(
             "hermes_pipeline.harness.tempfile.mkdtemp",
             lambda prefix=None, dir=None: str(tmp_path / "harness-run"),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+
+        def _cooperative_poll(**kwargs):
+            lifecycle.append("poll_started")
+            assert kwargs["cancel_event"].wait(2)
+            lifecycle.append("poll_stopped")
+            return False
+
+        mocker.patch(
+            "hermes_pipeline.harness._poll_kanban_phases",
+            side_effect=_cooperative_poll,
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "running"},
+        )
+
+        def _cancel_remote(*_args, **_kwargs):
+            assert lifecycle[-1] == "poll_stopped"
+            lifecycle.append("remote_terminated")
+            return True
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            side_effect=_cancel_remote,
+        )
+
+        from hermes_pipeline.test_report import generate_report as real_generate_report
+
+        def _generate_report(*args, **kwargs):
+            assert lifecycle[-1] == "remote_terminated"
+            lifecycle.append("report_generated")
+            return real_generate_report(*args, **kwargs)
+
+        mocker.patch(
+            "hermes_pipeline.test_report.generate_report",
+            side_effect=_generate_report,
         )
 
         result = run_harness(
@@ -590,15 +661,64 @@ class TestRunHarnessTimeout:
             loop=False,
             phase_only="phase_2_autoplan",
             keep_dir=True,
-            timeout=1,
+            timeout=0.01,
             convergence_threshold=3,
             config=None,
         )
 
         assert result.exit_code == 1
         assert "timeout" in result.summary.lower()
+        assert lifecycle == [
+            "poll_started",
+            "poll_stopped",
+            "remote_terminated",
+            "report_generated",
+        ]
         report_data = json.loads(result.report_path.read_text())
         assert any(p["status"] == "timeout" for p in report_data["phases"])
+
+    def test_timeout_retains_workspace_when_remote_termination_is_unconfirmed(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        from hermes_pipeline.harness import HarnessCleanupError
+
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.preflight_check",
+            lambda **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout",
+            return_value=(False, True, {}),
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "running"},
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            return_value=False,
+        )
+        generate = mocker.patch("hermes_pipeline.test_report.generate_report")
+
+        with pytest.raises(HarnessCleanupError, match="workspace retained"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=1,
+                convergence_threshold=3,
+                config=None,
+            )
+
+        assert workspace.exists()
+        generate.assert_not_called()
 
 
 class TestKanbanModeHermes:
@@ -610,7 +730,7 @@ class TestKanbanModeHermes:
 
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
         mock_harness_sp.return_value = preflight_result
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
 
         mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
         mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
@@ -635,7 +755,7 @@ class TestKanbanModeHermes:
 
         preflight_fail = MagicMock(returncode=1, stdout="", stderr="not authenticated")
         mock_run.return_value = preflight_fail
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
 
         with pytest.raises(KanbanPreflightError, match="hermes login"):
             run_harness(
@@ -647,7 +767,7 @@ class TestKanbanModeHermes:
     @pytest.mark.skip(reason="phases.run deleted in Task 4; restored when Task 5 rewrites harness dispatch")
     @patch("hermes_pipeline.harness.subprocess.run")
     def test_kanban_null_explicit_produces_no_kanban_calls(self, mock_run, monkeypatch, tmp_path):
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
         with patch("hermes_pipeline.phases.run") as mock_phases_run:
             mock_phases_run.return_value = {"status": "success"}
             run_harness(
@@ -664,7 +784,7 @@ class TestKanbanModeHermes:
     def test_kanban_hermes_polling_emits_jsonl_events(self, mock_harness_sp, tmp_path, monkeypatch, mocker):
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
         mock_harness_sp.return_value = preflight_result
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
 
         mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
         mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
@@ -704,7 +824,7 @@ class TestKanbanModeHermes:
             return MagicMock(returncode=0, stdout="", stderr="")
 
         mock_run.side_effect = _run_side_effect
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
 
         with pytest.raises(KanbanPreflightError, match="timed out.*15s"):
             run_harness(
@@ -716,7 +836,7 @@ class TestKanbanModeHermes:
     def test_convergence_halt_stops_polling_hermes(self, monkeypatch, mocker):
         mock_sp = mocker.patch("hermes_pipeline.harness.subprocess.run")
         mock_sp.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
 
         mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1", "t2", "t3"])
         mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
@@ -750,7 +870,7 @@ class TestKanbanModeHermes:
 
         preflight_result = MagicMock(returncode=0, stdout="[]", stderr="")
         mock_harness_sp.return_value = preflight_result
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
 
         mock_register = mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
         mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
@@ -779,7 +899,7 @@ class TestKanbanModeHermes:
     ):
         mock_sp = mocker.patch("hermes_pipeline.harness.subprocess.run")
         mock_sp.return_value = MagicMock(returncode=0, stdout="[]", stderr="")
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        preflight = mocker.patch("hermes_pipeline.harness.preflight_check")
         poll = mocker.patch(
             "hermes_pipeline.harness._poll_kanban_phases",
             return_value=True,
@@ -800,6 +920,7 @@ class TestKanbanModeHermes:
         )
 
         assert result.exit_code == 0
+        preflight.assert_called_once_with(prompt_client=expected)
         assert poll.call_args.kwargs["prompt_client"] == expected
 
     def test_run_harness_separates_project_from_artifacts(
@@ -807,7 +928,7 @@ class TestKanbanModeHermes:
     ):
         """The retained workspace keeps the Git fixture separate from run output."""
         workspace = tmp_path / "harness-run"
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
         monkeypatch.setattr(
             "hermes_pipeline.harness.tempfile.mkdtemp",
             lambda prefix=None, dir=None: str(workspace),
@@ -851,7 +972,7 @@ class TestKanbanModeHermes:
         self, tmp_path, monkeypatch, mocker
     ):
         workspace = tmp_path / "harness-run"
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
         monkeypatch.setattr(
             "hermes_pipeline.harness.tempfile.mkdtemp",
             lambda prefix=None, dir=None: str(workspace),
@@ -884,7 +1005,7 @@ class TestKanbanModeHermes:
     ):
         """Loop snapshots are retained beside artifacts, outside the Git fixture."""
         workspace = tmp_path / "harness-run"
-        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
         monkeypatch.setattr(
             "hermes_pipeline.harness.tempfile.mkdtemp",
             lambda prefix=None, dir=None: str(workspace),
@@ -1136,6 +1257,57 @@ class TestPollKanbanPhases:
         )
 
         assert register.call_args.kwargs["prompt_client"] == "codex"
+
+    def test_cancellation_interrupts_poll_wait_without_writing_outcomes(
+        self, tmp_path, mocker
+    ):
+        import threading
+
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
+
+        cancel_event = threading.Event()
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            return_value=["t_00000001"],
+        )
+
+        def _initial_status(*_args, **_kwargs):
+            cancel_event.set()
+            return {"phase_2_autoplan": "running"}
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            side_effect=_initial_status,
+        )
+        sleep = mocker.patch("hermes_pipeline.harness.time.sleep")
+        observe = mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(
+            HarnessMonitor(tmp_path / "events.jsonl"),
+            detector,
+            {},
+        )
+
+        result = _poll_kanban_phases(
+            project_slug="demo",
+            tick_id="01CANCEL",
+            state_dir=tmp_path / ".hermes",
+            todo_id="TODO-1",
+            project_dir=tmp_path,
+            phases_path=None,
+            monitor=monitor,
+            detector=detector,
+            cancel_event=cancel_event,
+        )
+
+        assert result is False
+        sleep.assert_not_called()
+        observe.assert_not_called()
 
     def test_emits_phase_failed_event_on_kanban_failure(self, tmp_path, mocker):
         import json as _json

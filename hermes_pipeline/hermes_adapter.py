@@ -25,7 +25,12 @@ HERMES_RETRY_DELAY = 1  # seconds between retries
 class HermesDependencyError(Exception):
     """Raised when the hermes CLI is not available at deploy/startup time."""
 
-class ClaudeDependencyError(Exception):
+
+class AgentClientDependencyError(Exception):
+    """Raised when the selected external agent client is unavailable."""
+
+
+class ClaudeDependencyError(AgentClientDependencyError):
     """Raised when the Claude Code CLI is not available or not authenticated."""
 
 class ClaudeCallError(Exception):
