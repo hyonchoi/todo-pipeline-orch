@@ -27,9 +27,10 @@ second is the structured source of truth for client support, discovery, and
 invocation metadata. `tpo doctor` loads both files unconditionally. Two
 profiles are bundled:
 
-- **`gstack`** (default) — the gstack/superpowers workflow. Skills: `autoplan`,
-  `writing-plans`, `subagent-driven-development`, `review`, `cso`, `qa`,
-  `document-release`, `document-generate`, `ship`.
+- **`gstack`** (default) — the gstack/superpowers workflow. Skills:
+  `ai-coding-agents`, `autoplan`, `writing-plans`,
+  `subagent-driven-development`, `review`, `cso`, `qa`, `document-release`,
+  `document-generate`, `ship`.
 - **`agent-skills`** — the agent-skills plugin workflow. Skills:
   `agent-skills:spec-driven-development`,
   `agent-skills:planning-and-task-breakdown`,

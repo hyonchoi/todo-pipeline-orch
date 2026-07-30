@@ -12,8 +12,10 @@ isolated environment and commit only the captured evidence.
 
 ### `gstack` / `claude`
 
-- Environment prerequisites: record the exact Claude Code, gstack, and
+- Environment prerequisites: record the exact Hermes, Claude Code, gstack, and
   superpowers versions.
+- Hermes dispatcher check: confirm the `ai-coding-agents` skill is available
+  in the Hermes skill registry and can invoke `claude -p`.
 - Discovery checks: follow symlinks under `~/.claude/skills` and confirm every
   required gstack `SKILL.md`; then confirm the official
   `claude-plugins-official/superpowers` plugin manifest and required
@@ -36,8 +38,10 @@ isolated environment and commit only the captured evidence.
 
 ### `gstack` / `codex`
 
-- Environment prerequisites: record the exact Codex, gstack, and superpowers
-  versions.
+- Environment prerequisites: record the exact Hermes, Codex, gstack, and
+  superpowers versions.
+- Hermes dispatcher check: confirm the `ai-coding-agents` skill is available
+  in the Hermes skill registry and can invoke `codex exec`.
 - Discovery checks: follow symlinks under `~/.codex/skills` and confirm every
   required gstack `SKILL.md`; then confirm the curated
   `openai-curated-remote/superpowers` plugin manifest and required

@@ -34,13 +34,16 @@ phases:
 def extract_bundled_skill_references(profile, phases):
     prompt_text = "\n".join(phase.prompt for phase in phases)
     if profile == "gstack":
-        return set(
+        return {
+            "ai-coding-agents",
+            *set(
             re.findall(
                 r"\{(?:skill_prefix|superpowers_skill_prefix)\}"
                 r"([a-z][a-z0-9-]*)",
                 prompt_text,
             )
-        )
+            ),
+        }
     if profile == "agent-skills":
         return set(re.findall(r"\bagent-skills:[a-z][a-z0-9-]*", prompt_text))
     raise AssertionError(f"missing test-owned extraction pattern for {profile}")
@@ -53,6 +56,8 @@ def test_prerequisite_metadata_covers_every_bundled_skill_reference():
         phases = load_phases(resolve_profile_phases_path(profile))
         prompt_text = "\n".join(phase.prompt for phase in phases)
         for skill_id in declared:
+            if skill_id == "ai-coding-agents":
+                continue
             assert skill_id in prompt_text
         assert extract_bundled_skill_references(profile, phases) == declared
 
@@ -70,6 +75,7 @@ def test_gstack_prerequisites_are_conditional_and_verified():
     assert {
         item.skill_id: item.distribution_owner for item in metadata.skills
     } == {
+        "ai-coding-agents": "hermes",
         "autoplan": "gstack",
         "writing-plans": "superpowers",
         "subagent-driven-development": "superpowers",
@@ -82,17 +88,19 @@ def test_gstack_prerequisites_are_conditional_and_verified():
     }
     for item in metadata.skills:
         assert item.support == "Conditional"
-        assert item.clients["claude"].invocation == f"/{item.skill_id}"
-        expected_codex_invocation = (
-            f"$superpowers:{item.skill_id}"
-            if item.distribution_owner == "superpowers"
-            else f"${item.skill_id}"
-        )
-        assert item.clients["codex"].invocation == expected_codex_invocation
-        if item.distribution_owner == "gstack":
+        if item.distribution_owner == "hermes":
+            assert item.clients["claude"].invocation == "claude -p"
+            assert item.clients["codex"].invocation == "codex exec"
+            assert item.clients["claude"].discovery_root == "Hermes skill registry"
+            assert item.clients["codex"].discovery_root == "Hermes skill registry"
+        elif item.distribution_owner == "gstack":
+            assert item.clients["claude"].invocation == f"/{item.skill_id}"
+            assert item.clients["codex"].invocation == f"${item.skill_id}"
             assert item.clients["claude"].discovery_root == ".claude/skills"
             assert item.clients["codex"].discovery_root == ".codex/skills"
         else:
+            assert item.clients["claude"].invocation == f"/{item.skill_id}"
+            assert item.clients["codex"].invocation == f"$superpowers:{item.skill_id}"
             assert "claude-plugins-official/superpowers" in (
                 item.clients["claude"].discovery_root or ""
             )
@@ -727,6 +735,8 @@ def test_every_bundled_phase_renders_for_client(
             invocation = prerequisite.clients[client].invocation
             opposite_invocation = prerequisite.clients[opposite_client].invocation
             if prerequisite.support == "Conditional":
+                if prerequisite.distribution_owner == "hermes":
+                    continue
                 if f"{{skill_prefix}}{prerequisite.skill_id}" not in phase.prompt:
                     continue
                 assert invocation is not None

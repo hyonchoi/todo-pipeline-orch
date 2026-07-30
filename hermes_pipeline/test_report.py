@@ -126,7 +126,9 @@ def summarize_report(report_path: Path) -> str:
     data = json.loads(report_path.read_text())
     total = data["total_phases"]
     passed = data["passed_phases"]
-    failed_phases = [p for p in data["phases"] if p["status"] in ("failed", "timeout")]
+    failed_phases = [
+        p for p in data["phases"] if p["status"] in ("failed", "timeout", "blocked")
+    ]
 
     summary = f"{passed}/{total} phases passed"
     if failed_phases:
