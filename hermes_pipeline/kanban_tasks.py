@@ -5,6 +5,7 @@ Uses raw `hermes kanban` CLI directly — not through HermesKanbanAdapter.
 from __future__ import annotations
 
 import fcntl
+import heapq
 import json
 import logging
 import os
@@ -1341,12 +1342,16 @@ def _child_first_task_order(tasks: list[dict[str, object]]) -> list[dict[str, ob
                 return None
             child_count[parent_id] += 1
 
-    ordered_ids = [task_id for task_id in tasks_by_id if child_count[task_id] == 0]
-    for task_id in ordered_ids:
+    ready_ids = [task_id for task_id in tasks_by_id if child_count[task_id] == 0]
+    heapq.heapify(ready_ids)
+    ordered_ids: list[str] = []
+    while ready_ids:
+        task_id = heapq.heappop(ready_ids)
+        ordered_ids.append(task_id)
         for parent_id in parents_by_id[task_id]:
             child_count[parent_id] -= 1
             if child_count[parent_id] == 0:
-                ordered_ids.append(parent_id)
+                heapq.heappush(ready_ids, parent_id)
     if len(ordered_ids) != len(tasks_by_id):
         return None
     return [tasks_by_id[task_id] for task_id in ordered_ids]

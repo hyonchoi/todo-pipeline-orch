@@ -1958,7 +1958,7 @@ class TestCancelTodoKanbanTasks:
         tasks = [
             {
                 "id": task_id,
-                "status": "ready",
+                "status": "running",
                 "body": json.dumps(
                     {"tick_id": "01CANCEL", "phase_key": phase_key}
                 ),
@@ -1972,6 +1972,81 @@ class TestCancelTodoKanbanTasks:
         parents = {
             "t_00000001": [],
             "t_00000002": ["t_00000003"],
+            "t_00000003": ["t_00000001"],
+        }
+
+        def _run(command, **_kwargs):
+            if command[:3] == ["hermes", "kanban", "show"]:
+                task_id = command[3]
+                return mocker.Mock(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "task": {
+                                "id": task_id,
+                                "worker_pid": None,
+                                "claim_lock": None,
+                            },
+                            "parents": parents[task_id],
+                            "runs": [
+                                {
+                                    "metadata": {"terminated": True},
+                                    "ended_at": 123,
+                                }
+                            ],
+                        }
+                    ),
+                    stderr="",
+                )
+            return mocker.Mock(returncode=0, stdout="", stderr="")
+
+        run = mocker.patch(
+            "hermes_pipeline.kanban_tasks.subprocess.run", side_effect=_run
+        )
+
+        assert cancel_todo_kanban_tasks("demo", "01CANCEL") is True
+        reclaim_commands = [
+            call.args[0]
+            for call in run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "reclaim"]
+        ]
+        archive_commands = [
+            call.args[0]
+            for call in run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "archive"]
+        ]
+        assert [command[-1] for command in reclaim_commands] == [
+            "t_00000002",
+            "t_00000003",
+            "t_00000001",
+        ]
+        assert archive_commands == [
+            ["hermes", "kanban", "archive", "t_00000002"],
+            ["hermes", "kanban", "archive", "t_00000003"],
+            ["hermes", "kanban", "archive", "t_00000001"],
+        ]
+
+    def test_archives_sibling_topology_by_task_id_not_snapshot_order(self, mocker):
+        from hermes_pipeline.kanban_tasks import cancel_todo_kanban_tasks
+
+        task_ids = ("t_00000001", "t_00000003", "t_00000002")
+        tasks = [
+            {
+                "id": task_id,
+                "status": "ready",
+                "body": json.dumps(
+                    {"tick_id": "01CANCEL", "phase_key": f"phase_{index}"}
+                ),
+            }
+            for index, task_id in enumerate(task_ids)
+        ]
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks._list_task_snapshot",
+            side_effect=[tasks, [{**task, "status": "archived"} for task in tasks]],
+        )
+        parents = {
+            "t_00000001": [],
+            "t_00000002": ["t_00000001"],
             "t_00000003": ["t_00000001"],
         }
 
@@ -2005,10 +2080,10 @@ class TestCancelTodoKanbanTasks:
             for call in run.call_args_list
             if call.args[0][:3] == ["hermes", "kanban", "archive"]
         ]
-        assert archive_commands == [
-            ["hermes", "kanban", "archive", "t_00000002"],
-            ["hermes", "kanban", "archive", "t_00000003"],
-            ["hermes", "kanban", "archive", "t_00000001"],
+        assert [command[-1] for command in archive_commands] == [
+            "t_00000002",
+            "t_00000003",
+            "t_00000001",
         ]
 
     @pytest.mark.parametrize(
