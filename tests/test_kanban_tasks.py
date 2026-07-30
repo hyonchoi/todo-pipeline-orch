@@ -225,8 +225,13 @@ def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
     assert "External agent timeout: 2400 seconds" in prepared[0].body
     assert "tracked background execution" in prepared[0].body
     assert "monitor the background process" in prepared[0].body
+    assert "60-second cleanup grace" in prepared[0].body
+    assert "terminate the external process tree" in prepared[0].body
+    assert "confirm that it is no longer running" in prepared[0].body
     assert "external_agent_timeout_seconds" in prepared[0].body
     assert "external_agent_exit_code" in prepared[0].body
+    assert "kanban_comment" in prepared[0].body
+    assert 'kanban_block(kind="needs_input"' in prepared[0].body
     assert "must not inspect partial changes" in prepared[0].body
     assert "must not implement or commit the phase yourself" in prepared[0].body
 
@@ -439,8 +444,11 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     )
     assert "already rendered $body" in create_commands[1]
     assert "--max-runtime" not in create_commands[0]
-    assert create_commands[1][create_commands[1].index("--max-runtime") + 1] == "2400"
-    assert create_commands[2][create_commands[2].index("--max-runtime") + 1] == "7200"
+    assert "--max-retries" not in create_commands[0]
+    assert create_commands[1][create_commands[1].index("--max-runtime") + 1] == "2460"
+    assert create_commands[1][create_commands[1].index("--max-retries") + 1] == "1"
+    assert create_commands[2][create_commands[2].index("--max-runtime") + 1] == "7260"
+    assert create_commands[2][create_commands[2].index("--max-retries") + 1] == "1"
 
 
 def test_create_prepared_blocks_until_registered_and_preserves_activation_order(

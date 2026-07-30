@@ -364,6 +364,42 @@ def test_load_phases_from_yaml(tmp_path):
     assert phases[0].turns == 20
     assert phases[1].timeout == 1800  # default
 
+
+@pytest.mark.parametrize("timeout", ["2400", True, 0, -1])
+def test_load_phases_rejects_invalid_timeout(tmp_path, timeout):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        yaml.safe_dump(
+            {
+                "phases": [
+                    {
+                        "phase_key": "phase_1",
+                        "name": "One",
+                        "timeout": timeout,
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"phase_1.*timeout must be a positive integer",
+    ):
+        load_phases(phases_path)
+
+
+def test_load_phases_defaults_timeout_to_1800(tmp_path):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+    )
+
+    assert load_phases(phases_path)[0].timeout == 1800
+
+
 def test_gate_phase_needs_no_llm_fields(tmp_path):
     p = tmp_path / "phases.yaml"
     p.write_text(

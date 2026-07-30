@@ -27,6 +27,7 @@ _EXPECTED_PHASES_FILE_SUFFIX = ".expected-phases.json"
 _PENDING_TASK_CREATE_FILE = "pending-task-create.json"
 _REGISTRATION_BARRIER_PHASE_KEY = "__registration_barrier__"
 _REGISTRATION_BARRIER_INFRASTRUCTURE = "registration_barrier"
+PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS = 60
 
 log = logging.getLogger(__name__)
 
@@ -128,18 +129,23 @@ def _external_client_delegation_block(
         "external client.\n"
         f"Required external command: `{command}`\n"
         f"External agent timeout: {timeout} seconds.\n"
+        f"The external client deadline is {timeout} seconds. The Hermes worker "
+        "has a 60-second cleanup grace after that deadline. If the deadline "
+        "expires, terminate the external process tree and confirm that it is "
+        "no longer running.\n"
         "Launch the external command with Hermes tracked background execution, "
         "then monitor the background process until it exits or this deadline "
         "expires. Do not use a foreground terminal call because Hermes may "
         "replace this phase timeout with its shorter foreground cap.\n"
         "Do not implement this phase directly with Hermes tools.\n"
         "If the external client is unavailable, exits non-zero, or exceeds "
-        "the deadline, block or fail this task with the exact reason. You "
-        "must not inspect partial changes, and must not implement or commit "
-        "the phase yourself.\n"
-        "When completing the task, include result metadata with "
-        "`external_agent_command`, `external_agent_timeout_seconds`, "
-        "`external_agent_exit_code`, and any external session identifier.\n\n"
+        "the deadline, write known `external_agent_command`, "
+        "`external_agent_timeout_seconds`, `external_agent_session_id`, and "
+        "`external_agent_exit_code` values through `kanban_comment`, then call "
+        '`kanban_block(kind="needs_input", reason=<exact reason>)`. '
+        "Do not inspect, implement, or commit partial work; you must not inspect "
+        "partial changes, and must not implement or commit the phase yourself.\n"
+        "When completing the task, include the same result metadata.\n\n"
     )
 
 
@@ -889,7 +895,9 @@ def create_prepared_todo_phases(
             cmd.extend(
                 [
                     "--max-runtime",
-                    str(phase.timeout),
+                    str(phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+                    "--max-retries",
+                    "1",
                     "--goal",
                     "--goal-max-turns",
                     str(phase.turns),

@@ -253,7 +253,16 @@ def load_phases(config_path: Path | str | None = None) -> list[Phase]:
     raw_phases = data.get("phases") if isinstance(data, dict) else None
     if not isinstance(raw_phases, list) or not raw_phases:
         raise ValueError(f"{config_path}: phases must contain at least one phase")
-    return [Phase(**phase) for phase in raw_phases]
+    phases: list[Phase] = []
+    for index, raw_phase in enumerate(raw_phases):
+        phase = Phase(**raw_phase)
+        if type(phase.timeout) is not int or phase.timeout <= 0:
+            source = raw_phase.get("phase_key", f"index {index}")
+            raise ValueError(
+                f"{config_path}:{source}: timeout must be a positive integer"
+            )
+        phases.append(phase)
+    return phases
 
 
 def _now_iso() -> str:

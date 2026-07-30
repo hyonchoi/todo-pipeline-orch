@@ -91,13 +91,17 @@ For every executable phase, its configured deadline follows this exact path:
 
 ```
 Phase.timeout
+  -> external Codex/Claude deadline
   -> PreparedPhaseTask.timeout
-  -> hermes kanban create --max-runtime <seconds>
-  -> tracked background Codex/Claude process with the same deadline
+  -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
 ```
 
+The final minute is cleanup-only: after the client deadline, the dispatcher
+terminates the external process tree and confirms it is no longer running.
 Only a zero external-agent exit may complete the phase. After a timeout or
-non-zero exit, Hermes cannot finish or commit partial work.
+non-zero exit, the dispatcher comments the known external-agent failure
+metadata, then applies the supported `needs_input` block transition with the
+exact reason. Hermes cannot finish, inspect, or commit partial work.
 
 ```
 cli._tick_project(config, contract)

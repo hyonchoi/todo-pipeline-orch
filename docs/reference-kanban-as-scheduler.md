@@ -18,10 +18,23 @@ closed without merge, or temporarily unverifiable. Once GitHub reports the PR as
 ## Operator execution deadlines
 
 The selected profile's `phases.yaml` owns each executable phase deadline.
-TPO sends that value to Hermes as `--max-runtime` and includes it in the
-external-agent delegation contract. Delegated clients run as tracked
-background processes so Hermes's 600-second foreground terminal cap cannot
-shorten a phase configured for longer work.
+The deadline follows this path:
+
+```
+Phase.timeout
+  -> external Codex/Claude deadline
+  -> PreparedPhaseTask.timeout
+  -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
+```
+
+Delegated clients run as tracked background processes so Hermes's 600-second
+foreground terminal cap cannot shorten a phase configured for longer work.
+The final minute is cleanup-only: after the client deadline, the dispatcher
+terminates the external process tree and confirms it is no longer running.
+On timeout or non-zero exit, it writes known external-agent failure metadata
+through `kanban_comment`, then uses the supported
+`kanban_block(kind="needs_input", reason=...)` transition. It does not inspect,
+implement, or commit partial work.
 
 Use `hermes kanban show <task-id> --json` to inspect task state and
 `hermes kanban log <task-id>` to inspect the worker audit trail.
@@ -388,8 +401,9 @@ each prepared phase, it then runs `hermes kanban create` with:
 - `--assignee -` for the barrier and gates; executable tasks use `assignee`
 - `--body <json_header>\n<phase_prompt>` — task body with JSON header on first
   line
-- `--max-runtime <seconds>` for executable tasks — the selected phase deadline;
-  gate tasks omit it
+- `--max-runtime <timeout + 60>` and `--max-retries 1` for executable tasks —
+  the selected phase deadline plus cleanup-only grace and a terminal single
+  attempt; gate tasks omit both flags
 
 After creating a gate, it runs
 `hermes kanban block --kind needs_input <gate-task-id>`. After the

@@ -86,6 +86,7 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     assert barrier[barrier.index("--assignee") + 1] == "-"
     assert "--goal" not in barrier
     assert "--max-runtime" not in barrier
+    assert "--max-retries" not in barrier
     assert "--parent" not in barrier
     assert "--initial-status" not in barrier
 
@@ -95,14 +96,16 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     assert "--goal" in first
     assert (
         first[first.index("--max-runtime") + 1]
-        == "2400"
+        == "2460"
     )
+    assert first[first.index("--max-retries") + 1] == "1"
     assert "--initial-status" not in first
 
     gate = create_commands["phase_gate"]
     assert gate[gate.index("--assignee") + 1] == "-"
     assert "--goal" not in gate
     assert "--max-runtime" not in gate
+    assert "--max-retries" not in gate
     assert gate[gate.index("--parent") + 1] == "t_00000001"
     assert "--initial-status" not in gate
 
@@ -110,8 +113,9 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     assert second[second.index("--parent") + 1] == "t_0000000a"
     assert (
         second[second.index("--max-runtime") + 1]
-        == "7200"
+        == "7260"
     )
+    assert second[second.index("--max-retries") + 1] == "1"
     assert "--initial-status" not in second
 
 
