@@ -515,6 +515,42 @@ class TestPollKanbanPhasesConsoleOutput:
 class TestRunHarnessTimeout:
     """Overall --timeout must actually bound a hung phase, not just be accepted and ignored."""
 
+    def test_timed_out_retained_run_preserves_live_state(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout",
+            return_value=(False, True, {}),
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "running"},
+        )
+
+        result = run_harness(
+            fixture_name="happy-path",
+            loop=False,
+            phase_only=None,
+            keep_dir=True,
+            timeout=1,
+            convergence_threshold=3,
+            config=None,
+        )
+
+        state_dir = workspace / "project" / ".hermes"
+        assert result.exit_code == 1
+        assert result.temp_dir == workspace
+        assert (state_dir / "tpo-config.yaml").exists()
+        assert (state_dir / "pipeline_checkpoints").exists()
+        assert (state_dir / "ready_for_review").exists()
+
     @pytest.mark.skip(reason="phases.run deleted in Task 4; restored when Task 5 rewrites harness dispatch")
     def test_hung_phase_times_out_and_reports_partial_progress(self, tmp_path, monkeypatch):
         import time as _time

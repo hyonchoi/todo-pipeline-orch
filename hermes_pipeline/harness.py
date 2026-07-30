@@ -748,7 +748,7 @@ def run_harness(
             f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
         )
 
-        if keep_dir:
+        if keep_dir and not timed_out:
             _prune_retained_state(state_dir)
 
         exit_code = 0 if (success and not timed_out) else 1
