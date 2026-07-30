@@ -81,7 +81,7 @@ During execution, the harness may create production-parity state under
 
 - `pipeline_branch.txt`;
 - `tpo-config.yaml`;
-- `outcomes/`;
+- empty `outcomes/`;
 - `pipeline_checkpoints/`;
 - `ready_for_review/`.
 
@@ -95,8 +95,8 @@ known terminal harness state:
 - empty `ready_for_review/`.
 
 The cleanup is allowlisted. It does not recursively remove unknown `.hermes`
-content, and it preserves non-empty checkpoint or review directories so
-failure evidence is not lost.
+content, and it preserves non-empty outcome, checkpoint, or review directories
+so failure evidence is not lost.
 
 Agent scratch directories and Python bytecode are excluded from this cleanup:
 they are not owned by the harness, and deleting arbitrary agent-created
