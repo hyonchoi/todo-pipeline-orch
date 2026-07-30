@@ -3,9 +3,9 @@
 - Evidence status: `release-final`
 - Release: `0.7.0`
 - Source VERSION: `0.7.0`
-- Source commit: `e34ae19fe89efbbe950fe492328ed320189fe1a0`
+- Source commit: `d150862b2430b083122145de85b8264fac43f7bd`
 - Profile/client: `gstack / codex`
-- Timestamp: `2026-07-30T01:28:08Z`
+- Timestamp: `2026-07-30T07:24:46Z`
 - Environment: `macOS 26.5.2 (25F84), arm64`
 - Client: `Codex CLI 0.146.0`
 - gstack: `1.60.1.0`
