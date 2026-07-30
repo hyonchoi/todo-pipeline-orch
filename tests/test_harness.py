@@ -905,6 +905,54 @@ class TestPollKanbanPhases:
         assert len(failed) == 1
         assert failed[0]["phase_key"] == "phase_2_autoplan"
 
+    def test_emits_phase_blocked_event_on_kanban_block(self, tmp_path, mocker):
+        import json as _json
+
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+            _poll_kanban_phases,
+        )
+
+        events_log = tmp_path / "events.jsonl"
+        base_monitor = HarnessMonitor(events_log)
+        detector = ConvergenceDetector(threshold=3)
+        monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", return_value=["t1"])
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=[
+            {"phase_4_development": "running"},
+            {"phase_4_development": "blocked"},
+            {"phase_4_development": "blocked"},
+        ])
+
+        result = _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK",
+            state_dir=tmp_path / ".hermes", todo_id="TODO-1",
+            project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.1,
+            phases=[
+                Phase(
+                    phase_key="phase_4_development",
+                    name="Phase 4: Development",
+                    prompt="",
+                    tools="",
+                    turns=0,
+                )
+            ],
+        )
+
+        assert result is False
+        lines = events_log.read_text().strip().splitlines()
+        events = [_json.loads(l) for l in lines if l.strip()]
+        blocked = [e for e in events if e["event_type"] == "phase_blocked"]
+        assert len(blocked) == 1
+        assert blocked[0]["phase_key"] == "phase_4_development"
+
     def test_convergence_halt_stops_polling(self, tmp_path, mocker):
 
         from hermes_pipeline.harness import (

@@ -413,6 +413,14 @@ def test_real_phases_yaml_review_phase_fields():
     assert "reset --hard" not in rev.prompt
 
 
+def test_real_phases_yaml_development_does_not_block_for_review():
+    phases = {p.phase_key: p for p in load_phases()}
+    dev = phases["phase_4_development"]
+    assert "Review is handled by the next pipeline phase" in dev.prompt
+    assert "do NOT block" in dev.prompt
+    assert "complete this task normally" in dev.prompt
+
+
 def test_real_phases_yaml_order_unchanged_for_existing_phases():
     keys = [p.phase_key for p in load_phases()]
     assert keys == [

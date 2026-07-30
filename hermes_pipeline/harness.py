@@ -317,6 +317,13 @@ def _poll_kanban_phases(
     previous_status: dict[str, str] = {}
     all_terminal = False
     current_interval = poll_interval
+    phase_by_key = {phase.phase_key: phase for phase in phases or []}
+
+    def _is_terminal_status(phase_key: str, status: str) -> bool:
+        if status in TERMINAL_STATUSES:
+            return True
+        phase = phase_by_key.get(phase_key)
+        return status == "blocked" and not getattr(phase, "gate", False)
 
     while not all_terminal:
         time.sleep(current_interval)
@@ -358,6 +365,16 @@ def _poll_kanban_phases(
                     # call is needed here.
                     monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
 
+                elif prev == "running" and status == "blocked":
+                    log.info("phase %s: running -> blocked", phase_key)
+                    monitor.current_phase_key = None
+                    monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
+
+                elif prev in (None, "ready") and status == "blocked":
+                    log.info("phase %s: %s -> blocked", phase_key, prev or "none")
+                    monitor.current_phase_key = None
+                    monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
+
                 elif prev in (None, "ready", "blocked") and status == "done":
                     # Phase completed between polls without ever being observed
                     # as "running" (fast phase, coarse poll interval). Still
@@ -386,7 +403,10 @@ def _poll_kanban_phases(
         previous_status = dict(status_map)
 
         if not all_terminal:
-            all_terminal = all(s in TERMINAL_STATUSES for s in status_map.values())
+            all_terminal = all(
+                _is_terminal_status(phase_key, status)
+                for phase_key, status in status_map.items()
+            )
 
     try:
         final_status = get_todo_kanban_status(project_slug, tick_id)
