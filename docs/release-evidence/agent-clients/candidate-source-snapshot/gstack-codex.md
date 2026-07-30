@@ -123,9 +123,8 @@ codex exec "\$autoplan Qualification only: identify the autoplan skill you disco
 Captured transcript excerpt:
 
 ```text
-Discovered skill: `autoplan` at `/Users/hyonchoi/.local/share/gstack/autoplan/SKILL.md`.
-
-`/autoplan` started. I am stopping here per qualification instructions: no file edits, no project commands, no review pipeline.
+Discovered `/autoplan` at `/Users/hyonchoi/.local/share/gstack/autoplan/SKILL.md`.
+Qualification started.
 ```
 
 ## Invocation forms

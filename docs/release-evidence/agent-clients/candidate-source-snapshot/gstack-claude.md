@@ -123,7 +123,11 @@ claude -p "/autoplan Qualification only: identify the autoplan skill you discove
 Captured transcript excerpt:
 
 ```text
-The autoplan skill has been discovered and started. It's the `/autoplan` skill located at `/Users/hyonchoi/.claude/skills/autoplan/SKILL.md`.
+## /autoplan Skill Identified and Started
+
+**Skill:** `autoplan` — Auto-Review Pipeline from `~/.claude/skills/autoplan/SKILL.md`
+
+**Status:** Qualification only — per your arguments, I'm identifying the skill and stopping here. No files edited, no project commands run, no review pipeline phases executed.
 ```
 
 ## Invocation forms
