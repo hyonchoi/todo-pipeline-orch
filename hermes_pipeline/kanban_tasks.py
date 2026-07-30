@@ -104,6 +104,31 @@ class PendingBarrierCommit:
     cleanup_task_ids: tuple[str, ...]
 
 
+def _external_client_delegation_block(prompt_client: PromptClient) -> str:
+    """Return the dispatcher contract prepended to executable phase tasks."""
+    if prompt_client == "codex":
+        command = "codex exec --sandbox danger-full-access"
+    elif prompt_client == "claude":
+        command = "claude -p"
+    else:
+        raise ValueError(
+            f"prompt_client must be one of ('claude', 'codex'), got {prompt_client!r}"
+        )
+    return (
+        "External client delegation:\n"
+        "You are the Hermes dispatcher, not the implementation agent.\n"
+        "Use the Hermes `ai-coding-agents` skill and invoke the selected "
+        "external client with the phase instructions below.\n"
+        f"Required external command: `{command}`\n"
+        "Do not implement this phase directly with Hermes tools. Use Hermes "
+        "tools only to invoke, monitor, and inspect the external client run.\n"
+        "If the external client is unavailable or exits non-zero, block or "
+        "fail this task with the exact reason.\n"
+        "When completing the task, include result metadata with "
+        "`external_agent_command` and any external session identifier.\n\n"
+    )
+
+
 def _pending_task_create_marker(project_dir: str | Path) -> Path:
     return Path(project_dir) / ".hermes" / "outcomes" / _PENDING_TASK_CREATE_FILE
 
@@ -573,32 +598,39 @@ def prepare_todo_phases(
     if not re.fullmatch(r"TODO-\d+", todo_id):
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
     phases = load_phases(phases_path)
-    return [
-        PreparedPhaseTask(
-            phase_key=phase.phase_key,
-            name=phase.name,
-            body=(
-                _build_json_header(
-                    tick_id=tick_id,
-                    phase_key=phase.phase_key,
-                    todo_id=todo_id,
-                    project_slug=board_slug,
-                )
-                + "\n"
-                + _render_phase_prompt(
-                    phase.prompt,
-                    todo_id=todo_id,
-                    tick_id=tick_id,
-                    project_slug=board_slug,
-                    prompt_client=prompt_client,
-                    template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
-                )
-            ),
-            turns=phase.turns,
-            gate=phase.gate,
+    prepared: list[PreparedPhaseTask] = []
+    for phase in phases:
+        rendered_prompt = _render_phase_prompt(
+            phase.prompt,
+            todo_id=todo_id,
+            tick_id=tick_id,
+            project_slug=board_slug,
+            prompt_client=prompt_client,
+            template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
         )
-        for phase in phases
-    ]
+        delegation = "" if phase.gate else _external_client_delegation_block(
+            prompt_client
+        )
+        prepared.append(
+            PreparedPhaseTask(
+                phase_key=phase.phase_key,
+                name=phase.name,
+                body=(
+                    _build_json_header(
+                        tick_id=tick_id,
+                        phase_key=phase.phase_key,
+                        todo_id=todo_id,
+                        project_slug=board_slug,
+                    )
+                    + "\n"
+                    + delegation
+                    + rendered_prompt
+                ),
+                turns=phase.turns,
+                gate=phase.gate,
+            )
+        )
+    return prepared
 
 
 def _registration_barrier_body(*, tick_id: str, project_slug: str) -> str:

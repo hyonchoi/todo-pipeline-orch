@@ -92,7 +92,10 @@ scheduler.
 Client-dependent gstack prompts use Claude Code slash syntax (for example,
 `/review` and `/ship`) when `prompt_client=claude`, and Codex dollar syntax
 (`$review` and `$ship`) when `prompt_client=codex`. This setting changes task
-body vocabulary only; Hermes still dispatches every task.
+body vocabulary and prepends external-client delegation instructions to each
+executable kanban task; Hermes still dispatches the task, but the task body
+requires the Hermes worker to invoke the selected client (`claude -p` or
+`codex exec`) through the `ai-coding-agents` skill.
 
 See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
 

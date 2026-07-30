@@ -166,6 +166,70 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
     assert "Use $review in Codex." in prepared[0].body
 
 
+@pytest.mark.parametrize(
+    ("prompt_client", "command", "forbidden"),
+    [
+        ("codex", "codex exec --sandbox danger-full-access", "claude -p"),
+        ("claude", "claude -p", "codex exec"),
+    ],
+)
+def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
+    tmp_path, mocker, prompt_client, command, forbidden
+):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: 'Use {skill_prefix}review in {agent_product}.'\n"
+        "    tools: Read,Bash\n"
+        "    turns: 5\n"
+    )
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        board_slug="demo",
+        phases_path=phases_path,
+        prompt_client=prompt_client,
+    )
+
+    run.assert_not_called()
+    assert "You are the Hermes dispatcher" in prepared[0].body
+    assert command in prepared[0].body
+    assert forbidden not in prepared[0].body
+    assert "Do not implement this phase directly with Hermes tools" in prepared[0].body
+    assert "external_agent_command" in prepared[0].body
+
+
+def test_prepare_todo_phases_does_not_wrap_gate_phase_with_client_delegation(
+    tmp_path,
+):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: gate\n"
+        "    name: Gate\n"
+        "    gate: true\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        board_slug="demo",
+        phases_path=phases_path,
+        prompt_client="codex",
+    )
+
+    assert "You are the Hermes dispatcher" not in prepared[0].body
+    assert "codex exec" not in prepared[0].body
+
+
 def test_prepare_todo_phases_rejects_invalid_todo_before_loading_phases(
     tmp_path, mocker
 ):

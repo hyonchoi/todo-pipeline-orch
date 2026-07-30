@@ -421,6 +421,16 @@ def test_real_phases_yaml_development_does_not_block_for_review():
     assert "complete this task normally" in dev.prompt
 
 
+def test_real_phases_yaml_development_defers_to_sdd_task_loop():
+    phases = {p.phase_key: p for p in load_phases()}
+    dev = phases["phase_4_development"]
+    assert "Follow the subagent-driven-development task loop" in dev.prompt
+    assert "short-circuit it with direct inline implementation" in dev.prompt
+    assert "implementer subagent per plan task" in dev.prompt
+    assert "test-driven-development" not in dev.prompt
+    assert "TDD" not in dev.prompt
+
+
 def test_real_phases_yaml_order_unchanged_for_existing_phases():
     keys = [p.phase_key for p in load_phases()]
     assert keys == [

@@ -194,7 +194,7 @@ Mixed-client fleets need separate project roots.
 
 | Setting | Selects |
 |---|---|
-| Global `prompt_client` | Prompt vocabulary only; it does not install skills or choose a worker executable |
+| Global `prompt_client` | Prompt vocabulary and external-client delegation guidance; it does not install skills or choose the Hermes assignee/profile/model |
 | Contract `profile` | Bundled phase and skill workflow |
 | Contract `assignee` | Hermes profile and agent identity |
 | Hermes configuration | Models and provider authentication |

@@ -47,10 +47,12 @@ Both `rejected` and `abandoned` archive the card — they differ in semantics: `
 PromptClient = Literal["claude", "codex"]
 ```
 
-`prompt_client` selects phase-task vocabulary only. `claude` renders
-`Claude Code` with slash invocations such as `/review` and `/ship`; `codex`
-renders `Codex` with dollar invocations such as `$review` and `$ship`. It does
-not choose a worker executable, Hermes assignee, profile, or model.
+`prompt_client` selects phase-task vocabulary and external-client delegation
+guidance. `claude` renders `Claude Code` with slash invocations such as
+`/review` and `/ship` plus `claude -p` delegation instructions; `codex` renders
+`Codex` with dollar invocations such as `$review` and `$ship` plus `codex exec`
+delegation instructions. It does not choose the Hermes assignee, profile, or
+model.
 
 ### `PreparedPhaseTask`
 
@@ -314,7 +316,7 @@ prepare_todo_phases(
 | `tick_id` | `str` | — | ULID tick ID embedded in each task body header. |
 | `board_slug` | `str` | — | Project slug embedded in each task body header. |
 | `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is packaged `gstack`; production resolves `contract.profile` and passes its path explicitly. |
-| `prompt_client` | `PromptClient` | `"claude"` | Renders the fixed product label and verified skill invocation vocabulary. |
+| `prompt_client` | `PromptClient` | `"claude"` | Renders the fixed product label, verified skill invocation vocabulary, and external-client delegation guidance. |
 
 **Returns:** All `PreparedPhaseTask` values in profile order.
 
