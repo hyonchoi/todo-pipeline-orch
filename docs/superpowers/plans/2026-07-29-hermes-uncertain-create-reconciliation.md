@@ -11,8 +11,8 @@ project tick proceeds.
 **Architecture:** Create an unassigned registration barrier, parent executable
 phases to it, sticky-block detached unassigned gates, persist the expected-phase
 sentinel, then complete the barrier as the release commit point. Keep atomic
-pending-create or cleanup-only state until every cleanup task is confirmed
-archived.
+pending-create, cleanup-only, or barrier-commit-pending state until cleanup or
+the registration commit is confirmed.
 
 **Tech Stack:** Python 3.12+, `pathlib`, JSON state files, Hermes Kanban CLI,
 pytest, pytest-mock, uv, Ruff, Markdown.
@@ -78,8 +78,8 @@ pytest, pytest-mock, uv, Ruff, Markdown.
   - an infrastructure JSON header and explanatory body.
 - [x] Parent phase 1 to the barrier and later executable phases to their
   executable predecessor.
-- [x] Persist `expected-phases.json`, clear pre-commit cleanup state, and
-  complete the barrier as the commit point.
+- [x] Persist `expected-phases.json`, replace cleanup state with
+  barrier-commit-pending state, and complete the barrier as the commit point.
 
 ## Task 2: Sticky unassigned gates
 
@@ -107,6 +107,9 @@ pending create:
 
 cleanup only:
   tenant, tick_id, cleanup_task_ids (child-first order)
+
+barrier commit pending:
+  tenant, tick_id, barrier_task_id, cleanup_task_ids (child-first order)
 ```
 
 - [x] Persist pending-create state before each remote create.
@@ -121,6 +124,10 @@ cleanup only:
 - [x] Query `hermes kanban list --archived --json` before and after archive
   commands. Count an already-archived task as success.
 - [x] Clear the marker only after every recorded ID is confirmed archived.
+- [x] After the expected-phase sentinel is durable, atomically replace cleanup
+  state with barrier-commit-pending state before completing the barrier.
+- [x] Reconciliation clears a snapshot-confirmed `done` barrier, retries
+  completion from `ready` or `todo`, and fails closed for uncertain status.
 
 ## Task 4: Fail closed before later ticks
 

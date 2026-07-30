@@ -322,3 +322,14 @@ Archived: 2026-07-14T00:00:00Z
   - **Cons:** Requires a one-time migration to backfill NEXT_TODO_ID into existing TODOS.md files; conflict-triggered auto-audit adds a fallback archive scan back on the rare drift path (acceptable since it's no longer the common path).
   - **Decisions:** Priority `P2`, Effort `S`, Phase `2 (Design)`, Branch `feature/todos-next-id-tracking`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
   - **Completed:** v0.6.3 (2026-07-27)
+
+- [x] **TODO-41: Global config for AI agent client selection** — Select Claude or Codex and mention the correct client in phase profiles
+  - **What:** Add a global Claude/Codex client setting, propagate it through phase rendering, and replace hardcoded client references in bundled phase profiles, documentation, and tests.
+  - **Why:** Phase prompts hardcode Claude Code despite supporting both Claude and Codex, causing incorrect execution instructions.
+  - **Pros:** Correct client-specific prompts, clearer configuration semantics, and consistent Claude/Codex support.
+  - **Cons:** Touches configuration, prompt rendering, profiles, documentation, and tests; terminology must remain distinct from phase and Hermes profiles.
+  - **Context:** `hermes_pipeline/config.py`, `hermes_pipeline/config_loader.py`, `hermes_pipeline/kanban_tasks.py`, `hermes_pipeline/data/phase-profiles/`, and related docs/tests
+  - **Depends on:** (none)
+  - **Assumptions:** Initial supported values are `claude` and `codex`; the setting is global, while phase profile and Hermes assignee/profile concepts retain their existing meanings.
+  - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/global-agent-client-selection`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.7.0 (2026-07-29)

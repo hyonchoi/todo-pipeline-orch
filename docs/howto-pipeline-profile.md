@@ -57,7 +57,7 @@ tpo doctor myproject
 
 Output (success):
 ```
-OK: schema_version=1 assignee=pipeline capabilities=['Bash', 'Edit', 'Read', 'Write']
+OK: schema_version=2 assignee=pipeline profile=gstack capabilities=['Bash', 'Edit', 'Read', 'Write']
 ```
 
 Output (missing profile):

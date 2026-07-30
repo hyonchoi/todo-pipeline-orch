@@ -122,7 +122,7 @@ tpo doctor myproject
 |------|---------|
 | 0 | Clean: schema version, assignee, capabilities all match |
 | 1 | Drift: contract missing capabilities required by phases.yaml |
-| 2 | Missing/invalid contract, unknown project, or missing profile |
+| 2 | Missing/invalid contract, unknown project/profile, or an `Unverified` profile/client prerequisite |
 
 If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes profile exists.
 

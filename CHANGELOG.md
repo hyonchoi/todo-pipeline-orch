@@ -8,17 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.0] - 2026-07-29
 
 ### Added
-- Phase prompts can target Claude or Codex while preserving strict, client-aware skill invocation syntax.
-- Agent-client prerequisites and release qualification evidence now cover supported gstack and Superpowers workflows.
-- Hermes phase registration now uses a non-spawnable barrier with durable crash recovery.
+- Set `prompt_client` to `claude` or `codex` so phase prompts use the correct client name and skill invocation syntax.
+- `tpo doctor` now reports agent-client prerequisites, backed by release qualification evidence for supported gstack and Superpowers workflows.
+- Hermes phase registration now uses a non-spawnable barrier with durable crash recovery, preventing partial task chains from dispatching.
 
 ### Changed
-- Phase prompts are fully rendered before tick persistence or Hermes task creation.
-- Release qualification evidence distinguishes candidate source snapshots from release-final artifacts.
+- Phase prompts are fully rendered before tick persistence or Hermes task creation, so template errors cannot strand an active tick.
+- Release qualification evidence distinguishes candidate source snapshots from release-final artifacts, making support claims traceable to the shipped version.
 
 ### Fixed
 - Uncertain Hermes task creation, cleanup, and barrier completion now fail closed without releasing partial task chains.
-- Prior-tick reconciliation runs before new TODO selection and safely retries interrupted registration commits.
+- Prior-tick reconciliation now runs before new TODO selection and safely retries interrupted registration commits.
 
 ## [0.6.6] - 2026-07-28
 

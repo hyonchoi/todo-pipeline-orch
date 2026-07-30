@@ -75,8 +75,10 @@ tpo doctor <project>
 ```
 
 Expected output:
-```
-OK: schema_version=2 assignee=default profile=agent-skills capabilities=['Bash', 'Edit', 'Read', 'Write']
+```text
+prompt client: <claude-or-codex> (global for all projects under projects_dir)
+...
+UNSUPPORTED: profile 'agent-skills' has Unverified prerequisites for prompt client '<claude-or-codex>'
 ```
 
 `doctor` resolves phases from the profile named in the contract, not always
@@ -84,6 +86,9 @@ OK: schema_version=2 assignee=default profile=agent-skills capabilities=['Bash',
 fails closed with a `MISSING` error and exit code 2. If either profile data file
 is missing or malformed, doctor reports
 `INVALID: failed to load profile data for '<name>'` and exits 2.
+The bundled `agent-skills` profile also exits 2 by design because its external
+client contracts remain `Unverified`; the contract itself may still be
+schema-valid.
 
 ### 3. Run the pipeline
 

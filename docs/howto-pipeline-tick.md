@@ -76,11 +76,13 @@ hermes kanban list --tenant demo
 
 You should see the phases with statuses:
 - `running` — the first phase in the chain is executing
-- `ready` — subsequent executable phases, blocked on `--parent` completion
+- `todo` — subsequent executable phases are waiting on `--parent` completion
+- `ready` — an executable phase is runnable and queued for dispatch
 - `blocked` — human gate phases, which stay blocked until manual approval
 
 The `--parent` chain means phases execute sequentially through the kanban
-board. When phase 2 completes, phase 4 transitions from `ready` to `running`
+board. When phase 2 completes, phase 4 transitions from `todo` through `ready`
+to `running`
 automatically — the orchestrator doesn't need to manage the handoff. When
 phase 4 completes, phase 5 (`phase_5_review`) transitions to `running`, and
 when phase 5 completes, phase 6.1 (CSO) transitions to `running`. Human gate
@@ -167,9 +169,13 @@ All TODOs are blocked or none are in progress. Check your `TODOS.md` for
 `[→]` status. The selection rationale in `.hermes/decisions/` explains why.
 
 **Kanban task creation fails mid-registration.**
-If a task fails partway through, already-created tasks are archived. The
-outcome file will show `failed_at_phase_*` with `kanban_status: "archived"`.
-Check the kanban board for archived tasks and investigate the error.
+Registration stays behind a non-spawnable barrier. Known tasks are archived
+child-first only after any uncertain child becomes visible; otherwise
+`pending-task-create.json` remains under `.hermes/outcomes/` and later ticks
+skip the project. If interruption happens while completing the barrier, later
+ticks inspect its status and either accept the completed chain or retry the
+commit. Check the marker, tick logs, and archived-inclusive kanban snapshot;
+see [durable registration and uncertain-create recovery](reference-kanban-as-scheduler.md#durable-registration-and-uncertain-create-recovery).
 
 **Circuit breaker trips (consecutive_no_progress >= 3).**
 Three consecutive no-progress ticks triggered a Slack alert. The gateway

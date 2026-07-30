@@ -132,7 +132,7 @@ tpo doctor demo-app
 Expected doctor output starts with:
 
 ```text
-OK: schema_version=1
+OK: schema_version=2
 ```
 
 ## Step 6: Run a manual tick
