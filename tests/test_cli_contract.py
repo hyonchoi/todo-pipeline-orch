@@ -300,6 +300,10 @@ class TestCmdDoctor:
             "hermes_pipeline.cli.load_phases",
             return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write")],
         )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=_allow_hermes_registry_skill_check,
+        )
         config = Config(projects_dir=projects_dir)
 
         result = _cmd_doctor(FakeArgs(project="demo"), config)
@@ -481,6 +485,10 @@ class TestDoctorProfileAware:
         mocker.patch(
             "hermes_pipeline.cli.load_phases",
             return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write")],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=_allow_hermes_registry_skill_check,
         )
         config = Config(projects_dir=projects_dir)
 
