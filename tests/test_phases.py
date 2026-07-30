@@ -416,9 +416,9 @@ def test_real_phases_yaml_review_phase_fields():
 def test_real_phases_yaml_development_does_not_block_for_review():
     phases = {p.phase_key: p for p in load_phases()}
     dev = phases["phase_4_development"]
-    assert "Review is handled by the next pipeline phase" in dev.prompt
-    assert "do NOT block" in dev.prompt
-    assert "complete this task normally" in dev.prompt
+    assert "Review is handled by the next pipeline phase" not in dev.prompt
+    assert "request human review" not in dev.prompt
+    assert "code review is still required" not in dev.prompt
 
 
 def test_real_phases_yaml_development_defers_to_sdd_task_loop():

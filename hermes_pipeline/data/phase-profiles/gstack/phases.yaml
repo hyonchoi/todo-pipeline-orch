@@ -45,10 +45,6 @@ phases:
       If the implementation plan is unworkable or contradicts the
       codebase, or you hit any other blocker, do NOT ask for clarification
       and do NOT hang — exit non-zero instead.
-
-      Review is handled by the next pipeline phase. After the implementation
-      is committed, complete this task normally; do NOT block, pause, or
-      request human review merely because code review is still required.
     tools: "Read,Write,Edit,Bash"
     turns: 60
     timeout: 3600
