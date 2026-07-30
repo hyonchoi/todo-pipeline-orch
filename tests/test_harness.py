@@ -84,6 +84,8 @@ class TestCreateMockProject:
         (tmp_path / "src" / "__pycache__").mkdir(parents=True)
         (tmp_path / "src" / "__pycache__" / "cache.py").write_text("cache = True\n")
         (tmp_path / "compiled.pyc").write_bytes(b"cache")
+        (tmp_path / "optimized.pyo").write_bytes(b"cache")
+        (tmp_path / "extension.pyd").write_bytes(b"cache")
 
         status = subprocess.run(
             ["git", "status", "--short", "--ignored"],
@@ -100,6 +102,8 @@ class TestCreateMockProject:
         assert "!! .superpowers/" in status
         assert "!! .code-review-graph/" in status
         assert "!! compiled.pyc" in status
+        assert "!! optimized.pyo" in status
+        assert "!! extension.pyd" in status
         assert "!! src/" in status
 
 
