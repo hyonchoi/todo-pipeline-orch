@@ -94,11 +94,12 @@ phases:
     name: "Phase 6.2: QA"
     prompt: |
       Check {todo_id}'s TODOS.md entry for `UI Review: required` in its
-      Decisions line. If it says `not-required`, exit 0 immediately — do not
-      run any QA.
+      Decisions line. If the `UI Review` decision is absent or says
+      `not-required`, exit 0 immediately — do not run any QA and do not block
+      the task.
 
-      If `required`: use the gstack {skill_prefix}qa skill. Test the web UI
-      changes on the current branch.
+      Only if `UI Review: required` is explicitly present: use the gstack
+      {skill_prefix}qa skill. Test the web UI changes on the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. If the skill would normally ask for approval before
