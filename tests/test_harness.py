@@ -18,6 +18,7 @@ from hermes_pipeline.harness import (
     HarnessResult,
     _classify_error_class,
     _ConvergenceMonitor,
+    _prune_retained_state,
     create_mock_project,
     filter_phases,
     isolate_config,
@@ -222,6 +223,33 @@ class TestIsolateConfig:
             assert os.environ["TPO_CONFIG_FILE"] == "/tmp/tpo-config.yaml"
 
         assert os.environ["TPO_CONFIG_FILE"] == "/original/config.yaml"
+
+
+def test_prune_retained_state_removes_only_safe_terminal_state(tmp_path):
+    state_dir = tmp_path / ".hermes"
+    state_dir.mkdir()
+    (state_dir / "pipeline.toml").write_text("schema_version = 2\n")
+    (state_dir / "pipeline_branch.txt").write_text("feat/mock\n")
+    (state_dir / "tpo-config.yaml").write_text("state_dir: .hermes\n")
+    (state_dir / "unknown.json").write_text("{}\n")
+
+    empty_outcomes = state_dir / "outcomes"
+    empty_outcomes.mkdir()
+    empty_checkpoints = state_dir / "pipeline_checkpoints"
+    empty_checkpoints.mkdir()
+    evidence_dir = state_dir / "ready_for_review"
+    evidence_dir.mkdir()
+    (evidence_dir / "failure.json").write_text("{}\n")
+
+    _prune_retained_state(state_dir)
+
+    assert (state_dir / "pipeline.toml").exists()
+    assert (state_dir / "unknown.json").exists()
+    assert not (state_dir / "pipeline_branch.txt").exists()
+    assert not (state_dir / "tpo-config.yaml").exists()
+    assert not empty_outcomes.exists()
+    assert not empty_checkpoints.exists()
+    assert (evidence_dir / "failure.json").exists()
 
 
 class TestHarnessResult:
@@ -757,8 +785,44 @@ class TestKanbanModeHermes:
         assert (artifacts_dir / "events.jsonl").exists()
         assert not (project_dir / "events.jsonl").exists()
         assert not (project_dir / "reports").exists()
+        assert (project_dir / ".hermes" / "pipeline.toml").exists()
+        assert not (project_dir / ".hermes" / "tpo-config.yaml").exists()
+        assert not (project_dir / ".hermes" / "pipeline_checkpoints").exists()
+        assert not (project_dir / ".hermes" / "ready_for_review").exists()
         assert poll.call_args.kwargs["project_dir"] == project_dir
         assert poll.call_args.kwargs["state_dir"] == project_dir / ".hermes"
+
+    def test_run_harness_keep_dir_false_removes_workspace(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.harness._poll_kanban_phases",
+            return_value=True,
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "done"},
+        )
+
+        result = run_harness(
+            fixture_name="happy-path",
+            loop=False,
+            phase_only=None,
+            keep_dir=False,
+            timeout=60,
+            convergence_threshold=3,
+            config=None,
+        )
+
+        assert result.temp_dir is None
+        assert not workspace.exists()
 
     def test_run_harness_stores_loop_reports_in_artifacts(
         self, tmp_path, monkeypatch, mocker

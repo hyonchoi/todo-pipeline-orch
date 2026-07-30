@@ -546,6 +546,29 @@ class HarnessResult:
     summary: str
 
 
+def _prune_retained_state(state_dir: Path) -> None:
+    """Remove only disposable harness state from a retained fixture."""
+    for filename in ("pipeline_branch.txt", "tpo-config.yaml"):
+        path = state_dir / filename
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("could not prune retained harness state %s: %s", path, exc)
+
+    for dirname in ("outcomes", "pipeline_checkpoints", "ready_for_review"):
+        path = state_dir / dirname
+        try:
+            if not path.exists():
+                continue
+            if next(path.iterdir(), None) is not None:
+                continue
+            path.rmdir()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            log.warning("could not prune retained harness state %s: %s", path, exc)
+
+
 
 
 def _run_with_timeout(
@@ -724,6 +747,9 @@ def run_harness(
             f"phases={status_map} "
             f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
         )
+
+        if keep_dir:
+            _prune_retained_state(state_dir)
 
         exit_code = 0 if (success and not timed_out) else 1
 
