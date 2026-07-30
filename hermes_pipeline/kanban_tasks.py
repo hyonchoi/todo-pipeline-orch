@@ -820,9 +820,9 @@ def create_prepared_todo_phases(
 ) -> list[str]:
     """Create a nonspawnable registration barrier and its phase task chain.
 
-    Executable tasks depend on the barrier, gates remain detached and receive a
-    sticky Hermes block event, and barrier completion commits the registration
-    only after the expected-phase sentinel is durable.
+    Every phase follows the barrier or preceding phase; gates remain unassigned
+    and receive a sticky Hermes block event. Barrier completion commits the
+    registration only after the expected-phase sentinel is durable.
 
     Args:
         prepared: Fully rendered phase tasks, in registration order.

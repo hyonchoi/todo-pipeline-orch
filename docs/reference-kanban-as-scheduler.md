@@ -2,10 +2,10 @@
 
 `tpo tick` uses the Hermes kanban board as the source of truth for
 pipeline phase state. Instead of writing internal state files tracking which
-phase is active, executable phases are registered as kanban tasks with
-`--parent` dependency chains. Gate phases, when a profile defines them, are
-created unassigned and detached from the parent chain, then explicitly receive a
-sticky `needs_input` block. Kanban status queries (`get_todo_kanban_status`,
+phase is active, phases are registered as one kanban task chain with
+`--parent` dependencies. Gate phases, when a profile defines them, stay in that
+chain but are created unassigned and explicitly receive a sticky `needs_input`
+block. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
@@ -244,8 +244,8 @@ tick starts
     |
     +-- for each phase:
     |       persist current create intent + known cleanup IDs
-    |       -> create executable task parented to barrier/previous executable
-    |          or create detached unassigned gate and apply needs_input block
+    |       -> create task parented to barrier/previous phase
+    |          and, for a gate, leave it unassigned and apply needs_input block
     |       -> persist the returned ID first in child-first cleanup order
     |
     v
@@ -264,18 +264,19 @@ dependencies allow each later executable phase to run when its predecessor ends.
 **Why kanban instead of internal state?**
 - The kanban board is already the operator's UI. Phase transitions are visible
   from the board, not hidden in `.hermes/phase_started/` files.
-- The `--parent` dependency chain means kanban enforces sequential executable
-  phase execution — the orchestrator doesn't need to manage phase ordering.
-- Gate phases are not parented because parent completion would otherwise
-  auto-unblock the gate. The default `gstack` profile has no gate phase.
+- The `--parent` dependency chain means kanban preserves the configured phase
+  order — the orchestrator doesn't need to manage phase ordering.
+- Gate phases stay in the parent chain, while their sticky `needs_input` block
+  keeps them nonspawnable until the gate is explicitly resolved. The default
+  `gstack` profile has no gate phase.
 - `todo` means an executable task is still waiting on its parent. `ready` means
   it is runnable and queued for dispatch.
 
 ### Durable registration and uncertain-create recovery
 
 Before any phase is created, the orchestrator creates an unassigned registration
-barrier. The first executable phase is parented to the barrier, so Hermes keeps
-it in `todo`; later executable phases are parented to the preceding executable.
+barrier. The first phase is parented to the barrier; every later phase is
+parented to the preceding phase.
 Before every remote `hermes kanban create`, including the barrier, the
 orchestrator atomically writes the per-project pending marker at
 `<project>/.hermes/outcomes/pending-task-create.json`. The marker records the
@@ -288,11 +289,12 @@ After every task is known, the orchestrator atomically writes
 expected chain and lets completion checks reject a partial board snapshot. It
 then replaces the cleanup marker with a barrier-commit-pending marker and
 completes the registration barrier. The marker spans that remote mutation and
-is cleared only after success. Completing the barrier moves the first executable
-from `todo` to `ready`; the remaining executable tasks stay `todo` until their
-parents finish. Gate tasks are detached and receive
-`hermes kanban block --kind needs_input`, so their block is independent of
-parent completion.
+is cleared only after success. Completing the barrier satisfies the first
+phase's parent: an executable first phase moves from `todo` to `ready`, while a
+gate first phase remains sticky-blocked. Later tasks wait for their preceding
+phase. Gate tasks are unassigned and receive
+`hermes kanban block --kind needs_input`, so their block remains explicit while
+the parent chain preserves phase order.
 
 An inconclusive create is fail-closed. The registration call retries the same
 idempotency key and takes a snapshot; if the task is still not visible, the
@@ -396,8 +398,8 @@ each prepared phase, it then runs `hermes kanban create` with:
 - `--workspace dir:<project_dir>` — project context
 - `--idempotency-key <tick_id>:<phase_key>` — dedup key (e.g.,
   `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`)
-- `--parent <prev_task_id>` — dependency chain for executable phases only; the
-  first executable uses the registration barrier (gate phases omit it)
+- `--parent <prev_task_id>` — dependency chain for every phase; the first phase
+  uses the registration barrier and each later phase uses its predecessor
 - `--assignee -` for the barrier and gates; executable tasks use `assignee`
 - `--body <json_header>\n<phase_prompt>` — task body with JSON header on first
   line
