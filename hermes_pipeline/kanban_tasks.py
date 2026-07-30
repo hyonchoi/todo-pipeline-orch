@@ -109,7 +109,7 @@ def _external_client_delegation_block(prompt_client: PromptClient) -> str:
     if prompt_client == "codex":
         command = "codex exec --sandbox danger-full-access"
     elif prompt_client == "claude":
-        command = "claude -p"
+        command = "claude -p --permission-mode bypassPermissions"
     else:
         raise ValueError(
             f"prompt_client must be one of ('claude', 'codex'), got {prompt_client!r}"

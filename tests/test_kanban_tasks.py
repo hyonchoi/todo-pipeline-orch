@@ -171,7 +171,11 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
     ("prompt_client", "command", "forbidden"),
     [
         ("codex", "codex exec --sandbox danger-full-access", "claude -p"),
-        ("claude", "claude -p", "codex exec"),
+        (
+            "claude",
+            "claude -p --permission-mode bypassPermissions",
+            "codex exec",
+        ),
     ],
 )
 def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
