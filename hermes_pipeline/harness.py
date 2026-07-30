@@ -318,6 +318,8 @@ def _poll_kanban_phases(
     all_terminal = False
     current_interval = poll_interval
     phase_by_key = {phase.phase_key: phase for phase in phases or []}
+    pre_run_statuses = (None, "todo", "ready", "blocked")
+    unstarted_statuses = (None, "todo", "ready")
 
     def _is_terminal_status(phase_key: str, status: str) -> bool:
         if status in TERMINAL_STATUSES:
@@ -342,7 +344,7 @@ def _poll_kanban_phases(
             for phase_key, status in status_map.items():
                 prev = previous_status.get(phase_key)
 
-                if prev in (None, "ready", "blocked") and status == "running":
+                if prev in pre_run_statuses and status == "running":
                     log.info("phase %s: %s -> running", phase_key, prev or "none")
                     monitor.current_phase_key = phase_key
                     monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
@@ -370,12 +372,12 @@ def _poll_kanban_phases(
                     monitor.current_phase_key = None
                     monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
 
-                elif prev in (None, "ready") and status == "blocked":
+                elif prev in unstarted_statuses and status == "blocked":
                     log.info("phase %s: %s -> blocked", phase_key, prev or "none")
                     monitor.current_phase_key = None
                     monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
 
-                elif prev in (None, "ready", "blocked") and status == "done":
+                elif prev in pre_run_statuses and status == "done":
                     # Phase completed between polls without ever being observed
                     # as "running" (fast phase, coarse poll interval). Still
                     # emit the event and run gate auto-complete so downstream
@@ -387,7 +389,7 @@ def _poll_kanban_phases(
                         project_slug, tick_id, completed_phase_key=phase_key, phases=phases
                     )
 
-                elif prev in (None, "ready", "blocked") and status == "failed":
+                elif prev in pre_run_statuses and status == "failed":
                     log.info("phase %s: %s -> failed", phase_key, prev or "none")
                     monitor.current_phase_key = None
                     monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})

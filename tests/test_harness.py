@@ -336,6 +336,26 @@ class TestPollKanbanPhasesConsoleOutput:
         )
         assert any("p1" in r.message and "failed" in r.message for r in caplog.records)
 
+    def test_todo_to_blocked_still_logs_blocked_phase(
+        self, monkeypatch, mocker, tmp_path, caplog
+    ):
+        """A phase can move from todo directly to blocked between polls."""
+        caplog.set_level("INFO", logger="hermes_pipeline.harness")
+        self._run_poll(
+            monkeypatch,
+            mocker,
+            tmp_path=tmp_path,
+            status_sequence=[
+                {"p0": "running", "p1": "todo"},
+                {"p0": "done", "p1": "todo"},
+                {"p0": "done", "p1": "blocked"},
+                {"p0": "done", "p1": "blocked"},
+            ],
+        )
+        event_lines = (tmp_path / "events.jsonl").read_text().splitlines()
+        assert any("p1" in r.message and "blocked" in r.message for r in caplog.records)
+        assert any('"event_type": "phase_blocked"' in line for line in event_lines)
+
     def test_initial_status_table_prints_after_registration(self, monkeypatch, mocker, tmp_path, caplog):
         caplog.set_level("INFO", logger="hermes_pipeline.harness")
         self._run_poll(
