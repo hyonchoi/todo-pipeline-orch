@@ -36,7 +36,8 @@ phases:
       the implementation plan from docs/pipeline/{todo_id}-impl-plan.md
 
       Follow the subagent-driven-development task loop. Do not replace or
-      short-circuit it with direct inline implementation.
+      short-circuit it with direct inline implementation. Use a fresh
+      implementer subagent per plan task.
 
       If the implementation plan is unworkable or contradicts the
       codebase, or you hit any other blocker, do NOT ask for clarification
