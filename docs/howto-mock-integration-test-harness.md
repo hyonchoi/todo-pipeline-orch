@@ -85,20 +85,17 @@ harness-xxxxxxxx/
       report.md          # Human-readable findings report
 ```
 
-### 5. Run in loop mode to diff reports across iterations
+### 5. Run in loop mode to retain a numbered snapshot
 
 ```bash
-# First run
-uv run tpo test --fixture happy-path --loop --keep --timeout 120
-
-# Second run (auto-diffs against first run report)
 uv run tpo test --fixture happy-path --loop --keep --timeout 120
 ```
 
-The `--loop` flag persists numbered report files
-(`artifacts/happy-path-report.1.json`, `artifacts/happy-path-report.2.json`,
-...) beside the reports directory and diffs them
-after each run. Requires `--keep` so the temp directory survives between runs.
+The `--loop` flag writes a numbered snapshot such as
+`artifacts/happy-path-report.1.json` beside the reports directory. Each CLI
+invocation creates a fresh harness workspace, so snapshots do not carry across
+separate invocations and cross-invocation auto-diff is not currently available.
+Requires `--keep` so the workspace and its snapshot survive the run.
 
 ### 6. Run the pytest test suite
 

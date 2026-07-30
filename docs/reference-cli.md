@@ -258,7 +258,7 @@ tpo test --fixture happy-path --convergence-threshold 2
 | `--timeout` | No | `86400` | Overall run timeout in seconds. Kills in-flight phase via `killpg` if exceeded. |
 | `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before circuit breaker halts the run. |
 | `--keep` | No | — | Preserve the temporary directory after the run for inspection. |
-| `--loop` | No | — | Persist numbered report files and diff them across runs. Requires `--keep`. |
+| `--loop` | No | — | Write a numbered report snapshot in the current workspace's `artifacts/` directory. Snapshots do not carry across separate CLI invocations, so cross-invocation auto-diff is unavailable. Requires `--keep`. |
 
 **Exit codes:**
 | Code | Meaning |
