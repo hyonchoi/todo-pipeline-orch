@@ -556,7 +556,7 @@ class TestDoctorMissingProfile:
         )
         mocker.patch(
             "hermes_pipeline.cli._cli_sp.run",
-            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+            return_value=MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n"),
         )
         config = Config(projects_dir=projects_dir)
 
@@ -564,6 +564,64 @@ class TestDoctorMissingProfile:
 
         assert result == 0
         assert "OK" in capsys.readouterr().out
+
+    def test_doctor_checks_hermes_skill_registry_prerequisite(
+        self, tmp_path, mocker, capsys
+    ):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        )
+
+        def run(cmd, **_kwargs):
+            if cmd == ["hermes", "profile", "show", "pipeline"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "ai-coding-agents" in out
+        assert "verified locally" in out
+
+    def test_doctor_missing_hermes_skill_registry_prerequisite_returns_2(
+        self, tmp_path, mocker, capsys
+    ):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        )
+
+        def run(cmd, **_kwargs):
+            if cmd == ["hermes", "profile", "show", "pipeline"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        out = capsys.readouterr().out
+        assert "MISSING" in out
+        assert "ai-coding-agents" in out
 
     def test_doctor_hermes_not_on_path_returns_2(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"

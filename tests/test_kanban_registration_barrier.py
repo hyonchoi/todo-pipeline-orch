@@ -101,7 +101,7 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     assert "--initial-status" not in gate
 
     second = create_commands["phase_2"]
-    assert second[second.index("--parent") + 1] == "t_00000001"
+    assert second[second.index("--parent") + 1] == "t_0000000a"
     assert "--initial-status" not in second
 
 

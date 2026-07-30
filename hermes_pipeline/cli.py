@@ -42,6 +42,7 @@ vlog = logging.getLogger("pipeline.verbose")
 # (kanban registration, outcome observation) so the selection call is bounded
 # strictly below the per-project lock's stale-reclaim window.
 _SELECTION_TIMEOUT_RESERVE_S = 30
+_HERMES_SKILL_REGISTRY_ROOT = "Hermes skill registry"
 
 
 def _resolve_project_dir(config: Config, slug: str) -> Path | None:
@@ -61,6 +62,44 @@ def _resolve_project_dir(config: Config, slug: str) -> Path | None:
         log.error("project not found: %s", slug)
         return None
     return project_dir
+
+
+def _unverified_prerequisite_ids(prerequisites, prompt_client: str) -> list[str]:
+    """Return profile prerequisites unsupported for the selected prompt client."""
+    unverified: list[str] = []
+    for prerequisite in prerequisites.skills:
+        if prerequisite.support == "Unverified":
+            # Validate the client row is present for the selected client, even
+            # though Unverified rows intentionally carry no invocation metadata.
+            prerequisite.clients[prompt_client]
+            unverified.append(prerequisite.skill_id)
+    return unverified
+
+
+def _verify_hermes_skill_registry_prerequisite(
+    *, assignee: str, skill_id: str
+) -> tuple[bool, str]:
+    cmd = ["hermes"]
+    if assignee != "default":
+        cmd.extend(["-p", assignee])
+    cmd.extend(["skills", "list", "--enabled-only"])
+    try:
+        result = _cli_sp.run(cmd, text=True, capture_output=True, timeout=10, check=False)
+    except FileNotFoundError:
+        return False, "Hermes is not installed or not on PATH."
+    except _cli_sp.TimeoutExpired:
+        return False, f"`{' '.join(cmd)}` timed out."
+
+    if result.returncode != 0:
+        stderr = (result.stderr or "").strip()
+        detail = f": {stderr}" if stderr else ""
+        return False, f"`{' '.join(cmd)}` failed{detail}."
+    if skill_id not in (result.stdout or ""):
+        return (
+            False,
+            f"skill '{skill_id}' is not enabled in Hermes profile '{assignee}'.",
+        )
+    return True, ""
 
 
 def _hermes_run_kill(job_id: str) -> int:
@@ -987,18 +1026,24 @@ def _tick_project(
         missing_capabilities,
         required_capabilities,
     )
-    from .phases import PhasePromptRenderError, resolve_profile_phases_path
+    from .phases import (
+        PhasePromptRenderError,
+        load_profile_prerequisites,
+        resolve_profile_phases_path,
+    )
 
     try:
         contract = load_contract(project_state)
         phases_path = resolve_profile_phases_path(contract.profile)
         phases = load_phases(phases_path)
+        prerequisites = load_profile_prerequisites(contract.profile)
     except ContractMissingError:
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
         phases_path = resolve_profile_phases_path("gstack")
         phases = load_phases(phases_path)
+        prerequisites = load_profile_prerequisites("gstack")
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
             assignee="pipeline",
@@ -1046,6 +1091,22 @@ def _tick_project(
         )
         raise CapabilityMismatchError(
             f"contract missing capabilities: {sorted(missing)}"
+        )
+
+    unverified = _unverified_prerequisite_ids(prerequisites, config.prompt_client)
+    if unverified:
+        log.error(
+            "project %s: profile '%s' has Unverified prerequisites for prompt "
+            "client '%s': %s — run `tpo doctor %s` for details",
+            project_slug,
+            contract.profile,
+            config.prompt_client,
+            ", ".join(unverified),
+            project_slug,
+        )
+        raise RuntimeError(
+            f"profile '{contract.profile}' has Unverified prerequisites for "
+            f"prompt client '{config.prompt_client}': {', '.join(unverified)}"
         )
 
     from .project_config import _resolve_slack_channel
@@ -1516,6 +1577,31 @@ def _cmd_doctor(args, config: Config) -> int:
     for prerequisite in prerequisites.skills:
         client = prerequisite.clients[config.prompt_client]
         if prerequisite.support == "Conditional":
+            if (
+                client.discovery_root == _HERMES_SKILL_REGISTRY_ROOT
+                and contract.assignee != "default"
+            ):
+                verified, detail = _verify_hermes_skill_registry_prerequisite(
+                    assignee=contract.assignee,
+                    skill_id=prerequisite.skill_id,
+                )
+                if not verified:
+                    print(
+                        f"MISSING: Hermes skill '{prerequisite.skill_id}' is not "
+                        f"enabled for profile '{contract.assignee}'"
+                    )
+                    print(f"Cause: {detail}")
+                    print(
+                        "Fix: Install the bundled profile with `tpo install-profile`, "
+                        "or enable the skill in the assigned Hermes profile."
+                    )
+                    return 2
+                print(
+                    f"- {prerequisite.skill_id} [Conditional]: "
+                    f"discovery root {client.discovery_root}; "
+                    f"invoke as {client.invocation}; verified locally"
+                )
+                continue
             print(
                 f"- {prerequisite.skill_id} [Conditional]: "
                 f"discovery root {client.discovery_root}; "
@@ -1528,10 +1614,12 @@ def _cmd_doctor(args, config: Config) -> int:
                 "not advertised as supported pending evidence"
             )
 
+    unverified = _unverified_prerequisite_ids(prerequisites, config.prompt_client)
     if has_unverified_prerequisites:
         print(
             f"UNSUPPORTED: profile '{contract.profile}' has Unverified "
-            f"prerequisites for prompt client '{config.prompt_client}'"
+            f"prerequisites for prompt client '{config.prompt_client}': "
+            f"{', '.join(unverified)}"
         )
         return 2
 

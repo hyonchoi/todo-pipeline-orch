@@ -817,7 +817,7 @@ def create_prepared_todo_phases(
     project_dir = Path(project_dir)
     created_task_ids: list[str] = []
     phase_task_ids: list[str] = []
-    previous_executable_id: str | None = None
+    previous_dependency_id: str | None = None
 
     barrier_cmd = [
         "hermes",
@@ -871,7 +871,7 @@ def create_prepared_todo_phases(
             cmd.extend(
                 [
                     "--parent",
-                    previous_executable_id or barrier_id,
+                    previous_dependency_id or barrier_id,
                     "--goal",
                     "--goal-max-turns",
                     str(phase.turns),
@@ -911,8 +911,7 @@ def create_prepared_todo_phases(
                     f"failed to apply sticky block to gate {phase.phase_key} "
                     f"for tick {tick_id}: {exc}{cleanup_detail}"
                 ) from exc
-        else:
-            previous_executable_id = task_id
+        previous_dependency_id = task_id
 
     try:
         _persist_expected_phases(prepared, project_dir=project_dir)

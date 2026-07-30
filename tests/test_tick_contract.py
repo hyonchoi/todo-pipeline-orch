@@ -190,19 +190,22 @@ class TestTickContractAssignee:
         assert result == 0
         mock_register.assert_not_called()
 
-    def test_tick_checks_capabilities_against_contract_profile(self, tmp_path, mocker):
+    def test_tick_blocks_unverified_profile_before_registration(self, tmp_path, mocker):
         """Capability validation must load phases from the contract's declared
         profile, not the hardcoded gstack default — else a project running a
         non-gstack profile is checked against the wrong phase requirements."""
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        run_selection = mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision("TODO-10"),
+        )
         mock_register = mocker.patch(
-            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
-            return_value=["t_1"],
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
         )
         from hermes_pipeline import phases as phases_mod
         from hermes_pipeline.phases import resolve_profile_phases_path
         spy_load_phases = mocker.patch(
-            "hermes_pipeline.cli.load_phases", wraps=phases_mod.load_phases,
+            "hermes_pipeline.cli.load_phases",
+            wraps=phases_mod.load_phases,
         )
 
         projects_dir = tmp_path / "projects"
@@ -219,7 +222,8 @@ class TestTickContractAssignee:
         result = _cmd_tick(FakeArgs(), config)
 
         assert result == 0
-        mock_register.assert_called_once()
+        run_selection.assert_not_called()
+        mock_register.assert_not_called()
         agent_skills_path = resolve_profile_phases_path("agent-skills")
         assert any(
             call.args and call.args[0] == agent_skills_path
@@ -332,7 +336,7 @@ class TestTickPromptPreparation:
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
-            'profile = "agent-skills"\n'
+            'profile = "gstack"\n'
         )
 
         _run_project_tick(
@@ -345,7 +349,7 @@ class TestTickPromptPreparation:
         assert [name for name, _ in events] == ["prepare", "persist", "create"]
         prepare_kwargs = prepare.call_args.kwargs
         assert prepare_kwargs["prompt_client"] == "codex"
-        assert "agent-skills" in str(prepare_kwargs["phases_path"])
+        assert "gstack" in str(prepare_kwargs["phases_path"])
         assert create.call_args.kwargs["prepared"] == ["prepared"]
         assert persist.call_count == 1
 
@@ -359,7 +363,7 @@ class TestTickPromptPreparation:
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
-            'profile = "agent-skills"\n'
+            'profile = "gstack"\n'
         )
 
         prepare = mocker.patch(
@@ -406,7 +410,7 @@ class TestTickPromptPreparation:
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
-            'profile = "agent-skills"\n'
+            'profile = "gstack"\n'
         )
         mocker.patch(
             "hermes_pipeline.cli.run_selection",
@@ -445,7 +449,7 @@ class TestTickPromptPreparation:
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
-            'profile = "agent-skills"\n'
+            'profile = "gstack"\n'
         )
         mocker.patch(
             "hermes_pipeline.kanban_tasks.prepare_todo_phases",

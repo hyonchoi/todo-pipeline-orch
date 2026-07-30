@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Set `prompt_client` to `claude` or `codex` so phase prompts use the correct client name and skill invocation syntax.
 - `tpo doctor` now reports agent-client prerequisites, backed by release qualification evidence for supported gstack and Superpowers workflows.
 - Hermes phase registration now uses a non-spawnable barrier with durable crash recovery, preventing partial task chains from dispatching.
+- `tpo doctor` now verifies Hermes-owned dispatcher prerequisites against the assigned Hermes profile's local skill registry.
 
 ### Changed
 - Phase prompts are fully rendered before tick persistence or Hermes task creation, so template errors cannot strand an active tick.
@@ -19,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 - Uncertain Hermes task creation, cleanup, and barrier completion now fail closed without releasing partial task chains.
 - Prior-tick reconciliation now runs before new TODO selection and safely retries interrupted registration commits.
+- Manual gate phases now remain in the dependency chain, so downstream executable phases wait for human approval.
+- `tpo tick` now refuses profiles whose selected prompt-client prerequisites are still `Unverified` before selection or task registration.
 
 ## [0.6.6] - 2026-07-28
 

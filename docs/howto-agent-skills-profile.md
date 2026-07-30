@@ -13,7 +13,9 @@ Namespaced invocation and discovery for the `agent-skills` profile remain
 `Unverified` for both Claude Code and Codex. This profile/client combination is
 unsupported, and changing `prompt_client` does not promote its support status.
 `tpo doctor` reports `UNSUPPORTED` and exits 2 for this profile until its
-client contracts are qualified.
+client contracts are qualified. Runtime ticks use the same fail-closed support
+policy before selection and registration, so an unsupported profile cannot
+dispatch merely because an operator skipped `doctor`.
 To remediate, use a verified profile/client pair, provide versioned
 [qualification evidence](release-qualification-agent-clients.md) that can
 promote the package metadata, or keep the row unsupported.
@@ -127,7 +129,8 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
      invocation strings; `Unverified` requires both client fields to be null
 3. Treat `prerequisites.yaml` as package data beside `phases.yaml`;
    `hermes_pipeline.phases.load_profile_prerequisites()` is the validating
-   loader and `tpo doctor` is the user-facing check.
+   loader; `tpo doctor` is the user-facing check, and `tpo tick` enforces
+   `Unverified` rows before selecting or registering work.
 4. Run `tpo init <project> --profile <name>` to write a contract selecting it.
 5. Run `tpo doctor <project>` to confirm both files resolve, prerequisite
    metadata validates, and capabilities are computed correctly.

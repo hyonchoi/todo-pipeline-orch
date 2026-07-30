@@ -224,9 +224,12 @@ Profile prerequisites come from the package metadata used by `tpo doctor`:
 | `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 
 `Conditional` requires the named external skill to be installed and
-discoverable by the selected client. `Unverified` is unsupported and does not
-become supported merely by setting `prompt_client`; `tpo doctor` reports
-`UNSUPPORTED` and exits 2 when the selected profile contains any such row.
+discoverable by the selected client. Hermes-owned registry prerequisites are
+checked locally against the assigned Hermes profile; remote worker prerequisites
+remain operator-provisioned. `Unverified` is unsupported and does not become
+supported merely by setting `prompt_client`; `tpo doctor` reports `UNSUPPORTED`
+and exits 2 when the selected profile contains any such row, and `tpo tick`
+refuses to select or register work for that unsupported profile/client pair.
 
 See [agent client release qualification](release-qualification-agent-clients.md)
 for the evidence protocol.

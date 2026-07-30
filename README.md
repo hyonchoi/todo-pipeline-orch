@@ -69,7 +69,10 @@ prompt client does not install those skills. `Conditional` rows are supported
 only when every listed skill is installed and discoverable by the worker.
 `Unverified` rows are unsupported until their external discovery and invocation
 contracts have qualification evidence. `tpo doctor` fails closed with exit code
-2 when the selected profile contains an `Unverified` prerequisite.
+2 when the selected profile contains an `Unverified` prerequisite, and `tpo tick`
+refuses to select or register work for that unsupported profile/client pair.
+Hermes-owned prerequisites are verified against the assigned Hermes profile's
+local skill registry; remote worker prerequisites remain operator-provisioned.
 
 | Profile | Referenced skill | Distribution owner | Claude discovery / invocation | Codex discovery / invocation | Support |
 |---|---|---|---|---|---|
