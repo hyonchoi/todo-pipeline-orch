@@ -1,6 +1,8 @@
 """Tests for cli.py — test subcommand."""
 
 
+import pytest
+
 from hermes_pipeline.cli import build_parser, main
 
 
@@ -59,6 +61,19 @@ def test_test_subcommand_loop_flag():
     parser = build_parser()
     args = parser.parse_args(["test", "--fixture", "happy-path", "--loop"])
     assert args.loop is True
+
+
+def test_test_subcommand_loop_help_describes_workspace_snapshot(capsys):
+    parser = build_parser()
+
+    with pytest.raises(SystemExit) as exc_info:
+        parser.parse_args(["test", "--help"])
+
+    help_output = " ".join(capsys.readouterr().out.split())
+    assert exc_info.value.code == 0
+    assert "numbered report snapshot in the current workspace" in help_output
+    assert "previous run" not in help_output
+
 
 def test_test_subcommand_phase_flag():
     """Verify --phase flag is parsed."""

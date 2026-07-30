@@ -371,7 +371,10 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--loop",
         action="store_true",
-        help="Re-run from scratch and diff report against previous run",
+        help=(
+            "Write a numbered report snapshot in the current workspace artifacts; "
+            "cross-invocation auto-diff is unavailable"
+        ),
     )
     test_parser.add_argument(
         "--phase",
