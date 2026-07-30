@@ -34,7 +34,7 @@ INFO phase phase_1 kickoff: running -> done
 INFO phase phase_2_autoplan: blocked -> running
 INFO phase phase_2_autoplan: running -> done
 ...
-[kanban] tenant=mock-project tick_id=01ARZ3... phases={...} report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
+[kanban] tenant=mock-project tick_id=01ARZ3... phases={...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
 ```
 
 Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the run timed out. Exit code 2 = preflight or setup error (missing dependency, `mock-project` tenant unreachable).
@@ -65,24 +65,24 @@ Error classes: `dependency_error`, `hermes_error`, `claude_error`, `timeout`, `p
 ```bash
 uv run tpo test --fixture happy-path --keep --timeout 120
 
-# Find the temp directory the harness left behind
-find /tmp -maxdepth 1 -name 'harness-*' -type d
+# Find the retained harness workspace
+find ~/.hermes/tmp -maxdepth 1 -name 'harness-*' -type d
 ```
 
 The temp directory contains:
 ```
 harness-xxxxxxxx/
-  TODOS.md              # Mock TODO entries
-  README.md
-  .hermes/
-    config.toml          # Pinned to claude-haiku-4-5
-    todo_id_counter
-    locks/
-    pipeline_checkpoints/
-    ready_for_review/
-  events.jsonl           # Per-phase event log (raw)
-  reports/
-    report.json          # Structured findings report
+  project/
+    .git/
+    TODOS.md
+    README.md
+    .hermes/
+      pipeline.toml
+  artifacts/
+    events.jsonl         # Per-phase event log (raw)
+    reports/
+      report.json        # Structured findings report
+      report.md          # Human-readable findings report
 ```
 
 ### 5. Run in loop mode to diff reports across iterations
@@ -95,8 +95,9 @@ uv run tpo test --fixture happy-path --loop --keep --timeout 120
 uv run tpo test --fixture happy-path --loop --keep --timeout 120
 ```
 
-The `--loop` flag persists numbered report files (`happy-path-report.1.json`,
-`happy-path-report.2.json`, ...) in the temp directory parent and diffs them
+The `--loop` flag persists numbered report files
+(`artifacts/happy-path-report.1.json`, `artifacts/happy-path-report.2.json`,
+...) beside the reports directory and diffs them
 after each run. Requires `--keep` so the temp directory survives between runs.
 
 ### 6. Run the pytest test suite
@@ -120,17 +121,17 @@ A successful full run:
 - Exit code 0
 - Log lines showing phase transitions: `phase phase_X_key: blocked -> running`, `phase phase_X_key: running -> done`
 - Final `[kanban]` summary line with `phases={...}` status map
-- `report.json` in temp directory (use `--keep` to preserve)
+- `artifacts/reports/report.json` in the retained workspace (use `--keep` to preserve)
 
 A run that hit convergence halt:
 - Exit code 1
 - Log line: "convergence detector: N+ consecutive phase_failure, halting"
-- Partial `report.json` in temp directory (check with `--keep`)
+- Partial `artifacts/reports/report.json` in the retained workspace (check with `--keep`)
 
 A run that hit the overall timeout:
 - Exit code 1
 - The in-flight phase is killed via `killpg`
-- `phase_timed_out` event written to `events.jsonl`
+- `phase_timed_out` event written to `artifacts/events.jsonl`
 
 ## Troubleshooting
 
@@ -146,8 +147,9 @@ Only `happy-path` is currently implemented. To add new fixtures, edit
 The CLI handler (`_cmd_test`) returns exit codes but doesn't print the report
 summary to stdout. Re-run with `--keep`, then read the report:
 ```bash
-HARNESS_DIR=$(find /tmp -maxdepth 1 -name 'harness-*' -type d | head -1)
-cat "$HARNESS_DIR/reports/report.json" | python -m json.tool
+HARNESS_DIR=$(find ~/.hermes/tmp -maxdepth 1 -name 'harness-*' -type d | head -1)
+python -m json.tool \
+  "$HARNESS_DIR/artifacts/reports/report.json"
 ```
 
 **`HermesCallError` / `ClaudeCallError` from a phase**
@@ -184,7 +186,8 @@ Key flow:
 8. `_ConvergenceMonitor` wraps the event callback, feeds the `ConvergenceDetector`,
    and raises `ConvergenceHaltError` if the threshold is reached
 9. `observe_outcomes()` writes the final state after all phases reach terminal status
-10. `generate_report()` transforms `events.jsonl` into `report.json`
+10. `generate_report()` transforms `artifacts/events.jsonl` into
+    `artifacts/reports/report.json` and `artifacts/reports/report.md`
 11. Temp directory is cleaned up unless `--keep` is set
 
 The entire run is threaded with a `--timeout` watchdog (default 86400s / 24h).
@@ -206,7 +209,7 @@ silently exit 0 with no card and no local evidence.
 a separate tenant per run.
 
 **Phase transition logging** — the poll loop logs each phase state change to console via
-`log.info()`, so you can follow progress without tailing `events.jsonl`:
+`log.info()`, so you can follow progress without tailing `artifacts/events.jsonl`:
 
 ```
 INFO phase phase_1 kickoff: none -> running
@@ -230,7 +233,7 @@ Fast phases (ready/None → done between polls) are also logged.
 **Output.** After report generation, the harness prints:
 
 ```
-[kanban] tenant=mock-project tick_id=01ARZ3ND... phases={phase_1 kickoff: done, phase_2_autoplan: done, ...} report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
+[kanban] tenant=mock-project tick_id=01ARZ3ND... phases={phase_1 kickoff: done, phase_2_autoplan: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
 ```
 
 Pass `--keep` to retain the temp directory for post-run inspection.

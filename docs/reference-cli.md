@@ -274,7 +274,7 @@ tpo test --fixture happy-path --convergence-threshold 2
 - On convergence halt, clears the active task with `outcome="abandoned"`.
 - Prints a `[kanban]` summary line after report generation:
   ```
-  [kanban] tenant=mock-project tick_id=01ARZ3... phases={phase_1 kickoff: done, ...} report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
+  [kanban] tenant=mock-project tick_id=01ARZ3... phases={phase_1 kickoff: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
   ```
 
 **`KanbanPreflightError`** — `RuntimeError` subclass raised when the kanban preflight fails. Two triggers:
