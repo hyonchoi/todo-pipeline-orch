@@ -1681,6 +1681,34 @@ class TestObserveOutcomes:
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {"phase_4_dev": "running"}
 
+    @pytest.mark.parametrize(
+        "snapshot",
+        (
+            None,
+            42,
+            {"tasks": None},
+            [None],
+            [{"body": None, "status": "done"}],
+            [{"body": "null\nbody", "status": "done"}],
+        ),
+    )
+    def test_get_todo_kanban_status_returns_empty_for_malformed_shapes(
+        self, mocker, snapshot
+    ):
+        """Malformed snapshots, task entries, and headers are conservatively empty."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mocker.patch(
+            "subprocess.run",
+            return_value=mocker.Mock(
+                returncode=0,
+                stdout=json.dumps(snapshot),
+                stderr="",
+            ),
+        )
+
+        assert get_todo_kanban_status("demo", "01HA") == {}
+
 
 class TestCompleteTodoKanbanTask:
     """Tests for complete_todo_kanban_task()."""
@@ -1769,3 +1797,151 @@ class TestGetTodoKanbanTasks:
         mock_run.return_value = mocker.Mock(returncode=1, stdout="", stderr="boom")
         from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
         assert get_todo_kanban_tasks("demo", "01TICK") == {}
+
+    @pytest.mark.parametrize(
+        "snapshot",
+        (
+            None,
+            42,
+            {"tasks": None},
+            [None],
+            [{"body": None, "status": "done"}],
+            [{"body": "[]\nbody", "status": "done"}],
+        ),
+    )
+    def test_get_todo_kanban_tasks_returns_empty_for_malformed_shapes(
+        self, mocker, snapshot
+    ):
+        """Malformed snapshots, task entries, and headers are conservatively empty."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.subprocess.run",
+            return_value=mocker.Mock(
+                returncode=0,
+                stdout=json.dumps(snapshot),
+                stderr="",
+            ),
+        )
+
+        assert get_todo_kanban_tasks("demo", "01TICK") == {}
+
+
+class TestCancelTodoKanbanTasks:
+    def test_reclaims_running_worker_archives_chain_and_confirms_runs(
+        self, mocker
+    ):
+        from hermes_pipeline.kanban_tasks import cancel_todo_kanban_tasks
+
+        running = {
+            "id": "t_00000001",
+            "status": "running",
+            "body": json.dumps(
+                {"tick_id": "01CANCEL", "phase_key": "phase_2"}
+            ),
+        }
+        archived = {**running, "status": "archived"}
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks._list_task_snapshot",
+            side_effect=[[running], [archived]],
+        )
+
+        def _run(command, **_kwargs):
+            if command[:3] == ["hermes", "kanban", "show"]:
+                return mocker.Mock(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "task": {
+                                "id": "t_00000001",
+                                "status": "ready",
+                                "worker_pid": None,
+                                "claim_lock": None,
+                            },
+                            "runs": [
+                                {
+                                    "id": 1,
+                                    "status": "reclaimed",
+                                    "outcome": "reclaimed",
+                                    "metadata": {"terminated": True},
+                                    "ended_at": 123,
+                                }
+                            ],
+                        }
+                    ),
+                    stderr="",
+                )
+            return mocker.Mock(returncode=0, stdout="", stderr="")
+
+        run = mocker.patch(
+            "hermes_pipeline.kanban_tasks.subprocess.run",
+            side_effect=_run,
+        )
+
+        assert cancel_todo_kanban_tasks("demo", "01CANCEL") is True
+        commands = [call.args[0] for call in run.call_args_list]
+        assert commands == [
+            [
+                "hermes",
+                "kanban",
+                "reclaim",
+                "--reason",
+                "tpo harness overall timeout",
+                "t_00000001",
+            ],
+            ["hermes", "kanban", "show", "t_00000001", "--json"],
+            ["hermes", "kanban", "archive", "t_00000001"],
+            ["hermes", "kanban", "show", "t_00000001", "--json"],
+        ]
+
+    def test_refuses_cleanup_when_worker_run_is_still_active(self, mocker):
+        from hermes_pipeline.kanban_tasks import cancel_todo_kanban_tasks
+
+        running = {
+            "id": "t_00000001",
+            "status": "running",
+            "body": json.dumps(
+                {"tick_id": "01CANCEL", "phase_key": "phase_2"}
+            ),
+        }
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks._list_task_snapshot",
+            return_value=[running],
+        )
+
+        def _run(command, **_kwargs):
+            if command[:3] == ["hermes", "kanban", "show"]:
+                return mocker.Mock(
+                    returncode=0,
+                    stdout=json.dumps(
+                        {
+                            "task": {
+                                "id": "t_00000001",
+                                "status": "running",
+                                "worker_pid": 4321,
+                                "claim_lock": "host:claim",
+                            },
+                            "runs": [
+                                {
+                                    "id": 1,
+                                    "status": "running",
+                                    "outcome": None,
+                                    "ended_at": None,
+                                }
+                            ],
+                        }
+                    ),
+                    stderr="",
+                )
+            return mocker.Mock(returncode=0, stdout="", stderr="")
+
+        run = mocker.patch(
+            "hermes_pipeline.kanban_tasks.subprocess.run",
+            side_effect=_run,
+        )
+
+        assert cancel_todo_kanban_tasks("demo", "01CANCEL") is False
+        assert not any(
+            call.args[0][:3] == ["hermes", "kanban", "archive"]
+            for call in run.call_args_list
+        )

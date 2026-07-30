@@ -432,6 +432,31 @@ def _parse_task_id(stdout: str) -> str | None:
     return task_id
 
 
+def _validated_task_list(snapshot: object) -> list[dict[str, object]] | None:
+    """Validate the two supported Hermes snapshot envelopes."""
+    if isinstance(snapshot, list):
+        tasks = snapshot
+    elif isinstance(snapshot, dict):
+        tasks = snapshot.get("tasks", [])
+    else:
+        return None
+    if not isinstance(tasks, list):
+        return None
+    return [task for task in tasks if isinstance(task, dict)]
+
+
+def _parse_task_header(task: dict[str, object]) -> dict[str, object] | None:
+    """Return a mapping-shaped JSON header from a task body."""
+    body = task.get("body", "")
+    if not isinstance(body, str):
+        return None
+    try:
+        header = json.loads(body.split("\n", 1)[0])
+    except json.JSONDecodeError:
+        return None
+    return header if isinstance(header, dict) else None
+
+
 def _list_task_snapshot(tenant: str) -> list[dict[str, object]] | None:
     """Return the current Hermes task snapshot, including archived tasks."""
     try:
@@ -456,15 +481,7 @@ def _list_task_snapshot(tenant: str) -> list[dict[str, object]] | None:
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
         return None
 
-    if isinstance(snapshot, list):
-        tasks = snapshot
-    elif isinstance(snapshot, dict):
-        tasks = snapshot.get("tasks", [])
-    else:
-        return None
-    if not isinstance(tasks, list):
-        return None
-    return [task for task in tasks if isinstance(task, dict)]
+    return _validated_task_list(snapshot)
 
 
 def _task_status_in_snapshot(*, tenant: str, task_id: str) -> str | None:
@@ -487,11 +504,8 @@ def _find_task_id_in_snapshot(
     if tasks is None:
         return None
     for task in tasks:
-        try:
-            header = json.loads(task.get("body", "").split("\n", 1)[0])
-        except (AttributeError, json.JSONDecodeError):
-            continue
-        if not isinstance(header, dict):
+        header = _parse_task_header(task)
+        if header is None:
             continue
         if (
             header.get("tick_id") == tick_id
@@ -1169,25 +1183,20 @@ def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:
         return {}
 
     # hermes kanban list --json returns a list; older versions returned
-    # {"tasks": [...]} — handle both.
-    if isinstance(snapshot, list):
-        tasks = snapshot
-    else:
-        tasks = snapshot.get("tasks", [])
+    # {"tasks": [...]} — handle both and fail conservatively on malformed data.
+    tasks = _validated_task_list(snapshot)
+    if tasks is None:
+        return {}
 
     status_map: dict[str, str] = {}
     for task in tasks:
-        body = task.get("body", "")
-        first_line = body.split("\n")[0]
-        try:
-            header = json.loads(first_line)
-            if header.get("tick_id") != tick_id:
-                continue
-            phase_key = header.get("phase_key")
-            if phase_key:
-                status_map[phase_key] = task.get("status", "unknown")
-        except (json.JSONDecodeError, IndexError):
-            pass
+        header = _parse_task_header(task)
+        if header is None or header.get("tick_id") != tick_id:
+            continue
+        phase_key = header.get("phase_key")
+        status = task.get("status", "unknown")
+        if isinstance(phase_key, str) and isinstance(status, str):
+            status_map[phase_key] = status
 
     return status_map
 
@@ -1222,28 +1231,154 @@ def get_todo_kanban_tasks(tenant: str, tick_id: str) -> dict[str, KanbanTaskInfo
         log.warning("kanban list failed for tenant=%s", tenant)
         return {}
 
-    tasks = snapshot if isinstance(snapshot, list) else snapshot.get("tasks", [])
+    tasks = _validated_task_list(snapshot)
+    if tasks is None:
+        return {}
 
     out: dict[str, KanbanTaskInfo] = {}
     for task in tasks:
-        body = task.get("body", "")
-        first_line = body.split("\n")[0]
-        try:
-            header = json.loads(first_line)
-        except (json.JSONDecodeError, IndexError):
-            continue
-        if header.get("tick_id") != tick_id:
+        header = _parse_task_header(task)
+        if header is None or header.get("tick_id") != tick_id:
             continue
         phase_key = header.get("phase_key")
-        if not phase_key:
+        task_id = task.get("id", "")
+        status = task.get("status", "unknown")
+        todo_id = header.get("todo_id", "")
+        if not all(
+            isinstance(value, str)
+            for value in (phase_key, task_id, status, todo_id)
+        ):
             continue
         out[phase_key] = KanbanTaskInfo(
-            task_id=task.get("id", ""),
+            task_id=task_id,
             phase_key=phase_key,
-            status=task.get("status", "unknown"),
-            todo_id=header.get("todo_id", ""),
+            status=status,
+            todo_id=todo_id,
         )
     return out
+
+
+def _task_run_terminated(task_id: str, *, require_kill_confirmation: bool) -> bool:
+    """Confirm Hermes has no active worker or unfinished run for a task."""
+    try:
+        result = subprocess.run(
+            ["hermes", "kanban", "show", task_id, "--json"],
+            capture_output=True,
+            text=True,
+            timeout=HERMES_COMMAND_TIMEOUT,
+            check=False,
+        )
+        if result.returncode != 0:
+            return False
+        payload = json.loads(result.stdout)
+    except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
+        return False
+
+    if not isinstance(payload, dict):
+        return False
+    task = payload.get("task")
+    runs = payload.get("runs")
+    if not isinstance(task, dict) or not isinstance(runs, list):
+        return False
+    if task.get("worker_pid") is not None or task.get("claim_lock") is not None:
+        return False
+    if not all(
+        isinstance(run, dict) and run.get("ended_at") is not None
+        for run in runs
+    ):
+        return False
+    if not require_kill_confirmation:
+        return True
+    if not runs:
+        return False
+    metadata = runs[-1].get("metadata")
+    return isinstance(metadata, dict) and metadata.get("terminated") is True
+
+
+def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
+    """Stop and archive every task for a timed-out harness tick.
+
+    Running workers are reclaimed first. Cleanup succeeds only when Hermes
+    reports the worker termination, every run has ended, and the complete
+    task chain is visible as archived.
+    """
+    snapshot = _list_task_snapshot(tenant)
+    if snapshot is None:
+        return False
+
+    tasks: list[dict[str, object]] = []
+    for task in snapshot:
+        header = _parse_task_header(task)
+        task_id = task.get("id")
+        if (
+            header is not None
+            and header.get("tick_id") == tick_id
+            and isinstance(task_id, str)
+        ):
+            tasks.append(task)
+    if not tasks:
+        return True
+
+    for task in reversed(tasks):
+        task_id = task["id"]
+        if task.get("status") != "running":
+            continue
+        try:
+            result = subprocess.run(
+                [
+                    "hermes",
+                    "kanban",
+                    "reclaim",
+                    "--reason",
+                    "tpo harness overall timeout",
+                    task_id,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=HERMES_COMMAND_TIMEOUT,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        if result.returncode != 0 or not _task_run_terminated(
+            task_id,
+            require_kill_confirmation=True,
+        ):
+            return False
+
+    for task in reversed(tasks):
+        if task.get("status") == "archived":
+            continue
+        task_id = task["id"]
+        try:
+            result = subprocess.run(
+                ["hermes", "kanban", "archive", task_id],
+                capture_output=True,
+                text=True,
+                timeout=HERMES_COMMAND_TIMEOUT,
+                check=False,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return False
+        if result.returncode != 0:
+            return False
+
+    final_snapshot = _list_task_snapshot(tenant)
+    if final_snapshot is None:
+        return False
+    final_statuses = {
+        task.get("id"): task.get("status")
+        for task in final_snapshot
+        if isinstance(task.get("id"), str)
+    }
+    return all(
+        final_statuses.get(task["id"]) == "archived"
+        and _task_run_terminated(
+            task["id"],
+            require_kill_confirmation=False,
+        )
+        for task in tasks
+    )
 
 
 def all_phases_complete(
