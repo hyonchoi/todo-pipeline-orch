@@ -45,6 +45,13 @@ def _create_valid_doctor_project(projects_dir, profile="gstack"):
     return FakeArgs(project="demo")
 
 
+def _allow_hermes_registry_skill_check(*args, **kwargs):
+    cmd = args[0] if args else kwargs.get("args", [])
+    if cmd == ["hermes", "skills", "list", "--enabled-only"]:
+        return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
+    pytest.fail("doctor must not inspect a remote worker for external skills")
+
+
 class TestBuildParserInit:
     def test_init_help(self):
         parser = build_parser()
@@ -329,9 +336,7 @@ class TestDoctorProfileAware:
         args = _create_valid_doctor_project(tmp_path)
         monkeypatch.setattr(
             "hermes_pipeline.cli._cli_sp.run",
-            lambda *args, **kwargs: pytest.fail(
-                "doctor must not inspect a remote worker for external skills"
-            ),
+            _allow_hermes_registry_skill_check,
         )
 
         assert (
@@ -369,9 +374,7 @@ class TestDoctorProfileAware:
         args = _create_valid_doctor_project(tmp_path)
         monkeypatch.setattr(
             "hermes_pipeline.cli._cli_sp.run",
-            lambda *args, **kwargs: pytest.fail(
-                "doctor must not inspect a remote worker for external skills"
-            ),
+            _allow_hermes_registry_skill_check,
         )
 
         assert (
@@ -512,8 +515,10 @@ class TestDoctorMissingProfile:
         out = capsys.readouterr().out
         assert "pipeline" in out.lower() or "profile" in out.lower()
 
-    def test_doctor_skips_profile_check_for_default_assignee(self, tmp_path, mocker, capsys):
-        """When assignee is 'default', doctor should NOT check Hermes profile."""
+    def test_doctor_skips_profile_show_for_default_assignee(
+        self, tmp_path, mocker, capsys
+    ):
+        """Default assignee skips profile show but still checks the skill registry."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -528,6 +533,8 @@ class TestDoctorMissingProfile:
             cmd = a[0] if a else kw.get("args", [])
             if "profile" in cmd:
                 return MagicMock(returncode=1, stderr="profile not found", stdout="")
+            if cmd == ["hermes", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
             return original_run(*a, **kw)
         mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=tracking_run)
         mocker.patch(
@@ -539,7 +546,7 @@ class TestDoctorMissingProfile:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 0
-        assert call_count["n"] == 0
+        assert call_count["n"] == 1
 
     def test_doctor_profile_check_success_returns_0(self, tmp_path, mocker, capsys):
         """Non-default assignee whose profile IS installed should pass clean."""
@@ -610,6 +617,32 @@ class TestDoctorMissingProfile:
             if cmd == ["hermes", "profile", "show", "pipeline"]:
                 return MagicMock(returncode=0, stderr="", stdout="")
             if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        out = capsys.readouterr().out
+        assert "MISSING" in out
+        assert "ai-coding-agents" in out
+
+    def test_doctor_missing_default_hermes_skill_registry_returns_2(
+        self, tmp_path, mocker, capsys
+    ):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\ncapabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        )
+
+        def run(cmd, **_kwargs):
+            if cmd == ["hermes", "skills", "list", "--enabled-only"]:
                 return MagicMock(returncode=0, stderr="", stdout="")
             raise AssertionError(f"unexpected command: {cmd}")
 

@@ -34,7 +34,7 @@ tpo tick myproject    # tick one project
 2. Check prior tick outcomes; observe circuit breaker
 3. Check in-flight phase state and circuit breaker progress
 4. Run Hermes agent selection on TODOS.md
-5. Register executable kanban phases with `--parent` dependency chains; profiles may also define detached blocked gates
+5. Register kanban phases with `--parent` dependency chains; profiles may also define blocked, nonspawnable gates
 
 Without a project argument, scans all subdirectories of the global
 `projects_dir` for `TODOS.md` files. Per-project locks isolate failures — one

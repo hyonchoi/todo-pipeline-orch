@@ -867,11 +867,10 @@ def create_prepared_todo_phases(
             "-" if is_gate else assignee,
             "--json",
         ]
+        cmd.extend(["--parent", previous_dependency_id or barrier_id])
         if not is_gate:
             cmd.extend(
                 [
-                    "--parent",
-                    previous_dependency_id or barrier_id,
                     "--goal",
                     "--goal-max-turns",
                     str(phase.turns),

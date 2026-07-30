@@ -993,7 +993,7 @@ class TestRegisterTodoPhases:
         gate_cmd = create_commands[2]
         assert "--initial-status" not in gate_cmd
         assert "--goal" not in gate_cmd
-        assert "--parent" not in gate_cmd
+        assert gate_cmd[gate_cmd.index("--parent") + 1] == "t_0000000a"
         assert gate_cmd[gate_cmd.index("--assignee") + 1] == "-"
 
         block_commands = [

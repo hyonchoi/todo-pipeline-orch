@@ -97,7 +97,7 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     gate = create_commands["phase_gate"]
     assert gate[gate.index("--assignee") + 1] == "-"
     assert "--goal" not in gate
-    assert "--parent" not in gate
+    assert gate[gate.index("--parent") + 1] == "t_00000001"
     assert "--initial-status" not in gate
 
     second = create_commands["phase_2"]

@@ -334,9 +334,9 @@ with respect to Hermes: no task is created.
 
 ### `create_prepared_todo_phases`
 
-Creates already-prepared tasks behind a registration barrier. Executable phases
-use `--parent` dependency chains; gate phases are detached and receive a sticky
-`needs_input` block.
+Creates already-prepared tasks behind a registration barrier. Every phase follows
+the previous phase with `--parent`; gate phases remain nonspawnable by omitting
+worker assignees and goals, and receive a sticky `needs_input` block.
 
 ```python
 create_prepared_todo_phases(

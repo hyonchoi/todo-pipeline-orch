@@ -1093,6 +1093,15 @@ def _tick_project(
             f"contract missing capabilities: {sorted(missing)}"
         )
 
+    from .kanban_tasks import reconcile_pending_task_create
+
+    if not reconcile_pending_task_create(project_dir):
+        log.warning(
+            "project %s: unresolved Hermes task creation; skipping",
+            project_slug,
+        )
+        return
+
     unverified = _unverified_prerequisite_ids(prerequisites, config.prompt_client)
     if unverified:
         log.error(
@@ -1115,15 +1124,6 @@ def _tick_project(
     slack_channel = _resolve_slack_channel(
         project_dir, env_channel=config.slack_channel, toml_data=project_toml
     )
-
-    from .kanban_tasks import reconcile_pending_task_create
-
-    if not reconcile_pending_task_create(project_dir):
-        log.warning(
-            "project %s: unresolved Hermes task creation; skipping",
-            project_slug,
-        )
-        return
 
     # Step 1: Check prior tick
     prior_tick_id = _read_prior_tick_id(project_state)
@@ -1579,7 +1579,6 @@ def _cmd_doctor(args, config: Config) -> int:
         if prerequisite.support == "Conditional":
             if (
                 client.discovery_root == _HERMES_SKILL_REGISTRY_ROOT
-                and contract.assignee != "default"
             ):
                 verified, detail = _verify_hermes_skill_registry_prerequisite(
                     assignee=contract.assignee,

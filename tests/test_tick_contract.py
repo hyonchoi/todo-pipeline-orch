@@ -271,6 +271,40 @@ class TestPendingTaskCreateGate:
         run_selection.assert_not_called()
         create.assert_not_called()
 
+    def test_pending_task_create_reconciles_before_unverified_profile_gate(
+        self, tmp_path, mocker
+    ):
+        """Cleanup recovery must not be blocked by unsupported profile metadata."""
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "agent-skills"\n'
+        )
+
+        reconcile = mocker.patch(
+            "hermes_pipeline.kanban_tasks.reconcile_pending_task_create",
+            return_value=False,
+        )
+        run_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases")
+
+        _tick_project(
+            project_dir=project_dir,
+            project_slug=project_dir.name,
+            project_state=project_state,
+            config=Config(prompt_client="codex"),
+            cb_cfg=CircuitBreakerConfig(),
+            tick_id="01PENDING",
+            project_toml={},
+        )
+
+        reconcile.assert_called_once_with(project_dir)
+        run_selection.assert_not_called()
+        create.assert_not_called()
+
     def test_reconciled_pending_task_create_checks_prior_tick(self, tmp_path, mocker):
         """A reconciled create preserves the existing prior-tick gate."""
         project_dir = _create_project(tmp_path, "demo")

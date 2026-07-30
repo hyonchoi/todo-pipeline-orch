@@ -53,9 +53,10 @@ hermes_pipeline/
 `state.py` — Locks, checkpoints, ready-for-review records, atomic tmp+rename writes. All state files are written atomically to prevent partial reads.
 
 ### Lane C: Kanban Integration
-`kanban.py`, `kanban_tasks.py` — Executable phases as kanban tasks with `--parent`
-dependency chains; human gates as detached tasks with a sticky `needs_input`
-block. Registration creates the executable chain behind a non-spawnable barrier
+`kanban.py`, `kanban_tasks.py` — Phases as kanban tasks with `--parent`
+dependency chains; human gates stay in the chain but have no assignee or goal
+and receive a sticky `needs_input` block. Registration creates the phase chain
+behind a non-spawnable barrier
 and releases it only after every task and the expected-phase sentinel are
 durable. Kanban status queries drive the tick loop.
 
@@ -101,8 +102,8 @@ cli._tick_project(config, contract)
     `-- create_prepared_todo_phases(...)
             +-- create unassigned registration barrier
             +-- create every prepared phase behind the barrier
-            |       +-- executable tasks form a --parent chain
-            |       `-- gate tasks stay detached and receive a sticky needs_input block
+            |       +-- every phase follows the previous phase with --parent
+            |       `-- gate tasks receive no goal and a sticky needs_input block
             +-- persist expected-phases sentinel
             `-- complete barrier, making the first executable runnable
 ```
@@ -159,7 +160,7 @@ All pipeline state lives under `<project>/.hermes/`:
 1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent`
    chains. A non-spawnable registration barrier prevents partial chains from
    running; it is completed only after the complete chain is durable. Profiles
-   may define detached gates with sticky `needs_input` blocks, but the default
+   may define manual gates with sticky `needs_input` blocks, but the default
    `gstack` profile ends at Phase 8 PR handoff.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review` in Claude Code or `$review` in Codex, and the agent owns the review lifecycle end-to-end.
