@@ -10,12 +10,14 @@
 
 ## Global Constraints
 
-- The phase `timeout` is authoritative for both the complete Hermes Kanban worker and the delegated external process.
+- The delegated external process receives the exact phase `timeout`; the complete Hermes worker receives `timeout + 60` seconds solely to terminate the client and persist failure evidence.
 - Executable external clients must use Hermes tracked background execution; foreground terminal execution is not acceptable for long-running phases.
-- Launch failure, non-zero exit, or timeout must block or fail the task and must never fall back to Hermes implementing or committing the phase itself.
+- Launch failure, non-zero exit, or timeout must write known metadata through `kanban_comment`, then use `kanban_block(kind="needs_input", reason=...)`; it must never fall back to Hermes implementing or committing the phase itself.
+- Executable tasks use `--max-retries 1` so deadline expiry is terminal and cannot overlap a retry.
 - Gate tasks are non-executable and must not receive `--max-runtime`.
 - `prompt_client` remains limited to prompt vocabulary and external-command selection.
 - Preserve the `Phase.timeout` default of 1,800 seconds for profiles that omit it.
+- Require `type(timeout) is int and timeout > 0` before tick persistence or Kanban mutation.
 - Use `rtk`-prefixed commands for searches, reads, tests, linting, and compilation.
 
 ---
@@ -440,3 +442,220 @@ rtk git diff HEAD~3..HEAD --check
 ```
 
 Expected: clean worktree, three implementation commits in dependency order, and no whitespace errors.
+
+---
+
+### Task 4: Close timeout lifecycle safety gaps
+
+**Files:**
+- Modify: `tests/test_phases.py`
+- Modify: `tests/test_kanban_tasks.py`
+- Modify: `tests/test_kanban_registration_barrier.py`
+- Modify: `hermes_pipeline/phases.py`
+- Modify: `hermes_pipeline/kanban_tasks.py`
+- Modify: `docs/ARCHITECTURE.md`
+- Modify: `docs/reference-kanban-as-scheduler.md`
+
+**Interfaces:**
+- Consumes: `Phase.timeout: int` and `PreparedPhaseTask.timeout: int`.
+- Produces: `PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS = 60`.
+- Produces: executable task flags `--max-runtime str(phase.timeout + 60)` and `--max-retries 1`.
+- Produces: source-aware timeout validation before prepared-task creation.
+- Produces: a delegation contract requiring process termination confirmation, `kanban_comment` failure metadata, and `kanban_block(kind="needs_input", reason=...)`.
+
+- [ ] **Step 1: Write failing timeout validation tests**
+
+Add parametrized coverage in `tests/test_phases.py`:
+
+```python
+@pytest.mark.parametrize("timeout", ["2400", True, 0, -1])
+def test_load_phases_rejects_invalid_timeout(tmp_path, timeout):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        yaml.safe_dump(
+            {
+                "phases": [
+                    {
+                        "phase_key": "phase_1",
+                        "name": "One",
+                        "timeout": timeout,
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"phase_1.*timeout must be a positive integer",
+    ):
+        load_phases(phases_path)
+```
+
+Add a separate omitted-value assertion:
+
+```python
+def test_load_phases_defaults_timeout_to_1800(tmp_path):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+    )
+
+    assert load_phases(phases_path)[0].timeout == 1800
+```
+
+- [ ] **Step 2: Verify timeout validation tests fail**
+
+Run:
+
+```bash
+rtk uv run pytest \
+  tests/test_phases.py::test_load_phases_rejects_invalid_timeout \
+  tests/test_phases.py::test_load_phases_defaults_timeout_to_1800 \
+  -q
+```
+
+Expected: invalid-value cases FAIL because dataclass annotations do not enforce runtime values; omitted default PASS.
+
+- [ ] **Step 3: Implement source-aware validation**
+
+In `load_phases()`, construct phases one row at a time and validate the
+effective value before returning:
+
+```python
+    phases: list[Phase] = []
+    for index, raw_phase in enumerate(raw_phases):
+        phase = Phase(**raw_phase)
+        if type(phase.timeout) is not int or phase.timeout <= 0:
+            source = raw_phase.get("phase_key", f"index {index}")
+            raise ValueError(
+                f"{config_path}:{source}: timeout must be a positive integer"
+            )
+        phases.append(phase)
+    return phases
+```
+
+- [ ] **Step 4: Write failing lifecycle command and prompt tests**
+
+Update executable command assertions to expect:
+
+```python
+    assert command[command.index("--max-runtime") + 1] == "2460"
+    assert command[command.index("--max-retries") + 1] == "1"
+```
+
+For the 7,200-second phase, expect `"7260"`. Assert barriers and gates contain
+neither `--max-runtime` nor `--max-retries`.
+
+Extend delegation assertions with:
+
+```python
+    assert "60-second cleanup grace" in prepared[0].body
+    assert "terminate the external process tree" in prepared[0].body
+    assert "confirm that it is no longer running" in prepared[0].body
+    assert "kanban_comment" in prepared[0].body
+    assert 'kanban_block(kind="needs_input"' in prepared[0].body
+```
+
+- [ ] **Step 5: Verify lifecycle tests fail**
+
+Run:
+
+```bash
+rtk uv run pytest \
+  tests/test_kanban_tasks.py::test_prepare_todo_phases_wraps_executable_phases_with_client_delegation \
+  tests/test_kanban_tasks.py::test_create_prepared_todo_phases_preserves_command_chain \
+  tests/test_kanban_registration_barrier.py::test_registration_barrier_owns_executable_chain_and_commits_last \
+  -q
+```
+
+Expected: FAIL because worker runtime equals the client timeout, retry policy is
+implicit, and the delegation body lacks cleanup/failure-transition instructions.
+
+- [ ] **Step 6: Implement cleanup grace, terminal retry, and failure contract**
+
+Define near the task-registration constants:
+
+```python
+PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS = 60
+```
+
+Render the lifecycle contract with these exact requirements:
+
+```text
+The external client deadline is <timeout> seconds. The Hermes worker has a
+60-second cleanup grace after that deadline. If the deadline expires, terminate
+the external process tree and confirm that it is no longer running. Write known
+external_agent_command, external_agent_timeout_seconds,
+external_agent_session_id, and external_agent_exit_code values through
+kanban_comment, then call kanban_block(kind="needs_input", reason=<exact
+reason>). Do not inspect, implement, or commit partial work.
+```
+
+Change the executable-only command extension:
+
+```python
+            cmd.extend(
+                [
+                    "--max-runtime",
+                    str(phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+                    "--max-retries",
+                    "1",
+                    "--goal",
+                    "--goal-max-turns",
+                    str(phase.turns),
+                ]
+            )
+```
+
+- [ ] **Step 7: Run focused GREEN and regression suites**
+
+Run:
+
+```bash
+rtk uv run pytest \
+  tests/test_phases.py \
+  tests/test_kanban_tasks.py \
+  tests/test_kanban_registration_barrier.py \
+  tests/test_kanban_tasks_legacy.py \
+  -q
+```
+
+Expected: PASS.
+
+- [ ] **Step 8: Correct operator documentation**
+
+Update both docs so the flow reads:
+
+```text
+Phase.timeout
+  -> external Codex/Claude deadline
+  -> PreparedPhaseTask.timeout
+  -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
+```
+
+Document that the final minute is cleanup-only and that failure metadata is
+commented before the supported `needs_input` block transition.
+
+- [ ] **Step 9: Run complete verification**
+
+Run:
+
+```bash
+rtk git diff --check
+rtk uv run ruff check .
+rtk uv run --locked pytest -q
+```
+
+Expected: all checks PASS with only pre-existing documented skips.
+
+- [ ] **Step 10: Commit the fix wave**
+
+Use the `git-atomic-commits` skill to create one cohesive final-review fix
+commit:
+
+```text
+Harden phase timeout lifecycle
+```
