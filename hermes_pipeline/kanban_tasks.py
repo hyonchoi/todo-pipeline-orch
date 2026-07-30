@@ -73,6 +73,7 @@ class PreparedPhaseTask:
     body: str
     turns: int
     gate: bool
+    timeout: int = 1800
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,10 @@ class PendingBarrierCommit:
     cleanup_task_ids: tuple[str, ...]
 
 
-def _external_client_delegation_block(prompt_client: PromptClient) -> str:
+def _external_client_delegation_block(
+    prompt_client: PromptClient,
+    timeout: int,
+) -> str:
     """Return the dispatcher contract prepended to executable phase tasks."""
     if prompt_client == "codex":
         command = "codex exec --sandbox danger-full-access"
@@ -123,12 +127,19 @@ def _external_client_delegation_block(prompt_client: PromptClient) -> str:
         "from the delimited block below and pass only that prompt to the "
         "external client.\n"
         f"Required external command: `{command}`\n"
-        "Do not implement this phase directly with Hermes tools. Use Hermes "
-        "tools only to invoke, monitor, and inspect the external client run.\n"
-        "If the external client is unavailable or exits non-zero, block or "
-        "fail this task with the exact reason.\n"
+        f"External agent timeout: {timeout} seconds.\n"
+        "Launch the external command with Hermes tracked background execution, "
+        "then monitor the background process until it exits or this deadline "
+        "expires. Do not use a foreground terminal call because Hermes may "
+        "replace this phase timeout with its shorter foreground cap.\n"
+        "Do not implement this phase directly with Hermes tools.\n"
+        "If the external client is unavailable, exits non-zero, or exceeds "
+        "the deadline, block or fail this task with the exact reason. You "
+        "must not inspect partial changes, and must not implement or commit "
+        "the phase yourself.\n"
         "When completing the task, include result metadata with "
-        "`external_agent_command` and any external session identifier.\n\n"
+        "`external_agent_command`, `external_agent_timeout_seconds`, "
+        "`external_agent_exit_code`, and any external session identifier.\n\n"
     )
 
 
@@ -628,8 +639,13 @@ def prepare_todo_phases(
             body_prompt = _external_agent_prompt_block(
                 rendered_prompt, prompt_client=prompt_client
             )
-        delegation = "" if phase.gate else _external_client_delegation_block(
-            prompt_client
+        delegation = (
+            ""
+            if phase.gate
+            else _external_client_delegation_block(
+                prompt_client,
+                timeout=phase.timeout,
+            )
         )
         prepared.append(
             PreparedPhaseTask(
@@ -648,6 +664,7 @@ def prepare_todo_phases(
                 ),
                 turns=phase.turns,
                 gate=phase.gate,
+                timeout=phase.timeout,
             )
         )
     return prepared

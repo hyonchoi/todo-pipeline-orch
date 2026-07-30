@@ -191,6 +191,7 @@ def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
         "    prompt: 'Use {skill_prefix}review.'\n"
         "    tools: Read,Bash\n"
         "    turns: 5\n"
+        "    timeout: 2400\n"
     )
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
 
@@ -210,6 +211,14 @@ def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
     assert forbidden not in prepared[0].body
     assert "Do not implement this phase directly with Hermes tools" in prepared[0].body
     assert "external_agent_command" in prepared[0].body
+    assert prepared[0].timeout == 2400
+    assert "External agent timeout: 2400 seconds" in prepared[0].body
+    assert "tracked background execution" in prepared[0].body
+    assert "monitor the background process" in prepared[0].body
+    assert "external_agent_timeout_seconds" in prepared[0].body
+    assert "external_agent_exit_code" in prepared[0].body
+    assert "must not inspect partial changes" in prepared[0].body
+    assert "must not implement or commit the phase yourself" in prepared[0].body
 
 
 def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, mocker):
@@ -275,6 +284,9 @@ def test_prepare_todo_phases_does_not_wrap_gate_phase_with_client_delegation(
     assert "You are the Hermes dispatcher" not in prepared[0].body
     assert "codex exec" not in prepared[0].body
     assert "BEGIN EXTERNAL AGENT PROMPT" not in prepared[0].body
+    assert prepared[0].timeout == 1800
+    assert "External agent timeout" not in prepared[0].body
+    assert "tracked background execution" not in prepared[0].body
 
 
 def test_prepare_todo_phases_rejects_invalid_todo_before_loading_phases(
