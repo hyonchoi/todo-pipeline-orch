@@ -87,6 +87,18 @@ every body for the global `prompt_client`; only after all rendering succeeds doe
 `create_prepared_todo_phases` creates the Hermes tasks. A malformed later prompt
 therefore creates no tasks and records no active tick.
 
+For every executable phase, its configured deadline follows this exact path:
+
+```
+Phase.timeout
+  -> PreparedPhaseTask.timeout
+  -> hermes kanban create --max-runtime <seconds>
+  -> tracked background Codex/Claude process with the same deadline
+```
+
+Only a zero external-agent exit may complete the phase. After a timeout or
+non-zero exit, Hermes cannot finish or commit partial work.
+
 ```
 cli._tick_project(config, contract)
     |

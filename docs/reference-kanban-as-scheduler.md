@@ -15,6 +15,17 @@ the branch was handed to a PR, not merged. `tpo tick` reads
 closed without merge, or temporarily unverifiable. Once GitHub reports the PR as
 `MERGED`, the next tick may select new work.
 
+## Operator execution deadlines
+
+The selected profile's `phases.yaml` owns each executable phase deadline.
+TPO sends that value to Hermes as `--max-runtime` and includes it in the
+external-agent delegation contract. Delegated clients run as tracked
+background processes so Hermes's 600-second foreground terminal cap cannot
+shorten a phase configured for longer work.
+
+Use `hermes kanban show <task-id> --json` to inspect task state and
+`hermes kanban log <task-id>` to inspect the worker audit trail.
+
 ## Types
 
 ### `PhaseStatus`
@@ -64,6 +75,7 @@ class PreparedPhaseTask:
     body: str
     turns: int
     gate: bool
+    timeout: int = 1800
 ```
 
 An immutable, fully rendered task ready for Hermes creation. Preparation
@@ -376,6 +388,8 @@ each prepared phase, it then runs `hermes kanban create` with:
 - `--assignee -` for the barrier and gates; executable tasks use `assignee`
 - `--body <json_header>\n<phase_prompt>` — task body with JSON header on first
   line
+- `--max-runtime <seconds>` for executable tasks — the selected phase deadline;
+  gate tasks omit it
 
 After creating a gate, it runs
 `hermes kanban block --kind needs_input <gate-task-id>`. After the
