@@ -21,6 +21,22 @@ from .config import PromptClient
 log = logging.getLogger(__name__)
 
 
+_MOCK_PROJECT_GITIGNORE = """\
+# Harness runtime artifacts
+events.jsonl
+.hermes/outcomes/
+.hermes/tpo-config.yaml
+
+# Agent scratch space
+.superpowers/
+.code-review-graph/
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+"""
+
+
 def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     """Create a mock project in *path* for integration testing."""
     path.mkdir(parents=True, exist_ok=True)
@@ -34,6 +50,7 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     todos_content = _get_todos_for_fixture(fixture_name)
     (path / "TODOS.md").write_text(todos_content)
     (path / "README.md").write_text(f"# Mock Project — {fixture_name}\n")
+    (path / ".gitignore").write_text(_MOCK_PROJECT_GITIGNORE)
 
     hermes_dir = path / ".hermes"
     hermes_dir.mkdir()
