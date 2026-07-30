@@ -89,10 +89,11 @@ def _get_todos_for_fixture(fixture_name: str) -> str:
             "> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim\n"
             "> - ID: sequential, immutable TODO-<n>\n"
             "> - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`\n\n"
-            "- [ ] **TODO-1: Implement mock feature A** — adds a simple data transformation module\n"
-            "  - **What:** Create a mock feature for integration testing.\n"
-            "  - **Why:** Test fixture for the harness.\n"
-            "  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feat/mock-happy-path`, Test Coverage `not-required`, Security Review `not-required`\n"
+            "- [ ] **TODO-1: Implement mock name normalization** — adds a deterministic Python data transformation\n"
+            "  - **What:** Create `mock_transform.py` with `normalize_names(names: list[str]) -> list[str]`. For each input string, strip surrounding whitespace, discard empty strings after stripping, lowercase the remaining value, and preserve input order. Return an empty list for empty input.\n"
+            "  - **Why:** Provide a small, executable feature that exercises the complete harness pipeline without external services.\n"
+            "  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feat/mock-happy-path`, Language `Python 3.12+`, Dependencies `standard library only`, Test Coverage `required`, Security Review `not-required`\n"
+            "  - **Acceptance criteria:** `normalize_names([\" Alice \", \"\", \"BOB\"])` returns `[\"alice\", \"bob\"]`; `normalize_names([])` returns `[]`; tests run with `uv run pytest`.\n"
         )
     else:
         raise ValueError(f"Unknown fixture: {fixture_name}")

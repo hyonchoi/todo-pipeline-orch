@@ -40,6 +40,25 @@ class TestCreateMockProject:
         assert "todo_id" in result
         assert "branch" in result
 
+    def test_create_mock_project_happy_path_has_executable_todo(self, tmp_path: Path):
+        create_mock_project(tmp_path, "happy-path")
+
+        todos = (tmp_path / "TODOS.md").read_text()
+        required_contract = (
+            "mock_transform.py",
+            "normalize_names(names: list[str]) -> list[str]",
+            "strip surrounding whitespace",
+            "discard empty strings",
+            "preserve input order",
+            "Return an empty list",
+            "standard library only",
+            "**Acceptance criteria:**",
+            "uv run pytest",
+        )
+
+        for requirement in required_contract:
+            assert requirement in todos
+
     def test_create_mock_project_unknown_fixture_raises(self, tmp_path: Path):
         with pytest.raises(ValueError, match="Unknown fixture"):
             create_mock_project(tmp_path, "nonexistent-fixture")
