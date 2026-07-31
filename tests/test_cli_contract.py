@@ -10,6 +10,7 @@ from hermes_pipeline.cli import (
     _cmd_doctor,
     _cmd_init,
     _cmd_install_profile,
+    _verify_hermes_skill_registry_prerequisite,
     build_parser,
 )
 from hermes_pipeline.config import Config
@@ -50,6 +51,31 @@ def _allow_hermes_registry_skill_check(*args, **kwargs):
     if cmd == ["hermes", "skills", "list", "--enabled-only"]:
         return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
     pytest.fail("doctor must not inspect a remote worker for external skills")
+
+
+def test_hermes_registry_prerequisite_requires_exact_enabled_skill_name(mocker):
+    """A similarly named skill must not satisfy the required Hermes skill ID."""
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        return_value=MagicMock(
+            returncode=0,
+            stderr="",
+            stdout=(
+                "Installed Skills (enabled only)\n"
+                "Name                       Category  Source  Trust  Status\n"
+                "ai-coding-agents-helper    local     local   local  enabled\n"
+                "0 hub-installed, 0 builtin, 1 local - 1 enabled shown\n"
+            ),
+        ),
+    )
+
+    verified, detail = _verify_hermes_skill_registry_prerequisite(
+        assignee="default",
+        skill_id="ai-coding-agents",
+    )
+
+    assert verified is False
+    assert "not enabled" in detail
 
 
 class TestBuildParserInit:

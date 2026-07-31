@@ -94,7 +94,12 @@ def _verify_hermes_skill_registry_prerequisite(
         stderr = (result.stderr or "").strip()
         detail = f": {stderr}" if stderr else ""
         return False, f"`{' '.join(cmd)}` failed{detail}."
-    if skill_id not in (result.stdout or ""):
+    enabled_skill_names: set[str] = set()
+    for line in (result.stdout or "").splitlines():
+        columns = line.split()
+        if len(columns) == 1 or (columns and columns[-1] == "enabled"):
+            enabled_skill_names.add(columns[0])
+    if skill_id not in enabled_skill_names:
         return (
             False,
             f"skill '{skill_id}' is not enabled in Hermes profile '{assignee}'.",
