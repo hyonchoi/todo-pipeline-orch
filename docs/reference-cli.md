@@ -255,7 +255,7 @@ tpo test --fixture happy-path --convergence-threshold 2
 |-----|----------|---------|-------------|
 | `--fixture` | Yes | — | Fixture name. Only `happy-path` is implemented. |
 | `--phase` | No | — | Run only the named phase in isolation (e.g. `phase_2_autoplan`). |
-| `--timeout` | No | `86400` | Overall run timeout in seconds. Kills in-flight phase via `killpg` if exceeded. |
+| `--timeout` | No | `86400` | Overall run timeout in seconds. Cooperatively stops polling, then reclaims and archives the tick's Hermes tasks. |
 | `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before circuit breaker halts the run. |
 | `--keep` | No | — | Preserve the temporary directory after the run for inspection. |
 | `--loop` | No | — | Write a numbered report snapshot in the current workspace's `artifacts/` directory. Snapshots do not carry across separate CLI invocations, so cross-invocation auto-diff is unavailable. Requires `--keep`. |
@@ -276,6 +276,19 @@ tpo test --fixture happy-path --convergence-threshold 2
   ```
   [kanban] tenant=mock-project tick_id=01ARZ3... phases={phase_1 kickoff: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
   ```
+
+**Timeout and exceptional poll cleanup:**
+- The harness first signals the poll thread to stop and waits for it to exit.
+- It then reclaims each running Hermes task and requires Hermes to confirm that
+  the worker is gone and every run has ended.
+- Tasks are archived child first according to their validated parent
+  relationships, then the harness confirms that the complete task set is
+  archived and quiescent.
+- If polling does not stop, task relationships are malformed, or any reclaim,
+  termination, archive, or final-state confirmation is inconclusive, cleanup
+  fails closed with `HarnessCleanupError` and retains the workspace for
+  inspection. The workspace is eligible for automatic removal only after
+  cleanup is confirmed.
 
 **`KanbanPreflightError`** — `RuntimeError` subclass raised when the kanban preflight fails. Two triggers:
 - `subprocess.TimeoutExpired` after 15 s → actionable timeout message
