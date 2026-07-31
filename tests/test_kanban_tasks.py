@@ -823,6 +823,35 @@ def test_find_task_rejects_malformed_snapshot(mocker, snapshot_stdout):
     )
 
 
+def test_find_task_rejects_mixed_valid_and_invalid_snapshot(mocker):
+    """Recovery must not trust a matching task from a malformed snapshot."""
+    from hermes_pipeline.kanban_tasks import _find_task_id_in_snapshot
+
+    matching_task = {
+        "id": "t_deadbeef",
+        "body": json.dumps(
+            {"tick_id": "01CLIENT", "phase_key": "phase_2"}
+        ),
+    }
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(
+            returncode=0,
+            stdout=json.dumps([matching_task, None]),
+            stderr="",
+        ),
+    )
+
+    assert (
+        _find_task_id_in_snapshot(
+            tenant="demo",
+            tick_id="01CLIENT",
+            phase_key="phase_2",
+        )
+        is None
+    )
+
+
 class TestRegisterTodoPhases:
     """Tests for register_todo_phases()."""
 
@@ -1709,6 +1738,34 @@ class TestObserveOutcomes:
 
         assert get_todo_kanban_status("demo", "01HA") == {}
 
+    def test_get_todo_kanban_status_rejects_mixed_valid_and_invalid_snapshot(
+        self, mocker
+    ):
+        """A malformed entry invalidates the whole status snapshot."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        valid_task = {
+            "status": "done",
+            "body": json.dumps(
+                {
+                    "tick_id": "01HA",
+                    "phase_key": "phase_2_autoplan",
+                    "todo_id": "TODO-10",
+                    "project_slug": "demo",
+                }
+            ),
+        }
+        mocker.patch(
+            "subprocess.run",
+            return_value=mocker.Mock(
+                returncode=0,
+                stdout=json.dumps([valid_task, None]),
+                stderr="",
+            ),
+        )
+
+        assert get_todo_kanban_status("demo", "01HA") == {}
+
 
 class TestCompleteTodoKanbanTask:
     """Tests for complete_todo_kanban_task()."""
@@ -1820,6 +1877,35 @@ class TestGetTodoKanbanTasks:
             return_value=mocker.Mock(
                 returncode=0,
                 stdout=json.dumps(snapshot),
+                stderr="",
+            ),
+        )
+
+        assert get_todo_kanban_tasks("demo", "01TICK") == {}
+
+    def test_get_todo_kanban_tasks_rejects_mixed_valid_and_invalid_snapshot(
+        self, mocker
+    ):
+        """A malformed entry invalidates the whole task-info snapshot."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+
+        valid_task = {
+            "id": "t_00000001",
+            "status": "done",
+            "body": json.dumps(
+                {
+                    "tick_id": "01TICK",
+                    "phase_key": "phase_2_autoplan",
+                    "todo_id": "TODO-10",
+                    "project_slug": "demo",
+                }
+            ),
+        }
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.subprocess.run",
+            return_value=mocker.Mock(
+                returncode=0,
+                stdout=json.dumps([valid_task, None]),
                 stderr="",
             ),
         )

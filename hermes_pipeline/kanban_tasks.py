@@ -443,7 +443,9 @@ def _validated_task_list(snapshot: object) -> list[dict[str, object]] | None:
         return None
     if not isinstance(tasks, list):
         return None
-    return [task for task in tasks if isinstance(task, dict)]
+    if not all(isinstance(task, dict) for task in tasks):
+        return None
+    return tasks
 
 
 def _parse_task_header(task: dict[str, object]) -> dict[str, object] | None:
