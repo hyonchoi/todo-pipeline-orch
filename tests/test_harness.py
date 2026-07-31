@@ -519,6 +519,66 @@ class TestPollKanbanPhasesConsoleOutput:
         transition_idx = next(i for i, m in enumerate(messages) if "p1" in m and "-> done" in m)
         assert initial_idx < transition_idx
 
+    def test_partial_terminal_snapshot_waits_for_complete_registered_profile(
+        self, monkeypatch, mocker, tmp_path
+    ):
+        """Terminal statuses cannot complete a poll until every phase is present."""
+        from hermes_pipeline.harness import _poll_kanban_phases
+
+        phases = [
+            Phase(phase_key="p1", name="P1"),
+            Phase(phase_key="p2", name="P2"),
+        ]
+        status = mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            side_effect=[
+                {"p1": "done"},
+                {"p1": "done"},
+                {"p1": "done", "p2": "done"},
+                {"p1": "done", "p2": "done"},
+            ],
+        )
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.time.sleep", lambda *_a, **_kw: None
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            return_value=["t1", "t2"],
+        )
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+
+        log_path = tmp_path / "events.jsonl"
+        monitor = _ConvergenceMonitor(
+            HarnessMonitor(log_path),
+            ConvergenceDetector(threshold=99),
+            {},
+        )
+
+        assert _poll_kanban_phases(
+            project_slug="proj",
+            tick_id="tick-1",
+            state_dir=tmp_path,
+            todo_id="TODO-30",
+            project_dir=tmp_path,
+            phases_path=None,
+            monitor=monitor,
+            detector=ConvergenceDetector(threshold=99),
+            poll_interval=0.0,
+            max_poll_interval=0.0,
+            phases=phases,
+        )
+        assert status.call_count == 4
+        events = [
+            json.loads(line)
+            for line in log_path.read_text().splitlines()
+        ]
+        assert any(
+            event["event_type"] == "phase_completed"
+            and event["phase_key"] == "p2"
+            for event in events
+        )
+
     def test_registration_failure_emits_no_transition_logs(self, monkeypatch, mocker, tmp_path, caplog):
         """If register_todo_phases() raises, the poll loop must never start —
         matches today's behavior, no new failure path."""
@@ -717,6 +777,51 @@ class TestRunHarnessTimeout:
                 config=None,
             )
 
+        assert workspace.exists()
+        generate.assert_not_called()
+
+    def test_poll_exception_after_registration_cleans_remote_or_retains_workspace(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        from hermes_pipeline.harness import HarnessCleanupError
+
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.preflight_check",
+            lambda **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        register = mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            return_value=["t_00000001"],
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            side_effect=RuntimeError("poll exploded"),
+        )
+        cancel = mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            return_value=False,
+        )
+        generate = mocker.patch("hermes_pipeline.test_report.generate_report")
+
+        with pytest.raises(HarnessCleanupError, match="workspace retained"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+            )
+
+        register.assert_called_once()
+        cancel.assert_called_once()
         assert workspace.exists()
         generate.assert_not_called()
 

@@ -316,6 +316,7 @@ def _poll_kanban_phases(
     phases: list[Phase] | None = None,
     prompt_client: PromptClient = "claude",
     cancel_event: Any = None,
+    registration_event: Any = None,
 ) -> bool:
     """Poll kanban-as-scheduler phases to completion.
 
@@ -351,6 +352,8 @@ def _poll_kanban_phases(
         assignee=assignee,
         prompt_client=prompt_client,
     )
+    if registration_event is not None:
+        registration_event.set()
 
     # Intentionally unguarded — fail fast before polling begins, matching
     # register_todo_phases()'s unguarded call above.
@@ -368,6 +371,7 @@ def _poll_kanban_phases(
     all_terminal = False
     current_interval = poll_interval
     phase_by_key = {phase.phase_key: phase for phase in phases or []}
+    expected_phase_keys = frozenset(phase_by_key)
     pre_run_statuses = (None, "todo", "ready", "blocked")
     unstarted_statuses = (None, "todo", "ready")
 
@@ -459,9 +463,12 @@ def _poll_kanban_phases(
         previous_status = dict(status_map)
 
         if not all_terminal:
-            all_terminal = all(
-                _is_terminal_status(phase_key, status)
-                for phase_key, status in status_map.items()
+            all_terminal = (
+                expected_phase_keys.issubset(status_map)
+                and all(
+                    _is_terminal_status(phase_key, status)
+                    for phase_key, status in status_map.items()
+                )
             )
 
     try:
@@ -470,7 +477,9 @@ def _poll_kanban_phases(
     except Exception as e:
         log.warning("observe_outcomes failed: %s", e)
 
-    return all(s == "done" for s in previous_status.values())
+    return expected_phase_keys.issubset(previous_status) and all(
+        status == "done" for status in previous_status.values()
+    )
 
 
 def _classify_error_class(exc: Exception) -> str:
@@ -751,6 +760,7 @@ def run_harness(
             import threading
 
             cancel_event = threading.Event()
+            registration_event = threading.Event()
 
             def _poll() -> bool:
                 todo_id_str = f"TODO-{fixture['todo_id']}"
@@ -766,6 +776,7 @@ def run_harness(
                     phases=phases,
                     prompt_client=prompt_client,
                     cancel_event=cancel_event,
+                    registration_event=registration_event,
                 )
 
             try:
@@ -778,6 +789,26 @@ def run_harness(
                 workspace_quiescent = False
                 raise HarnessCleanupError(
                     f"{exc}; workspace retained at {workspace_dir}"
+                ) from exc
+            except Exception as exc:
+                if not registration_event.is_set():
+                    raise
+                from .kanban_tasks import cancel_todo_kanban_tasks
+
+                try:
+                    cleanup_confirmed = cancel_todo_kanban_tasks(
+                        fixture["project_slug"],
+                        tick_id,
+                    )
+                except Exception:
+                    cleanup_confirmed = False
+                if cleanup_confirmed:
+                    raise
+                workspace_quiescent = False
+                raise HarnessCleanupError(
+                    "Poll failed after Hermes task registration and task or "
+                    "worker termination could not be confirmed; workspace "
+                    f"retained at {workspace_dir}"
                 ) from exc
 
             if timed_out:
