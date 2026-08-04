@@ -90,6 +90,43 @@ def test_reconcile_pending_create_without_marker_allows_tick(tmp_path):
     assert reconcile_pending_task_create(tmp_path) is True
 
 
+def test_cleanup_only_reconciliation_never_completes_pending_barrier(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        PendingBarrierCommit,
+        PendingTaskCleanup,
+        _persist_pending_barrier_commit,
+        reconcile_pending_task_create,
+    )
+
+    pending = PendingBarrierCommit(
+        "demo",
+        "01CLIENT",
+        "t_00000001",
+        ("t_00000002", "t_00000001"),
+    )
+    _persist_pending_barrier_commit(tmp_path, pending)
+    complete = mocker.patch(
+        "hermes_pipeline.kanban_tasks._complete_registration_barrier"
+    )
+    cleanup = mocker.patch(
+        "hermes_pipeline.kanban_tasks._persist_and_archive_cleanup",
+        return_value=True,
+    )
+
+    assert reconcile_pending_task_create(tmp_path, cleanup_only=True)
+    complete.assert_not_called()
+    cleanup.assert_called_once_with(
+        tmp_path,
+        PendingTaskCleanup(
+            "demo",
+            "01CLIENT",
+            ("t_00000002", "t_00000001"),
+        ),
+    )
+
+
 def test_persist_pending_create_delegates_to_shared_atomic_writer(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import (
         PendingTaskCreate,
@@ -535,6 +572,75 @@ def test_durable_create_failure_does_not_expose_hermes_stderr(
     assert "rc=1" in str(exc_info.value)
 
 
+def test_durable_create_cancellation_cleans_returned_remote_task_without_retry(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _run_durable_task_create,
+    )
+
+    cancel_event = mocker.Mock()
+    cancel_event.is_set.side_effect = [False, True]
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(
+            returncode=0,
+            stdout='{"id": "t_00000001"}',
+            stderr="",
+        ),
+    )
+    recover = mocker.patch(
+        "hermes_pipeline.kanban_tasks._recover_and_archive_uncertain_task"
+    )
+    cleanup = mocker.patch(
+        "hermes_pipeline.kanban_tasks._persist_and_archive_cleanup",
+        return_value=True,
+    )
+    pending = PendingTaskCreate("demo", "01CLIENT", "phase_1", ())
+
+    with pytest.raises(RuntimeError, match="registration cancelled during phase_1"):
+        _run_durable_task_create(
+            cmd=["hermes", "kanban", "create"],
+            project_dir=tmp_path,
+            pending=pending,
+            cancel_event=cancel_event,
+        )
+
+    recover.assert_not_called()
+    cleanup.assert_called_once()
+
+
+def test_durable_create_cancellation_after_timeout_skips_recovery_retry(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _run_durable_task_create,
+    )
+
+    cancel_event = mocker.Mock()
+    cancel_event.is_set.side_effect = [False, True]
+    run = mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd=["hermes"], timeout=60),
+    )
+    recover = mocker.patch(
+        "hermes_pipeline.kanban_tasks._recover_and_archive_uncertain_task"
+    )
+
+    with pytest.raises(RuntimeError, match="recovery remains pending"):
+        _run_durable_task_create(
+            cmd=["hermes", "kanban", "create"],
+            project_dir=tmp_path,
+            pending=PendingTaskCreate("demo", "01CLIENT", "phase_1", ()),
+            cancel_event=cancel_event,
+        )
+
+    assert run.call_count == 1
+    recover.assert_not_called()
+
+
 def test_create_prepared_blocks_until_registered_and_preserves_activation_order(
     tmp_path, mocker
 ):
@@ -604,6 +710,36 @@ def test_create_prepared_blocks_until_registered_and_preserves_activation_order(
     assert create_commands[2][create_commands[2].index("--parent") + 1] == (
         "t_00000002"
     )
+
+
+def test_create_prepared_cancellation_before_commit_cleans_once(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import create_prepared_todo_phases
+
+    cancel_event = mocker.Mock()
+    cancel_event.is_set.side_effect = [False, False, True]
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(
+            returncode=0,
+            stdout='{"id": "t_00000001"}',
+            stderr="",
+        ),
+    )
+    cleanup = mocker.patch(
+        "hermes_pipeline.kanban_tasks._persist_and_archive_cleanup",
+        return_value=True,
+    )
+
+    with pytest.raises(RuntimeError, match="cancelled before commit"):
+        create_prepared_todo_phases(
+            prepared=[],
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+            cancel_event=cancel_event,
+        )
+
+    cleanup.assert_called_once()
 
 
 def test_pending_marker_clear_only_removes_matching_create(tmp_path):
@@ -1998,6 +2134,89 @@ class TestGetTodoKanbanTasks:
 
 
 class TestCancelTodoKanbanTasks:
+    def test_refuses_empty_snapshot_while_recovery_marker_is_pending(
+        self, tmp_path, mocker
+    ):
+        from hermes_pipeline.kanban_tasks import cancel_todo_kanban_tasks
+
+        reconcile = mocker.patch(
+            "hermes_pipeline.kanban_tasks.reconcile_pending_task_create",
+            return_value=False,
+        )
+        snapshot = mocker.patch(
+            "hermes_pipeline.kanban_tasks._list_task_snapshot",
+            return_value=[],
+        )
+
+        assert not cancel_todo_kanban_tasks(
+            "demo", "01CANCEL", project_dir=tmp_path
+        )
+        reconcile.assert_called_once_with(tmp_path, cleanup_only=True)
+        snapshot.assert_not_called()
+
+    def test_refuses_cleanup_when_matching_task_set_is_not_stable(self, mocker):
+        from hermes_pipeline.kanban_tasks import cancel_todo_kanban_tasks
+
+        task = {
+            "id": "t_00000001",
+            "status": "ready",
+            "body": json.dumps(
+                {"tick_id": "01CANCEL", "phase_key": "phase_1"}
+            ),
+        }
+        late_task = {
+            "id": "t_00000002",
+            "status": "ready",
+            "body": json.dumps(
+                {"tick_id": "01CANCEL", "phase_key": "phase_2"}
+            ),
+        }
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks._list_task_snapshot",
+            side_effect=[[task], [task, late_task]],
+        )
+        run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+
+        assert not cancel_todo_kanban_tasks("demo", "01CANCEL")
+        run.assert_not_called()
+
+    def test_refuses_cleanup_when_late_task_appears_in_final_snapshot(self, mocker):
+        from hermes_pipeline.kanban_tasks import cancel_todo_kanban_tasks
+
+        task = {
+            "id": "t_00000001",
+            "status": "ready",
+            "body": json.dumps(
+                {"tick_id": "01CANCEL", "phase_key": "phase_1"}
+            ),
+        }
+        archived = {**task, "status": "archived"}
+        late_task = {
+            "id": "t_00000002",
+            "status": "ready",
+            "body": json.dumps(
+                {"tick_id": "01CANCEL", "phase_key": "phase_2"}
+            ),
+        }
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks._list_task_snapshot",
+            side_effect=[[task], [task], [archived, late_task]],
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks._child_first_task_order",
+            return_value=[task],
+        )
+        run = mocker.patch(
+            "hermes_pipeline.kanban_tasks.subprocess.run",
+            return_value=mocker.Mock(returncode=0, stdout="", stderr=""),
+        )
+
+        assert not cancel_todo_kanban_tasks("demo", "01CANCEL")
+        assert any(
+            call.args[0][:3] == ["hermes", "kanban", "archive"]
+            for call in run.call_args_list
+        )
+
     def test_fetches_independent_task_details_concurrently(self, mocker):
         import threading
         import time
@@ -2062,7 +2281,7 @@ class TestCancelTodoKanbanTasks:
         archived = {**running, "status": "archived"}
         mocker.patch(
             "hermes_pipeline.kanban_tasks._list_task_snapshot",
-            side_effect=[[running], [archived]],
+            side_effect=[[running], [running], [archived]],
         )
 
         def _run(command, **_kwargs):
@@ -2186,7 +2405,11 @@ class TestCancelTodoKanbanTasks:
         ]
         mocker.patch(
             "hermes_pipeline.kanban_tasks._list_task_snapshot",
-            side_effect=[tasks, [{**task, "status": "archived"} for task in tasks]],
+            side_effect=[
+                tasks,
+                tasks,
+                [{**task, "status": "archived"} for task in tasks],
+            ],
         )
         parents = {
             "t_00000001": [],
@@ -2261,7 +2484,11 @@ class TestCancelTodoKanbanTasks:
         ]
         mocker.patch(
             "hermes_pipeline.kanban_tasks._list_task_snapshot",
-            side_effect=[tasks, [{**task, "status": "archived"} for task in tasks]],
+            side_effect=[
+                tasks,
+                tasks,
+                [{**task, "status": "archived"} for task in tasks],
+            ],
         )
         parents = {
             "t_00000001": [],

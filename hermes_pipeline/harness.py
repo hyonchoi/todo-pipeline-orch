@@ -195,8 +195,10 @@ _PREFLIGHT_TIMEOUT = 15
 # Maximum poll interval for kanban-as-scheduler phase polling (seconds)
 _KANBAN_POLL_MAX_INTERVAL = 30.0
 
-# Maximum cooperative join after the overall timeout.
-_POLL_CANCELLATION_TIMEOUT = 30.0
+# Registration creates are individually bounded at 60 seconds. Allow the
+# worker to observe cancellation after its current create returns so cleanup
+# never races a still-mutating producer.
+_POLL_CANCELLATION_TIMEOUT = 65.0
 
 # Maximum characters in error messages captured by the harness
 _ERROR_MESSAGE_MAX = 500
@@ -356,6 +358,7 @@ def _poll_kanban_phases(
         phases_path=phases_path,
         assignee=assignee,
         prompt_client=prompt_client,
+        cancel_event=cancel_event,
     )
     # Intentionally unguarded — fail fast before polling begins, matching
     # register_todo_phases()'s unguarded call above.
@@ -680,6 +683,26 @@ def _run_with_timeout(
     return result_box["success"], False, result_box
 
 
+def _cancel_registered_tasks(
+    *, project_slug: str, tick_id: str, project_dir: Path
+) -> bool:
+    """Attempt sanitized, marker-aware remote cleanup for one harness tick."""
+    from .kanban_tasks import cancel_todo_kanban_tasks
+
+    try:
+        return cancel_todo_kanban_tasks(
+            project_slug,
+            tick_id,
+            project_dir=project_dir,
+        )
+    except Exception as exc:
+        log.warning(
+            "remote harness cleanup failed: error_type=%s",
+            type(exc).__name__,
+        )
+        return False
+
+
 def run_harness(
     *,
     fixture_name: str,
@@ -788,31 +811,19 @@ def run_harness(
                     cancel_event=cancel_event,
                 )
             except PollCancellationError as exc:
-                from .kanban_tasks import cancel_todo_kanban_tasks
-
-                try:
-                    cancel_todo_kanban_tasks(
-                        fixture["project_slug"],
-                        tick_id,
-                    )
-                except Exception:
-                    pass
                 workspace_quiescent = False
                 raise HarnessCleanupError(
-                    f"{exc}; workspace retained at {workspace_dir}"
+                    f"{exc}; remote cleanup was not started while the registration "
+                    f"worker remained active; workspace retained at {workspace_dir}"
                 ) from exc
             except Exception as exc:
                 if not registration_event.is_set():
                     raise
-                from .kanban_tasks import cancel_todo_kanban_tasks
-
-                try:
-                    cleanup_confirmed = cancel_todo_kanban_tasks(
-                        fixture["project_slug"],
-                        tick_id,
-                    )
-                except Exception:
-                    cleanup_confirmed = False
+                cleanup_confirmed = _cancel_registered_tasks(
+                    project_slug=fixture["project_slug"],
+                    tick_id=tick_id,
+                    project_dir=project_dir,
+                )
                 if cleanup_confirmed:
                     raise
                 workspace_quiescent = False
@@ -832,15 +843,11 @@ def run_harness(
                     )
                 except Exception:
                     pass
-                from .kanban_tasks import cancel_todo_kanban_tasks
-
-                try:
-                    cleanup_confirmed = cancel_todo_kanban_tasks(
-                        fixture["project_slug"],
-                        tick_id,
-                    )
-                except Exception:
-                    cleanup_confirmed = False
+                cleanup_confirmed = _cancel_registered_tasks(
+                    project_slug=fixture["project_slug"],
+                    tick_id=tick_id,
+                    project_dir=project_dir,
+                )
                 if not cleanup_confirmed:
                     workspace_quiescent = False
                     raise HarnessCleanupError(

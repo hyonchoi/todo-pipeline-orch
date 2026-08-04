@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from pathlib import Path
@@ -780,7 +781,7 @@ class TestRunHarnessTimeout:
         assert workspace.exists()
         generate.assert_not_called()
 
-    def test_poll_cancellation_failure_attempts_remote_cleanup(
+    def test_poll_cancellation_failure_does_not_race_remote_cleanup(
         self, tmp_path, monkeypatch, mocker
     ):
         from hermes_pipeline.harness import HarnessCleanupError, PollCancellationError
@@ -815,7 +816,7 @@ class TestRunHarnessTimeout:
                 config=None,
             )
 
-        cancel.assert_called_once()
+        cancel.assert_not_called()
         assert workspace.exists()
 
     def test_poll_exception_after_registration_cleans_remote_or_retains_workspace(
@@ -973,7 +974,7 @@ class TestRunHarnessTimeout:
         assert not workspace.exists()
 
     def test_timeout_cleanup_exception_retains_workspace(
-        self, tmp_path, monkeypatch, mocker
+        self, tmp_path, monkeypatch, mocker, caplog
     ):
         from hermes_pipeline.harness import HarnessCleanupError
 
@@ -994,8 +995,9 @@ class TestRunHarnessTimeout:
         )
         mocker.patch(
             "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
-            side_effect=RuntimeError("cleanup failed"),
+            side_effect=RuntimeError("cleanup failed token=secret-value"),
         )
+        caplog.set_level(logging.WARNING)
 
         with pytest.raises(HarnessCleanupError, match="workspace retained"):
             run_harness(
@@ -1009,6 +1011,8 @@ class TestRunHarnessTimeout:
             )
 
         assert workspace.exists()
+        assert "secret-value" not in caplog.text
+        assert "error_type=RuntimeError" in caplog.text
 
 
 class TestKanbanModeHermes:

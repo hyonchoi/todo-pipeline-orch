@@ -46,6 +46,31 @@ class TestTickSubcommand:
         with pytest.raises(SystemExit):
             parser.parse_args(["tick", "--help"])
 
+    def test_tick_outer_error_boundary_redacts_chained_exception(
+        self, tmp_path, mocker, caplog
+    ):
+        secret = "prompt-token=secret-value"
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        def fail_tick(**_kwargs):
+            try:
+                raise RuntimeError(secret)
+            except RuntimeError as cause:
+                raise RuntimeError("registration failed") from cause
+
+        mocker.patch("hermes_pipeline.cli._tick_project", side_effect=fail_tick)
+        caplog.set_level(logging.ERROR)
+
+        assert _cmd_tick(
+            FakeArgs(), Config(projects_dir=projects_dir, state_dir=state_dir)
+        ) == 0
+        assert secret not in caplog.text
+        assert "error_type=RuntimeError" in caplog.text
+
     def test_tick_prior_in_flight_skips(self, tmp_path, mocker):
         """Prior tick still has in-flight kanban tasks -> skip."""
         mocker.patch(

@@ -367,12 +367,21 @@ def _clear_pending_task_create(
     return _clear_pending_task_state(project_dir, pending)
 
 
-def reconcile_pending_task_create(project_dir: str | Path) -> bool:
+def reconcile_pending_task_create(
+    project_dir: str | Path, *, cleanup_only: bool = False
+) -> bool:
     """Resolve an uncertain create and confirm child-first archive cleanup."""
     pending = _load_pending_task_state(project_dir)
     if pending is None:
         return not _pending_task_create_marker(project_dir).exists()
     if isinstance(pending, PendingBarrierCommit):
+        if cleanup_only:
+            cleanup = PendingTaskCleanup(
+                pending.tenant,
+                pending.tick_id,
+                pending.cleanup_task_ids,
+            )
+            return _persist_and_archive_cleanup(project_dir, cleanup)
         barrier_status = _task_status_in_snapshot(
             tenant=pending.tenant,
             task_id=pending.barrier_task_id,
@@ -737,8 +746,11 @@ def _run_durable_task_create(
     cmd: list[str],
     project_dir: str | Path,
     pending: PendingTaskCreate,
+    cancel_event: object | None = None,
 ) -> tuple[str, PendingTaskCleanup]:
     """Run one idempotent create while preserving crash-recovery state."""
+    if cancel_event is not None and cancel_event.is_set():
+        raise RuntimeError("kanban registration cancelled before remote create")
     try:
         _persist_pending_task_create(project_dir, pending)
     except OSError as exc:
@@ -770,6 +782,11 @@ def _run_durable_task_create(
             f"({type(exc).__name__}){cleanup_detail}"
         ) from exc
     except subprocess.TimeoutExpired as exc:
+        if cancel_event is not None and cancel_event.is_set():
+            raise RuntimeError(
+                f"kanban registration cancelled during {pending.phase_key}; "
+                "recovery remains pending"
+            ) from exc
         cleanup_succeeded = _recover_and_archive_uncertain_task(
             cmd,
             project_dir=project_dir,
@@ -781,6 +798,25 @@ def _run_durable_task_create(
             f"for tick {pending.tick_id}: Hermes process timed out"
             f"{cleanup_detail}"
         ) from exc
+
+    if cancel_event is not None and cancel_event.is_set():
+        task_id = _parse_task_id(result.stdout) if result.returncode == 0 else None
+        if task_id is None:
+            raise RuntimeError(
+                f"kanban registration cancelled during {pending.phase_key}; "
+                "recovery remains pending"
+            )
+        cleanup = PendingTaskCleanup(
+            tenant=pending.tenant,
+            tick_id=pending.tick_id,
+            task_ids=(task_id, *reversed(pending.known_task_ids)),
+        )
+        cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
+        cleanup_detail = "" if cleanup_succeeded else "; recovery remains pending"
+        raise RuntimeError(
+            f"kanban registration cancelled during {pending.phase_key}"
+            f"{cleanup_detail}"
+        )
 
     if result.returncode != 0:
         cleanup_succeeded = _recover_and_archive_uncertain_task(
@@ -838,6 +874,7 @@ def create_prepared_todo_phases(
     board_slug: str,
     project_dir: str | Path,
     assignee: str = "default",
+    cancel_event: object | None = None,
 ) -> list[str]:
     """Create a nonspawnable registration barrier and its phase task chain.
 
@@ -889,6 +926,7 @@ def create_prepared_todo_phases(
             phase_key=_REGISTRATION_BARRIER_PHASE_KEY,
             known_task_ids=(),
         ),
+        cancel_event=cancel_event,
     )
     created_task_ids.append(barrier_id)
 
@@ -939,9 +977,18 @@ def create_prepared_todo_phases(
                 phase_key=phase.phase_key,
                 known_task_ids=tuple(created_task_ids),
             ),
+            cancel_event=cancel_event,
         )
         created_task_ids.append(task_id)
         phase_task_ids.append(task_id)
+
+        if cancel_event is not None and cancel_event.is_set():
+            cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
+            cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
+            raise RuntimeError(
+                f"kanban registration cancelled after {phase.phase_key}"
+                f"{cleanup_detail}"
+            )
 
         if is_gate:
             try:
@@ -959,6 +1006,13 @@ def create_prepared_todo_phases(
                     f"for tick {tick_id}: {exc}{cleanup_detail}"
                 ) from exc
         previous_dependency_id = task_id
+
+    if cancel_event is not None and cancel_event.is_set():
+        cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
+        cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
+        raise RuntimeError(
+            f"kanban registration cancelled before commit{cleanup_detail}"
+        )
 
     try:
         _persist_expected_phases(prepared, project_dir=project_dir)
@@ -986,6 +1040,13 @@ def create_prepared_todo_phases(
             f"{exc}{cleanup_detail}"
         ) from exc
 
+    if cancel_event is not None and cancel_event.is_set():
+        cleanup_succeeded = _persist_and_archive_cleanup(project_dir, cleanup)
+        cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
+        raise RuntimeError(
+            f"kanban registration cancelled before barrier commit{cleanup_detail}"
+        )
+
     try:
         _complete_registration_barrier(barrier_id)
     except Exception as exc:
@@ -1012,6 +1073,7 @@ def register_todo_phases(
     phases_path: str | Path | None = None,
     assignee: str = "default",
     prompt_client: PromptClient = "claude",
+    cancel_event: object | None = None,
 ) -> list[str]:
     """Prepare and register phases as backward-compatible kanban tasks."""
     prepared = prepare_todo_phases(
@@ -1027,6 +1089,7 @@ def register_todo_phases(
         board_slug=board_slug,
         project_dir=project_dir,
         assignee=assignee,
+        cancel_event=cancel_event,
     )
 
 
@@ -1389,13 +1452,23 @@ def _child_first_task_order(tasks: list[dict[str, object]]) -> list[dict[str, ob
     return [tasks_by_id[task_id] for task_id in ordered_ids]
 
 
-def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
+def cancel_todo_kanban_tasks(
+    tenant: str,
+    tick_id: str,
+    *,
+    project_dir: str | Path | None = None,
+) -> bool:
     """Stop and archive every task for a timed-out harness tick.
 
     Running workers are reclaimed first. Cleanup succeeds only when Hermes
     reports the worker termination, every run has ended, and the complete
     task chain is visible as archived.
     """
+    if project_dir is not None and not reconcile_pending_task_create(
+        project_dir, cleanup_only=True
+    ):
+        return False
+
     snapshot = _list_task_snapshot(tenant)
     if snapshot is None:
         return False
@@ -1410,8 +1483,23 @@ def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
             and isinstance(task_id, str)
         ):
             tasks.append(task)
+    expected_task_ids = {task["id"] for task in tasks}
+    stable_snapshot = _list_task_snapshot(tenant)
+    if stable_snapshot is None:
+        return False
+    stable_task_ids = {
+        task["id"]
+        for task in stable_snapshot
+        if isinstance(task.get("id"), str)
+        and (header := _parse_task_header(task)) is not None
+        and header.get("tick_id") == tick_id
+    }
+    if stable_task_ids != expected_task_ids:
+        return False
     if not tasks:
-        return True
+        return project_dir is None or reconcile_pending_task_create(
+            project_dir, cleanup_only=True
+        )
     ordered_tasks = _child_first_task_order(tasks)
     if ordered_tasks is None:
         return False
@@ -1468,6 +1556,15 @@ def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
         for task in final_snapshot
         if isinstance(task.get("id"), str)
     }
+    final_task_ids = {
+        task["id"]
+        for task in final_snapshot
+        if isinstance(task.get("id"), str)
+        and (header := _parse_task_header(task)) is not None
+        and header.get("tick_id") == tick_id
+    }
+    if final_task_ids != expected_task_ids:
+        return False
     final_payloads = _fetch_task_payloads(
         [task["id"] for task in ordered_tasks if isinstance(task.get("id"), str)]
     )

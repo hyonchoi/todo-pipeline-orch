@@ -989,7 +989,11 @@ def _cmd_tick(args, config: Config) -> int:
                 "project %s: tick already in flight (lock held), skipping", project_slug
             )
         except Exception as e:
-            log.error("project %s: %s", project_slug, e, exc_info=True)
+            log.error(
+                "project %s: tick failed: error_type=%s",
+                project_slug,
+                type(e).__name__,
+            )
             # Continue to next project
 
     vlog.info("scan complete: scan_id=%s", scan_id)
@@ -2315,7 +2319,7 @@ def _cmd_test(args, config: Config) -> int:
             return result.exit_code
         return 0
     except Exception as e:
-        log.error("test harness failed: %s", e, exc_info=True)
+        log.error("test harness failed: error_type=%s", type(e).__name__)
         return 2
 
 
