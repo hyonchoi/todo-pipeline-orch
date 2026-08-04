@@ -113,6 +113,44 @@ def test_persist_pending_create_delegates_to_shared_atomic_writer(tmp_path, mock
     }
 
 
+@pytest.mark.parametrize(
+    "pending",
+    [
+        ("", "01CLIENT", "phase_1", ()),
+        ("demo", "", "phase_1", ()),
+        ("demo", "01CLIENT", "", ()),
+        ("demo", "01CLIENT", "phase_1", ("not-a-hermes-id",)),
+    ],
+)
+def test_pending_task_create_payload_rejects_invalid_durable_fields(pending):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _pending_task_create_payload,
+    )
+
+    with pytest.raises(ValueError):
+        _pending_task_create_payload(PendingTaskCreate(*pending))
+
+
+@pytest.mark.parametrize(
+    "pending",
+    [
+        ("", "01CLIENT", ("t_deadbeef",)),
+        ("demo", "", ("t_deadbeef",)),
+        ("demo", "01CLIENT", ()),
+        ("demo", "01CLIENT", ("not-a-hermes-id",)),
+    ],
+)
+def test_pending_task_cleanup_payload_rejects_invalid_durable_fields(pending):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCleanup,
+        _pending_task_cleanup_payload,
+    )
+
+    with pytest.raises(ValueError):
+        _pending_task_cleanup_payload(PendingTaskCleanup(*pending))
+
+
 def test_reconcile_pending_create_retains_marker_when_archive_fails(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import (
         PendingTaskCreate,
@@ -180,7 +218,7 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
 @pytest.mark.parametrize(
     ("prompt_client", "command", "forbidden"),
     [
-        ("codex", "codex exec --sandbox danger-full-access", "claude -p"),
+        ("codex", "codex exec --sandbox workspace-write", "claude -p"),
         (
             "claude",
             "claude -p --permission-mode bypassPermissions",
@@ -225,7 +263,12 @@ def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
     assert "External agent timeout: 2400 seconds" in prepared[0].body
     assert "tracked background execution" in prepared[0].body
     assert "monitor the background process" in prepared[0].body
-    assert "60-second cleanup grace" in prepared[0].body
+    from hermes_pipeline.kanban_tasks import PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS
+
+    assert (
+        f"{PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS}-second cleanup grace"
+        in prepared[0].body
+    )
     assert "terminate the external process tree" in prepared[0].body
     assert "confirm that it is no longer running" in prepared[0].body
     assert "external_agent_timeout_seconds" in prepared[0].body

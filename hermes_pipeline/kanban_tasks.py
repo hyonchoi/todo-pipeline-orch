@@ -122,7 +122,7 @@ def _external_client_delegation_block(
 ) -> str:
     """Return the dispatcher contract prepended to executable phase tasks."""
     if prompt_client == "codex":
-        command = "codex exec --sandbox danger-full-access"
+        command = "codex exec --sandbox workspace-write"
     elif prompt_client == "claude":
         command = "claude -p --permission-mode bypassPermissions"
     else:
@@ -140,7 +140,8 @@ def _external_client_delegation_block(
         f"Required external command: `{command}`\n"
         f"External agent timeout: {timeout} seconds.\n"
         f"The external client deadline is {timeout} seconds. The Hermes worker "
-        "has a 60-second cleanup grace after that deadline. If the deadline "
+        f"has a {PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS}-second cleanup grace "
+        "after that deadline. If the deadline "
         "expires, terminate the external process tree and confirm that it is "
         "no longer running.\n"
         "Launch the external command with Hermes tracked background execution, "
@@ -159,9 +160,7 @@ def _external_client_delegation_block(
     )
 
 
-def _external_agent_prompt_block(
-    rendered_prompt: str, *, prompt_client: PromptClient
-) -> str:
+def _external_agent_prompt_block(rendered_prompt: str) -> str:
     """Wrap rendered phase work as the prompt Hermes should pass onward."""
     return (
         "BEGIN EXTERNAL AGENT PROMPT\n"
@@ -660,9 +659,7 @@ def prepare_todo_phases(
         if phase.gate:
             body_prompt = rendered_prompt
         else:
-            body_prompt = _external_agent_prompt_block(
-                rendered_prompt, prompt_client=prompt_client
-            )
+            body_prompt = _external_agent_prompt_block(rendered_prompt)
         delegation = (
             ""
             if phase.gate
