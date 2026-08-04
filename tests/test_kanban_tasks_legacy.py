@@ -21,7 +21,7 @@ class TestRegisterTodoPhasesLegacy:
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
             returncode=0,
-            stdout="Created t_legacy123  (ready, assignee=-)",
+            stdout="Created t_cafebabe  (ready, assignee=-)",
         )
 
         phases_cfg = tmp_path / "phases.yaml"
@@ -43,7 +43,7 @@ class TestRegisterTodoPhasesLegacy:
             phases_path=str(phases_cfg),
         )
 
-        assert task_ids == ["t_legacy123"]
+        assert task_ids == ["t_cafebabe"]
 
     def test_unparseable_task_id_raises(self, tmp_path, mocker):
         """Output that is neither JSON nor 'Created t_xxx' raises RuntimeError."""
@@ -121,7 +121,7 @@ class TestRegisterTodoPhasesLegacy:
         """--goal and --goal-max-turns flags are included in the command."""
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
-            returncode=0, stdout=json.dumps({"id": "task-001"})
+            returncode=0, stdout=json.dumps({"id": "t_00000001"})
         )
 
         phases_cfg = tmp_path / "phases.yaml"
@@ -143,7 +143,12 @@ class TestRegisterTodoPhasesLegacy:
             phases_path=str(phases_cfg),
         )
 
-        call_args = mock_run.call_args_list[0][0][0]
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
         assert "--goal" in call_args
         assert "--goal-max-turns" in call_args
         idx = call_args.index("--goal-max-turns")
@@ -153,7 +158,7 @@ class TestRegisterTodoPhasesLegacy:
         """--assignee flag defaults to 'default' in the command."""
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
-            returncode=0, stdout=json.dumps({"id": "task-001"})
+            returncode=0, stdout=json.dumps({"id": "t_00000001"})
         )
 
         phases_cfg = tmp_path / "phases.yaml"
@@ -175,7 +180,12 @@ class TestRegisterTodoPhasesLegacy:
             phases_path=str(phases_cfg),
         )
 
-        call_args = mock_run.call_args_list[0][0][0]
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
         assert "--assignee" in call_args
         idx = call_args.index("--assignee")
         assert call_args[idx + 1] == "default"
@@ -188,7 +198,7 @@ class TestRegisterTodoPhasesLegacy:
         ]
 
         # Should not raise
-        _archive_tasks(["task-001"])
+        _archive_tasks(["t_00000001"])
         assert mock_run.call_count == 1
 
     def test_archive_tasks_exception_best_effort(self, mocker):
@@ -199,7 +209,7 @@ class TestRegisterTodoPhasesLegacy:
         ]
 
         # Should not raise
-        _archive_tasks(["task-001"])
+        _archive_tasks(["t_00000001"])
         assert mock_run.call_count == 1
 
 

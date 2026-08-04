@@ -16,8 +16,13 @@
 - Keep global config as a whole-file configuration selected through existing discovery rules; do not add an individual environment-variable override.
 - Support only the exact, case-sensitive values `claude` and `codex`; YAML null is invalid.
 - Keep one canonical set of bundled phase profiles; do not add client overlays or duplicate prompt bodies.
-- Claude Code vocabulary is `agent_product="Claude Code"` and `skill_prefix="/"`; Codex vocabulary is `agent_product="Codex"` and `skill_prefix="$"`.
-- Strict templates allow only the exact bare fields `todo_id`, `tick_id`, `project_slug`, `agent_product`, and `skill_prefix`, plus escaped `{{` and `}}`.
+- Claude Code vocabulary is `agent_product="Claude Code"`, `skill_prefix="/"`,
+  and `superpowers_skill_prefix="/"`; Codex vocabulary is
+  `agent_product="Codex"`, `skill_prefix="$"`, and
+  `superpowers_skill_prefix="$superpowers:"`.
+- Strict templates allow only the six exact bare fields `todo_id`, `tick_id`,
+  `project_slug`, `agent_product`, `skill_prefix`, and
+  `superpowers_skill_prefix`, plus escaped `{{` and `}}`.
 - Unknown, positional, malformed, unresolved, converted, format-specified, traversed, indexed, or nested fields raise `PhasePromptRenderError` before any Hermes task is created.
 - Treat external skill installation/discovery as a documented prerequisite; normal CI must not require third-party credentials or installations.
 - `Unverified` profile/client pairs remain unsupported and non-blocking; do not guess namespaced invocation syntax.
@@ -227,7 +232,7 @@ git commit -m "feat(TODO-41): add global prompt client config"
 - Modify: `tests/test_phases.py`
 
 **Interfaces:**
-- Consumes: `PromptClient`, `Phase`, `load_phases()`, and the five allowed template fields.
+- Consumes: `PromptClient`, `Phase`, `load_phases()`, and the six allowed template fields.
 - Produces: `PhasePromptRenderError(ValueError)`, `CLIENT_VOCABULARY`, and `_render_phase_prompt(..., prompt_client: PromptClient = "claude", template_source: str | None = None) -> str`.
 
 - [ ] **Step 1: Add the failing strict-grammar renderer matrix**
@@ -239,13 +244,18 @@ from hermes_pipeline.phases import PhasePromptRenderError, _render_phase_prompt
 
 
 @pytest.mark.parametrize(
-    ("client", "product", "prefix"),
-    [("claude", "Claude Code", "/"), ("codex", "Codex", "$")],
+    ("client", "product", "prefix", "superpowers_prefix"),
+    [
+        ("claude", "Claude Code", "/", "/"),
+        ("codex", "Codex", "$", "$superpowers:"),
+    ],
 )
-def test_render_phase_prompt_all_allowed_fields(client, product, prefix):
+def test_render_phase_prompt_all_allowed_fields(
+    client, product, prefix, superpowers_prefix
+):
     out = _render_phase_prompt(
         "{todo_id}|{tick_id}|{project_slug}|{agent_product}|"
-        "{skill_prefix}review|{{literal}}",
+        "{skill_prefix}review|{superpowers_skill_prefix}writing-plans|{{literal}}",
         todo_id="TODO-41",
         tick_id="01CLIENT",
         project_slug="demo",
@@ -253,7 +263,8 @@ def test_render_phase_prompt_all_allowed_fields(client, product, prefix):
         template_source="test-profile:phase_x",
     )
     assert out.endswith(
-        f"TODO-41|01CLIENT|demo|{product}|{prefix}review|{{literal}}"
+        f"TODO-41|01CLIENT|demo|{product}|{prefix}review|"
+        f"{superpowers_prefix}writing-plans|{{literal}}"
     )
 
 
@@ -602,7 +613,6 @@ class PreparedPhaseTask:
     phase_key: str
     name: str
     body: str
-    tools: str
     turns: int
     gate: bool
 
@@ -612,7 +622,6 @@ def prepare_todo_phases(
     todo_id: str,
     tick_id: str,
     board_slug: str,
-    project_dir: str | Path,
     phases_path: str | Path | None = None,
     prompt_client: PromptClient = "claude",
 ) -> list[PreparedPhaseTask]:
@@ -642,7 +651,6 @@ def prepare_todo_phases(
                     ),
                 )
             ),
-            tools=phase.tools,
             turns=phase.turns,
             gate=phase.gate,
         )
@@ -683,7 +691,6 @@ def register_todo_phases(
         todo_id=todo_id,
         tick_id=tick_id,
         board_slug=board_slug,
-        project_dir=project_dir,
         phases_path=phases_path,
         prompt_client=prompt_client,
     )

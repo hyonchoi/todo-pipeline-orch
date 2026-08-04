@@ -14,6 +14,10 @@ board, and verified the outcome files.
 - Hermes is installed and authenticated: `hermes login`.
 - A Hermes kanban board is configured for your project (check with `hermes kanban list`).
 - The project has a `TODOS.md` with at least one TODO in `[→]` (in progress) status.
+- Every external skill required by the selected profile is provisioned in the
+  worker client's discovery root. Check the selected client with
+  `tpo config get prompt_client` and its prerequisites with
+  `tpo doctor <project>`.
 - `.hermes/config.toml` is configured with `[selection]` and `[circuit_breaker]` sections
   — see [howto-config-toml.md](howto-config-toml.md).
 
@@ -34,9 +38,16 @@ tick:
      a. Migrate per-project state (one-time)
      b. Check prior tick (per-project)
      c. Run selection (per-project)
-     d. Register kanban phases or observe circuit breaker
+     d. Render every phase body from the selected profile for prompt_client
+     e. Persist current_tick_id.txt and the tick_started outcome
+     f. Create the prepared Hermes kanban tasks
   4. Release lock
 ```
+
+Steps 3d–3f form the production registration boundary. If any body fails to
+render, the tick records `failed_to_spawn` without persisting the current tick
+or creating a Hermes task. Persistence occurs only after all bodies are valid
+and immediately before the first task creation.
 
 ### 2. Check what the selection picked
 
@@ -65,16 +76,26 @@ hermes kanban list --tenant demo
 
 You should see the phases with statuses:
 - `running` — the first phase in the chain is executing
-- `ready` — subsequent executable phases, blocked on `--parent` completion
+- `todo` — subsequent executable phases are waiting on `--parent` completion
+- `ready` — an executable phase is runnable and queued for dispatch
 - `blocked` — human gate phases, which stay blocked until manual approval
 
 The `--parent` chain means phases execute sequentially through the kanban
-board. When phase 2 completes, phase 4 transitions from `ready` to `running`
+board. When phase 2 completes, phase 4 transitions from `todo` through `ready`
+to `running`
 automatically — the orchestrator doesn't need to manage the handoff. When
 phase 4 completes, phase 5 (`phase_5_review`) transitions to `running`, and
 when phase 5 completes, phase 6.1 (CSO) transitions to `running`. Human gate
 phases are not parent-chained, so they cannot be auto-unblocked by the kanban
 scheduler.
+
+Client-dependent gstack prompts use Claude Code slash syntax (for example,
+`/review` and `/ship`) when `prompt_client=claude`, and Codex dollar syntax
+(`$review` and `$ship`) when `prompt_client=codex`. This setting changes task
+body vocabulary and prepends external-client delegation instructions to each
+executable kanban task; Hermes still dispatches the task, but the task body
+requires the Hermes worker to invoke the selected client (`claude -p` or
+`codex exec`) through the `ai-coding-agents` skill.
 
 See [reference-kanban-as-scheduler.md](reference-kanban-as-scheduler.md) for how the kanban-as-scheduler flow works.
 
@@ -98,11 +119,11 @@ for all possible outcomes, including the new review outcomes: `review_clean`, `r
 
 ### 4. Inspect PR handoff
 
-The default `gstack` profile ends at Phase 8. Phase 8 runs `/ship`, pushes the
-branch, opens or updates a PR, and does not merge it. The pipeline records the
-branch in `<project>/.hermes/pipeline_branch.txt`; later ticks check that PR and
-skip new selection while it is open, closed without merge, or temporarily
-unverifiable.
+The default `gstack` profile ends at Phase 8. Phase 8 runs `/ship` in Claude
+Code or `$ship` in Codex, pushes the branch, opens or updates a PR, and does not
+merge it. The pipeline records the branch in
+`<project>/.hermes/pipeline_branch.txt`; later ticks check that PR and skip new
+selection while it is open, closed without merge, or temporarily unverifiable.
 
 ### 5. Check the circuit breaker state
 
@@ -128,8 +149,9 @@ selection, temporarily set all other projects to `enabled = false` in their
 ## State Directory
 
 Per-project state (selection decisions, outcomes, circuit breaker) now lives
-at `<project>/.hermes/`. Global state (`tick.lock`, `config.toml`) remains
-in `~/.hermes/`.
+at `<project>/.hermes/`, including that project's `tick.lock`. Global
+configuration remains in the configured `state_dir` (normally `~/.hermes/`),
+but there is deliberately no single global tick lock.
 
 ## Troubleshooting
 
@@ -139,7 +161,7 @@ handoff is waiting on a PR that is open, closed without merge, or temporarily
 unverifiable. Check the board with
 `hermes kanban list --tenant demo` and check the PR named by
 `.hermes/pipeline_branch.txt`. If tasks are stuck in `running`, manually clear
-them via `hermes kanban update <project> <task_id> --status done`.
+them via `hermes kanban complete <task_id>`.
 
 **"Error: tick.lock held by pid X"**.
 The tick lock is held. If the PID is alive (within `max_tick_duration_min` —
@@ -151,9 +173,13 @@ All TODOs are blocked or none are in progress. Check your `TODOS.md` for
 `[→]` status. The selection rationale in `.hermes/decisions/` explains why.
 
 **Kanban task creation fails mid-registration.**
-If a task fails partway through, already-created tasks are archived. The
-outcome file will show `failed_at_phase_*` with `kanban_status: "archived"`.
-Check the kanban board for archived tasks and investigate the error.
+Registration stays behind a non-spawnable barrier. Known tasks are archived
+child-first only after any uncertain child becomes visible; otherwise
+`pending-task-create.json` remains under `.hermes/outcomes/` and later ticks
+skip the project. If interruption happens while completing the barrier, later
+ticks inspect its status and either accept the completed chain or retry the
+commit. Check the marker, tick logs, and archived-inclusive kanban snapshot;
+see [durable registration and uncertain-create recovery](reference-kanban-as-scheduler.md#durable-registration-and-uncertain-create-recovery).
 
 **Circuit breaker trips (consecutive_no_progress >= 3).**
 Three consecutive no-progress ticks triggered a Slack alert. The gateway

@@ -1,0 +1,93 @@
+schema_version: 1
+profile: agent-skills
+skills:
+  - skill_id: agent-skills:spec-driven-development
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:planning-and-task-breakdown
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:incremental-implementation
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:test-driven-development
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:code-review-and-quality
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:code-reviewer
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:security-and-hardening
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:security-auditor
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:
+  - skill_id: agent-skills:ship
+    distribution_owner: agent-skills plugin
+    support: Unverified
+    clients:
+      claude:
+        discovery_root:
+        invocation:
+      codex:
+        discovery_root:
+        invocation:

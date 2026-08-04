@@ -2,10 +2,9 @@ phases:
   - phase_key: "phase_2_autoplan"
     name: "Phase 2: Autoplan"
     prompt: |
-      Use the gstack /autoplan skill in claude code.
+      Use the gstack {skill_prefix}autoplan skill.
 
-      The selected TODO is {todo_id} — it is already marked in-flight in the
-      kanban board (not in TODOS.md text). Work on {todo_id} only; do not
+      The selected TODO is {todo_id} Work on {todo_id} only; do not
       pick a different TODO.
 
       1. Run CEO/Eng/UI/DX reviews for {todo_id}.
@@ -23,7 +22,7 @@ phases:
   - phase_key: "phase_3_writing_plan"
     name: "Phase 3: Writing Plan"
     prompt: |
-      Use the superpowers /writing-plans skill in claude code. Read the plan
+      Use the superpowers {superpowers_skill_prefix}writing-plans skill. Read the plan
       from docs/pipeline/{todo_id}-plan.md, convert it into superpowers plan
       format, and save it to docs/pipeline/{todo_id}-impl-plan.md. Commit the
       generated docs.
@@ -33,9 +32,12 @@ phases:
   - phase_key: "phase_4_development"
     name: "Phase 4: Development"
     prompt: |
-      Use the superpowers /subagent-driven-development skill in claude code. Read the
-      implementation plan from docs/pipeline/{todo_id}-impl-plan.md and
-      implement it. Commit all changes.
+      Use the superpowers {superpowers_skill_prefix}subagent-driven-development skill with
+      the implementation plan from docs/pipeline/{todo_id}-impl-plan.md
+
+      Follow the subagent-driven-development task loop. Do not replace or
+      short-circuit it with direct inline implementation. Use a fresh
+      implementer subagent per plan task.
 
       If the implementation plan is unworkable or contradicts the
       codebase, or you hit any other blocker, do NOT ask for clarification
@@ -46,7 +48,7 @@ phases:
   - phase_key: "phase_5_review"
     name: "Phase 5: Code Review"
     prompt: |
-      Use the gstack /review skill in claude code on the current branch.
+      Use the gstack {skill_prefix}review skill on the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. When the skill's Step 5c would normally batch-ask about
@@ -57,7 +59,7 @@ phases:
       in the changes on this branch.
 
       After applying all fixes, run the project's test suite (detect the
-      framework the same way /review's own stack detection does — pytest,
+      framework the same way {skill_prefix}review's own stack detection does — pytest,
       jest, vitest, rspec, go test, etc.) and verify it passes. If tests fail,
       fix and re-run until they pass, or until you've made a good-faith effort
       within your turn budget — then revert to the pre-review state and note
@@ -77,7 +79,7 @@ phases:
       Decisions line. If it says `not-required`, exit 0 immediately — do not
       run any review.
 
-      If `required`: use the gstack /cso skill in claude code. Run a security
+      If `required`: use the gstack {skill_prefix}cso skill. Run a security
       review of the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
@@ -93,11 +95,12 @@ phases:
     name: "Phase 6.2: QA"
     prompt: |
       Check {todo_id}'s TODOS.md entry for `UI Review: required` in its
-      Decisions line. If it says `not-required`, exit 0 immediately — do not
-      run any QA.
+      Decisions line. If the `UI Review` decision is absent or says
+      `not-required`, exit 0 immediately — do not run any QA and do not block
+      the task.
 
-      If `required`: use the gstack /qa skill in claude code. Test the web UI
-      changes on the current branch.
+      Only if `UI Review: required` is explicitly present: use the gstack
+      {skill_prefix}qa skill. Test the web UI changes on the current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. If the skill would normally ask for approval before
@@ -111,10 +114,10 @@ phases:
   - phase_key: "phase_7_document_release"
     name: "Phase 7: Document Release"
     prompt: |
-      1. Use the gstack /document-release skill in claude code to update
+      1. Use the gstack {skill_prefix}document-release skill to update
          existing docs (CHANGELOG.md, README.md, and others), which will
          identify any docs that are missing entirely. Then use the gstack
-         /document-generate skill in claude code to create those missing
+         {skill_prefix}document-generate skill to create those missing
          docs.
 
       2. Determine the version bump level from {todo_id}'s TODOS.md Decisions
@@ -139,7 +142,7 @@ phases:
   - phase_key: "phase_8_finish_branch"
     name: "Phase 8: Finish Branch"
     prompt: |
-      Use the gstack /ship skill in claude code.
+      Use the gstack {skill_prefix}ship skill.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. Loop through the skill's fix-and-reverify cycles for as
@@ -148,9 +151,9 @@ phases:
       Open or update the PR, push every intended branch change, and complete
       this task normally. Do NOT merge the PR.
 
-      Let /ship own the whole finish-branch workflow. If /ship reaches its turn
+      Let {skill_prefix}ship own the whole finish-branch workflow. If {skill_prefix}ship reaches its turn
       budget, asks for a fresh invocation, or stops before pushing/opening the
-      PR, exit non-zero. Do NOT finish the remaining /ship steps manually with
+      PR, exit non-zero. Do NOT finish the remaining {skill_prefix}ship steps manually with
       raw git or gh commands.
 
       If no git remote is configured, PR creation isn't possible. In that
@@ -163,10 +166,10 @@ phases:
       current branch name and commit that state update.
 
       Do not block this task because a PR is ready. The only blocking/failure
-      condition is the final verdict from /ship saying that the agent must run
-      /ship again instead of treating the finish-branch work as fully
-      completed. If /ship reaches that verdict, exit non-zero. Do NOT attempt
-      to simulate the remaining /ship work yourself.
+      condition is the final verdict from {skill_prefix}ship saying that the agent must run
+      {skill_prefix}ship again instead of treating the finish-branch work as fully
+      completed. If {skill_prefix}ship reaches that verdict, exit non-zero. Do NOT attempt
+      to simulate the remaining {skill_prefix}ship work yourself.
     tools: "Read,Write,Edit,Bash"
     turns: 100
     timeout: 7200

@@ -1,8 +1,19 @@
 
+import copy
+import re
+from pathlib import Path
+
 import pytest
+import yaml
 
 from hermes_pipeline.contract import ContractSchemaError
-from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+from hermes_pipeline.phases import (
+    PhasePromptRenderError,
+    _render_phase_prompt,
+    load_phases,
+    load_profile_prerequisites,
+    resolve_profile_phases_path,
+)
 
 FIXTURE = """
 phases:
@@ -19,6 +30,330 @@ phases:
     turns: 15
 """
 
+
+def extract_bundled_skill_references(profile, phases):
+    prompt_text = "\n".join(phase.prompt for phase in phases)
+    if profile == "gstack":
+        return {
+            "ai-coding-agents",
+            *set(
+            re.findall(
+                r"\{(?:skill_prefix|superpowers_skill_prefix)\}"
+                r"([a-z][a-z0-9-]*)",
+                prompt_text,
+            )
+            ),
+        }
+    if profile == "agent-skills":
+        return set(re.findall(r"\bagent-skills:[a-z][a-z0-9-]*", prompt_text))
+    raise AssertionError(f"missing test-owned extraction pattern for {profile}")
+
+
+def test_prerequisite_metadata_covers_every_bundled_skill_reference():
+    for profile in ("gstack", "agent-skills"):
+        metadata = load_profile_prerequisites(profile)
+        declared = {item.skill_id for item in metadata.skills}
+        phases = load_phases(resolve_profile_phases_path(profile))
+        prompt_text = "\n".join(phase.prompt for phase in phases)
+        for skill_id in declared:
+            if skill_id == "ai-coding-agents":
+                continue
+            assert skill_id in prompt_text
+        assert extract_bundled_skill_references(profile, phases) == declared
+
+
+def test_load_phases_rejects_empty_profile(tmp_path):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text("phases: []\n")
+
+    with pytest.raises(ValueError, match=r"phases.*must contain at least one"):
+        load_phases(phases_path)
+
+
+def test_gstack_prerequisites_are_conditional_and_verified():
+    metadata = load_profile_prerequisites("gstack")
+    assert {
+        item.skill_id: item.distribution_owner for item in metadata.skills
+    } == {
+        "ai-coding-agents": "hermes",
+        "autoplan": "gstack",
+        "writing-plans": "superpowers",
+        "subagent-driven-development": "superpowers",
+        "review": "gstack",
+        "cso": "gstack",
+        "qa": "gstack",
+        "document-release": "gstack",
+        "document-generate": "gstack",
+        "ship": "gstack",
+    }
+    for item in metadata.skills:
+        assert item.support == "Conditional"
+        if item.distribution_owner == "hermes":
+            assert item.clients["claude"].invocation == "claude -p"
+            assert item.clients["codex"].invocation == "codex exec"
+            assert item.clients["claude"].discovery_root == "Hermes skill registry"
+            assert item.clients["codex"].discovery_root == "Hermes skill registry"
+        elif item.distribution_owner == "gstack":
+            assert item.clients["claude"].invocation == f"/{item.skill_id}"
+            assert item.clients["codex"].invocation == f"${item.skill_id}"
+            assert item.clients["claude"].discovery_root == ".claude/skills"
+            assert item.clients["codex"].discovery_root == ".codex/skills"
+        else:
+            assert item.clients["claude"].invocation == f"/{item.skill_id}"
+            assert item.clients["codex"].invocation == f"$superpowers:{item.skill_id}"
+            assert "claude-plugins-official/superpowers" in (
+                item.clients["claude"].discovery_root or ""
+            )
+            assert "openai-curated-remote/superpowers" in (
+                item.clients["codex"].discovery_root or ""
+            )
+
+
+def test_agent_skills_prerequisites_do_not_guess_external_contracts():
+    metadata = load_profile_prerequisites("agent-skills")
+    for item in metadata.skills:
+        assert item.distribution_owner == "agent-skills plugin"
+        assert item.support == "Unverified"
+        assert item.clients["claude"].discovery_root is None
+        assert item.clients["claude"].invocation is None
+        assert item.clients["codex"].discovery_root is None
+        assert item.clients["codex"].invocation is None
+
+
+def _documented_client_contract(client):
+    if client.discovery_root is None:
+        return "Unverified external plugin mechanism"
+    return f"`{client.discovery_root}` / `{client.invocation}`"
+
+
+def _documented_prerequisite_row(profile, item):
+    return (
+        f"| `{profile}` | `{item.skill_id}` | {item.distribution_owner} | "
+        f"{_documented_client_contract(item.clients['claude'])} | "
+        f"{_documented_client_contract(item.clients['codex'])} | "
+        f"{item.support} |"
+    )
+
+
+def test_documented_prerequisite_rows_match_all_package_metadata_fields():
+    readme = Path("README.md").read_text()
+    reference = Path("docs/reference-cli.md").read_text()
+    for profile in ("gstack", "agent-skills"):
+        metadata = load_profile_prerequisites(profile)
+        for item in metadata.skills:
+            row = _documented_prerequisite_row(profile, item)
+            assert row in readme
+            assert row in reference
+
+
+def test_readme_config_walkthrough_initializes_once_and_runs_sequentially():
+    readme = Path("README.md").read_text()
+    core_workflows = readme.split("## Core workflows", 1)[1].split(
+        "## Subcommands", 1
+    )[0]
+    expected = """\
+```bash
+tpo config init
+tpo config set projects_dir ~/my-projects
+tpo config get prompt_client
+tpo config set prompt_client codex
+tpo config get prompt_client
+tpo doctor <project>
+```"""
+    assert expected in core_workflows
+    assert core_workflows.count("tpo config init") == 1
+
+
+def test_profile_guide_lists_exact_metadata_skill_inventories():
+    guide = Path("docs/howto-agent-skills-profile.md").read_text()
+    for profile in ("gstack", "agent-skills"):
+        marker = f"- **`{profile}`**"
+        start = guide.index(marker)
+        boundaries = (
+            guide.find("\n- **", start + len(marker)),
+            guide.find("\n\n", start + len(marker)),
+        )
+        end = min(boundary for boundary in boundaries if boundary != -1)
+        inventory = guide[start:end].split("Skills:", 1)[1]
+        documented = re.findall(r"`([^`]+)`", inventory)
+        expected = [
+            item.skill_id for item in load_profile_prerequisites(profile).skills
+        ]
+        assert documented == expected
+
+
+def test_profile_guide_documents_complete_profile_data_and_doctor_error():
+    guide = Path("docs/howto-agent-skills-profile.md").read_text()
+    add_profile = guide.split("## Adding a new profile", 1)[1].split(
+        "## Troubleshooting", 1
+    )[0]
+    assert "`phases.yaml`" in add_profile
+    assert "`prerequisites.yaml`" in add_profile
+    for field in (
+        "`schema_version`",
+        "`profile`",
+        "`skills`",
+        "`skill_id`",
+        "`distribution_owner`",
+        "`support`",
+        "`clients`",
+        "`discovery_root`",
+        "`invocation`",
+    ):
+        assert field in add_profile
+
+    troubleshooting = guide.split("## Troubleshooting", 1)[1]
+    assert "INVALID: failed to load profile data for '<name>'" in troubleshooting
+    assert "`prerequisites.yaml`" in troubleshooting
+
+
+def test_release_qualification_covers_conditional_pairs():
+    guide = Path("docs/release-qualification-agent-clients.md").read_text()
+    for profile in ("gstack", "agent-skills"):
+        for item in load_profile_prerequisites(profile).skills:
+            if item.support != "Conditional":
+                continue
+            for client in ("claude", "codex"):
+                assert f"`{profile}` / `{client}`" in guide
+    assert "Normal CI does not run these checks" in guide
+
+
+def test_candidate_evidence_inventory_matches_conditional_pairs():
+    evidence_root = (
+        Path("docs/release-evidence/agent-clients") / "candidate-source-snapshot"
+    )
+    conditional_pairs = {
+        (profile, client)
+        for profile in ("gstack", "agent-skills")
+        for item in load_profile_prerequisites(profile).skills
+        if item.support == "Conditional"
+        for client in ("claude", "codex")
+    }
+
+    expected_names = {
+        f"{profile}-{client}.md" for profile, client in conditional_pairs
+    }
+    assert {path.name for path in evidence_root.glob("*.md")} == expected_names
+
+
+def _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text("phases: []\n")
+    if metadata_text is not None:
+        (tmp_path / "prerequisites.yaml").write_text(metadata_text)
+    monkeypatch.setattr(
+        "hermes_pipeline.phases.resolve_profile_phases_path",
+        lambda profile: phases_path,
+    )
+    return load_profile_prerequisites("gstack")
+
+
+VALID_PREREQUISITE_METADATA = {
+    "schema_version": 1,
+    "profile": "gstack",
+    "skills": [
+        {
+            "skill_id": "review",
+            "distribution_owner": "gstack",
+            "support": "Conditional",
+            "clients": {
+                "claude": {
+                    "discovery_root": ".claude/skills",
+                    "invocation": "/review",
+                },
+                "codex": {
+                    "discovery_root": ".codex/skills",
+                    "invocation": "$review",
+                },
+            },
+        }
+    ],
+}
+_DELETE = object()
+
+
+def _metadata_with_updates(*updates):
+    metadata = copy.deepcopy(VALID_PREREQUISITE_METADATA)
+    for path, value in updates:
+        target = metadata
+        for key in path[:-1]:
+            target = target[key]
+        if value is _DELETE:
+            del target[path[-1]]
+        else:
+            target[path[-1]] = value
+    return yaml.safe_dump(metadata, sort_keys=False)
+
+
+@pytest.mark.parametrize(
+    ("updates", "field"),
+    [
+        (((("schema_version",), 2),), "schema_version"),
+        (((("profile",), "other"),), "profile"),
+        (((("skills",), {}),), "skills"),
+        (((("skills",), ["review"]),), "skills[0]"),
+        (((("skills", 0, "skill_id"), ""),), "skills[0].skill_id"),
+        (
+            (
+                (
+                    ("skills",),
+                    [
+                        copy.deepcopy(VALID_PREREQUISITE_METADATA["skills"][0]),
+                        copy.deepcopy(VALID_PREREQUISITE_METADATA["skills"][0]),
+                    ],
+                ),
+            ),
+            "skills[1].skill_id",
+        ),
+        (
+            ((("skills", 0, "distribution_owner"), ""),),
+            "skills[0].distribution_owner",
+        ),
+        (((("skills", 0, "support"), "Maybe"),), "skills[0].support"),
+        (
+            ((("skills", 0, "clients", "codex"), _DELETE),),
+            "skills[0].clients",
+        ),
+        (
+            ((("skills", 0, "clients", "claude", "invocation"), _DELETE),),
+            "skills[0].clients.claude",
+        ),
+        (
+            ((("skills", 0, "clients", "claude", "discovery_root"), None),),
+            "skills[0].clients.claude.discovery_root",
+        ),
+        (
+            (
+                (("skills", 0, "support"), "Unverified"),
+                (("skills", 0, "clients", "claude", "discovery_root"), None),
+                (("skills", 0, "clients", "codex", "discovery_root"), None),
+                (("skills", 0, "clients", "codex", "invocation"), None),
+            ),
+            "skills[0].clients.claude.invocation",
+        ),
+    ],
+)
+def test_prerequisite_metadata_validation_names_path_and_field(
+    monkeypatch, tmp_path, updates, field
+):
+    metadata_text = _metadata_with_updates(*updates)
+    with pytest.raises(ValueError) as exc_info:
+        _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text)
+    message = str(exc_info.value)
+    assert str(tmp_path / "prerequisites.yaml") in message
+    assert field in message
+
+
+@pytest.mark.parametrize("metadata_text", [None, "skills: [\n", "- review\n"])
+def test_prerequisite_metadata_read_errors_name_path(
+    monkeypatch, tmp_path, metadata_text
+):
+    with pytest.raises(ValueError) as exc_info:
+        _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text)
+    message = str(exc_info.value)
+    assert str(tmp_path / "prerequisites.yaml") in message
+    assert "metadata" in message
+
 def test_load_phases_from_yaml(tmp_path):
     p = tmp_path / "phases.yaml"
     p.write_text(FIXTURE)
@@ -28,6 +363,42 @@ def test_load_phases_from_yaml(tmp_path):
     assert phases[0].name == "Phase 2: Autoplan"
     assert phases[0].turns == 20
     assert phases[1].timeout == 1800  # default
+
+
+@pytest.mark.parametrize("timeout", ["2400", True, 0, -1])
+def test_load_phases_rejects_invalid_timeout(tmp_path, timeout):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        yaml.safe_dump(
+            {
+                "phases": [
+                    {
+                        "phase_key": "phase_1",
+                        "name": "One",
+                        "timeout": timeout,
+                    }
+                ]
+            }
+        )
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"phase_1.*timeout must be a positive integer",
+    ):
+        load_phases(phases_path)
+
+
+def test_load_phases_defaults_timeout_to_1800(tmp_path):
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+    )
+
+    assert load_phases(phases_path)[0].timeout == 1800
+
 
 def test_gate_phase_needs_no_llm_fields(tmp_path):
     p = tmp_path / "phases.yaml"
@@ -86,6 +457,34 @@ def test_real_phases_yaml_review_phase_fields():
     assert "reset --hard" not in rev.prompt
 
 
+def test_real_phases_yaml_development_does_not_block_for_review():
+    phases = {p.phase_key: p for p in load_phases()}
+    dev = phases["phase_4_development"]
+    assert "Review is handled by the next pipeline phase" not in dev.prompt
+    assert "request human review" not in dev.prompt
+    assert "code review is still required" not in dev.prompt
+
+
+def test_real_phases_yaml_development_defers_to_sdd_task_loop():
+    phases = {p.phase_key: p for p in load_phases()}
+    dev = phases["phase_4_development"]
+    assert "Follow the subagent-driven-development task loop" in dev.prompt
+    assert "short-circuit it with direct inline implementation" in dev.prompt
+    assert "implementer subagent per plan task" in dev.prompt
+    assert "test-driven-development" not in dev.prompt
+    assert "TDD" not in dev.prompt
+
+
+def test_gstack_phase_prompts_do_not_duplicate_hermes_wrapper():
+    phases = load_phases(resolve_profile_phases_path("gstack"))
+
+    for phase in phases:
+        assert not phase.prompt.startswith("Hermes phase instructions:\n")
+        assert "BEGIN EXTERNAL AGENT PROMPT" not in phase.prompt
+        assert "END EXTERNAL AGENT PROMPT" not in phase.prompt
+        assert "{agent_product}" not in phase.prompt
+
+
 def test_real_phases_yaml_order_unchanged_for_existing_phases():
     keys = [p.phase_key for p in load_phases()]
     assert keys == [
@@ -129,13 +528,34 @@ def test_real_phases_yaml_records_pipeline_branch_for_pr_handoff():
 def test_real_phases_yaml_finish_branch_uses_ship_skill():
     phases = {p.phase_key: p for p in load_phases()}
     finish = phases["phase_8_finish_branch"]
-    assert "/ship" in finish.prompt
+    assert "{skill_prefix}ship" in finish.prompt
     assert "finishing-a-development-branch" not in finish.prompt
     assert "complete\nthis task normally" in finish.prompt
     assert "Do NOT merge the PR" in finish.prompt
     assert "Do not block this task because a PR is ready" in finish.prompt
     assert "human review" not in finish.prompt.lower()
-    assert "Do NOT finish the remaining /ship steps manually" in finish.prompt
+    assert (
+        "Do NOT finish the remaining {skill_prefix}ship steps manually"
+        in finish.prompt
+    )
+    claude_prompt = _render_phase_prompt(
+        finish.prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="claude",
+    )
+    codex_prompt = _render_phase_prompt(
+        finish.prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+    assert "Use the gstack /ship skill." in claude_prompt
+    assert "Do NOT finish the remaining /ship steps manually" in claude_prompt
+    assert "Use the gstack $ship skill." in codex_prompt
+    assert "Do NOT finish the remaining $ship steps manually" in codex_prompt
     assert finish.turns >= 100
     assert finish.timeout >= 7200
 
@@ -235,3 +655,180 @@ def test_render_phase_prompt_empty_reference_list_omitted():
         reference_paths=[],
     )
     assert "Reference material:" not in out
+
+
+@pytest.mark.parametrize(
+    ("client", "product", "prefix"),
+    [("claude", "Claude Code", "/"), ("codex", "Codex", "$")],
+)
+def test_render_phase_prompt_all_allowed_fields(client, product, prefix):
+    out = _render_phase_prompt(
+        "{todo_id}|{tick_id}|{project_slug}|{agent_product}|"
+        "{skill_prefix}review|{{literal}}",
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client=client,
+        template_source="test-profile:phase_x",
+    )
+    assert out.endswith(
+        f"TODO-41|01CLIENT|demo|{product}|{prefix}review|{{literal}}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("template", "message"),
+    [
+        ("{unknown}", "unknown"),
+        ("{}", "positional"),
+        ("{0}", "positional"),
+        ("{todo_id", "malformed"),
+        ("{agent_product!r}", "conversion"),
+        ("{todo_id:}", "format specification"),
+        ("{todo_id:>10}", "format specification"),
+        ("{todo_id.value}", "traversal"),
+        ("{todo_id[0]}", "traversal"),
+        ("{todo_id:{tick_id}}", "nested"),
+    ],
+)
+def test_render_phase_prompt_rejects_advanced_formatting(template, message):
+    with pytest.raises(
+        PhasePromptRenderError,
+        match=rf"test-profile:phase_x.*{message}",
+    ):
+        _render_phase_prompt(
+            template,
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            project_slug="demo",
+            template_source="test-profile:phase_x",
+        )
+
+
+def test_render_phase_prompt_rejects_unknown_client():
+    with pytest.raises(
+        PhasePromptRenderError,
+        match=r"prompt_client.*claude.*codex",
+    ):
+        _render_phase_prompt(
+            "{agent_product}",
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            project_slug="demo",
+            prompt_client="Claude",
+        )
+
+
+def test_render_phase_prompt_does_not_rewrite_unrelated_text():
+    template = "Read docs/a/b.md and https://example.test/a; literal $HOME."
+    out = _render_phase_prompt(
+        template,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+    assert out.endswith(template)
+
+
+@pytest.mark.parametrize("profile", ["gstack", "agent-skills"])
+@pytest.mark.parametrize(
+    ("client", "product", "forbidden_product"),
+    [
+        ("claude", "Claude Code", "Codex"),
+        ("codex", "Codex", "Claude Code"),
+    ],
+)
+def test_every_bundled_phase_renders_for_client(
+    profile, client, product, forbidden_product
+):
+    prerequisites = load_profile_prerequisites(profile)
+    opposite_client = "codex" if client == "claude" else "claude"
+    opposite_invocations = {
+        item.clients[opposite_client].invocation
+        for item in prerequisites.skills
+        if item.support == "Conditional"
+    }
+    assert None not in opposite_invocations
+    phases = load_phases(resolve_profile_phases_path(profile))
+    for phase in phases:
+        rendered = _render_phase_prompt(
+            phase.prompt,
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            project_slug="demo",
+            prompt_client=client,
+            template_source=f"{profile}:{phase.phase_key}",
+        )
+        assert "{agent_product}" not in rendered
+        assert "{skill_prefix}" not in rendered
+        if "agent_product" in phase.prompt:
+            assert product in rendered
+            assert forbidden_product not in rendered
+        for opposite_invocation in opposite_invocations:
+            assert opposite_invocation not in rendered
+        for prerequisite in prerequisites.skills:
+            invocation = prerequisite.clients[client].invocation
+            opposite_invocation = prerequisite.clients[opposite_client].invocation
+            if prerequisite.support == "Conditional":
+                if prerequisite.distribution_owner == "hermes":
+                    continue
+                if f"{{skill_prefix}}{prerequisite.skill_id}" not in phase.prompt:
+                    continue
+                assert invocation is not None
+                assert opposite_invocation is not None
+                assert invocation in rendered
+            else:
+                if prerequisite.skill_id not in phase.prompt:
+                    continue
+                assert prerequisite.support == "Unverified"
+                assert invocation is None
+                assert opposite_invocation is None
+                assert prerequisite.skill_id in rendered
+                assert f"/{prerequisite.skill_id}" not in rendered
+                assert f"${prerequisite.skill_id}" not in rendered
+
+
+def test_codex_gstack_profile_uses_namespaced_superpowers_skills():
+    phases = {
+        phase.phase_key: phase
+        for phase in load_phases(resolve_profile_phases_path("gstack"))
+    }
+
+    writing_plan = _render_phase_prompt(
+        phases["phase_3_writing_plan"].prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+    development = _render_phase_prompt(
+        phases["phase_4_development"].prompt,
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        project_slug="demo",
+        prompt_client="codex",
+    )
+
+    assert "$superpowers:writing-plans" in writing_plan
+    assert "$superpowers:subagent-driven-development" in development
+
+
+@pytest.mark.parametrize(
+    ("client", "ordinary", "possessive"),
+    [
+        ("claude", "Use the /autoplan skill in Claude Code.", "Follow /review's fix loop."),
+        ("codex", "Use the $autoplan skill in Codex.", "Follow $review's fix loop."),
+    ],
+)
+def test_gstack_exact_client_grammar(client, ordinary, possessive):
+    assert ordinary in _render_phase_prompt(
+        "Use the {skill_prefix}autoplan skill in {agent_product}.",
+        todo_id="TODO-41", tick_id="01CLIENT", project_slug="demo",
+        prompt_client=client,
+    )
+    assert possessive in _render_phase_prompt(
+        "Follow {skill_prefix}review's fix loop.",
+        todo_id="TODO-41", tick_id="01CLIENT", project_slug="demo",
+        prompt_client=client,
+    )

@@ -82,15 +82,15 @@ cannot turn their external installation into a hermetic package test.
 
 | Profile | Referenced skill | Distribution owner | Claude discovery | Codex discovery | Support |
 |---|---|---|---|---|---|
-| `gstack` | `autoplan` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `writing-plans` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `subagent-driven-development` | superpowers | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `review` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `cso` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `qa` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-release` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `document-generate` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
-| `gstack` | `ship` | gstack | `.claude/skills` | `.agents/skills` | Conditional |
+| `gstack` | `autoplan` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `writing-plans` | superpowers | official Claude plugin | curated Codex plugin | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | official Claude plugin | curated Codex plugin | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` | `.codex/skills` | Conditional |
 | `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
@@ -129,7 +129,8 @@ explicitly or by matching their descriptions. Their explicit invocation and
 repository discovery conventions differ:
 
 - Claude Code: `/skill-name`, with project skills under `.claude/skills/`.
-- Codex: `$skill-name`, with repository skills under `.agents/skills/`.
+- Codex: `$skill-name`, with gstack skills under `.codex/skills/` and curated
+  plugins in Codex's plugin registry.
 
 The common skill standard supports a shared phase workflow. The differing
 invocation vocabulary justifies render-time client fields rather than duplicate
@@ -320,6 +321,7 @@ Before formatting, parse the template fields and allow only:
 - `project_slug`
 - `agent_product`
 - `skill_prefix`
+- `superpowers_skill_prefix`
 
 Unknown fields, positional fields, malformed braces, unresolved allowed fields,
 conversions, format specifications, attribute/index traversal, and nested
@@ -335,7 +337,7 @@ templates is not a supported compatibility contract.
 
 The `prompt_client="claude"` default remains for direct callers; formatting
 tolerance does not. Tests must cover ordinary literal braces using escaped
-`{{` and `}}`, all five allowed fields, unknown fields, positional fields,
+`{{` and `}}`, all six allowed fields, unknown fields, positional fields,
 malformed braces, unresolved client fields, conversions, format specifications,
 attribute/index traversal, and nested fields.
 
@@ -370,8 +372,8 @@ Release qualification is versioned and auditable. For every `Conditional`
 client/profile pair it defines:
 
 - environment and installation prerequisites;
-- the discovery command;
-- one representative explicit invocation and expected result;
+- gstack skill-root and official/curated plugin discovery checks;
+- the verified invocation forms for the discovered skill IDs;
 - the evidence artifact path and timestamp;
 - the blocking rule for release.
 

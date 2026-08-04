@@ -2,8 +2,11 @@
 
 Complete reference for `tpo` subcommands.
 
-- `uv run tpo <command> [args]` — Production pipeline orchestration (tick, init, doctor, ...)
-- `uv run tpo test [args]` — Mock integration test harness
+The examples below use the installed `tpo` command. In a source checkout,
+contributors can run the same commands as `uv run tpo ...`.
+
+- `tpo <command> [args]` — Production pipeline orchestration (tick, init, doctor, ...)
+- `tpo test [args]` — Mock integration test harness
 
 ## tpo Global Flags
 
@@ -13,7 +16,7 @@ Complete reference for `tpo` subcommands.
 | `--verbose` | Increased log detail: selection results, lock state, agent call summaries |
 | `--debug` | Full debug logging: circuit breaker transitions, subprocess output |
 
-Global flags apply before the subcommand: `uv run tpo --verbose tick`.
+Global flags apply before the subcommand: `tpo --verbose tick`.
 
 ## Subcommands
 
@@ -22,8 +25,8 @@ Global flags apply before the subcommand: `uv run tpo --verbose tick`.
 Run one pipeline tick: discover active projects, select TODOs, register kanban phases.
 
 ```bash
-uv run tpo tick              # scan all active projects
-uv run tpo tick myproject    # tick one project
+tpo tick              # scan all active projects
+tpo tick myproject    # tick one project
 ```
 
 **Flow per project:**
@@ -31,7 +34,7 @@ uv run tpo tick myproject    # tick one project
 2. Check prior tick outcomes; observe circuit breaker
 3. Check in-flight phase state and circuit breaker progress
 4. Run Hermes agent selection on TODOS.md
-5. Register executable kanban phases with `--parent` dependency chains; profiles may also define detached blocked gates
+5. Register kanban phases with `--parent` dependency chains; profiles may also define blocked, nonspawnable gates
 
 Without a project argument, scans all subdirectories of the global
 `projects_dir` for `TODOS.md` files. Per-project locks isolate failures — one
@@ -45,8 +48,8 @@ fairness.
 Legacy helper for existing ship-gate sidecars: bump version in PR, squash-merge to main, complete the ship gate.
 
 ```bash
-uv run tpo approve myproject --todo TODO-5
-uv run tpo approve myproject --todo TODO-5 --force --force
+tpo approve myproject --todo TODO-5
+tpo approve myproject --todo TODO-5 --force --force
 ```
 
 **Arguments:**
@@ -76,7 +79,7 @@ uv run tpo approve myproject --todo TODO-5 --force --force
 Initialize `.hermes/todo_id_counter` from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files.
 
 ```bash
-uv run tpo recover-counter myproject
+tpo recover-counter myproject
 ```
 
 Useful when bootstrapping a project with hand-written TODOs but no counter file.
@@ -88,10 +91,10 @@ Useful when bootstrapping a project with hand-written TODOs but no counter file.
 Write the default pipeline execution contract (`.hermes/pipeline.toml`) for a project.
 
 ```bash
-uv run tpo init myproject
-uv run tpo init myproject --force
-uv run tpo init myproject --assignee pipeline
-uv run tpo init myproject --profile agent-skills
+tpo init myproject
+tpo init myproject --force
+tpo init myproject --assignee pipeline
+tpo init myproject --profile agent-skills
 ```
 
 **Arguments:**
@@ -111,7 +114,7 @@ Capabilities are computed from `phases.yaml` at write time, not hardcoded.
 Verify a project's pipeline execution contract against `phases.yaml`.
 
 ```bash
-uv run tpo doctor myproject
+tpo doctor myproject
 ```
 
 **Exit codes:**
@@ -119,7 +122,7 @@ uv run tpo doctor myproject
 |------|---------|
 | 0 | Clean: schema version, assignee, capabilities all match |
 | 1 | Drift: contract missing capabilities required by phases.yaml |
-| 2 | Missing/invalid contract, unknown project, or missing profile |
+| 2 | Missing/invalid contract, unknown project/profile, or an `Unverified` profile/client prerequisite |
 
 If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes profile exists.
 
@@ -130,13 +133,13 @@ If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes p
 Install the bundled pipeline Hermes profile for unattended kanban execution.
 
 ```bash
-uv run tpo install-profile
-uv run tpo install-profile --force
+tpo install-profile
+tpo install-profile --force
 ```
 
 Creates a `pipeline` profile cloned from the active Hermes profile, then overlays the bundled `SOUL.md`. With `--force`, deletes an existing `pipeline` profile first.
 
-After install, set the assignee: `uv run tpo init myproject --assignee pipeline`.
+After install, set the assignee: `tpo init myproject --assignee pipeline`.
 
 ---
 
@@ -145,9 +148,9 @@ After install, set the assignee: `uv run tpo init myproject --assignee pipeline`
 Install or remove the bundled `todos-manager` skill.
 
 ```bash
-uv run tpo skills install
-uv run tpo skills install --target all --reinstall
-uv run tpo skills uninstall --target codex --yes
+tpo skills install
+tpo skills install --target all --reinstall
+tpo skills uninstall --target codex --yes
 ```
 
 **Install arguments:**
@@ -168,6 +171,71 @@ Install refuses to overwrite an existing destination unless `--reinstall` is set
 
 ---
 
+### `config`
+
+Read and write the global configuration:
+
+```bash
+tpo config init
+tpo config get prompt_client
+tpo config set prompt_client claude
+tpo config set prompt_client codex
+```
+
+`prompt_client` accepts exactly the lowercase, case-sensitive values `claude`
+and `codex`. If the field is absent, the effective default is `claude`.
+`tpo config get prompt_client` reports both the effective value and whether it
+came from the default or the active config file. `TPO_CONFIG_FILE` can select
+an alternate complete config file, but there is no individual environment
+override such as `PIPELINE_PROMPT_CLIENT`.
+
+One global `prompt_client` applies to every project under `projects_dir`.
+Mixed-client fleets need separate project roots.
+
+| Setting | Selects |
+|---|---|
+| Global `prompt_client` | Prompt vocabulary and external-client delegation guidance; it does not install skills or choose the Hermes assignee/profile/model |
+| Contract `profile` | Bundled phase and skill workflow |
+| Contract `assignee` | Hermes profile and agent identity |
+| Hermes configuration | Models and provider authentication |
+
+Profile prerequisites come from the package metadata used by `tpo doctor`:
+
+| Profile | Referenced skill | Distribution owner | Claude discovery / invocation | Codex discovery / invocation | Support |
+|---|---|---|---|---|---|
+| `gstack` | `ai-coding-agents` | hermes | `Hermes skill registry` / `claude -p` | `Hermes skill registry` / `codex exec` | Conditional |
+| `gstack` | `autoplan` | gstack | `.claude/skills` / `/autoplan` | `.codex/skills` / `$autoplan` | Conditional |
+| `gstack` | `writing-plans` | superpowers | `~/.claude/plugins/cache/claude-plugins-official/superpowers/*/skills` / `/writing-plans` | `~/.config/codex/plugins/cache/openai-curated-remote/superpowers/*/skills` / `$superpowers:writing-plans` | Conditional |
+| `gstack` | `subagent-driven-development` | superpowers | `~/.claude/plugins/cache/claude-plugins-official/superpowers/*/skills` / `/subagent-driven-development` | `~/.config/codex/plugins/cache/openai-curated-remote/superpowers/*/skills` / `$superpowers:subagent-driven-development` | Conditional |
+| `gstack` | `review` | gstack | `.claude/skills` / `/review` | `.codex/skills` / `$review` | Conditional |
+| `gstack` | `cso` | gstack | `.claude/skills` / `/cso` | `.codex/skills` / `$cso` | Conditional |
+| `gstack` | `qa` | gstack | `.claude/skills` / `/qa` | `.codex/skills` / `$qa` | Conditional |
+| `gstack` | `document-release` | gstack | `.claude/skills` / `/document-release` | `.codex/skills` / `$document-release` | Conditional |
+| `gstack` | `document-generate` | gstack | `.claude/skills` / `/document-generate` | `.codex/skills` / `$document-generate` | Conditional |
+| `gstack` | `ship` | gstack | `.claude/skills` / `/ship` | `.codex/skills` / `$ship` | Conditional |
+| `agent-skills` | `agent-skills:spec-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:planning-and-task-breakdown` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:incremental-implementation` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:test-driven-development` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:code-review-and-quality` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:code-reviewer` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:security-and-hardening` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:security-auditor` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+
+`Conditional` requires the named external skill to be installed and
+discoverable by the selected client. Hermes-owned registry prerequisites are
+checked locally against the assigned Hermes profile; remote worker prerequisites
+remain operator-provisioned. `Unverified` is unsupported and does not become
+supported merely by setting `prompt_client`; `tpo doctor` reports `UNSUPPORTED`
+and exits 2 when the selected profile contains any such row, and `tpo tick`
+refuses to select or register work for that unsupported profile/client pair.
+
+See [agent client release qualification](release-qualification-agent-clients.md)
+for the evidence protocol.
+
+---
+
 ## tpo test
 
 Run the mock integration test harness: bootstraps a temporary git project, executes
@@ -177,9 +245,9 @@ was removed along with `runner.py`/`watcher.py` in v0.5.6; the harness now alway
 requires `hermes login` and access to the `mock-project` tenant.
 
 ```bash
-uv run tpo test --fixture happy-path
-uv run tpo test --fixture happy-path --phase phase_2_autoplan
-uv run tpo test --fixture happy-path --convergence-threshold 2
+tpo test --fixture happy-path
+tpo test --fixture happy-path --phase phase_2_autoplan
+tpo test --fixture happy-path --convergence-threshold 2
 ```
 
 **Arguments:**
@@ -187,10 +255,10 @@ uv run tpo test --fixture happy-path --convergence-threshold 2
 |-----|----------|---------|-------------|
 | `--fixture` | Yes | — | Fixture name. Only `happy-path` is implemented. |
 | `--phase` | No | — | Run only the named phase in isolation (e.g. `phase_2_autoplan`). |
-| `--timeout` | No | `86400` | Overall run timeout in seconds. Kills in-flight phase via `killpg` if exceeded. |
+| `--timeout` | No | `86400` | Overall run timeout in seconds. Cooperatively stops polling, then reclaims and archives the tick's Hermes tasks. |
 | `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before circuit breaker halts the run. |
 | `--keep` | No | — | Preserve the temporary directory after the run for inspection. |
-| `--loop` | No | — | Persist numbered report files and diff them across runs. Requires `--keep`. |
+| `--loop` | No | — | Write a numbered report snapshot in the current workspace's `artifacts/` directory. Snapshots do not carry across separate CLI invocations, so cross-invocation auto-diff is unavailable. Requires `--keep`. |
 
 **Exit codes:**
 | Code | Meaning |
@@ -206,8 +274,21 @@ uv run tpo test --fixture happy-path --convergence-threshold 2
 - On convergence halt, clears the active task with `outcome="abandoned"`.
 - Prints a `[kanban]` summary line after report generation:
   ```
-  [kanban] tenant=mock-project tick_id=01ARZ3... phases={phase_1 kickoff: done, ...} report=/tmp/harness-.../reports/report.json keep=no (temp dir will be removed)
+  [kanban] tenant=mock-project tick_id=01ARZ3... phases={phase_1 kickoff: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
   ```
+
+**Timeout and exceptional poll cleanup:**
+- The harness first signals the poll thread to stop and waits for it to exit.
+- It then reclaims each running Hermes task and requires Hermes to confirm that
+  the worker is gone and every run has ended.
+- Tasks are archived child first according to their validated parent
+  relationships, then the harness confirms that the complete task set is
+  archived and quiescent.
+- If polling does not stop, task relationships are malformed, or any reclaim,
+  termination, archive, or final-state confirmation is inconclusive, cleanup
+  fails closed with `HarnessCleanupError` and retains the workspace for
+  inspection. The workspace is eligible for automatic removal only after
+  cleanup is confirmed.
 
 **`KanbanPreflightError`** — `RuntimeError` subclass raised when the kanban preflight fails. Two triggers:
 - `subprocess.TimeoutExpired` after 15 s → actionable timeout message

@@ -2,7 +2,7 @@ phases:
   - phase_key: "phase_1_spec"
     name: "Phase 1: Spec"
     prompt: |
-      Use the agent-skills:spec-driven-development skill's Specify phase in claude code.
+      Use the agent-skills:spec-driven-development skill's Specify phase in {agent_product}.
 
       The selected TODO is {todo_id} — it is already marked in-flight in TODOS.md.
       Work on {todo_id} only; do not pick a different TODO.
@@ -19,13 +19,13 @@ phases:
     gate: true
   - phase_key: "phase_2_plan"
     name: "Phase 2: Plan"
-    prompt: "Use the agent-skills:planning-and-task-breakdown skill in claude code. Read the spec from SPEC.md, write the plan to tasks/plan.md and the task checklist to tasks/todo.md. Commit the generated docs."
+    prompt: "Use the agent-skills:planning-and-task-breakdown skill in {agent_product}. Read the spec from SPEC.md, write the plan to tasks/plan.md and the task checklist to tasks/todo.md. Commit the generated docs."
     tools: "Read,Write,Bash"
     turns: 15
     timeout: 1800
   - phase_key: "phase_3_implement"
     name: "Phase 3: Implement"
-    prompt: "Use the agent-skills:incremental-implementation skill alongside agent-skills:test-driven-development in claude code. Read tasks/plan.md and tasks/todo.md and implement the plan in thin, test-driven slices. Commit as you go."
+    prompt: "Use the agent-skills:incremental-implementation skill alongside agent-skills:test-driven-development in {agent_product}. Read tasks/plan.md and tasks/todo.md and implement the plan in thin, test-driven slices. Commit as you go."
     tools: "Read,Write,Edit,Bash"
     turns: 60
     timeout: 3600

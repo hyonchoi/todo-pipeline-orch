@@ -28,7 +28,7 @@ from .circuit import CircuitBreaker
 from .config import CircuitBreakerConfig, Config, _validate_project_slug
 from .decision import run_selection
 from .decision.context import build_context
-from .kanban_tasks import all_phases_complete, observe_outcomes, register_todo_phases
+from .kanban_tasks import all_phases_complete, observe_outcomes
 from .logging_setup import configure as configure_logging
 from .logging_setup import new_tick_id as _new_tick_id
 from .outcomes import CURRENT_TICK_ID_FILE, OUTCOME_PICKED_NONE
@@ -42,6 +42,7 @@ vlog = logging.getLogger("pipeline.verbose")
 # (kanban registration, outcome observation) so the selection call is bounded
 # strictly below the per-project lock's stale-reclaim window.
 _SELECTION_TIMEOUT_RESERVE_S = 30
+_HERMES_SKILL_REGISTRY_ROOT = "Hermes skill registry"
 
 
 def _resolve_project_dir(config: Config, slug: str) -> Path | None:
@@ -61,6 +62,47 @@ def _resolve_project_dir(config: Config, slug: str) -> Path | None:
         log.error("project not found: %s", slug)
         return None
     return project_dir
+
+
+def _unverified_prerequisite_ids(prerequisites, prompt_client: str) -> list[str]:
+    """Return profile prerequisites unsupported for the selected prompt client."""
+    unverified: list[str] = []
+    for prerequisite in prerequisites.skills:
+        if prerequisite.support == "Unverified":
+            # Validate the client row is present for the selected client, even
+            # though Unverified rows intentionally carry no invocation metadata.
+            prerequisite.clients[prompt_client]
+            unverified.append(prerequisite.skill_id)
+    return unverified
+
+
+def _verify_hermes_skill_registry_prerequisite(
+    *, assignee: str, skill_id: str
+) -> tuple[bool, str]:
+    cmd = ["hermes"]
+    if assignee != "default":
+        cmd.extend(["-p", assignee])
+    cmd.extend(["skills", "list", "--enabled-only"])
+    try:
+        result = _cli_sp.run(cmd, text=True, capture_output=True, timeout=10, check=False)
+    except FileNotFoundError:
+        return False, "Hermes is not installed or not on PATH."
+    except _cli_sp.TimeoutExpired:
+        return False, f"`{' '.join(cmd)}` timed out."
+
+    if result.returncode != 0:
+        return False, f"`{' '.join(cmd)}` failed (rc={result.returncode})."
+    enabled_skill_names: set[str] = set()
+    for line in (result.stdout or "").splitlines():
+        columns = line.split()
+        if len(columns) == 1 or (columns and columns[-1] == "enabled"):
+            enabled_skill_names.add(columns[0])
+    if skill_id not in enabled_skill_names:
+        return (
+            False,
+            f"skill '{skill_id}' is not enabled in Hermes profile '{assignee}'.",
+        )
+    return True, ""
 
 
 def _hermes_run_kill(job_id: str) -> int:
@@ -332,7 +374,10 @@ def build_parser() -> argparse.ArgumentParser:
     test_parser.add_argument(
         "--loop",
         action="store_true",
-        help="Re-run from scratch and diff report against previous run",
+        help=(
+            "Write a numbered report snapshot in the current workspace artifacts; "
+            "cross-invocation auto-diff is unavailable"
+        ),
     )
     test_parser.add_argument(
         "--phase",
@@ -740,6 +785,35 @@ def _persist_tick_id(
         log.warning("failed to write tick_started sentinel: %s", e)
 
 
+def _record_failed_to_spawn(
+    project_state: Path,
+    tick_id: str,
+    todo_id: str,
+    error: Exception,
+    *,
+    reason: str,
+) -> None:
+    """Record a failed phase spawn without masking the primary failure."""
+    try:
+        from .decision.store import append_outcome
+
+        append_outcome(
+            project_state,
+            tick_id,
+            outcome="failed_to_spawn",
+            detail={
+                "todo_id": todo_id,
+                "reason": reason,
+                "error_type": type(error).__name__,
+            },
+        )
+    except Exception as sidecar_exc:
+        log.warning(
+            "failed to write outcome sidecar: error_type=%s",
+            type(sidecar_exc).__name__,
+        )
+
+
 def _rotate_projects(
     projects: list[tuple[Path, dict | None]],
     state_dir: Path,
@@ -915,7 +989,11 @@ def _cmd_tick(args, config: Config) -> int:
                 "project %s: tick already in flight (lock held), skipping", project_slug
             )
         except Exception as e:
-            log.error("project %s: %s", project_slug, e, exc_info=True)
+            log.error(
+                "project %s: tick failed: error_type=%s",
+                project_slug,
+                type(e).__name__,
+            )
             # Continue to next project
 
     vlog.info("scan complete: scan_id=%s", scan_id)
@@ -967,16 +1045,24 @@ def _tick_project(
         missing_capabilities,
         required_capabilities,
     )
-    from .phases import resolve_profile_phases_path
+    from .phases import (
+        PhasePromptRenderError,
+        load_profile_prerequisites,
+        resolve_profile_phases_path,
+    )
 
     try:
         contract = load_contract(project_state)
-        phases = load_phases(resolve_profile_phases_path(contract.profile))
+        phases_path = resolve_profile_phases_path(contract.profile)
+        phases = load_phases(phases_path)
+        prerequisites = load_profile_prerequisites(contract.profile)
     except ContractMissingError:
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
-        phases = load_phases()
+        phases_path = resolve_profile_phases_path("gstack")
+        phases = load_phases(phases_path)
+        prerequisites = load_profile_prerequisites("gstack")
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
             assignee="pipeline",
@@ -1024,6 +1110,31 @@ def _tick_project(
         )
         raise CapabilityMismatchError(
             f"contract missing capabilities: {sorted(missing)}"
+        )
+
+    from .kanban_tasks import reconcile_pending_task_create
+
+    if not reconcile_pending_task_create(project_dir):
+        log.warning(
+            "project %s: unresolved Hermes task creation; skipping",
+            project_slug,
+        )
+        return
+
+    unverified = _unverified_prerequisite_ids(prerequisites, config.prompt_client)
+    if unverified:
+        log.error(
+            "project %s: profile '%s' has Unverified prerequisites for prompt "
+            "client '%s': %s — run `tpo doctor %s` for details",
+            project_slug,
+            contract.profile,
+            config.prompt_client,
+            ", ".join(unverified),
+            project_slug,
+        )
+        raise RuntimeError(
+            f"profile '{contract.profile}' has Unverified prerequisites for "
+            f"prompt client '{config.prompt_client}': {', '.join(unverified)}"
         )
 
     from .project_config import _resolve_slack_channel
@@ -1232,19 +1343,42 @@ def _tick_project(
             _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
-    # Step 4: Persist tick_id before registering kanban phases.
-    # This prevents a crash window: if register_todo_phases succeeds but
-    # persist fails (or we crash between them), the next tick has no
-    # record of this tick and cold-starts → duplicate agent spawn.
-    # The tick_started sentinel tells all_phases_complete that this tick
-    # was legitimate even if registration crashed before creating kanban tasks.
-    _persist_tick_id(project_state, tick_id)
+    # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
+    from .kanban_tasks import create_prepared_todo_phases, prepare_todo_phases
 
-    # Step 5: Register kanban phases
     log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
     try:
-        task_ids = register_todo_phases(
+        prepared = prepare_todo_phases(
             todo_id=picked,
+            tick_id=tick_id,
+            board_slug=project_slug,
+            phases_path=phases_path,
+            prompt_client=config.prompt_client,
+        )
+    except PhasePromptRenderError as exc:
+        _record_failed_to_spawn(
+            project_state,
+            tick_id,
+            picked,
+            exc,
+            reason="phase_prompt_preparation_failed",
+        )
+        cb.observe(picked=None, counts_as_no_progress=True)
+        log.error(
+            "project %s: phase prompt preparation failed: error_type=%s",
+            project_slug,
+            type(exc).__name__,
+        )
+        return
+
+    # Step 5: Persist immediately before the first Hermes mutation. The
+    # tick_started sentinel preserves the existing registration-crash recovery.
+    _persist_tick_id(project_state, tick_id)
+
+    # Step 6: Create the already-rendered kanban phases.
+    try:
+        task_ids = create_prepared_todo_phases(
+            prepared=prepared,
             tick_id=tick_id,
             board_slug=project_slug,
             project_dir=project_dir,
@@ -1258,19 +1392,18 @@ def _tick_project(
             task_ids,
         )
     except RuntimeError as e:
-        log.error("project %s: kanban registration failed: %s", project_slug, e)
-        # Write failure outcome so the circuit breaker knows
-        try:
-            from .decision.store import append_outcome
-
-            append_outcome(
-                project_state,
-                tick_id,
-                outcome="failed_to_spawn",
-                detail={"todo_id": picked, "error": str(e)[:500]},
-            )
-        except Exception as se:
-            log.warning("failed to write outcome sidecar: %s", se)
+        log.error(
+            "project %s: kanban registration failed: error_type=%s",
+            project_slug,
+            type(e).__name__,
+        )
+        _record_failed_to_spawn(
+            project_state,
+            tick_id,
+            picked,
+            e,
+            reason="kanban_registration_failed",
+        )
         raise
 
     # Observe circuit breaker
@@ -1410,17 +1543,20 @@ def _cmd_doctor(args, config: Config) -> int:
         print(f"INVALID: {e}")
         return 2
 
-    # Load phases from the contract's selected profile
-    from .phases import resolve_profile_phases_path
+    # Load phases and prerequisite metadata from the selected profile.
+    from .phases import load_profile_prerequisites, resolve_profile_phases_path
 
     try:
         profile_path = resolve_profile_phases_path(contract.profile)
         phases = load_phases(profile_path)
+        prerequisites = load_profile_prerequisites(contract.profile)
     except ContractSchemaError as e:
         print(f"MISSING: {e}")
         return 2
     except Exception as e:
-        print(f"INVALID: failed to load phases for profile '{contract.profile}': {e}")
+        print(
+            f"INVALID: failed to load profile data for '{contract.profile}': {e}"
+        )
         return 2
 
     missing = missing_capabilities(contract, phases)
@@ -1462,6 +1598,64 @@ def _cmd_doctor(args, config: Config) -> int:
                 f"with `hermes profile create {contract.assignee}`."
             )
             return 2
+
+    print(
+        f"prompt client: {config.prompt_client} "
+        "(global for all projects under projects_dir)"
+    )
+    print(
+        "Mixed-client fleets require separate project roots; per-project "
+        "selection is deferred to TODO-42."
+    )
+    print(f"Prerequisites for profile '{contract.profile}':")
+    has_unverified_prerequisites = False
+    for prerequisite in prerequisites.skills:
+        client = prerequisite.clients[config.prompt_client]
+        if prerequisite.support == "Conditional":
+            if (
+                client.discovery_root == _HERMES_SKILL_REGISTRY_ROOT
+            ):
+                verified, detail = _verify_hermes_skill_registry_prerequisite(
+                    assignee=contract.assignee,
+                    skill_id=prerequisite.skill_id,
+                )
+                if not verified:
+                    print(
+                        f"MISSING: Hermes skill '{prerequisite.skill_id}' is not "
+                        f"enabled for profile '{contract.assignee}'"
+                    )
+                    print(f"Cause: {detail}")
+                    print(
+                        "Fix: Install the bundled profile with `tpo install-profile`, "
+                        "or enable the skill in the assigned Hermes profile."
+                    )
+                    return 2
+                print(
+                    f"- {prerequisite.skill_id} [Conditional]: "
+                    f"discovery root {client.discovery_root}; "
+                    f"invoke as {client.invocation}; verified locally"
+                )
+                continue
+            print(
+                f"- {prerequisite.skill_id} [Conditional]: "
+                f"discovery root {client.discovery_root}; "
+                f"invoke as {client.invocation}; worker provisioning is required"
+            )
+        else:
+            has_unverified_prerequisites = True
+            print(
+                f"- {prerequisite.skill_id} [Unverified]: compatibility is "
+                "not advertised as supported pending evidence"
+            )
+
+    unverified = _unverified_prerequisite_ids(prerequisites, config.prompt_client)
+    if has_unverified_prerequisites:
+        print(
+            f"UNSUPPORTED: profile '{contract.profile}' has Unverified "
+            f"prerequisites for prompt client '{config.prompt_client}': "
+            f"{', '.join(unverified)}"
+        )
+        return 2
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
@@ -2125,7 +2319,7 @@ def _cmd_test(args, config: Config) -> int:
             return result.exit_code
         return 0
     except Exception as e:
-        log.error("test harness failed: %s", e, exc_info=True)
+        log.error("test harness failed: error_type=%s", type(e).__name__)
         return 2
 
 

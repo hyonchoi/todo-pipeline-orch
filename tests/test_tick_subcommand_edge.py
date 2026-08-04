@@ -187,8 +187,12 @@ class TestTickPicked:
         state_dir = tmp_path / "state"
         state_dir.mkdir()
 
-        mock_register = mocker.patch(
-            "hermes_pipeline.cli.register_todo_phases",
+        mock_prepare = mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            return_value=["prepared-1", "prepared-2"],
+        )
+        mock_create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             return_value=["task-001", "task-002"],
         )
 
@@ -196,9 +200,14 @@ class TestTickPicked:
         result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
-        mock_register.assert_called_once()
-        assert mock_register.call_args.kwargs["todo_id"] == "TODO-10"
-        assert mock_register.call_args.kwargs["board_slug"] == "demo"
+        mock_prepare.assert_called_once()
+        assert mock_prepare.call_args.kwargs["todo_id"] == "TODO-10"
+        assert mock_prepare.call_args.kwargs["board_slug"] == "demo"
+        mock_create.assert_called_once()
+        assert mock_create.call_args.kwargs["prepared"] == [
+            "prepared-1",
+            "prepared-2",
+        ]
 
         # Verify tick_id was persisted in per-project state
         project_state = projects_dir / "demo" / ".hermes"
@@ -267,7 +276,7 @@ class TestTickPicked:
         state_dir.mkdir()
 
         mock_register = mocker.patch(
-            "hermes_pipeline.cli.register_todo_phases",
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             return_value=["task-001"],
         )
 
@@ -307,7 +316,7 @@ class TestTickPicked:
         state_dir.mkdir()
 
         mocker.patch(
-            "hermes_pipeline.cli.register_todo_phases",
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             side_effect=RuntimeError("kanban error"),
         )
 
@@ -347,7 +356,7 @@ class TestTickPicked:
         state_dir.mkdir()
 
         mocker.patch(
-            "hermes_pipeline.cli.register_todo_phases",
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             side_effect=RuntimeError("kanban error"),
         )
 

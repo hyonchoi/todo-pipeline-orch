@@ -9,46 +9,83 @@ report contents) per the design doc's "assertion granularity" decision.
 from __future__ import annotations
 
 import json
+import subprocess
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
 
 from hermes_pipeline.harness import run_harness
 
 
 @pytest.fixture(autouse=True)
 def _skip_preflight(monkeypatch):
-    monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda: None)
+    monkeypatch.setattr(
+        "hermes_pipeline.harness.preflight_check",
+        lambda **_kwargs: None,
+    )
 
 
-@pytest.mark.skip(reason="phases.run deleted in Task 4; restored when Task 5 rewrites harness dispatch")
-def test_happy_path_e2e_runs_all_phases_and_generates_report(tmp_path):
-    with patch("hermes_pipeline.phases.run") as mock_run:
-        mock_run.return_value = {"status": "success"}
+def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
+    tmp_path, monkeypatch, mocker
+):
+    """The no-remote fixture has a successful local terminal phase contract."""
+    from hermes_pipeline.phases import load_phases
 
-        result = run_harness(
-            fixture_name="happy-path",
-            loop=False,
-            phase_only=None,
-            keep_dir=True,
-            timeout=60,
-            convergence_threshold=3,
-            config=None,
-        )
+    workspace = tmp_path / "harness-run"
+    monkeypatch.setattr(
+        "hermes_pipeline.harness.tempfile.mkdtemp",
+        lambda prefix=None, dir=None: str(workspace),
+    )
+    mocker.patch("hermes_pipeline.harness._kanban_preflight")
+    register = mocker.patch(
+        "hermes_pipeline.kanban_tasks.register_todo_phases",
+        return_value=["t_00000001"],
+    )
+    mocker.patch("hermes_pipeline.harness.time.sleep")
+    mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+    expected_phase_keys = [phase.phase_key for phase in load_phases()]
+    completed = {phase_key: "done" for phase_key in expected_phase_keys}
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+        return_value=completed,
+    )
 
+    result = run_harness(
+        fixture_name="happy-path",
+        loop=False,
+        phase_only=None,
+        keep_dir=True,
+        timeout=60,
+        convergence_threshold=3,
+        config=None,
+    )
+
+    profile_path = Path(register.call_args.kwargs["phases_path"])
+    profile = yaml.safe_load(profile_path.read_text())
+    registered_phase_keys = [phase["phase_key"] for phase in profile["phases"]]
+    terminal = next(
+        phase
+        for phase in profile["phases"]
+        if phase["phase_key"] == "phase_8_finish_branch"
+    )
+
+    assert registered_phase_keys == expected_phase_keys
+    assert "local terminal workflow" in terminal["prompt"].lower()
+    assert "do not push or open a pull request" in terminal["prompt"].lower()
+    assert subprocess.run(
+        ["git", "remote"],
+        cwd=workspace / "project",
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout == ""
     assert result.exit_code == 0
-    assert mock_run.call_count > 0
-
-    called_phase_keys = [kwargs["phase_key"] for _, kwargs in mock_run.call_args_list]
-    assert called_phase_keys == sorted(set(called_phase_keys), key=called_phase_keys.index)
-    assert len(called_phase_keys) == len(set(called_phase_keys))
-
     assert result.report_path is not None
     report = json.loads(result.report_path.read_text())
-    dispatched_report_phases = [p for p in report["phases"] if p["phase_key"] in called_phase_keys]
-    assert len(dispatched_report_phases) == len(called_phase_keys)
-    assert all(p["status"] == "completed" for p in dispatched_report_phases)
-
+    assert [phase["phase_key"] for phase in report["phases"]] == expected_phase_keys
+    assert all(phase["status"] == "completed" for phase in report["phases"])
     assert "passed" in result.summary
 
 

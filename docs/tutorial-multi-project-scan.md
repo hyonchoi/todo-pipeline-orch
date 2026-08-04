@@ -91,7 +91,8 @@ project second-app: selection result: picked=TODO-1
 project second-app: registered 4 kanban tasks for TODO-1
 ```
 
-One tick, two projects, one global lock. No cron per project needed.
+One tick, two projects, and a lock scoped to each project. No cron per project
+needed.
 
 ---
 
@@ -174,7 +175,7 @@ so it has no tick state — only the `project.toml` and counter.
 You now have a multi-project setup that:
 
 - Discovers active projects automatically via `_discover_projects`
-- Runs one selection per project under a single global lock
+- Runs one selection per project under a per-project lock
 - Uses per-project Slack channels for notifications
 - Archives projects without deleting `TODOS.md`
 - Shares one cron entry (`hermes cron set pipeline-tick */5 * * * *`)
@@ -191,8 +192,8 @@ See [Pipeline state machine](hermes-state-machine.md) for the tick lifecycle.
 
 **Understand the scan loop architecture:**
 
-- Read [How the multi-project scan loop works](explanation-multi-project-scan.md) for why
-  a single global lock guards the entire scan.
+- Read [How the multi-project scan loop works](explanation-multi-project-scan.md)
+  for how per-project locks isolate overlapping ticks.
 - Read [How to troubleshoot state migration](howto-troubleshoot-state-migration.md) for
   fixing migration issues when you have multiple projects.
 

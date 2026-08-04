@@ -63,6 +63,9 @@ def generate_report(jsonl_path: Path, output_dir: Path) -> dict[str, Any]:
                 phase["error_message"] = event["error_class"]
             elif "return_code" in event:
                 phase["error_message"] = f"return_code={event['return_code']}"
+        elif event["event_type"] == "phase_blocked":
+            phase["status"] = "blocked"
+            phase["error_message"] = "phase blocked"
         elif event["event_type"] == "phase_timed_out":
             phase["status"] = "timeout"
             phase["error_message"] = "phase timeout exceeded"
@@ -70,7 +73,7 @@ def generate_report(jsonl_path: Path, output_dir: Path) -> dict[str, Any]:
     phases_list = sorted(phases_by_key.values(), key=lambda p: p["phase_key"])
 
     passed = sum(1 for p in phases_list if p["status"] == "completed")
-    failed = sum(1 for p in phases_list if p["status"] in ("failed", "timeout"))
+    failed = sum(1 for p in phases_list if p["status"] in ("failed", "timeout", "blocked"))
 
     report = {
         "total_phases": len(phases_list),
@@ -104,7 +107,7 @@ def generate_report(jsonl_path: Path, output_dir: Path) -> dict[str, Any]:
     md_lines.append("")
     if failed > 0:
         for p in phases_list:
-            if p["status"] in ("failed", "timeout"):
+            if p["status"] in ("failed", "timeout", "blocked"):
                 err = p["error_message"] or "unknown"
                 md_lines.append(
                     f"- **{p['phase_key']}**: {p['status']} — {err}"
@@ -123,7 +126,9 @@ def summarize_report(report_path: Path) -> str:
     data = json.loads(report_path.read_text())
     total = data["total_phases"]
     passed = data["passed_phases"]
-    failed_phases = [p for p in data["phases"] if p["status"] in ("failed", "timeout")]
+    failed_phases = [
+        p for p in data["phases"] if p["status"] in ("failed", "timeout", "blocked")
+    ]
 
     summary = f"{passed}/{total} phases passed"
     if failed_phases:

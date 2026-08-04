@@ -5,6 +5,9 @@ import re
 import tomllib
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import Literal
+
+PromptClient = Literal["claude", "codex"]
 
 
 @dataclass(frozen=True)
@@ -14,6 +17,7 @@ class Config:
     log_file_subpath: str = "pipeline.log"
     log_retention_days: int = 7
     slack_channel: str = ""
+    prompt_client: PromptClient = "claude"
 
     @classmethod
     def default(cls) -> Config:

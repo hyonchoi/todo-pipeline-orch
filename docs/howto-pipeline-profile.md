@@ -55,10 +55,16 @@ Then verify with:
 tpo doctor myproject
 ```
 
-Output (success):
+Output (success; prerequisite diagnostics appear before the final line):
+```text
+prompt client: <claude-or-codex> (global for all projects under projects_dir)
+Prerequisites for profile 'gstack':
+...
+OK: schema_version=2 assignee=pipeline profile=gstack capabilities=['Bash', 'Edit', 'Read', 'Write']
 ```
-OK: schema_version=1 assignee=pipeline capabilities=['Bash', 'Edit', 'Read', 'Write']
-```
+
+If the selected profile has any `Unverified` prerequisite, `doctor` prints an
+`UNSUPPORTED` result and exits 2 even when the contract itself is valid.
 
 Output (missing profile):
 ```

@@ -11,13 +11,13 @@ Tick Loop (Hermes cron or manual)
 [Selection] -- Hermes agent picks a TODO from TODOS.md
     |
     v
-[Kanban Registration] -- Create phases as kanban tasks with --parent chains
+[Kanban Registration] -- Build a complete chain behind a registration barrier
     |
     v
 Phase 2: Autoplan --> Phase 3: Writing Plan --> Phase 4: Development
     |
     v
-Phase 5: Code Review (gstack /review, v0.4+)
+Phase 5: Code Review (gstack /review in Claude Code or $review in Codex)
     |
     v
 Phase 6.1: CSO Security Review --> Phase 6.2: QA
@@ -39,7 +39,7 @@ hermes_pipeline/
 ├── contract.py               # Pipeline execution contract (schema, load, validate, capabilities)
 ├── hermes_adapter.py         # Hermes CLI wrapper (replaces direct Anthropic SDK)
 ├── kanban.py                 # Kanban adapter (hermes kanban commands)
-├── kanban_tasks.py           # Task registration with --parent chains and manual gates
+├── kanban_tasks.py           # Durable task registration, dependency chains, manual gates
 ├── ship.py                   # Legacy ship-gate helper for existing sidecars
 ├── outcomes.py               # Outcome sidecar writing/reading
 ├── phases.py                 # Phase definitions + hermes subprocess invocation
@@ -53,13 +53,18 @@ hermes_pipeline/
 `state.py` — Locks, checkpoints, ready-for-review records, atomic tmp+rename writes. All state files are written atomically to prevent partial reads.
 
 ### Lane C: Kanban Integration
-`kanban.py`, `kanban_tasks.py` — Executable phases as kanban tasks with `--parent` dependency chains; human gates as detached blocked tasks. Kanban status queries drive the tick loop.
+`kanban.py`, `kanban_tasks.py` — Phases as kanban tasks with `--parent`
+dependency chains; human gates stay in the chain but have no assignee or goal
+and receive a sticky `needs_input` block. Registration creates the phase chain
+behind a non-spawnable barrier
+and releases it only after every task and the expected-phase sentinel are
+durable. Kanban status queries drive the tick loop.
 
 ### Lane D: Runner & Phases
-`phases.py`, `tick.py` — Phase execution via Hermes subprocess. Atomic-mkdir tick lock prevents duplicate ticks. Phase 5 (code review) is a plain kanban-dispatched phase like any other — the code-owned pre/post review lifecycle (`review_phase.py`) was removed in v0.5.6 as dead code; the prompt instructs `/review` directly with no code-side snapshot/restore machinery.
+`phases.py`, `tick.py` — Phase execution via Hermes subprocess. Atomic-mkdir tick lock prevents duplicate ticks. Phase 5 (code review) is a plain kanban-dispatched phase like any other — the code-owned pre/post review lifecycle (`review_phase.py`) was removed in v0.5.6 as dead code; the rendered prompt instructs `/review` in Claude Code or `$review` in Codex, with no code-side snapshot/restore machinery.
 
 ### Lane E: Finish Branch
-Phase 8 runs `/ship`, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the default gstack phase profile.
+Phase 8 runs `/ship` in Claude Code or `$ship` in Codex, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the default gstack phase profile.
 
 Phase 8 records the work branch in `.hermes/pipeline_branch.txt`. After the
 terminal kanban task completes, the next `tpo tick` checks that branch's PR and
@@ -75,27 +80,58 @@ cron ticks from stacking the next TODO on top of an open PR branch.
 ## Phase Execution Flow
 
 Phase execution is fully kanban-dispatched — there is no in-process Python loop that invokes
-Hermes per phase. `kanban_tasks.py`'s `register_todo_phases` builds one kanban task per phase
-with a rendered prompt as the task body, chains executable phases with `--parent`, creates gate
-phases as detached blocked tasks, and hands them off to `hermes kanban
-create`; the actual Hermes agent run happens outside this codebase, dispatched by the kanban
-system.
+Hermes per phase. Production registration is deliberately split around tick
+persistence: `prepare_todo_phases` loads the contract-selected profile and renders
+every body for the global `prompt_client`; only after all rendering succeeds does
+`_tick_project` persist `current_tick_id.txt` and its `tick_started` outcome, then
+`create_prepared_todo_phases` creates the Hermes tasks. A malformed later prompt
+therefore creates no tasks and records no active tick.
+
+For every executable phase, its configured deadline follows this exact path:
 
 ```
-register_todo_phases(todo_id, ...)
-    |
-    +-- load_phases() -- read phases.yaml for the active profile
-    |
-    +-- for each phase:
-    |       _render_phase_prompt(phase.prompt, todo_id, tick_id, project_slug)
-    |       |
-    |       +-- hermes kanban create --tenant <slug> [--parent <prev_task_id>] --body <rendered prompt>
-    |
-    +-- task_ids[] -- returned for --parent chaining of the next executable phase
+Phase.timeout
+  -> external Codex/Claude deadline
+  -> PreparedPhaseTask.timeout
+  -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
 ```
+
+The final minute is cleanup-only: after the client deadline, the dispatcher
+terminates the external process tree and confirms it is no longer running.
+Only a zero external-agent exit may complete the phase. After a timeout or
+non-zero exit, the dispatcher comments the known external-agent failure
+metadata, then applies the supported `needs_input` block transition with the
+exact reason. Hermes cannot finish, inspect, or commit partial work.
+
+```
+cli._tick_project(config, contract)
+    |
+    +-- resolve_profile_phases_path(contract.profile)
+    |
+    +-- prepare_todo_phases(..., phases_path, prompt_client)
+    |       +-- load_phases()
+    |       +-- render every body into PreparedPhaseTask[]
+    |       `-- any render error: failed_to_spawn, no tick persistence or Hermes calls
+    |
+    +-- _persist_tick_id() -- current_tick_id.txt + tick_started outcome
+    |
+    `-- create_prepared_todo_phases(...)
+            +-- create unassigned registration barrier
+            +-- create every prepared phase behind the barrier
+            |       +-- every phase follows the previous phase with --parent
+            |       `-- gate tasks receive no goal and a sticky needs_input block
+            +-- persist expected-phases sentinel
+            `-- complete barrier, making the first executable runnable
+```
+
+`register_todo_phases` remains a compatibility wrapper that performs the prepare
+and create calls back-to-back for harnesses and direct callers. Production uses
+the split API so tick persistence stays immediately before the first external
+mutation.
 
 Phase 5 (code review) is not special-cased in code — its prompt instructs the agent to run
-`/review`, and the review lifecycle (pass/fail/revert) is entirely the agent's responsibility,
+`/review` in Claude Code or `$review` in Codex, and the review lifecycle
+(pass/fail/revert) is entirely the agent's responsibility,
 not tracked via code-owned pre/post snapshots (that machinery was removed in v0.5.6; see Lane D).
 
 ## Data Flow
@@ -110,7 +146,7 @@ All pipeline state lives under `<project>/.hermes/`:
 ├── ready_for_review/          # Legacy ship-gate sidecars
 ├── pipeline_branch.txt        # Branch currently waiting at PR handoff
 ├── phase_started/             # In-flight phase markers
-├── tick.lock/                 # Global tick lock (atomic mkdir)
+├── tick.lock/                 # Per-project tick lock (atomic mkdir)
 ├── todo_id_counter            # Compatibility cache for tracked TODO IDs
 ├── config.toml                # Per-project config overlay
 ├── project.toml               # Project marker (enabled/slack_channel)
@@ -137,11 +173,16 @@ All pipeline state lives under `<project>/.hermes/`:
 
 ## Key Design Decisions
 
-1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent` chains. Profiles may define detached blocked gates, but the default `gstack` profile ends at Phase 8 PR handoff.
+1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent`
+   chains. A non-spawnable registration barrier prevents partial chains from
+   running; it is completed only after the complete chain is durable. Profiles
+   may define manual gates with sticky `needs_input` blocks, but the default
+   `gstack` profile ends at Phase 8 PR handoff.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
-3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review`, and the agent owns the review lifecycle end-to-end.
+3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review` in Claude Code or `$review` in Codex, and the agent owns the review lifecycle end-to-end.
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.
-5. **Multi-project scan** — Single global lock, per-project selection under one tick execution.
+5. **Multi-project scan** — Each project has its own lock, so a slow or
+   overlapping tick skips only that project while the scan continues.
 
 ### TODOS Manager Skill (v2.1)
 
@@ -170,4 +211,4 @@ The skill's deterministic logic (ID sequencing, entry parsing, format validation
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state
 - [Pipeline State Machine](hermes-state-machine.md) — Full tick lifecycle transitions
 - [Modularization Plan](pipeline-modularization-plan.md) — Design history and rationale
-- [Multi-Project Scan](explanation-multi-project-scan.md) — Why single global lock, state migration decisions
+- [Multi-Project Scan](explanation-multi-project-scan.md) — Per-project locking and state migration decisions

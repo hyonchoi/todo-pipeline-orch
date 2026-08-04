@@ -101,5 +101,5 @@ failure does not block the others.
 ## Related
 
 - [Multi-project scan tutorial](tutorial-multi-project-scan.md) — step-by-step walkthrough with two projects
-- [How the scan loop works](explanation-multi-project-scan.md) — why single global lock, state migration decisions
+- [How the scan loop works](explanation-multi-project-scan.md) — per-project locking and state migration decisions
 - [How to troubleshoot state migration](howto-troubleshoot-state-migration.md) — fixing migration issues

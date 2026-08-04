@@ -79,17 +79,10 @@ NEXT_TODO_ID: 43
   - **Context:** Relevant files include `hermes_pipeline/data/skills/todos-manager/SKILL.md`, `hermes_pipeline/data/skills/todos-manager/sections/schema.md`, `hermes_pipeline/data/skills/todos-manager/sections/auto-research.md`, installed skill mirror `/Users/hyonchoi/.agents/skills/todos-manager/`, and tests under `tests/skill-test-environment/`.
   - **Depends on:** `TODO-39`
   - **Assumptions:** `Plan:` should be user-confirmed like `Spec:`/`Reference:` paths, not silently guessed; if multiple candidate plan files exist, `--add` should ask the user which one, including an option to leave it blank.
+  - **Spec:** docs/superpowers/specs/2026-08-04-todo-40-document-attachments-design.md
+  - **Plan:** docs/superpowers/plans/2026-08-04-todo-40-document-attachments.md
+  - **Reference:** CONTEXT.md, docs/adr/0001-plan-is-the-execution-authority.md
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/todos-add-plan-field`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
-
-- [ ] **TODO-41: Global config for AI agent client selection** — Select Claude or Codex and mention the correct client in phase profiles
-  - **What:** Add a global Claude/Codex client setting, propagate it through phase rendering, and replace hardcoded client references in bundled phase profiles, documentation, and tests.
-  - **Why:** Phase prompts hardcode Claude Code despite supporting both Claude and Codex, causing incorrect execution instructions.
-  - **Pros:** Correct client-specific prompts, clearer configuration semantics, and consistent Claude/Codex support.
-  - **Cons:** Touches configuration, prompt rendering, profiles, documentation, and tests; terminology must remain distinct from phase and Hermes profiles.
-  - **Context:** `hermes_pipeline/config.py`, `hermes_pipeline/config_loader.py`, `hermes_pipeline/kanban_tasks.py`, `hermes_pipeline/data/phase-profiles/`, and related docs/tests
-  - **Depends on:** (none)
-  - **Assumptions:** Initial supported values are `claude` and `codex`; the setting is global, while phase profile and Hermes assignee/profile concepts retain their existing meanings.
-  - **Decisions:** Priority `P2`, Effort `M`, Phase `4 (Development)`, Branch `feature/global-agent-client-selection`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
 
 - [ ] **TODO-42: Add per-project prompt client overrides** — Support mixed Claude/Codex worker fleets in one project scan
   - **What:** Add an optional per-project `prompt_client` override, with the global value as default; define contract precedence, migration, doctor output, and multi-project tests.

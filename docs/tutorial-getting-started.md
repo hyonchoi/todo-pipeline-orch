@@ -106,7 +106,19 @@ Tell `tpo` where to find projects:
 tpo config init
 tpo config set projects_dir ~/my-projects
 tpo config get projects_dir
+tpo config get prompt_client
 ```
+
+`prompt_client` defaults to `claude`. Keep it for Claude Code prompts such as
+`/review` and `/ship`, or select Codex vocabulary (`$review` and `$ship`) for
+every project under this `projects_dir`:
+
+```bash
+tpo config set prompt_client codex
+```
+
+The setting changes rendered task instructions only. It does not select a
+Hermes assignee or install the profile's external skills.
 
 ## Step 5: Write and verify the pipeline contract
 
@@ -117,10 +129,11 @@ tpo init demo-app
 tpo doctor demo-app
 ```
 
-Expected doctor output starts with:
+For the supported `gstack` profile, doctor first prints the selected prompt
+client and prerequisite diagnostics. Successful output ends with:
 
 ```text
-OK: schema_version=1
+OK: schema_version=2
 ```
 
 ## Step 6: Run a manual tick
@@ -131,7 +144,10 @@ Before the first tick, mark the TODO you want the pipeline to select as in progr
 tpo tick demo-app
 ```
 
-The tick checks project state, selects eligible TODOs, and registers phase tasks. If nothing is ready, it reports that no TODO was picked.
+The tick checks project state and selects eligible TODOs. When a TODO is picked,
+it renders every phase body first, persists `current_tick_id.txt` plus the
+`tick_started` outcome only after all bodies are valid, and then creates the
+prepared Hermes tasks. If nothing is ready, it reports that no TODO was picked.
 
 To scan every active project under `projects_dir`:
 
@@ -151,7 +167,10 @@ See [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) for how phase tasks 
 
 ## Step 8: Inspect PR handoff
 
-The default `gstack` profile finishes at Phase 8. That phase runs `/ship`, pushes all intended branch changes, and opens or updates a PR without merging it. Inspect the PR in GitHub or from the project worktree:
+The default `gstack` profile finishes at Phase 8. That phase runs `/ship` in
+Claude Code or `$ship` in Codex, pushes all intended branch changes, and opens
+or updates a PR without merging it. Inspect the PR in GitHub or from the
+project worktree:
 
 ```bash
 gh pr status

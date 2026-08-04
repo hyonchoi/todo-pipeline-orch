@@ -5,6 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-08-04
+
+### Added
+- Set `prompt_client` to `claude` or `codex` so phase prompts use the correct client name and skill invocation syntax.
+- `tpo doctor` now reports agent-client prerequisites, backed by release qualification evidence for supported gstack and Superpowers workflows.
+- Hermes phase registration now uses a non-spawnable barrier with durable crash recovery, preventing partial task chains from dispatching.
+- `tpo doctor` now verifies Hermes-owned dispatcher prerequisites against the assigned Hermes profile's local skill registry.
+
+### Changed
+- Phase prompts are fully rendered before tick persistence or Hermes task creation, so template errors cannot strand an active tick.
+- Release qualification evidence distinguishes candidate source snapshots from release-final artifacts, making support claims traceable to the shipped version.
+
+### Fixed
+- Uncertain Hermes task creation, cleanup, and barrier completion now fail closed without releasing partial task chains.
+- Prior-tick reconciliation now runs before new TODO selection and safely retries interrupted registration commits.
+- Manual gate phases now remain in the dependency chain, so downstream executable phases wait for human approval.
+- `tpo tick` now refuses profiles whose selected prompt-client prerequisites are still `Unverified` before selection or task registration.
+- Pending Hermes task-create recovery now runs before unsupported-profile checks, so cleanup markers remain recoverable after profile metadata changes.
+- Default-assignee projects now verify Hermes-owned dispatcher prerequisites during `tpo doctor`, while still skipping the non-default profile-existence check.
+- Harness cancellation now waits for registration to quiesce, preserves uncertain recovery markers, rejects unstable cleanup snapshots, and prevents cancelled barriers from committing late work.
+- Tick and harness failure logs now retain static failure types without exposing raw prompt or provider exception content.
+
 ## [0.6.6] - 2026-07-28
 
 ### Added

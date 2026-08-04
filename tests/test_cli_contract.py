@@ -10,6 +10,7 @@ from hermes_pipeline.cli import (
     _cmd_doctor,
     _cmd_init,
     _cmd_install_profile,
+    _verify_hermes_skill_registry_prerequisite,
     build_parser,
 )
 from hermes_pipeline.config import Config
@@ -32,6 +33,83 @@ def _create_project(projects_dir, name):
     project_dir.mkdir(parents=True, exist_ok=True)
     (project_dir / "TODOS.md").write_text("# TODOS\n")
     return project_dir
+
+
+def _create_valid_doctor_project(projects_dir, profile="gstack"):
+    project_dir = _create_project(projects_dir, "demo")
+    (project_dir / ".hermes").mkdir(parents=True)
+    (project_dir / ".hermes" / "pipeline.toml").write_text(
+        "schema_version = 2\n"
+        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        f'profile = "{profile}"\n'
+    )
+    return FakeArgs(project="demo")
+
+
+def _allow_hermes_registry_skill_check(*args, **kwargs):
+    cmd = args[0] if args else kwargs.get("args", [])
+    if cmd == ["hermes", "skills", "list", "--enabled-only"]:
+        return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
+    pytest.fail("doctor must not inspect a remote worker for external skills")
+
+
+def test_hermes_registry_prerequisite_requires_exact_enabled_skill_name(mocker):
+    """A similarly named skill must not satisfy the required Hermes skill ID."""
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        return_value=MagicMock(
+            returncode=0,
+            stderr="",
+            stdout=(
+                "Installed Skills (enabled only)\n"
+                "Name                       Category  Source  Trust  Status\n"
+                "ai-coding-agents-helper    local     local   local  enabled\n"
+                "0 hub-installed, 0 builtin, 1 local - 1 enabled shown\n"
+            ),
+        ),
+    )
+
+    verified, detail = _verify_hermes_skill_registry_prerequisite(
+        assignee="default",
+        skill_id="ai-coding-agents",
+    )
+
+    assert verified is False
+    assert "not enabled" in detail
+
+
+def test_hermes_registry_prerequisite_timeout_is_actionable(mocker):
+    import subprocess
+
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=subprocess.TimeoutExpired(["hermes"], 10),
+    )
+
+    verified, detail = _verify_hermes_skill_registry_prerequisite(
+        assignee="pipeline",
+        skill_id="ai-coding-agents",
+    )
+
+    assert verified is False
+    assert detail == "`hermes -p pipeline skills list --enabled-only` timed out."
+
+
+def test_hermes_registry_prerequisite_failure_hides_raw_stderr(mocker):
+    secret = "Authorization: Bearer provider-secret"
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        return_value=MagicMock(returncode=1, stderr=secret, stdout=""),
+    )
+
+    verified, detail = _verify_hermes_skill_registry_prerequisite(
+        assignee="default",
+        skill_id="ai-coding-agents",
+    )
+
+    assert verified is False
+    assert detail == "`hermes skills list --enabled-only` failed (rc=1)."
+    assert secret not in detail
 
 
 class TestBuildParserInit:
@@ -282,6 +360,10 @@ class TestCmdDoctor:
             "hermes_pipeline.cli.load_phases",
             return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write")],
         )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=_allow_hermes_registry_skill_check,
+        )
         config = Config(projects_dir=projects_dir)
 
         result = _cmd_doctor(FakeArgs(project="demo"), config)
@@ -312,6 +394,92 @@ class TestCmdDoctor:
 
 
 class TestDoctorProfileAware:
+    def test_doctor_reports_global_prompt_client_scope(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        args = _create_valid_doctor_project(tmp_path)
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            _allow_hermes_registry_skill_check,
+        )
+
+        assert (
+            _cmd_doctor(
+                args,
+                Config(projects_dir=tmp_path, prompt_client="codex"),
+            )
+            == 0
+        )
+
+        output = capsys.readouterr().out
+        assert (
+            "prompt client: codex (global for all projects under projects_dir)"
+            in output
+        )
+        assert "separate project roots" in output
+        assert "TODO-42" in output
+
+    @pytest.mark.parametrize(
+        ("prompt_client", "discovery_root", "invocation"),
+        [
+            ("claude", ".claude/skills", "/autoplan"),
+            ("codex", ".codex/skills", "$autoplan"),
+        ],
+    )
+    def test_doctor_reports_conditional_prerequisites_without_local_failure(
+        self,
+        monkeypatch,
+        tmp_path,
+        capsys,
+        prompt_client,
+        discovery_root,
+        invocation,
+    ):
+        args = _create_valid_doctor_project(tmp_path)
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            _allow_hermes_registry_skill_check,
+        )
+
+        assert (
+            _cmd_doctor(
+                args,
+                Config(projects_dir=tmp_path, prompt_client=prompt_client),
+            )
+            == 0
+        )
+
+        output = capsys.readouterr().out
+        assert "Conditional" in output
+        assert discovery_root in output
+        assert invocation in output
+        assert "worker provisioning is required" in output
+
+    def test_doctor_marks_unverified_profile_unsupported(
+        self, monkeypatch, tmp_path, capsys
+    ):
+        args = _create_valid_doctor_project(tmp_path, profile="agent-skills")
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            lambda *args, **kwargs: pytest.fail(
+                "doctor must not inspect a remote worker for external skills"
+            ),
+        )
+
+        assert (
+            _cmd_doctor(
+                args,
+                Config(projects_dir=tmp_path, prompt_client="codex"),
+            )
+            == 2
+        )
+
+        output = capsys.readouterr().out
+        assert "Unverified" in output
+        assert "not advertised as supported" in output
+        assert "UNSUPPORTED" in output
+        assert "OK:" not in output
+
     def test_doctor_loads_phases_from_contract_profile(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -378,6 +546,10 @@ class TestDoctorProfileAware:
             "hermes_pipeline.cli.load_phases",
             return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write")],
         )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=_allow_hermes_registry_skill_check,
+        )
         config = Config(projects_dir=projects_dir)
 
         result = _cmd_doctor(FakeArgs(project="demo"), config)
@@ -411,8 +583,10 @@ class TestDoctorMissingProfile:
         out = capsys.readouterr().out
         assert "pipeline" in out.lower() or "profile" in out.lower()
 
-    def test_doctor_skips_profile_check_for_default_assignee(self, tmp_path, mocker, capsys):
-        """When assignee is 'default', doctor should NOT check Hermes profile."""
+    def test_doctor_skips_profile_show_for_default_assignee(
+        self, tmp_path, mocker, capsys
+    ):
+        """Default assignee skips profile show but still checks the skill registry."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -427,6 +601,8 @@ class TestDoctorMissingProfile:
             cmd = a[0] if a else kw.get("args", [])
             if "profile" in cmd:
                 return MagicMock(returncode=1, stderr="profile not found", stdout="")
+            if cmd == ["hermes", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
             return original_run(*a, **kw)
         mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=tracking_run)
         mocker.patch(
@@ -438,7 +614,7 @@ class TestDoctorMissingProfile:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 0
-        assert call_count["n"] == 0
+        assert call_count["n"] == 1
 
     def test_doctor_profile_check_success_returns_0(self, tmp_path, mocker, capsys):
         """Non-default assignee whose profile IS installed should pass clean."""
@@ -455,7 +631,7 @@ class TestDoctorMissingProfile:
         )
         mocker.patch(
             "hermes_pipeline.cli._cli_sp.run",
-            return_value=MagicMock(returncode=0, stderr="", stdout=""),
+            return_value=MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n"),
         )
         config = Config(projects_dir=projects_dir)
 
@@ -463,6 +639,90 @@ class TestDoctorMissingProfile:
 
         assert result == 0
         assert "OK" in capsys.readouterr().out
+
+    def test_doctor_checks_hermes_skill_registry_prerequisite(
+        self, tmp_path, mocker, capsys
+    ):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        )
+
+        def run(cmd, **_kwargs):
+            if cmd == ["hermes", "profile", "show", "pipeline"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "ai-coding-agents" in out
+        assert "verified locally" in out
+
+    def test_doctor_missing_hermes_skill_registry_prerequisite_returns_2(
+        self, tmp_path, mocker, capsys
+    ):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        )
+
+        def run(cmd, **_kwargs):
+            if cmd == ["hermes", "profile", "show", "pipeline"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        out = capsys.readouterr().out
+        assert "MISSING" in out
+        assert "ai-coding-agents" in out
+
+    def test_doctor_missing_default_hermes_skill_registry_returns_2(
+        self, tmp_path, mocker, capsys
+    ):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes").mkdir(parents=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\ncapabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        )
+
+        def run(cmd, **_kwargs):
+            if cmd == ["hermes", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_doctor(FakeArgs(project="demo"), config)
+
+        assert result == 2
+        out = capsys.readouterr().out
+        assert "MISSING" in out
+        assert "ai-coding-agents" in out
 
     def test_doctor_hermes_not_on_path_returns_2(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"
