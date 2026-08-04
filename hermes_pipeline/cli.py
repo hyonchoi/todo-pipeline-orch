@@ -790,6 +790,8 @@ def _record_failed_to_spawn(
     tick_id: str,
     todo_id: str,
     error: Exception,
+    *,
+    reason: str,
 ) -> None:
     """Record a failed phase spawn without masking the primary failure."""
     try:
@@ -799,10 +801,17 @@ def _record_failed_to_spawn(
             project_state,
             tick_id,
             outcome="failed_to_spawn",
-            detail={"todo_id": todo_id, "error": str(error)[:500]},
+            detail={
+                "todo_id": todo_id,
+                "reason": reason,
+                "error_type": type(error).__name__,
+            },
         )
     except Exception as sidecar_exc:
-        log.warning("failed to write outcome sidecar: %s", sidecar_exc)
+        log.warning(
+            "failed to write outcome sidecar: error_type=%s",
+            type(sidecar_exc).__name__,
+        )
 
 
 def _rotate_projects(
@@ -1343,12 +1352,18 @@ def _tick_project(
             prompt_client=config.prompt_client,
         )
     except PhasePromptRenderError as exc:
-        _record_failed_to_spawn(project_state, tick_id, picked, exc)
+        _record_failed_to_spawn(
+            project_state,
+            tick_id,
+            picked,
+            exc,
+            reason="phase_prompt_preparation_failed",
+        )
         cb.observe(picked=None, counts_as_no_progress=True)
         log.error(
-            "project %s: phase prompt preparation failed: %s",
+            "project %s: phase prompt preparation failed: error_type=%s",
             project_slug,
-            exc,
+            type(exc).__name__,
         )
         return
 
@@ -1373,8 +1388,18 @@ def _tick_project(
             task_ids,
         )
     except RuntimeError as e:
-        log.error("project %s: kanban registration failed: %s", project_slug, e)
-        _record_failed_to_spawn(project_state, tick_id, picked, e)
+        log.error(
+            "project %s: kanban registration failed: error_type=%s",
+            project_slug,
+            type(e).__name__,
+        )
+        _record_failed_to_spawn(
+            project_state,
+            tick_id,
+            picked,
+            e,
+            reason="kanban_registration_failed",
+        )
         raise
 
     # Observe circuit breaker

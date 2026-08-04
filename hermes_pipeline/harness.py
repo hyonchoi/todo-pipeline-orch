@@ -788,6 +788,15 @@ def run_harness(
                     cancel_event=cancel_event,
                 )
             except PollCancellationError as exc:
+                from .kanban_tasks import cancel_todo_kanban_tasks
+
+                try:
+                    cancel_todo_kanban_tasks(
+                        fixture["project_slug"],
+                        tick_id,
+                    )
+                except Exception:
+                    pass
                 workspace_quiescent = False
                 raise HarnessCleanupError(
                     f"{exc}; workspace retained at {workspace_dir}"

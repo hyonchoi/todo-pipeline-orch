@@ -221,7 +221,7 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
         ("codex", "codex exec --sandbox workspace-write", "claude -p"),
         (
             "claude",
-            "claude -p --permission-mode bypassPermissions",
+            "claude -p --permission-mode dontAsk --allowedTools Read,Bash",
             "codex exec",
         ),
     ],
@@ -277,6 +277,17 @@ def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
     assert 'kanban_block(kind="needs_input"' in prepared[0].body
     assert "must not inspect partial changes" in prepared[0].body
     assert "must not implement or commit the phase yourself" in prepared[0].body
+
+
+def test_claude_delegation_rejects_unsafe_allowed_tool_names():
+    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
+
+    with pytest.raises(ValueError, match="simple identifiers"):
+        _external_client_delegation_block(
+            "claude",
+            1800,
+            tools="Read,$(touch /tmp/unsafe-tool-name)",
+        )
 
 
 def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, mocker):

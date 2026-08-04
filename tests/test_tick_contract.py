@@ -388,7 +388,7 @@ class TestTickPromptPreparation:
         assert persist.call_count == 1
 
     def test_prompt_preparation_failure_leaves_registration_unmutated(
-        self, tmp_path, mocker
+        self, tmp_path, mocker, caplog
     ):
         tick_id = "01PREPFAIL"
         project_dir = _create_project(tmp_path, "demo")
@@ -403,7 +403,7 @@ class TestTickPromptPreparation:
         prepare = mocker.patch(
             "hermes_pipeline.kanban_tasks.prepare_todo_phases",
             side_effect=PhasePromptRenderError(
-                "agent-skills:phase_7_ship: unknown field"
+                "agent-skills:phase_7_ship: unknown field token=secret-value"
             ),
         )
         persist = mocker.patch("hermes_pipeline.cli._persist_tick_id")
@@ -424,6 +424,15 @@ class TestTickPromptPreparation:
         outcomes = _read_outcomes(project_state)
         assert outcomes[-1].outcome == "failed_to_spawn"
         assert outcomes[-1].tick_id == tick_id
+        assert outcomes[-1].detail == {
+            "todo_id": "TODO-10",
+            "reason": "phase_prompt_preparation_failed",
+            "error_type": "PhasePromptRenderError",
+        }
+        assert "secret-value" not in caplog.text
+        assert "secret-value" not in "".join(
+            path.read_text() for path in (project_state / "outcomes").glob("*.json")
+        )
 
         prepare.side_effect = None
         prepare.return_value = ["prepared"]
@@ -507,4 +516,5 @@ class TestTickPromptPreparation:
 
         persist.assert_not_called()
         create.assert_not_called()
-        assert "failed to write outcome sidecar: disk full" in caplog.text
+        assert "failed to write outcome sidecar: error_type=OSError" in caplog.text
+        assert "disk full" not in caplog.text

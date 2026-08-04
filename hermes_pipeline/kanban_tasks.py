@@ -119,12 +119,19 @@ class PendingBarrierCommit:
 def _external_client_delegation_block(
     prompt_client: PromptClient,
     timeout: int,
+    tools: str,
 ) -> str:
     """Return the dispatcher contract prepended to executable phase tasks."""
     if prompt_client == "codex":
         command = "codex exec --sandbox workspace-write"
     elif prompt_client == "claude":
-        command = "claude -p --permission-mode bypassPermissions"
+        tool_names = [tool.strip() for tool in tools.split(",") if tool.strip()]
+        if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", tool) for tool in tool_names):
+            raise ValueError("Claude allowed tool names must be simple identifiers")
+        allowed_tools = ",".join(tool_names)
+        command = "claude -p --permission-mode dontAsk"
+        if allowed_tools:
+            command += f" --allowedTools {allowed_tools}"
     else:
         raise ValueError(
             f"prompt_client must be one of ('claude', 'codex'), got {prompt_client!r}"
@@ -666,6 +673,7 @@ def prepare_todo_phases(
             else _external_client_delegation_block(
                 prompt_client,
                 timeout=phase.timeout,
+                tools=phase.tools,
             )
         )
         prepared.append(

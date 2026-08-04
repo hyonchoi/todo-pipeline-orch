@@ -780,6 +780,44 @@ class TestRunHarnessTimeout:
         assert workspace.exists()
         generate.assert_not_called()
 
+    def test_poll_cancellation_failure_attempts_remote_cleanup(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        from hermes_pipeline.harness import HarnessCleanupError, PollCancellationError
+
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.preflight_check",
+            lambda **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout",
+            side_effect=PollCancellationError("poll worker did not stop"),
+        )
+        cancel = mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            return_value=True,
+        )
+
+        with pytest.raises(HarnessCleanupError, match="workspace retained"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=1,
+                convergence_threshold=3,
+                config=None,
+            )
+
+        cancel.assert_called_once()
+        assert workspace.exists()
+
     def test_poll_exception_after_registration_cleans_remote_or_retains_workspace(
         self, tmp_path, monkeypatch, mocker
     ):
