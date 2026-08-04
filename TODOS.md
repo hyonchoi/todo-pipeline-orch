@@ -79,6 +79,9 @@ NEXT_TODO_ID: 43
   - **Context:** Relevant files include `hermes_pipeline/data/skills/todos-manager/SKILL.md`, `hermes_pipeline/data/skills/todos-manager/sections/schema.md`, `hermes_pipeline/data/skills/todos-manager/sections/auto-research.md`, installed skill mirror `/Users/hyonchoi/.agents/skills/todos-manager/`, and tests under `tests/skill-test-environment/`.
   - **Depends on:** `TODO-39`
   - **Assumptions:** `Plan:` should be user-confirmed like `Spec:`/`Reference:` paths, not silently guessed; if multiple candidate plan files exist, `--add` should ask the user which one, including an option to leave it blank.
+  - **Spec:** docs/superpowers/specs/2026-08-04-todo-40-document-attachments-design.md
+  - **Plan:** docs/superpowers/plans/2026-08-04-todo-40-document-attachments.md
+  - **Reference:** CONTEXT.md, docs/adr/0001-plan-is-the-execution-authority.md
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/todos-add-plan-field`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
 
 - [ ] **TODO-42: Add per-project prompt client overrides** — Support mixed Claude/Codex worker fleets in one project scan
