@@ -5,7 +5,7 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.7.0] - 2026-07-29
+## [0.7.0] - 2026-08-04
 
 ### Added
 - Set `prompt_client` to `claude` or `codex` so phase prompts use the correct client name and skill invocation syntax.
@@ -24,6 +24,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `tpo tick` now refuses profiles whose selected prompt-client prerequisites are still `Unverified` before selection or task registration.
 - Pending Hermes task-create recovery now runs before unsupported-profile checks, so cleanup markers remain recoverable after profile metadata changes.
 - Default-assignee projects now verify Hermes-owned dispatcher prerequisites during `tpo doctor`, while still skipping the non-default profile-existence check.
+- Harness cancellation now waits for registration to quiesce, preserves uncertain recovery markers, rejects unstable cleanup snapshots, and prevents cancelled barriers from committing late work.
+- Tick and harness failure logs now retain static failure types without exposing raw prompt or provider exception content.
 
 ## [0.6.6] - 2026-07-28
 
