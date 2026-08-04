@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1262,6 +1263,15 @@ def get_todo_kanban_tasks(tenant: str, tick_id: str) -> dict[str, KanbanTaskInfo
 
 def _task_run_terminated(task_id: str, *, require_kill_confirmation: bool) -> bool:
     """Confirm Hermes has no active worker or unfinished run for a task."""
+    payload = _show_task_payload(task_id)
+    return _task_payload_run_terminated(
+        payload,
+        require_kill_confirmation=require_kill_confirmation,
+    )
+
+
+def _show_task_payload(task_id: str) -> dict[str, object] | None:
+    """Fetch one validated Hermes task-detail envelope."""
     try:
         result = subprocess.run(
             ["hermes", "kanban", "show", task_id, "--json"],
@@ -1271,12 +1281,21 @@ def _task_run_terminated(task_id: str, *, require_kill_confirmation: bool) -> bo
             check=False,
         )
         if result.returncode != 0:
-            return False
+            return None
         payload = json.loads(result.stdout)
     except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
-        return False
+        return None
 
     if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _task_payload_run_terminated(
+    payload: dict[str, object] | None, *, require_kill_confirmation: bool
+) -> bool:
+    """Validate worker/run termination from a fetched task-detail envelope."""
+    if payload is None:
         return False
     task = payload.get("task")
     runs = payload.get("runs")
@@ -1297,30 +1316,38 @@ def _task_run_terminated(task_id: str, *, require_kill_confirmation: bool) -> bo
     return isinstance(metadata, dict) and metadata.get("terminated") is True
 
 
+def _fetch_task_payloads(
+    task_ids: list[str],
+) -> dict[str, dict[str, object]] | None:
+    """Fetch independent Hermes task details with bounded concurrency."""
+    if not task_ids:
+        return {}
+    max_workers = min(4, len(task_ids))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        payloads = list(executor.map(_show_task_payload, task_ids))
+    if any(payload is None for payload in payloads):
+        return None
+    return {
+        task_id: payload
+        for task_id, payload in zip(task_ids, payloads)
+        if payload is not None
+    }
+
+
 def _child_first_task_order(tasks: list[dict[str, object]]) -> list[dict[str, object]] | None:
     """Return selected tasks in child-before-parent order from Hermes topology."""
     tasks_by_id: dict[str, dict[str, object]] = {}
-    parents_by_id: dict[str, list[str]] = {}
     for task in tasks:
         task_id = task["id"]
         if not isinstance(task_id, str) or task_id in tasks_by_id:
             return None
-        try:
-            result = subprocess.run(
-                ["hermes", "kanban", "show", task_id, "--json"],
-                capture_output=True,
-                text=True,
-                timeout=HERMES_COMMAND_TIMEOUT,
-                check=False,
-            )
-            if result.returncode != 0:
-                return None
-            payload = json.loads(result.stdout)
-        except (subprocess.TimeoutExpired, OSError, json.JSONDecodeError):
-            return None
+        tasks_by_id[task_id] = task
 
-        if not isinstance(payload, dict):
-            return None
+    payloads = _fetch_task_payloads(list(tasks_by_id))
+    if payloads is None:
+        return None
+    parents_by_id: dict[str, list[str]] = {}
+    for task_id, payload in payloads.items():
         shown_task = payload.get("task")
         parents = payload.get("parents")
         runs = payload.get("runs")
@@ -1333,7 +1360,6 @@ def _child_first_task_order(tasks: list[dict[str, object]]) -> list[dict[str, ob
             or not all(isinstance(run, dict) for run in runs)
         ):
             return None
-        tasks_by_id[task_id] = task
         parents_by_id[task_id] = parents
 
     child_count = {task_id: 0 for task_id in tasks_by_id}
@@ -1437,10 +1463,15 @@ def cancel_todo_kanban_tasks(tenant: str, tick_id: str) -> bool:
         for task in final_snapshot
         if isinstance(task.get("id"), str)
     }
+    final_payloads = _fetch_task_payloads(
+        [task["id"] for task in ordered_tasks if isinstance(task.get("id"), str)]
+    )
+    if final_payloads is None:
+        return False
     return all(
         final_statuses.get(task["id"]) == "archived"
-        and _task_run_terminated(
-            task["id"],
+        and _task_payload_run_terminated(
+            final_payloads.get(task["id"]),
             require_kill_confirmation=False,
         )
         for task in tasks

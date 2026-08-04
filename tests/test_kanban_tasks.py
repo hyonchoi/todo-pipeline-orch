@@ -1944,6 +1944,55 @@ class TestGetTodoKanbanTasks:
 
 
 class TestCancelTodoKanbanTasks:
+    def test_fetches_independent_task_details_concurrently(self, mocker):
+        import threading
+        import time
+
+        from hermes_pipeline.kanban_tasks import _child_first_task_order
+
+        tasks = [
+            {
+                "id": f"t_{index:08x}",
+                "status": "ready",
+                "body": json.dumps(
+                    {"tick_id": "01CANCEL", "phase_key": f"phase_{index}"}
+                ),
+            }
+            for index in range(1, 4)
+        ]
+        active = 0
+        max_active = 0
+        lock = threading.Lock()
+
+        def _run(command, **_kwargs):
+            nonlocal active, max_active
+            task_id = command[3]
+            with lock:
+                active += 1
+                max_active = max(max_active, active)
+            time.sleep(0.02)
+            with lock:
+                active -= 1
+            return mocker.Mock(
+                returncode=0,
+                stdout=json.dumps(
+                    {
+                        "task": {"id": task_id},
+                        "parents": [],
+                        "runs": [],
+                    }
+                ),
+                stderr="",
+            )
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.subprocess.run",
+            side_effect=_run,
+        )
+
+        assert _child_first_task_order(tasks) is not None
+        assert max_active > 1
+
     def test_reclaims_running_worker_archives_chain_and_confirms_runs(
         self, mocker
     ):

@@ -866,6 +866,112 @@ class TestRunHarnessTimeout:
         assert workspace.exists()
         generate.assert_not_called()
 
+    def test_partial_registration_failure_retains_workspace_when_cleanup_raises(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        from hermes_pipeline.harness import HarnessCleanupError
+
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            side_effect=RuntimeError("registration failed"),
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            side_effect=RuntimeError("cleanup failed"),
+        )
+        generate = mocker.patch("hermes_pipeline.test_report.generate_report")
+
+        with pytest.raises(HarnessCleanupError, match="workspace retained"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+            )
+
+        assert workspace.exists()
+        generate.assert_not_called()
+
+    def test_partial_registration_failure_removes_workspace_after_confirmed_cleanup(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            side_effect=RuntimeError("registration failed"),
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            return_value=True,
+        )
+
+        with pytest.raises(RuntimeError, match="registration failed"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+            )
+
+        assert not workspace.exists()
+
+    def test_timeout_cleanup_exception_retains_workspace(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        from hermes_pipeline.harness import HarnessCleanupError
+
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr("hermes_pipeline.harness.preflight_check", lambda **_kwargs: None)
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout",
+            return_value=(False, True, {}),
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"phase_2_autoplan": "running"},
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            side_effect=RuntimeError("cleanup failed"),
+        )
+
+        with pytest.raises(HarnessCleanupError, match="workspace retained"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=1,
+                convergence_threshold=3,
+                config=None,
+            )
+
+        assert workspace.exists()
+
 
 class TestKanbanModeHermes:
     """Tests for --kanban hermes wiring in run_harness() using kanban-as-scheduler."""

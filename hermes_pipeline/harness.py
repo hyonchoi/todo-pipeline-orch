@@ -825,10 +825,14 @@ def run_harness(
                     pass
                 from .kanban_tasks import cancel_todo_kanban_tasks
 
-                if not cancel_todo_kanban_tasks(
-                    fixture["project_slug"],
-                    tick_id,
-                ):
+                try:
+                    cleanup_confirmed = cancel_todo_kanban_tasks(
+                        fixture["project_slug"],
+                        tick_id,
+                    )
+                except Exception:
+                    cleanup_confirmed = False
+                if not cleanup_confirmed:
                     workspace_quiescent = False
                     raise HarnessCleanupError(
                         "Hermes task or worker termination could not be "
