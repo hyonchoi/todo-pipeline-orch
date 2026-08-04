@@ -78,6 +78,40 @@ def test_hermes_registry_prerequisite_requires_exact_enabled_skill_name(mocker):
     assert "not enabled" in detail
 
 
+def test_hermes_registry_prerequisite_timeout_is_actionable(mocker):
+    import subprocess
+
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=subprocess.TimeoutExpired(["hermes"], 10),
+    )
+
+    verified, detail = _verify_hermes_skill_registry_prerequisite(
+        assignee="pipeline",
+        skill_id="ai-coding-agents",
+    )
+
+    assert verified is False
+    assert detail == "`hermes -p pipeline skills list --enabled-only` timed out."
+
+
+def test_hermes_registry_prerequisite_failure_hides_raw_stderr(mocker):
+    secret = "Authorization: Bearer provider-secret"
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        return_value=MagicMock(returncode=1, stderr=secret, stdout=""),
+    )
+
+    verified, detail = _verify_hermes_skill_registry_prerequisite(
+        assignee="default",
+        skill_id="ai-coding-agents",
+    )
+
+    assert verified is False
+    assert detail == "`hermes skills list --enabled-only` failed (rc=1)."
+    assert secret not in detail
+
+
 class TestBuildParserInit:
     def test_init_help(self):
         parser = build_parser()

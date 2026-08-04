@@ -343,6 +343,11 @@ def _poll_kanban_phases(
     except Exception as e:
         log.warning("failed to load pipeline contract, using assignee='default': %s", e)
     log.info("registering kanban phases for %s tick %s (assignee=%s)", todo_id, tick_id, assignee)
+    # Registration can mutate Hermes before it raises. Signal that cleanup may
+    # be required before entering the call so a partial create cannot cause the
+    # only durable recovery marker to be deleted with the harness workspace.
+    if registration_event is not None:
+        registration_event.set()
     register_todo_phases(
         todo_id=todo_id,
         tick_id=tick_id,
@@ -352,9 +357,6 @@ def _poll_kanban_phases(
         assignee=assignee,
         prompt_client=prompt_client,
     )
-    if registration_event is not None:
-        registration_event.set()
-
     # Intentionally unguarded — fail fast before polling begins, matching
     # register_todo_phases()'s unguarded call above.
     initial_status = get_todo_kanban_status(project_slug, tick_id)

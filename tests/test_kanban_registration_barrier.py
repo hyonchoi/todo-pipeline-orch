@@ -299,7 +299,7 @@ def test_local_phase_two_oserror_becomes_cleanup_only_and_later_clears(
         return_value=False,
     )
 
-    with pytest.raises(RuntimeError, match=r"phase_2.*local exec failed"):
+    with pytest.raises(RuntimeError, match=r"phase_2.*OSError") as exc_info:
         create_prepared_todo_phases(
             prepared=[
                 PreparedPhaseTask("phase_1", "One", "body", 5, False),
@@ -309,6 +309,8 @@ def test_local_phase_two_oserror_becomes_cleanup_only_and_later_clears(
             board_slug="demo",
             project_dir=tmp_path,
         )
+
+    assert "local exec failed" not in str(exc_info.value)
 
     marker = tmp_path / ".hermes" / "outcomes" / "pending-task-create.json"
     assert json.loads(marker.read_text(encoding="utf-8")) == {

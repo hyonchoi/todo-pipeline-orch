@@ -46,7 +46,15 @@ COMPLETION_STATUSES = frozenset({"done", "failed"})
 # Timeouts for subprocess calls
 KANBAN_QUERY_TIMEOUT = 60       # kanban create (task registration)
 HERMES_COMMAND_TIMEOUT = 10     # kanban list, archive (utility commands)
-ERROR_MSG_MAX_LENGTH = 200      # max chars of stderr in error messages
+
+
+def _persist_pending_payload(
+    project_dir: str | Path, payload: dict[str, object]
+) -> None:
+    """Atomically persist validated recovery state using the shared marker."""
+    marker = _pending_task_create_marker(project_dir)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write_text(marker, json.dumps(payload, sort_keys=True))
 
 
 def _build_json_header(
@@ -190,10 +198,7 @@ def _persist_pending_task_create(
     project_dir: str | Path, pending: PendingTaskCreate
 ) -> None:
     """Atomically persist an uncertain task create for a later retry."""
-    marker = _pending_task_create_marker(project_dir)
-    payload = json.dumps(_pending_task_create_payload(pending), sort_keys=True)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(marker, payload)
+    _persist_pending_payload(project_dir, _pending_task_create_payload(pending))
 
 
 def _pending_task_cleanup_payload(pending: PendingTaskCleanup) -> dict[str, object]:
@@ -219,10 +224,7 @@ def _persist_pending_task_cleanup(
     project_dir: str | Path, pending: PendingTaskCleanup
 ) -> None:
     """Atomically persist known task IDs whose cleanup was not confirmed."""
-    marker = _pending_task_create_marker(project_dir)
-    payload = json.dumps(_pending_task_cleanup_payload(pending), sort_keys=True)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(marker, payload)
+    _persist_pending_payload(project_dir, _pending_task_cleanup_payload(pending))
 
 
 def _pending_barrier_commit_payload(
@@ -252,10 +254,7 @@ def _persist_pending_barrier_commit(
     project_dir: str | Path, pending: PendingBarrierCommit
 ) -> None:
     """Persist the commit intent before completing the remote barrier."""
-    marker = _pending_task_create_marker(project_dir)
-    payload = json.dumps(_pending_barrier_commit_payload(pending), sort_keys=True)
-    marker.parent.mkdir(parents=True, exist_ok=True)
-    _atomic_write_text(marker, payload)
+    _persist_pending_payload(project_dir, _pending_barrier_commit_payload(pending))
 
 
 def _load_pending_task_state(
@@ -604,12 +603,13 @@ def _block_gate_task(task_id: str) -> None:
             check=False,
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
-        raise RuntimeError(f"failed to block kanban gate {task_id}: {exc}") from exc
+        raise RuntimeError(
+            f"failed to block kanban gate {task_id}: {type(exc).__name__}"
+        ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"failed to block kanban gate {task_id}: "
-            f"rc={result.returncode} "
-            f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
+            f"rc={result.returncode}"
         )
 
 
@@ -625,13 +625,13 @@ def _complete_registration_barrier(task_id: str) -> None:
         )
     except (subprocess.TimeoutExpired, OSError) as exc:
         raise RuntimeError(
-            f"failed to complete registration barrier {task_id}: {exc}"
+            f"failed to complete registration barrier {task_id}: "
+            f"{type(exc).__name__}"
         ) from exc
     if result.returncode != 0:
         raise RuntimeError(
             f"failed to complete registration barrier {task_id}: "
-            f"rc={result.returncode} "
-            f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
+            f"rc={result.returncode}"
         )
 
 
@@ -760,8 +760,8 @@ def _run_durable_task_create(
         cleanup_detail = "" if cleanup_succeeded else "; cleanup remains pending"
         raise RuntimeError(
             f"failed to register kanban task {pending.phase_key} "
-            f"for tick {pending.tick_id}: Hermes process failed: "
-            f"{exc}{cleanup_detail}"
+            f"for tick {pending.tick_id}: Hermes process failed "
+            f"({type(exc).__name__}){cleanup_detail}"
         ) from exc
     except subprocess.TimeoutExpired as exc:
         cleanup_succeeded = _recover_and_archive_uncertain_task(
@@ -772,8 +772,8 @@ def _run_durable_task_create(
         cleanup_detail = "" if cleanup_succeeded else "; recovery remains pending"
         raise RuntimeError(
             f"failed to register kanban task {pending.phase_key} "
-            f"for tick {pending.tick_id}: Hermes process failed: "
-            f"{exc}{cleanup_detail}"
+            f"for tick {pending.tick_id}: Hermes process timed out"
+            f"{cleanup_detail}"
         ) from exc
 
     if result.returncode != 0:
@@ -784,16 +784,14 @@ def _run_durable_task_create(
         )
         cleanup_detail = "" if cleanup_succeeded else "; recovery remains pending"
         log.error(
-            "failed to register prepared kanban task %s for tick %s: rc=%d stderr=%s",
+            "failed to register prepared kanban task %s for tick %s: rc=%d",
             pending.phase_key,
             pending.tick_id,
             result.returncode,
-            result.stderr[:ERROR_MSG_MAX_LENGTH],
         )
         raise RuntimeError(
             f"failed to register kanban task {pending.phase_key} "
             f"for tick {pending.tick_id}: rc={result.returncode} "
-            f"stderr={result.stderr[:ERROR_MSG_MAX_LENGTH]}"
             f"{cleanup_detail}"
         )
 
@@ -809,7 +807,7 @@ def _run_durable_task_create(
         raise RuntimeError(
             f"{pending.phase_key}: failed to parse valid task ID; "
             f"inspect Hermes task with idempotency key {idempotency_key}: "
-            f"{result.stdout[:ERROR_MSG_MAX_LENGTH]}{cleanup_detail}"
+            f"Hermes returned an invalid response{cleanup_detail}"
         )
 
     cleanup = PendingTaskCleanup(
@@ -1074,14 +1072,15 @@ def _archive_tasks(task_ids: list[str], *, tenant: str | None = None) -> bool:
                 if result.returncode != 0:
                     command_succeeded = False
                     log.warning(
-                        "failed to archive task %s: rc=%d stderr=%s",
+                        "failed to archive task %s: rc=%d",
                         task_id,
                         result.returncode,
-                        result.stderr[:ERROR_MSG_MAX_LENGTH],
                     )
             except Exception as exc:
                 command_succeeded = False
-                log.warning("failed to archive task %s: %s", task_id, exc)
+                log.warning(
+                    "failed to archive task %s: %s", task_id, type(exc).__name__
+                )
         return command_succeeded
 
     snapshot = _list_task_snapshot(tenant)
@@ -1107,13 +1106,14 @@ def _archive_tasks(task_ids: list[str], *, tenant: str | None = None) -> bool:
             )
             if result.returncode != 0:
                 log.warning(
-                    "failed to archive task %s: rc=%d stderr=%s",
+                    "failed to archive task %s: rc=%d",
                     task_id,
                     result.returncode,
-                    result.stderr[:ERROR_MSG_MAX_LENGTH],
                 )
         except Exception as exc:
-            log.warning("failed to archive task %s: %s", task_id, exc)
+            log.warning(
+                "failed to archive task %s: %s", task_id, type(exc).__name__
+            )
 
         snapshot = _list_task_snapshot(tenant)
         if snapshot is None:
@@ -1147,16 +1147,15 @@ def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:
         )
         if result.returncode != 0:
             log.warning(
-                "failed to complete kanban task %s: rc=%d stderr=%s",
+                "failed to complete kanban task %s: rc=%d",
                 task_id,
                 result.returncode,
-                result.stderr[:ERROR_MSG_MAX_LENGTH],
             )
             return False
         log.info("completed kanban task %s", task_id)
         return True
-    except Exception as e:
-        log.warning("failed to complete task %s: %s", task_id, e)
+    except Exception as exc:
+        log.warning("failed to complete task %s: %s", task_id, type(exc).__name__)
         return False
 
 

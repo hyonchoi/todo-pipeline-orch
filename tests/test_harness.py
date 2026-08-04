@@ -825,6 +825,47 @@ class TestRunHarnessTimeout:
         assert workspace.exists()
         generate.assert_not_called()
 
+    def test_partial_registration_failure_retains_workspace_when_cleanup_unconfirmed(
+        self, tmp_path, monkeypatch, mocker
+    ):
+        from hermes_pipeline.harness import HarnessCleanupError
+
+        workspace = tmp_path / "harness-run"
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.preflight_check",
+            lambda **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.tempfile.mkdtemp",
+            lambda prefix=None, dir=None: str(workspace),
+        )
+        mocker.patch("hermes_pipeline.harness._kanban_preflight")
+        register = mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            side_effect=RuntimeError("recovery remains pending"),
+        )
+        cancel = mocker.patch(
+            "hermes_pipeline.kanban_tasks.cancel_todo_kanban_tasks",
+            return_value=False,
+        )
+        generate = mocker.patch("hermes_pipeline.test_report.generate_report")
+
+        with pytest.raises(HarnessCleanupError, match="workspace retained"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+            )
+
+        register.assert_called_once()
+        cancel.assert_called_once()
+        assert workspace.exists()
+        generate.assert_not_called()
+
 
 class TestKanbanModeHermes:
     """Tests for --kanban hermes wiring in run_harness() using kanban-as-scheduler."""

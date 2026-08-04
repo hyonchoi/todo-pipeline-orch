@@ -91,9 +91,7 @@ def _verify_hermes_skill_registry_prerequisite(
         return False, f"`{' '.join(cmd)}` timed out."
 
     if result.returncode != 0:
-        stderr = (result.stderr or "").strip()
-        detail = f": {stderr}" if stderr else ""
-        return False, f"`{' '.join(cmd)}` failed{detail}."
+        return False, f"`{' '.join(cmd)}` failed (rc={result.returncode})."
     enabled_skill_names: set[str] = set()
     for line in (result.stdout or "").splitlines():
         columns = line.split()

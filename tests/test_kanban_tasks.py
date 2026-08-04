@@ -451,6 +451,36 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     assert create_commands[2][create_commands[2].index("--max-retries") + 1] == "1"
 
 
+def test_durable_create_failure_does_not_expose_hermes_stderr(
+    tmp_path, mocker, caplog
+):
+    from hermes_pipeline.kanban_tasks import (
+        PendingTaskCreate,
+        _run_durable_task_create,
+    )
+
+    secret = "Authorization: Bearer provider-secret"
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(returncode=1, stdout="", stderr=secret),
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._recover_and_archive_uncertain_task",
+        return_value=True,
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        _run_durable_task_create(
+            cmd=["hermes", "kanban", "create"],
+            project_dir=tmp_path,
+            pending=PendingTaskCreate("demo", "01CLIENT", "phase_1", ()),
+        )
+
+    assert secret not in str(exc_info.value)
+    assert secret not in caplog.text
+    assert "rc=1" in str(exc_info.value)
+
+
 def test_create_prepared_blocks_until_registered_and_preserves_activation_order(
     tmp_path, mocker
 ):
