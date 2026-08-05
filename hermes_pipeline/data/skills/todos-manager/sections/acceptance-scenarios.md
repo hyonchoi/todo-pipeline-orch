@@ -172,13 +172,17 @@ general research to run again.
 
 **Walkthrough:** The synthesis warns about the invalid existing Spec but marks
 all attachment values preserved. The user sends `Plan: replace docs/new-plan.md`,
-`Spec: remove`, and `Reference: append docs/context.md, docs/adr/0002.md`.
-They later send `Reference: remove docs/context.md` before preview.
+`Spec: remove`, and `Reference: append docs/new-plan.md`. The skill normalizes
+the Reference candidate, rejects it because it matches the selected Plan, and
+re-prompts only Reference. The user sends
+`Reference: append docs/context.md, docs/adr/0002.md`, then later sends
+`Reference: remove docs/context.md` before preview.
 
 **Expected outcome:** The Plan changes only because of `replace`; the invalid
 existing Spec warning does not block that unrelated edit and the explicit
-`remove` deletes the Spec. Reference append normalizes then deduplicates,
-retains pre-existing order, and the explicit removal leaves only
+`remove` deletes the Spec. The selected Plan is never also attached as a
+Reference. A valid Reference append normalizes then deduplicates, retains
+pre-existing order, and the explicit removal leaves only
 `docs/adr/0001.md, docs/adr/0002.md`. Cancel at the preview writes nothing.
 
 ---

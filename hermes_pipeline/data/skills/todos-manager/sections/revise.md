@@ -125,8 +125,10 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
      append <path>` validates and appends a new normalized path, then
      deduplicates normalized values without changing the order of the retained
      paths. `Reference: remove <path>` is the only way to remove an existing
-     Reference. Never add a Plan or Spec path to Reference merely because it
-     was discovered.
+     Reference. Reject a `Reference: append <path>`
+     when the normalized path matches the selected or existing Plan or Spec; a
+     Plan or Spec path must never also be added to Reference, whether discovered
+     or explicitly requested.
    - Offer `attach as Plan and Spec` only when the same validated document
      strongly qualifies for both roles. The user must explicitly select that
      combined Plan and Spec action; it does not imply a Reference attachment.

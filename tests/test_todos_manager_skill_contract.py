@@ -102,3 +102,11 @@ def test_revise_contract_preserves_and_explicitly_mutates_attachments():
     ]
     for phrase in required:
         assert phrase in revise
+
+
+def test_revise_rejects_reference_append_matching_plan_or_spec():
+    revise = skill_text("sections/revise.md")
+    assert "Reject a `Reference: append <path>`" in revise
+    assert (
+        "normalized path matches the selected or existing Plan or Spec" in revise
+    )
