@@ -191,10 +191,53 @@ def audit_attachment_fields(
     return findings
 
 
+def _without_fenced_code(text: str) -> str:
+    """Return Markdown text with fenced examples removed."""
+    outside: list[str] = []
+    fence_marker: str | None = None
+    fence_length = 0
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        marker_match = re.match(r"(`{3,}|~{3,})", stripped)
+        if fence_marker is None:
+            if marker_match is None:
+                outside.append(line)
+                continue
+            fence_marker = marker_match.group(1)[0]
+            fence_length = len(marker_match.group(1))
+        elif re.fullmatch(
+            rf"{re.escape(fence_marker)}{{{fence_length},}}[ \t]*(?:\r?\n)?",
+            stripped,
+        ):
+            fence_marker = None
+            fence_length = 0
+        outside.append("\n" if line.endswith(("\n", "\r\n")) else "")
+    return "".join(outside)
+
+
+def _has_concrete_implementation_target(text: str) -> bool:
+    mutation_verb = re.compile(
+        r"\b(?:add|build|change|configure|create|delete|edit|implement|integrate|"
+        r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
+        re.IGNORECASE,
+    )
+    for line in text.splitlines():
+        for code_span in re.finditer(r"`([^`\n]+)`", line):
+            if mutation_verb.search(line[: code_span.start()]) is None:
+                continue
+            target = code_span.group(1)
+            if re.search(r"\b(?:pytest|unittest|tox|nox)\b", target, re.IGNORECASE):
+                continue
+            if re.search(r"[/\\]|\.[a-zA-Z0-9]+|\buv\s+run\b", target):
+                return True
+    return False
+
+
 def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ...]:
     """Classify a relevant document by its strongest attachment roles."""
     normalized = relative_path.replace("\\", "/")
     lower_text = text.lower()
+    semantic_text = _without_fenced_code(text)
     recognized_plan = (
         normalized.startswith("docs/gstack/")
         and any(marker in lower_text for marker in ("status: approved", "verdict:"))
@@ -205,20 +248,22 @@ def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ..
             r"(?:Step\s+\d+\s*[:.)-]\s*)?"
             r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
             r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
-            text,
+            semantic_text,
         )
         or re.search(
-            r"(?im)^\s*###\s+Task\s+\d+\s*:\s*(?:\*\*)?"
+            r"(?im)^###\s+Task\s+\d+\s*:\s*(?:\*\*)?"
             r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
             r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
-            text,
+            semantic_text,
         )
     )
-    concrete_target = bool(
-        re.search(r"`[^`\n]*(?:[/\\]|\.[a-zA-Z0-9]+|uv run|pytest)[^`\n]*`", text)
-    )
+    concrete_target = _has_concrete_implementation_target(semantic_text)
     verification = bool(
-        re.search(r"\b(?:verify|verification|test|acceptance)\b", text, re.IGNORECASE)
+        re.search(
+            r"\b(?:verify|verification|test|acceptance)\b",
+            semantic_text,
+            re.IGNORECASE,
+        )
     )
     plan = recognized_plan or (implementation_work and concrete_target and verification)
     spec = bool(

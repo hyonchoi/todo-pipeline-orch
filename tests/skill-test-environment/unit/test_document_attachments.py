@@ -682,8 +682,33 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
             "Run `uv run pytest tests/test_cache.py`.\n",
             ("Reference",),
         ),
+        (
+            "    ### Task 1: Update cache storage\n"
+            "Change `src/cache.py` to bound cache size.\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Reference",),
+        ),
+        (
+            "```markdown\n"
+            "### Task 1: Update cache storage\n"
+            "Change `src/cache.py` to bound cache size.\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n"
+            "```\n",
+            ("Reference",),
+        ),
+        (
+            "### Task 1: Update cache behavior\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Reference",),
+        ),
     ],
-    ids=["implementation-task", "verification-only-task"],
+    ids=[
+        "implementation-task",
+        "verification-only-task",
+        "indented-task-example",
+        "fenced-task-example",
+        "verification-command-without-change-target",
+    ],
 )
 def test_task_heading_plan_requires_mutation_target_and_verification(text, roles):
     assert classify_attachment_document("docs/other/cache.md", text) == roles
