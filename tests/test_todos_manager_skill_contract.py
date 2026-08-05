@@ -92,3 +92,13 @@ def test_revise_always_runs_post_creation_attachment_discovery():
     assert "Always run document attachment discovery" in revise
     assert "ordinary fields have no gaps" in revise
     assert "continue to attachment discovery" in revise
+
+
+def test_revise_contract_preserves_and_explicitly_mutates_attachments():
+    revise = skill_text("sections/revise.md")
+    required = [
+        "Plan", "Spec", "Reference", "preserve", "replace", "remove",
+        "append", "deduplicate", "combined Plan", "invalid existing",
+    ]
+    for phrase in required:
+        assert phrase in revise

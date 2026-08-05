@@ -54,9 +54,12 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
      its research phase with the shared counters after attachment discovery.
    - If `gap_fields` is empty, skip general auto-research and proceed with the
      attachment candidates and states.
-   - Exit with "TODO-N has no missing or weak fields. Nothing to revise." only
-     when `gap_fields` is empty, no qualified attachment candidate was found,
-     and the user did not request an attachment replacement or removal.
+   - Do not take the no-gaps exit before the attachment rows have been shown at
+     the confirm/edit gate: a user may invoke `--revise` specifically to attach
+     a planning output created after the TODO. Exit with "TODO-N has no missing
+     or weak fields. Nothing to revise." only when `gap_fields` is empty, no
+     qualified attachment candidate was found, and the user explicitly makes
+     no attachment replacement, removal, or addition.
 
    **Layering contract:** Gap scoping remains a behavioral layer on top of
    `auto-research.md`; attachment discovery is the shared pre-research phase:
@@ -75,9 +78,10 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
    - Fields that were already good (not in `gap_fields`) show with `(unchanged)` tag and their current value.
    - Fields derived by auto-research show with `[Confidence: high/medium/low]` tags.
    - Fields provided manually by the user (from the auto-research-empty fallback) show with `[Confidence: high]`.
-   - **Plan**, **Spec**, and **Reference** show their path values and
-     `suggested`, `unresolved`, `none detected`, or `preserved` states from the
-     shared attachment policy.
+   - Add **Plan**, **Spec**, and **Reference** revision rows from the shared
+     attachment policy. Each row shows its normalized path value and
+     `suggested`, `unresolved`, `none detected`, or `preserved` state. Existing
+     values stay `preserved` unless the user supplies an explicit mutation.
    - **Status** is also shown in the synthesis block, displaying the current status marker.
 
    Example synthesis block:
@@ -112,6 +116,28 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
    - The user may edit any field, including `Status` (e.g., `Status: [→]`) and
      Plan, Spec, or Reference. Validate attachment edits with
      `sections/document-attachments.md`.
+   - Preserve an existing singleton `Plan` or `Spec` by default. Mutate one
+     only with `Plan: replace <path>`, `Spec: replace <path>`, `Plan: remove`,
+     or `Spec: remove`; a bare path must not overwrite an existing value. When
+     the singleton is absent, a validated selected candidate or `Plan: <path>`
+     / `Spec: <path>` attaches it.
+   - Preserve existing `Reference` paths in their current order. `Reference:
+     append <path>` validates and appends a new normalized path, then
+     deduplicates normalized values without changing the order of the retained
+     paths. `Reference: remove <path>` is the only way to remove an existing
+     Reference. Never add a Plan or Spec path to Reference merely because it
+     was discovered.
+   - Offer `attach as Plan and Spec` only when the same validated document
+     strongly qualifies for both roles. The user must explicitly select that
+     combined Plan and Spec action; it does not imply a Reference attachment.
+     Reject confirmation while any candidate role remains unresolved, asking
+     only for that role's selection or `none`.
+   - If an existing attachment path is invalid existing content (missing,
+     non-regular, outside the repository, or otherwise invalid under the shared
+     policy), warn about the invalid existing value in its attachment row but
+     do not block unrelated field edits. An invalid new or replacement path
+     reports the shared error and re-prompts only that attachment edit. Do not
+     rerun discovery or general research after an edit-path validation failure.
    - If the reply contains an invalid edit (e.g., bad Depends on ID, out-of-range Decisions value, invalid status marker), report just that field's error and re-prompt for that field only — do not discard the other confirmed edits.
 
 7. **Preview gate:** Show the complete before/after so the user sees the full revised entry:

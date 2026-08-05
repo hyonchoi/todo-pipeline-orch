@@ -129,6 +129,60 @@ unchanged after cancellation.
 
 ---
 
+### Post-planning attachment scenarios for `--revise`
+
+#### Scenario A1i: Three-session planning attachment
+
+**Setup:** A user creates `TODO-12` with `todos-manager --add`. In a later
+session, they invoke an explicit planning skill that creates and finalizes
+`docs/gstack/cache-rework-plan.md` and `docs/gstack/cache-rework-spec.md`.
+The active TODO has no ordinary gaps and has no existing attachments.
+
+**Walkthrough:** The user invokes `todos-manager --revise`, selects `TODO-12`,
+and provides the explicit invoking-skill paths. Attachment discovery validates
+those paths first, then uses Git-changed fallback and bounded conventional
+search only for remaining candidates. The synthesis offers the plan and spec;
+the user confirms them and approves the preview.
+
+**Expected outcome:** Revision does not exit just because ordinary fields have
+no gaps. The selected Plan and Spec appear in the preview and are written only
+after its existing confirmation and preview gates.
+
+#### Scenario A1j: Combined role, ambiguity, and invalid edit correction
+
+**Setup:** A finalized document strongly qualifies as both an executable Plan
+and authoritative Spec. A second qualified Plan candidate also exists.
+
+**Walkthrough:** The synthesis offers `attach as Plan and Spec` for the
+combined-role document and leaves Plan unresolved because of the second
+candidate. `confirm` is rejected until the user explicitly selects the
+combined role or another Plan choice. If the user supplies an invalid
+edit-path, the skill reports the shared validation error and re-prompts only
+that attachment field.
+
+**Expected outcome:** No candidate is silently selected, the combined document
+is not added as a Reference, and the invalid edit never causes discovery or
+general research to run again.
+
+#### Scenario A1k: Preservation, replacement, removal, and ordered References
+
+**Setup:** `TODO-12` has `Plan: docs/old-plan.md`,
+`Spec: docs/old-spec.md`, and References in this order:
+`docs/adr/0001.md, docs/context.md`. The old Spec file is now missing.
+
+**Walkthrough:** The synthesis warns about the invalid existing Spec but marks
+all attachment values preserved. The user sends `Plan: replace docs/new-plan.md`,
+`Spec: remove`, and `Reference: append docs/context.md, docs/adr/0002.md`.
+They later send `Reference: remove docs/context.md` before preview.
+
+**Expected outcome:** The Plan changes only because of `replace`; the invalid
+existing Spec warning does not block that unrelated edit and the explicit
+`remove` deletes the Spec. Reference append normalizes then deduplicates,
+retains pre-existing order, and the explicit removal leaves only
+`docs/adr/0001.md, docs/adr/0002.md`. Cancel at the preview writes nothing.
+
+---
+
 ### Scenario A2: `--init` on new project
 
 **Setup:**
