@@ -4,7 +4,10 @@
 
 After the user provides a title and summary, silently research the codebase to
 derive all todo fields. Only ask targeted questions for gaps that research
-couldn't resolve. Never ask what can be determined.
+couldn't resolve. Never ask what can be determined. Run
+`sections/document-attachments.md` first so explicit paths and all bounded
+attachment sources are handled before general research consumes the shared
+budget.
 
 ## Research signals — collect silently before any output
 
@@ -84,10 +87,17 @@ Test Coverage:   <derived>                      [Confidence: high/medium/low]
 Security Review: <derived>                      [Confidence: high/medium/low]
 UI Review:       <derived or answered>          [Confidence: high/medium/low]
 Depends on:      <derived or answered, or "(none)">
+Plan:            <path and state>
+Spec:            <path and state>
+Reference:       <paths and state>
 ======== END SYNTHESIS ========
 
 These are pre-fills — confirm or edit each in the next step.
 ```
+
+The attachment rows use the `suggested`, `unresolved`, `none detected`, or
+`preserved` states from `sections/document-attachments.md`. They participate in
+the same synthesis confirmation and the subsequent full-entry preview.
 
 Confidence rule: fields answered directly by the user (via gap questions) are
 always `high`. Derived fields are `high` if backed by an exact match (design

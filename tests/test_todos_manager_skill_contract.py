@@ -43,5 +43,39 @@ def test_document_attachment_policy_is_shared_and_bounded():
 
 def test_both_workflows_route_to_shared_attachment_policy():
     skill = skill_text("SKILL.md")
-    assert "sections/document-attachments.md" in skill
-    assert "--add" in skill and "--revise" in skill
+    route = next(
+        line
+        for line in skill.splitlines()
+        if "sections/document-attachments.md" in line
+    )
+    assert "--add" in route and "--revise" in route
+
+
+def test_attachment_discovery_precedes_general_research():
+    skill = skill_text("SKILL.md")
+    assert "complete attachment discovery before general research" in skill
+    assert "derive field drafts only after attachment discovery" in skill
+
+
+def test_attachment_search_roots_are_validated_before_traversal():
+    policy = skill_text("sections/document-attachments.md")
+    assert "Before reading, listing, or searching any discovery root" in policy
+    assert "Do not traverse a rejected root" in policy
+    assert "existing directory inside the resolved repository root" in policy
+
+
+def test_attachment_roles_flow_through_synthesis_and_preview():
+    auto_research = skill_text("sections/auto-research.md")
+    policy = skill_text("sections/document-attachments.md")
+    assert "Plan:            <path and state>" in auto_research
+    assert "Spec:            <path and state>" in auto_research
+    assert "Reference:       <paths and state>" in auto_research
+    assert "existing synthesis confirmation" in policy
+    assert "subsequent full-entry preview" in policy
+
+
+def test_revise_always_runs_post_creation_attachment_discovery():
+    revise = skill_text("sections/revise.md")
+    assert "Always run document attachment discovery" in revise
+    assert "ordinary fields have no gaps" in revise
+    assert "continue to attachment discovery" in revise

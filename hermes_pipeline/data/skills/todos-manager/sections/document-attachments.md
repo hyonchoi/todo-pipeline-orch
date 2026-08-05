@@ -36,6 +36,15 @@ Use this order, stopping when five qualified candidates have been collected:
 3. Search only task-context paths and conventional documentation locations for
    semantically relevant documents.
 
+Before reading, listing, or searching any discovery root supplied by task
+context or selected from a conventional location, require its lexical input to
+be repository-relative, resolve it against the resolved repository root, and
+require the result to be an existing directory inside the resolved repository root.
+Do not traverse a rejected root, including an absolute root, a missing or
+non-directory root, traversal outside the repository, or a symlink that
+resolves outside the repository. Report the applicable attachment-discovery-root
+error from Path normalization and validation before continuing with other roots.
+
 Discovery ends at **five qualified candidates**, not five files considered.
 If the read or search cap is reached first, disclose incomplete discovery and
 the skipped source; do not extend the 20-read/10-search cap.
@@ -107,6 +116,15 @@ Remediation: Choose an existing document file.
 
 Error: Reference path contains a comma.
 Remediation: Use one comma-separated Reference path per value; rename paths containing commas.
+
+Error: Attachment discovery root must be repository-relative.
+Remediation: Enter a directory path relative to the repository root.
+
+Error: Attachment discovery root resolves outside the repository.
+Remediation: Choose a directory inside the repository root.
+
+Error: Attachment discovery root does not exist or is not a directory.
+Remediation: Choose an existing directory inside the repository root.
 ```
 
 ## Candidate records and ambiguity
@@ -130,9 +148,12 @@ For each role, report one of these states:
 - `preserved` when an existing value remains unchanged.
 
 Never silently select a suggested candidate, resolve ambiguity, or rewrite an
-existing value. The `--add` and `--revise` confirmation gate must present all
-roles together, including `Plan: none detected` when applicable, and require
-explicit user confirmation before writing.
+existing value. Put Plan, Spec, and Reference paths and states into the
+existing synthesis confirmation alongside the ordinary TODO fields. The
+`--add` and `--revise` confirmation gate must present all roles together,
+including `Plan: none detected` when applicable, and require explicit user
+confirmation. Carry the confirmed attachment rows into the subsequent full-entry preview,
+where the user can edit or cancel them before writing.
 
 ## Existing-value preservation
 

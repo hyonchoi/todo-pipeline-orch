@@ -97,7 +97,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Validation: 10–200 characters, non-empty.
 4. **Prompt for summary:** "One-line summary after the em dash (required):"
    - Validation: Non-empty, 10–100 characters.
-5. **Auto-research (step 4.5):** Read `sections/auto-research.md` and `sections/document-attachments.md`. Execute the research phase and shared attachment discovery: collect signals, derive field drafts, discover bounded document candidates, ask gap questions one at a time, show synthesis block.
+5. **Attachment discovery and auto-research (step 4.5):** Read `sections/document-attachments.md` and `sections/auto-research.md`. Validate explicit attachment paths, reserve their reads, and complete attachment discovery before general research. Then collect the remaining research signals under the shared counters and derive field drafts only after attachment discovery. Ask gap questions one at a time and show the combined synthesis block.
 6. **Confirm or edit fields** (pre-filled from auto-research):
    - Present all fields from the synthesis block in a single message, in the same
      order shown there, with their `Confidence:` tags. Instruction: "Reply
@@ -112,6 +112,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - **Context:** (optional)
    - **Depends on:** (optional; validate each TODO-<n> exists in TODOS.md or TODOS-archive.md)
    - **Assumptions:** (optional)
+   - **Plan:**, **Spec:**, **Reference:** (optional attachment rows and states from `sections/document-attachments.md`; validate paths before confirmation)
    - If the reply contains an invalid edit (e.g. bad Depends-on ID, out-of-range
      Decisions value), report just that field's error and re-prompt for that
      field only — do not discard the other confirmed edits.
@@ -122,7 +123,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - [ ] **TODO-<n>: <Title>** — <Summary>
      - **What:** ...
      - **Why:** ...
-     [all fields]
+     [all fields, including Plan, Spec, and Reference attachment states]
    ======== END PREVIEW ========
 
    Proceed? [y / edit / cancel]
