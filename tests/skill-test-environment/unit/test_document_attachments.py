@@ -827,15 +827,86 @@ def test_task_verification_requires_an_affirmative_action(text):
 
 
 @pytest.mark.parametrize(
-    "acceptance",
+    ("verification", "roles"),
     [
-        "- Cache writes never exceed the configured bound.\n",
-        "- [ ] Cache writes never exceed the configured bound.\n",
-        "1. Cache writes never exceed the configured bound.\n",
+        (
+            "Test that cache is bounded after 100 writes.\n",
+            ("Plan",),
+        ),
+        (
+            "Check cache remains bounded after 100 writes.\n",
+            ("Plan",),
+        ),
+        (
+            "Verify that cache will not exceed 100 entries.\n",
+            ("Plan",),
+        ),
+        ("Test does not run.\n", ("Reference",)),
+        ("Test doesn't run.\n", ("Reference",)),
+        ("Test won't run.\n", ("Reference",)),
+        ("Test cannot run.\n", ("Reference",)),
+        ("Test can't execute.\n", ("Reference",)),
+        ("Test did not execute.\n", ("Reference",)),
+        ("Test shouldn't run.\n", ("Reference",)),
     ],
-    ids=["criterion", "checkbox", "ordered-step"],
+    ids=[
+        "test-that-assertion",
+        "check-imperative",
+        "verify-negated-outcome",
+        "does-not-run",
+        "doesnt-run",
+        "wont-run",
+        "cannot-run",
+        "cant-execute",
+        "did-not-execute",
+        "shouldnt-run",
+    ],
 )
-def test_task_acceptance_criteria_supply_verification(acceptance):
+def test_task_verification_distinguishes_actions_from_non_execution(
+    verification,
+    roles,
+):
+    text = (
+        "### Task 1: Update cache storage\n"
+        "Target: src/cache.py\n"
+        f"{verification}"
+    )
+
+    assert classify_attachment_document("docs/other/cache.md", text) == roles
+
+
+@pytest.mark.parametrize(
+    ("acceptance", "roles"),
+    [
+        (
+            "- Cache remains bounded after 100 writes.\n",
+            ("Plan",),
+        ),
+        (
+            "- [ ] Cache writes never exceed the configured bound.\n",
+            ("Plan",),
+        ),
+        (
+            "1. Cache will not exceed 100 entries after writes.\n",
+            ("Plan",),
+        ),
+        ("- Verification steps\n", ("Reference",)),
+        ("- Tests are not required.\n", ("Reference",)),
+        ("- Tests aren't required.\n", ("Reference",)),
+    ],
+    ids=[
+        "declarative-outcome",
+        "checkbox-outcome",
+        "negated-bound-outcome",
+        "topic-fragment",
+        "non-required-tests",
+        "contracted-non-required-tests",
+    ],
+)
+def test_task_acceptance_criteria_require_a_concrete_outcome(
+    acceptance,
+    roles,
+):
     text = (
         "### Task 1: Update cache storage\n"
         "Target: src/cache.py\n"
@@ -843,7 +914,7 @@ def test_task_acceptance_criteria_supply_verification(acceptance):
         f"{acceptance}"
     )
 
-    assert classify_attachment_document("docs/other/cache.md", text) == ("Plan",)
+    assert classify_attachment_document("docs/other/cache.md", text) == roles
 
 
 @pytest.mark.parametrize(
@@ -865,6 +936,46 @@ def test_task_acceptance_criteria_require_a_concrete_item(acceptance):
     assert classify_attachment_document("docs/other/cache.md", text) == (
         "Reference",
     )
+
+
+@pytest.mark.parametrize(
+    ("task_body", "roles"),
+    [
+        (
+            "#### Modify `src/cache.py`\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Plan",),
+        ),
+        (
+            "#### Modify `src/cache.py`\n"
+            "#### Acceptance Criteria\n"
+            "- Cache remains bounded after 100 writes.\n",
+            ("Plan",),
+        ),
+        (
+            "```markdown\n"
+            "#### Modify `src/cache.py`\n"
+            "```\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Reference",),
+        ),
+        (
+            "#### Acceptance Criteria\n"
+            "- Cache remains bounded after 100 writes.\n",
+            ("Reference",),
+        ),
+    ],
+    ids=[
+        "h4-mutation-target",
+        "h4-target-before-acceptance-section",
+        "fenced-h4-target",
+        "acceptance-heading-is-not-target",
+    ],
+)
+def test_task_h4_headings_preserve_action_and_section_state(task_body, roles):
+    text = "### Task 1: Cache storage\n" + task_body
+
+    assert classify_attachment_document("docs/other/cache.md", text) == roles
 
 
 @pytest.mark.parametrize("target", ["CacheTest", "HealthCheck", "PolicyLint"])

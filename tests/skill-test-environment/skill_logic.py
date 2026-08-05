@@ -235,10 +235,21 @@ _COMMAND_INTENT_RE = re.compile(
     r"^(?:build|check|confirm|execute|lint|run|test|validate|verify)\b",
     re.IGNORECASE,
 )
+_NEGATED_AUXILIARY_PATTERN = (
+    r"(?:cannot|[a-z]+n(?:'|\N{RIGHT SINGLE QUOTATION MARK})t|"
+    r"(?:am|are|can|could|did|do|does|had|has|have|"
+    r"is|may|might|must|need|shall|should|was|were|will|would)[ \t]+not)"
+)
+_NEGATED_AUXILIARY_RE = re.compile(
+    rf"^{_NEGATED_AUXILIARY_PATTERN}\b",
+    re.IGNORECASE,
+)
 _NON_EXECUTION_RE = re.compile(
     r"^(?:do\s+not|don't|never|no|omit|skip|without)\b"
     r"|^(?:execute|run)\s+no\b"
-    r"|\b(?:can|could|may|might|must|shall|should|will|would)\s+not\b",
+    rf"|\b{_NEGATED_AUXILIARY_PATTERN}(?:[ \t]+[a-z]+){{0,2}}[ \t]+"
+    r"(?:be[ \t]+)?(?:execut(?:e|ed|ing)|perform(?:ed|ing)?|"
+    r"run|running|required|needed|necessary)\b",
     re.IGNORECASE,
 )
 _DESCRIPTIVE_VERIFICATION_STATE_RE = re.compile(
@@ -246,9 +257,29 @@ _DESCRIPTIVE_VERIFICATION_STATE_RE = re.compile(
     r"(?:are|can|could|has|have|is|may|might|must|shall|should|was|were|will|would)\b",
     re.IGNORECASE,
 )
+_VERIFICATION_NOUN_SUBJECT_RE = re.compile(
+    r"^(?:lint(?:ing)?[ \t]+(?:policy|rules?|status)|"
+    r"test(?:ing)?[ \t]+(?:coverage|results?|status|suite))\b",
+    re.IGNORECASE,
+)
 _VERIFICATION_SECTION_RE = re.compile(
     r"^(?:acceptance(?:\s+criteria)?|build\s+verification|checks?|lint(?:ing)?|"
     r"tests?(?:\s+commands?)?|verification)(?:\s+steps?)?$",
+    re.IGNORECASE,
+)
+_ACCEPTANCE_TOPIC_FRAGMENT_RE = re.compile(
+    r"^(?:acceptance(?:[ \t]+criteria)?|checks?|tests?|testing|"
+    r"verification(?:[ \t]+steps?)?)$",
+    re.IGNORECASE,
+)
+_ACCEPTANCE_OUTCOME_RE = re.compile(
+    r"\b(?:accepts?|allows?|are|blocks?|bounds?|can|cannot|completes?|"
+    r"contains?|creates?|does?|exists?|exits?|fails?|has|have|is|must|"
+    r"passes?|rejects?|remains?|returns?|should|stays?|succeeds?|"
+    r"will|would)\b"
+    r"|\bnever[ \t]+[a-z][a-z0-9_-]*\b"
+    r"|(?:<=|>=|==|!=|<|>|\bat[ \t]+(?:least|most)\b|"
+    r"\bno[ \t]+more[ \t]+than\b)",
     re.IGNORECASE,
 )
 
@@ -462,21 +493,40 @@ def _is_affirmative_verification_action(
     in_verification_section: bool,
 ) -> bool:
     action = _INLINE_CODE_RE.sub("", line.text).strip("* \t")
-    if _NON_EXECUTION_RE.search(action) is not None:
-        return False
-    if _DESCRIPTIVE_VERIFICATION_STATE_RE.search(action) is not None:
-        return False
-    if _VERIFICATION_ACTION_RE.search(action) is not None:
-        return True
     command_spans = tuple(
         code_span.group(1)
         for code_span in _INLINE_CODE_RE.finditer(line.text)
     )
     has_command = any(_is_verification_command(command) for command in command_spans)
-    if _RUN_VERIFICATION_RE.search(action) is not None:
+
+    action_match = _VERIFICATION_ACTION_RE.match(action)
+    if action_match is not None:
+        remainder = action[action_match.end() :].strip()
+        if (
+            remainder
+            and _NEGATED_AUXILIARY_RE.match(remainder) is None
+            and not re.match(r"^(?:never|no|without)\b", remainder, re.IGNORECASE)
+            and _VERIFICATION_NOUN_SUBJECT_RE.match(action) is None
+        ):
+            return True
+        if not remainder and has_command:
+            return True
+
+    run_match = _RUN_VERIFICATION_RE.match(action)
+    if run_match is not None:
+        remainder = action[run_match.end() :].strip()
+        if re.match(r"^(?:never|no|without)\b", remainder, re.IGNORECASE):
+            return False
+        if _NEGATED_AUXILIARY_RE.match(remainder) is not None:
+            return False
         return has_command or _VERIFICATION_NOUN_RE.search(action) is not None
     if has_command and _COMMAND_INTENT_RE.search(action) is not None:
         return True
+
+    if _NON_EXECUTION_RE.search(action) is not None:
+        return False
+    if _DESCRIPTIVE_VERIFICATION_STATE_RE.search(action) is not None:
+        return False
 
     command_only = not action.strip(" .:;,-")
     if has_command and command_only and (
@@ -489,17 +539,24 @@ def _is_affirmative_verification_action(
 def _is_concrete_acceptance_item(line: _MarkdownLine) -> bool:
     if line.list_kind is None:
         return False
-    criterion = _INLINE_CODE_RE.sub(" command ", line.text)
-    return len(re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", criterion)) >= 2
+    criterion = _INLINE_CODE_RE.sub(" command ", line.text).strip("* \t .:;,-")
+    if _NON_EXECUTION_RE.search(criterion) is not None:
+        return False
+    if _ACCEPTANCE_TOPIC_FRAGMENT_RE.fullmatch(criterion) is not None:
+        return False
+    return _ACCEPTANCE_OUTCOME_RE.search(criterion) is not None
 
 
 def _line_has_concrete_implementation_target(
     line: _MarkdownLine,
     *,
     allow_target_declarations: bool,
+    allow_action_heading: bool,
     in_verification_section: bool,
 ) -> bool:
-    if in_verification_section or line.heading_title is not None:
+    if in_verification_section or (
+        line.heading_title is not None and not allow_action_heading
+    ):
         return False
 
     if allow_target_declarations:
@@ -540,23 +597,35 @@ def _plan_signals(
         target = _line_has_concrete_implementation_target(
             title_line,
             allow_target_declarations=False,
+            allow_action_heading=False,
             in_verification_section=False,
         )
 
     section_kind: str | None = None
     for line in lines:
+        action_heading = False
         if line.heading_title is not None:
-            section_kind = (
+            next_section_kind = (
                 _verification_section_kind(line)
                 if allow_target_declarations or allow_acceptance_criteria
                 else None
             )
-            continue
+            section_kind = next_section_kind
+            action_heading = bool(
+                task_title is not None
+                and line.heading_level == 4
+                and next_section_kind is None
+            )
+            if not action_heading:
+                continue
 
         in_verification_section = section_kind is not None
         if (
             not in_verification_section
-            and line.list_kind in {"checklist", "ordered"}
+            and (
+                line.list_kind in {"checklist", "ordered"}
+                or action_heading
+            )
             and _MUTATION_START_RE.match(line.text)
         ):
             mutation = True
@@ -564,6 +633,7 @@ def _plan_signals(
         if _line_has_concrete_implementation_target(
             line,
             allow_target_declarations=allow_target_declarations,
+            allow_action_heading=action_heading,
             in_verification_section=in_verification_section,
         ):
             target = True
