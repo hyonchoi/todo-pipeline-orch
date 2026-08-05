@@ -212,11 +212,34 @@ _TARGET_DECLARATION_RE = re.compile(
     r"(?::(?:\*\*)?|\*\*:)[ \t]*(?P<value>.+)$",
     re.IGNORECASE,
 )
-_VERIFICATION_PROSE_RE = re.compile(
-    r"\b(?:acceptance|checks?|checking|lints?|linting|tests?|testing|"
-    r"verif(?:y|ies|ied|ication))\b",
+_MARKDOWN_LIST_PREFIX_RE = re.compile(
+    r"^\s*(?:\d+[.)]|[-*](?:\s+\[[ xX]\])?)\s+"
+)
+_MARKDOWN_STEP_PREFIX_RE = re.compile(
+    r"^(?:\*\*)?Step\s+\d+\s*[:.)-]\s*",
     re.IGNORECASE,
 )
+_VERIFICATION_ACTION_RE = re.compile(
+    r"^(?:check|confirm|lint|test|validate|verify)\b",
+    re.IGNORECASE,
+)
+_RUN_VERIFICATION_RE = re.compile(
+    r"^(?:execute|run)\b.*\b(?:build|checks?|lint(?:ing)?|tests?|verification)\b",
+    re.IGNORECASE,
+)
+_NEGATED_VERIFICATION_RE = re.compile(
+    r"^(?:do\s+not|don't|never|no|omit|skip|without)\b"
+    r"|^(?:execute|run)\s+no\b"
+    r"|^(?:build|checks?|lint(?:ing)?|tests?|verification)\b.*"
+    r"\b(?:not\s+(?:needed|required)|optional|unnecessary)\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_SECTION_RE = re.compile(
+    r"^(?:acceptance(?:\s+criteria)?|build\s+verification|checks?|lint(?:ing)?|"
+    r"tests?(?:\s+commands?)?|verification)(?:\s+steps?)?$",
+    re.IGNORECASE,
+)
+_NON_ACTION_VERIFICATION_NOUN_RE = re.compile(r"^lint\s+rules?\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -225,19 +248,32 @@ class _TaskSection:
     lines: tuple[str, ...]
 
 
+def _fence_opener(line: str) -> tuple[str, int] | None:
+    """Parse a complete column-zero Markdown fence opening line."""
+    opening = re.fullmatch(
+        r"(?P<marker>`{3,}|~{3,})(?P<info>[^\r\n]*)(?:\r?\n)?",
+        line,
+    )
+    if opening is None:
+        return None
+    marker = opening.group("marker")
+    if marker.startswith("`") and "`" in opening.group("info"):
+        return None
+    return marker[0], len(marker)
+
+
 def _without_fenced_code(text: str) -> str:
     """Return Markdown text with column-zero fenced examples removed."""
     outside: list[str] = []
     fence_marker: str | None = None
     fence_length = 0
     for line in text.splitlines(keepends=True):
-        marker_match = re.match(r"(`{3,}|~{3,})", line)
         if fence_marker is None:
-            if marker_match is None:
+            opener = _fence_opener(line)
+            if opener is None:
                 outside.append(line)
                 continue
-            fence_marker = marker_match.group(1)[0]
-            fence_length = len(marker_match.group(1))
+            fence_marker, fence_length = opener
         elif re.fullmatch(
             rf"{re.escape(fence_marker)}{{{fence_length},}}[ \t]*(?:\r?\n)?",
             line,
@@ -289,6 +325,11 @@ def _is_verification_command(command: str) -> bool:
         return False
     if len(tokens) == 1 and re.search(r"[/\\]|\.[A-Za-z0-9_-]+$", tokens[0]):
         return False
+    if len(tokens) == 1 and re.fullmatch(
+        r"[A-Z][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z0-9_]+)*",
+        tokens[0],
+    ):
+        return False
 
     exact_intents = {
         "build",
@@ -329,6 +370,33 @@ def _is_concrete_implementation_target(value: str) -> bool:
     )
 
 
+def _markdown_action_text(line: str) -> str:
+    text = _MARKDOWN_LIST_PREFIX_RE.sub("", line.strip())
+    text = _MARKDOWN_STEP_PREFIX_RE.sub("", text)
+    return text.strip("* \t")
+
+
+def _is_verification_section(title: str) -> bool:
+    normalized = _INLINE_CODE_RE.sub("", title).strip("*#: \t")
+    return _VERIFICATION_SECTION_RE.fullmatch(normalized) is not None
+
+
+def _is_affirmative_verification_action(line: str) -> bool:
+    action = _markdown_action_text(_INLINE_CODE_RE.sub("", line))
+    if _NEGATED_VERIFICATION_RE.search(action) is not None:
+        return False
+    if _NON_ACTION_VERIFICATION_NOUN_RE.search(action) is not None:
+        return False
+    if _VERIFICATION_ACTION_RE.search(action) is not None:
+        return True
+    if _RUN_VERIFICATION_RE.search(action) is not None:
+        return True
+    return any(
+        _is_verification_command(code_span.group(1))
+        for code_span in _INLINE_CODE_RE.finditer(line)
+    )
+
+
 def _has_concrete_implementation_target(
     text: str,
     *,
@@ -341,8 +409,8 @@ def _has_concrete_implementation_target(
 
         heading_match = re.match(r"^#{1,6}[ \t]+(?P<title>.*)$", line)
         if allow_target_declarations and heading_match is not None:
-            in_verification_section = bool(
-                _VERIFICATION_PROSE_RE.search(heading_match.group("title"))
+            in_verification_section = _is_verification_section(
+                heading_match.group("title")
             )
         if allow_target_declarations and in_verification_section:
             continue
@@ -359,7 +427,7 @@ def _has_concrete_implementation_target(
             prefix = line[: code_span.start()]
             if _MUTATION_WORD_RE.search(prefix) is None:
                 continue
-            if _VERIFICATION_PROSE_RE.search(prefix) is not None:
+            if _is_affirmative_verification_action(line):
                 continue
             if _is_concrete_implementation_target(code_span.group(1)):
                 return True
@@ -372,12 +440,7 @@ def _has_verification(text: str) -> bool:
             continue
         if _TARGET_DECLARATION_RE.match(line) is not None:
             continue
-        if _VERIFICATION_PROSE_RE.search(_INLINE_CODE_RE.sub("", line)) is not None:
-            return True
-        if any(
-            _is_verification_command(code_span.group(1))
-            for code_span in _INLINE_CODE_RE.finditer(line)
-        ):
+        if _is_affirmative_verification_action(line):
             return True
     return False
 
@@ -386,7 +449,7 @@ def _task_is_semantic_plan(task: _TaskSection) -> bool:
     task_text = "\n".join(task.lines)
     task_body = "\n".join(task.lines[1:])
     return bool(
-        _MUTATION_START_RE.match(task.title)
+        (_MUTATION_START_RE.match(task.title) or _ORDERED_MUTATION_RE.search(task_body))
         and _has_concrete_implementation_target(
             task_text,
             allow_target_declarations=True,

@@ -730,6 +730,19 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
             "Target: tests/cache.spec.ts\n",
             ("Reference",),
         ),
+        (
+            "### Task 1: Cache storage\n"
+            "1. Update `src/cache.py` to bound cache size.\n"
+            "2. Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Plan",),
+        ),
+        (
+            "```markdown```\n"
+            "### Task 1: Update cache storage\n"
+            "Change `src/cache.py` to bound cache size.\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Plan",),
+        ),
     ],
     ids=[
         "implementation-task",
@@ -742,10 +755,57 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
         "indented-fence-before-real-task",
         "separate-target-declaration",
         "target-declaration-without-verification",
+        "ordered-mutation-in-task-body",
+        "inline-backticks-before-real-task",
     ],
 )
 def test_task_heading_plan_requires_mutation_target_and_verification(text, roles):
     assert classify_attachment_document("docs/other/cache.md", text) == roles
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        (
+            "### Task 1: Update health behavior\n"
+            "Target: src/health.py\n"
+            "Add health checks for readiness.\n"
+        ),
+        (
+            "### Task 1: Add style policy\n"
+            "Target: pyproject.toml\n"
+            "Add lint rules for imports.\n"
+        ),
+        (
+            "### Task 1: Update cache storage\n"
+            "Target: src/cache.py\n"
+            "No tests are required.\n"
+        ),
+    ],
+    ids=["health-check-noun", "lint-noun", "negated-tests"],
+)
+def test_task_verification_requires_an_affirmative_action(text):
+    assert classify_attachment_document("docs/other/cache.md", text) == (
+        "Reference",
+    )
+
+
+@pytest.mark.parametrize("target", ["CacheTest", "HealthCheck", "PolicyLint"])
+def test_target_declaration_accepts_interface_names_with_verification_suffix(target):
+    text = (
+        "### Task 1: Update cache interface\n"
+        f"Target: {target}\n"
+        "Verify with `uv run pytest tests/test_cache.py`.\n"
+    )
+
+    assert classify_attachment_document("docs/other/cache.md", text) == ("Plan",)
+
+
+def test_existing_todo25_implementation_document_classifies_as_plan():
+    relative = "docs/pipeline/TODO-25-spec-impl.md"
+    text = Path(relative).read_text(encoding="utf-8")
+
+    assert classify_attachment_document(relative, text) == ("Plan",)
 
 
 @pytest.mark.parametrize(
