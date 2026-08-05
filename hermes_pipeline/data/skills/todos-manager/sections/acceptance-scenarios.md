@@ -69,8 +69,9 @@ non-actionable. No separate Plan prompt appears.
 candidate. Its record includes the reason that it matches the TODO scope.
 
 **Walkthrough:** The synthesis displays the one candidate path and relevance
-reason as the Plan suggestion. The user replies `confirm` in the existing
-batched confirmation, then types `y` at the final preview.
+reason as the Plan suggestion. A plain `confirm` requests explicit Plan
+selection; the user selects candidate `1`, confirms the existing batched
+confirmation, then types `y` at the final preview.
 
 **Expected outcome:** The preview and written entry contain
 `**Plan:** docs/gstack/api-rate-limit-plan.md`. The path is selected only by
@@ -335,14 +336,14 @@ repository contract test.
 
 | Requirement group | Executable coverage | Mapping |
 |---|---|---|
-| Role semantics and ownership | `test_combined_plan_and_spec_requires_explicit_combined_choice` | Plan/Spec combined-role behavior is executable. TODO-40 owns attachment behavior; TODO-39 owns runtime selection, prompt consumption, worktree creation, and execution behavior, which remain outside this suite. |
+| Role semantics and ownership | `test_packaged_markdown_policy_drives_the_harness`; `test_combined_plan_and_spec_requires_explicit_combined_choice` | The harness parses the authoritative packaged policy and executes Plan/Spec combined-role behavior. TODO-40 owns attachment behavior; TODO-39 owns runtime selection, prompt consumption, worktree creation, and execution behavior, which remain outside this suite. |
 | Discovery order and exclusions | `test_discovery_obeys_precedence_candidate_limit_and_exclusions` | Executes explicit, Git-changed/untracked, then bounded-search precedence; verifies the five-candidate stop and excluded archive paths. |
-| Discovery budgets and exhaustion | `test_discovery_honors_shared_read_and_search_budgets` | Executes bounded reads/searches and verifies exhaustion plus skipped-source reporting. |
+| Discovery budgets and exhaustion | `test_discovery_honors_shared_read_and_search_budgets`; `test_generic_subject_substring_does_not_establish_strong_relevance` | Executes invocation-counted searches, bounded reads, exhaustion, skipped-source reporting, and strong relevance. |
 | Qualification, relevance, and classification | `test_recognized_and_fallback_document_formats` | Executes recognized gstack/Superpowers formats, semantic fallback Plan qualification, Spec classification, and combined roles. |
 | Path normalization and validation | `test_path_validation_normalizes_inside_paths_and_rejects_escape` | Executes normalization plus absolute/traversal containment, directory, and outside-symlink rejection. |
 | Attachment cardinality and Reference syntax | `test_add_candidate_cardinality_controls_confirmation`; `test_reference_representation_has_no_literal_comma_escape`; `test_revise_references_append_deduplicate_remove_and_exclude_roles` | Executes zero/one/multiple cardinality, deterministic comma-separated storage, literal-comma candidate rejection, ordered deduplication, and Plan/Spec exclusion. |
 | Validation recovery | `test_invalid_manual_value_recovers_without_rediscovery` | Executes field-local correction and verifies discovery runs only once. |
-| Interaction and confirmation | `test_ambiguity_blocks_preview_until_one_candidate_is_selected`; `test_add_supports_manual_and_omitted_attachments_without_early_write` | Executes unresolved-confirm rejection, preview blocking, cancellation, and no write before approval. |
+| Interaction and confirmation | `test_ambiguity_blocks_preview_until_one_candidate_is_selected`; `test_add_supports_manual_and_omitted_attachments_without_early_write`; `test_preview_approval_mutates_actual_todo_markdown_only_after_approval` | Executes unresolved-confirm rejection, preview blocking, cancellation, and real TODO Markdown mutation only after approval. |
 | `--add` candidate handling | `test_add_candidate_cardinality_controls_confirmation`; `test_add_supports_manual_and_omitted_attachments_without_early_write` | Executes zero/one/multiple, manual, omitted, and explicit-none add outcomes. |
 | `--revise` attachment mutation | `test_revise_preserves_replaces_and_removes_singletons`; `test_revise_warns_about_invalid_existing_paths_without_blocking_other_edits`; `test_revise_references_append_deduplicate_remove_and_exclude_roles` | Executes preservation, explicit replacement/removal, non-blocking invalid-existing warnings, Reference append/removal, ordering, and deduplication. |
 | Compatibility and non-mutating attachment audit | `test_legacy_entry_without_attachments_remains_valid`; `test_audit_validates_each_stored_reference_without_mutation` | Executes optional legacy compatibility, tokenized Reference audit, path findings, and non-mutation. |

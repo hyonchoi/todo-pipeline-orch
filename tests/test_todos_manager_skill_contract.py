@@ -159,6 +159,7 @@ def test_acceptance_coverage_maps_the_authoritative_spec_boundary():
 
     expected = {
         "Role semantics and ownership": (
+            "test_packaged_markdown_policy_drives_the_harness",
             "test_combined_plan_and_spec_requires_explicit_combined_choice",
         ),
         "Discovery order and exclusions": (
@@ -166,6 +167,7 @@ def test_acceptance_coverage_maps_the_authoritative_spec_boundary():
         ),
         "Discovery budgets and exhaustion": (
             "test_discovery_honors_shared_read_and_search_budgets",
+            "test_generic_subject_substring_does_not_establish_strong_relevance",
         ),
         "Qualification, relevance, and classification": (
             "test_recognized_and_fallback_document_formats",
@@ -184,6 +186,7 @@ def test_acceptance_coverage_maps_the_authoritative_spec_boundary():
         "Interaction and confirmation": (
             "test_ambiguity_blocks_preview_until_one_candidate_is_selected",
             "test_add_supports_manual_and_omitted_attachments_without_early_write",
+            "test_preview_approval_mutates_actual_todo_markdown_only_after_approval",
         ),
         "`--add` candidate handling": (
             "test_add_candidate_cardinality_controls_confirmation",

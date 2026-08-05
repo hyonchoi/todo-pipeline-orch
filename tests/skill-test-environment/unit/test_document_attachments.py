@@ -9,9 +9,11 @@ from tests.skill_test_environment.skill_logic import (
     AttachmentSelection,
     AttachmentValidationError,
     AttachmentWorkflow,
+    apply_attachment_selection_to_todo,
     audit_attachment_fields,
     classify_attachment_document,
     discover_attachment_candidates,
+    load_attachment_policy,
     parse_stored_references,
     validate_attachment_path,
 )
@@ -30,14 +32,23 @@ def _candidate(path: str, *roles: str) -> AttachmentCandidate:
         roles=roles,
         relevance_reason="explicit task context",
         source="explicit",
+        validation="valid",
     )
+
+
+def test_packaged_markdown_policy_drives_the_harness():
+    policy = load_attachment_policy()
+
+    assert policy["version"] == 1
+    assert policy["candidate_limit"] == 5
+    assert policy["confirmation"]["one"] == "explicit-selection"
 
 
 @pytest.mark.parametrize(
     ("candidates", "state", "selected_plan", "confirm_error"),
     [
         ((), "none detected", None, None),
-        ((_candidate("docs/one.md", "Plan"),), "suggested", "docs/one.md", None),
+        ((_candidate("docs/one.md", "Plan"),), "suggested", None, "Plan requires explicit selection"),
         (
             (
                 _candidate("docs/one.md", "Plan"),
@@ -82,6 +93,25 @@ def test_add_supports_manual_and_omitted_attachments_without_early_write(tmp_pat
     omitted = AttachmentWorkflow(tmp_path, command="add")
     omitted.choose_none("Plan")
     assert omitted.confirm() == AttachmentSelection()
+
+
+def test_preview_approval_mutates_actual_todo_markdown_only_after_approval(tmp_path):
+    _write(tmp_path, "docs/plan.md")
+    todos = tmp_path / "TODOS.md"
+    todos.write_text(
+        "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 2\n\n## Entry Schema\n\n"
+        "schema\n\n## Entries\n\n- [ ] **TODO-1: Example task** — Example summary\n"
+        "  - **What:** Do the work\n  - **Why:** It matters enough\n"
+        "  - **Decisions:** Priority `P2`\n",
+        encoding="utf-8",
+    )
+    before = todos.read_bytes()
+    selection = AttachmentSelection(plan="docs/plan.md")
+
+    assert apply_attachment_selection_to_todo(todos, "TODO-1", selection, approved=False) is False
+    assert todos.read_bytes() == before
+    assert apply_attachment_selection_to_todo(todos, "TODO-1", selection, approved=True) is True
+    assert "  - **Plan:** docs/plan.md" in todos.read_text(encoding="utf-8")
 
 
 def test_ambiguity_blocks_preview_until_one_candidate_is_selected(tmp_path):
@@ -183,6 +213,26 @@ def test_revise_references_append_deduplicate_remove_and_exclude_roles(tmp_path)
         "docs/adr/0001.md",
         "docs/adr/0002.md",
     )
+    assert workflow.role_state("Reference") == "preserved"
+
+
+@pytest.mark.parametrize("operation", ["select", "replace", "combined"])
+def test_plan_and_spec_selection_rejects_existing_reference_conflict(tmp_path, operation):
+    _write(tmp_path, "docs/shared.md")
+    workflow = AttachmentWorkflow(
+        tmp_path,
+        command="revise",
+        existing=AttachmentSelection(references=("docs/shared.md",)),
+        candidates=(_candidate("docs/shared.md", "Plan", "Spec"),),
+    )
+
+    with pytest.raises(ValueError, match="already present in Reference"):
+        if operation == "select":
+            workflow.select_candidate("Plan", 1)
+        elif operation == "replace":
+            workflow.replace("Plan", "docs/shared.md")
+        else:
+            workflow.attach_combined(1)
 
 
 def test_combined_plan_and_spec_requires_explicit_combined_choice(tmp_path):
@@ -232,6 +282,7 @@ def test_discovery_obeys_precedence_candidate_limit_and_exclusions(tmp_path):
         git_paths=("docs/git.md", "docs/archive/ignored.md"),
         search_paths=tuple(paths[2:]),
         subject_terms=("cache",),
+        target_paths=("src/cache.py",),
     )
 
     assert [candidate.source for candidate in result.candidates] == [
@@ -253,18 +304,32 @@ def test_discovery_honors_shared_read_and_search_budgets(tmp_path):
 
     result = discover_attachment_candidates(
         tmp_path,
-        search_paths=tuple(
+        search_batches=(tuple(
             f"docs/superpowers/plans/TODO-40-{index}.md" for index in range(4)
-        ),
+        ),),
         todo_id="TODO-40",
         read_limit=2,
         search_limit=1,
     )
 
-    assert result.reads == 1
+    assert result.reads == 2
     assert result.searches == 1
     assert result.exhausted is True
     assert result.skipped_source == "bounded search"
+
+
+def test_generic_subject_substring_does_not_establish_strong_relevance(tmp_path):
+    plan = "1. Change `src/other.py`.\n2. Verify with `uv run pytest`.\n"
+    _write(tmp_path, "docs/superpowers/plans/cache.md", plan)
+
+    result = discover_attachment_candidates(
+        tmp_path,
+        search_batches=(("docs/superpowers/plans/cache.md",),),
+        subject_terms=("cache",),
+        target_paths=("src/cache.py",),
+    )
+
+    assert result.candidates == ()
 
 
 @pytest.mark.parametrize(
@@ -342,10 +407,11 @@ def test_reference_representation_has_no_literal_comma_escape(tmp_path):
     empty_item = audit_attachment_fields(
         tmp_path,
         "TODO-12",
-        {"Reference": "docs/research, , notes.md"},
+        {"Reference": "docs/research, , notes.md, docs/missing.md"},
     )
     assert [(finding.stored_path, finding.defect) for finding in empty_item] == [
-        ("", "contains an empty path between separators")
+        ("", "contains an empty path between separators"),
+        ("docs/missing.md", "does not exist"),
     ]
 
 
@@ -360,12 +426,12 @@ def test_audit_validates_each_stored_reference_without_mutation(tmp_path):
     findings = audit_attachment_fields(tmp_path, "TODO-12", fields)
 
     assert [(finding.role, finding.stored_path, finding.defect) for finding in findings] == [
-        ("Plan", "docs/missing.md", "does not exist or is not a regular file"),
+        ("Plan", "docs/missing.md", "does not exist"),
         ("Reference", "../outside.md", "resolves outside the repository"),
         (
             "Reference",
             "docs/also-missing.md",
-            "does not exist or is not a regular file",
+            "does not exist",
         ),
     ]
     assert fields == snapshot

@@ -13,7 +13,32 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
+
+
+def load_attachment_policy(skill_root: Path | None = None) -> dict:
+    """Parse the executable policy embedded in the authoritative skill Markdown."""
+    root = skill_root or files("hermes_pipeline.data").joinpath(
+        "skills", "todos-manager"
+    )
+    source = root / "sections" / "document-attachments.md"
+    text = source.read_text(encoding="utf-8")
+    match = re.search(
+        r"```json todos-manager-attachment-policy\n(.*?)\n```",
+        text,
+        re.DOTALL,
+    )
+    if match is None:
+        raise RuntimeError("authoritative attachment policy block is missing")
+    for relative in ("SKILL.md", "sections/auto-research.md", "sections/revise.md"):
+        route = (root / relative).read_text(encoding="utf-8")
+        if "sections/document-attachments.md" not in route:
+            raise RuntimeError(f"{relative} is disconnected from attachment policy")
+    return json.loads(match.group(1))
+
+
+ATTACHMENT_POLICY = load_attachment_policy()
 
 
 @dataclass(frozen=True)
@@ -22,6 +47,7 @@ class AttachmentCandidate:
     roles: tuple[str, ...]
     relevance_reason: str
     source: str
+    validation: str
 
 
 @dataclass(frozen=True)
@@ -75,7 +101,7 @@ def validate_attachment_path(
     if lexical.is_absolute():
         raise AttachmentValidationError(
             "Attachment path must be repository-relative.",
-            defect="is absolute, not repository-relative",
+            defect=ATTACHMENT_POLICY["errors"]["absolute"],
         )
 
     root = repository.resolve()
@@ -86,29 +112,33 @@ def validate_attachment_path(
         if is_symlink:
             raise AttachmentValidationError(
                 "Attachment path is a symlink that resolves outside the repository.",
-                defect="is a symlink that resolves outside the repository",
+                defect=ATTACHMENT_POLICY["errors"]["symlink_outside"],
             )
         raise AttachmentValidationError(
             "Attachment path resolves outside the repository.",
-            defect="resolves outside the repository",
+            defect=ATTACHMENT_POLICY["errors"]["outside"],
+        )
+    if not resolved.exists():
+        raise AttachmentValidationError(
+            "Attachment path does not exist.",
+            defect=ATTACHMENT_POLICY["errors"]["missing"],
+        )
+    if resolved.is_dir():
+        raise AttachmentValidationError(
+            "Attachment path is a directory, not a regular file.",
+            defect=ATTACHMENT_POLICY["errors"]["directory"],
         )
     if not resolved.is_file():
         raise AttachmentValidationError(
-            "Attachment path does not exist or is not a regular file.",
-            defect="does not exist or is not a regular file",
+            "Attachment path is not a regular file.",
+            defect=ATTACHMENT_POLICY["errors"]["not_regular"],
         )
     return resolved.relative_to(root).as_posix()
 
 
 def parse_stored_references(value: str) -> tuple[str, ...]:
     """Parse canonical Reference storage; every comma is a separator."""
-    paths = tuple(part.strip() for part in value.split(","))
-    if any(not path for path in paths):
-        raise AttachmentValidationError(
-            "Reference contains an empty path between separators.",
-            defect="contains an empty path between separators",
-        )
-    return paths
+    return tuple(part.strip() for part in value.split(ATTACHMENT_POLICY["reference_separator"]))
 
 
 def audit_attachment_fields(
@@ -131,25 +161,23 @@ def audit_attachment_fields(
 
     reference_value = fields.get("Reference")
     if reference_value:
-        try:
-            stored_references = parse_stored_references(reference_value)
-        except AttachmentValidationError as exc:
-            findings.append(
-                AttachmentAuditFinding(todo_id, "Reference", "", exc.defect)
-            )
-        else:
-            for stored in stored_references:
-                try:
-                    validate_attachment_path(repository, stored)
-                except AttachmentValidationError as exc:
-                    findings.append(
-                        AttachmentAuditFinding(
-                            todo_id,
-                            "Reference",
-                            stored,
-                            exc.defect,
-                        )
+        for stored in parse_stored_references(reference_value):
+            if not stored:
+                findings.append(
+                    AttachmentAuditFinding(
+                        todo_id,
+                        "Reference",
+                        "",
+                        ATTACHMENT_POLICY["errors"]["empty_reference"],
                     )
+                )
+                continue
+            try:
+                validate_attachment_path(repository, stored)
+            except AttachmentValidationError as exc:
+                findings.append(
+                    AttachmentAuditFinding(todo_id, "Reference", stored, exc.defect)
+                )
     return findings
 
 
@@ -187,17 +215,7 @@ def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ..
 
 def _attachment_path_is_excluded(relative_path: str) -> bool:
     parts = Path(relative_path).parts
-    excluded_parts = {
-        ".git",
-        ".worktrees",
-        "archive",
-        "archives",
-        "dist",
-        "build",
-        "generated",
-        "node_modules",
-        "vendor",
-    }
+    excluded_parts = set(ATTACHMENT_POLICY["excluded_parts"])
     return any(part.lower() in excluded_parts for part in parts)
 
 
@@ -207,11 +225,13 @@ def discover_attachment_candidates(
     explicit_paths: tuple[str, ...] = (),
     git_paths: tuple[str, ...] = (),
     search_paths: tuple[str, ...] = (),
+    search_batches: tuple[tuple[str, ...], ...] = (),
     todo_id: str | None = None,
     subject_terms: tuple[str, ...] = (),
-    read_limit: int = 20,
-    search_limit: int = 10,
-    candidate_limit: int = 5,
+    target_paths: tuple[str, ...] = (),
+    read_limit: int = ATTACHMENT_POLICY["read_limit"],
+    search_limit: int = ATTACHMENT_POLICY["search_limit"],
+    candidate_limit: int = ATTACHMENT_POLICY["candidate_limit"],
 ) -> AttachmentDiscoveryResult:
     """Execute bounded discovery in explicit, Git, then search precedence."""
     candidates: list[AttachmentCandidate] = []
@@ -221,13 +241,22 @@ def discover_attachment_candidates(
     searches = 0
     exhausted = False
     skipped_source: str | None = None
+    if search_paths:
+        search_batches = (search_paths, *search_batches)
     sources = (
         ("explicit", explicit_paths, False),
         ("git changed or untracked", git_paths, False),
-        ("bounded search", search_paths, True),
+        ("bounded search", tuple(path for batch in search_batches for path in batch), True),
     )
     lowered_terms = tuple(term.lower() for term in subject_terms if term)
 
+    search_invocation_paths = {
+        path: invocation
+        for invocation, batch in enumerate(search_batches)
+        for path in batch
+    }
+    counted_searches: set[int] = set()
+    lowered_targets = tuple(path.lower() for path in target_paths)
     for source, paths, is_search in sources:
         for raw_path in paths:
             if len(candidates) >= candidate_limit:
@@ -236,11 +265,14 @@ def discover_attachment_candidates(
             if _attachment_path_is_excluded(raw_path):
                 continue
             if is_search:
-                if searches >= search_limit:
+                invocation = search_invocation_paths[raw_path]
+                if invocation not in counted_searches and searches >= search_limit:
                     exhausted = True
                     skipped_source = source
                     break
-                searches += 1
+                if invocation not in counted_searches:
+                    searches += 1
+                    counted_searches.add(invocation)
             if reads >= read_limit:
                 exhausted = True
                 skipped_source = source
@@ -258,7 +290,7 @@ def discover_attachment_candidates(
             relevant = (
                 source == "explicit"
                 or (todo_id is not None and todo_id.lower() in haystack)
-                or any(term in haystack for term in lowered_terms)
+                or any(target in haystack for target in lowered_targets)
             )
             if not relevant:
                 continue
@@ -266,7 +298,7 @@ def discover_attachment_candidates(
             relevance_reason = (
                 "explicit task context"
                 if source == "explicit"
-                else f"matches {todo_id or next(term for term in lowered_terms if term in haystack)}"
+                else f"matches {todo_id or next(target for target in lowered_targets if target in haystack)}"
             )
             candidates.append(
                 AttachmentCandidate(
@@ -274,6 +306,7 @@ def discover_attachment_candidates(
                     roles=roles,
                     relevance_reason=relevance_reason,
                     source=source,
+                    validation="valid",
                 )
             )
             seen.add(normalized)
@@ -349,7 +382,7 @@ class AttachmentWorkflow:
             if role == "Spec"
             else self._existing.references
         )
-        if existing and current == existing:
+        if existing and (role == "Reference" or current == existing):
             return "preserved"
         if role in self._none_roles:
             return "none detected"
@@ -370,6 +403,8 @@ class AttachmentWorkflow:
         if number < 1 or number > len(candidates):
             raise ValueError(f"invalid {role} candidate number")
         path = candidates[number - 1].path
+        if role in {"Plan", "Spec"} and path in self._references:
+            raise ValueError(f"{role} path is already present in Reference")
         if role == "Plan":
             self._plan = path
         elif role == "Spec":
@@ -385,6 +420,8 @@ class AttachmentWorkflow:
             self.append_reference(raw_path)
             return
         normalized = validate_attachment_path(self.repository, raw_path)
+        if role in {"Plan", "Spec"} and normalized in self._references:
+            raise ValueError(f"{role} path is already present in Reference")
         if role == "Plan":
             self._plan = normalized
         elif role == "Spec":
@@ -413,6 +450,9 @@ class AttachmentWorkflow:
         if number < 1 or number > len(combined):
             raise ValueError("invalid combined candidate number")
         self._plan = combined[number - 1].path
+        if self._plan in self._references:
+            self._plan = None
+            raise ValueError("Plan path is already present in Reference")
         self._spec = combined[number - 1].path
         self._combined_selected = True
         self._changed()
@@ -472,10 +512,7 @@ class AttachmentWorkflow:
             if len(candidates) > 1:
                 raise ValueError(f"{role} is unresolved")
             if len(candidates) == 1:
-                if role == "Plan":
-                    self._plan = candidates[0].path
-                else:
-                    self._spec = candidates[0].path
+                raise ValueError(f"{role} requires explicit selection")
 
         reference_candidates = self._role_candidates("Reference")
         if not self._existing.references and "Reference" not in self._none_roles:
@@ -500,6 +537,38 @@ class AttachmentWorkflow:
             return False
         writer(self.selection)
         return True
+
+
+def apply_attachment_selection_to_todo(
+    todos_path: Path,
+    todo_id: str,
+    selection: AttachmentSelection,
+    *,
+    approved: bool,
+) -> bool:
+    """Apply confirmed attachments to one real TODO Markdown entry."""
+    if not approved:
+        return False
+    original = todos_path.read_text(encoding="utf-8")
+    blocks = extract_entry_blocks(original)
+    matching = next((block for block in blocks if todo_id in block.splitlines()[0]), None)
+    if matching is None:
+        raise ValueError(f"{todo_id} not found")
+    attachment_fields = set(ATTACHMENT_POLICY["fields"])
+    lines = [
+        line
+        for line in matching.rstrip().splitlines()
+        if not any(f"**{field}:**" in line for field in attachment_fields)
+    ]
+    if selection.plan:
+        lines.append(f"  - **Plan:** {selection.plan}")
+    if selection.spec:
+        lines.append(f"  - **Spec:** {selection.spec}")
+    if selection.references:
+        lines.append(f"  - **Reference:** {', '.join(selection.references)}")
+    updated = original.replace(matching, "\n".join(lines), 1)
+    atomic_update_todos(todos_path, lambda _text: updated)
+    return True
 
 
 def scan_ids(text: str) -> set[int]:

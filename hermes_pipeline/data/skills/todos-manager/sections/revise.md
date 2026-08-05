@@ -129,6 +129,9 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
      when the normalized path matches the selected or existing Plan or Spec; a
      Plan or Spec path must never also be added to Reference, whether discovered
      or explicitly requested.
+   - Apply the same exclusion in the reverse direction: selecting, manually
+     setting, or replacing Plan/Spec, including `attach as Plan and Spec`, is
+     rejected when the normalized path is already present in Reference.
    - Offer `attach as Plan and Spec` only when the same validated document
      strongly qualifies for both roles. The user must explicitly select that
      combined Plan and Spec action; it does not imply a Reference attachment.

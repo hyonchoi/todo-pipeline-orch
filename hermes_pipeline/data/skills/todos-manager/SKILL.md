@@ -115,8 +115,9 @@ The skill supports seven subcommands. Each has its own workflow below.
    - **Plan:**, **Spec:**, **Reference:** (optional attachment rows and states from `sections/document-attachments.md`; validate paths before confirmation)
    - **Plan selection:** Keep this row in the same batched confirmation. With
      zero qualified Plans, show `Plan: none detected` and allow confirmation
-     without a Plan. With one candidate, show its path and relevance reason;
-     `confirm` accepts it, or the user may edit it. With multiple candidates,
+     without a Plan. With one candidate, show its path and relevance reason as
+     a suggestion; require an explicit candidate selection, `Plan: <path>`, or
+     `none` before `confirm`. With multiple candidates,
      show numbered paths and reasons and leave Plan unresolved. In that case,
      `confirm` must reject only Plan and request a selection, `Plan: <path>`,
      or `none`. A manual path uses the shared attachment validation without
@@ -176,7 +177,8 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Validate every present attachment value using
      `sections/document-attachments.md`: validate Plan and Spec as single paths.
      For Reference, treat every stored comma as a separator, trim and validate
-     each non-empty item independently, and report empty items. Because stored
+     each non-empty item independently, and report empty items without stopping
+     validation of the remaining items. Because stored
      Reference text has no escaping syntax, never infer a literal-comma path
      after splitting; literal-comma candidates are rejected before storage.
      Report one path-specific finding per defect that the stored representation

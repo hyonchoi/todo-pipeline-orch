@@ -2,6 +2,34 @@
 
 ## Purpose
 
+The fenced JSON block below is the deterministic policy consumed by the
+provider-free contract harness. Keep it authoritative and synchronized with
+the human-readable rules that follow.
+
+```json todos-manager-attachment-policy
+{
+  "version": 1,
+  "read_limit": 20,
+  "search_limit": 10,
+  "candidate_limit": 5,
+  "sources": ["explicit", "git changed or untracked", "bounded search"],
+  "confirmation": {"zero": "none", "one": "explicit-selection", "multiple": "explicit-selection"},
+  "reference_separator": ",",
+  "fields": ["Plan", "Spec", "Reference"],
+  "excluded_parts": [".git", ".worktrees", "archive", "archives", "dist", "build", "generated", "node_modules", "vendor"],
+  "relevance": ["explicit", "todo-id", "concrete-target-overlap"],
+  "errors": {
+    "absolute": "is absolute, not repository-relative",
+    "outside": "resolves outside the repository",
+    "symlink_outside": "is a symlink that resolves outside the repository",
+    "missing": "does not exist",
+    "directory": "is a directory, not a regular file",
+    "not_regular": "is not a regular file",
+    "empty_reference": "contains an empty path between separators"
+  }
+}
+```
+
 This shared policy governs document attachment discovery for both `--add` and
 `--revise`. It consumes the TODO title, summary, TODO ID when available,
 explicit context paths, Git status, the remaining research budget, and current
@@ -46,7 +74,8 @@ resolves outside the repository. Report the applicable attachment-discovery-root
 error from Path normalization and validation before continuing with other roots.
 
 Discovery ends at **five qualified candidates**, not five files considered.
-If the read or search cap is reached first, disclose incomplete discovery and
+Count searches by invocation, not by returned path. If one search invocation
+returns several paths, it consumes one of the ten searches. If the read or search cap is reached first, disclose incomplete discovery and
 the skipped source; do not extend the 20-read/10-search cap.
 
 Never search or accept paths in `.git`, dependency/vendor trees, generated
@@ -68,7 +97,8 @@ location, or author.
 
 Strong relevance signals are, in descending order: an explicit TODO ID or
 task context, close title/summary scope, and substantial overlap with concrete
-change targets. Record the strongest applicable signal in `relevance_reason`.
+change targets. A generic subject substring alone is not strong relevance.
+Record the strongest applicable signal in `relevance_reason`.
 
 Classify each qualified document by role:
 
@@ -103,7 +133,7 @@ validation, when one detected or explicitly supplied filesystem path is known
 to be a single path, reject it if that path contains a literal comma. There is
 no escaping syntax. In a stored `Reference:` value every comma is
 unconditionally a separator: split on every comma, trim each item, reject an
-empty item, and validate each non-empty item as a separate path. Audit must
+empty item, and continue validating each non-empty item as a separate path. Audit must
 never infer that two stored items were one literal-comma path. `Plan` and
 `Spec` each contain one normalized path only.
 
@@ -116,7 +146,13 @@ Remediation: Enter a path relative to the repository root.
 Error: Attachment path resolves outside the repository.
 Remediation: Choose a file inside the repository root.
 
-Error: Attachment path does not exist or is not a regular file.
+Error: Attachment path does not exist.
+Remediation: Choose an existing document file.
+
+Error: Attachment path is a directory, not a regular file.
+Remediation: Choose an existing document file.
+
+Error: Attachment path is not a regular file.
 Remediation: Choose an existing document file.
 
 Error: Reference path contains a comma.
@@ -152,7 +188,8 @@ For each role, report one of these states:
 - `unresolved` when more than one candidate could fill the role;
 - `preserved` when an existing value remains unchanged.
 
-Never silently select a suggested candidate, resolve ambiguity, or rewrite an
+Never silently select a suggested candidate, including during a plain
+`confirm`; require an explicit candidate selection or `none`. Never resolve ambiguity or rewrite an
 existing value. Put Plan, Spec, and Reference paths and states into the
 existing synthesis confirmation alongside the ordinary TODO fields. The
 `--add` and `--revise` confirmation gate must present all roles together,

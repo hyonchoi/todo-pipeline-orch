@@ -14,6 +14,7 @@ from hermes_pipeline.cli import (
 )
 from hermes_pipeline.config import Config
 from hermes_pipeline.phases import load_profile_prerequisites
+from tests.skill_test_environment.skill_logic import load_attachment_policy
 
 TODOS_MANAGER_DATA = files("hermes_pipeline.data").joinpath(
     "skills", "todos-manager"
@@ -575,6 +576,9 @@ class TestCmdSkillsInstall:
             assert (installed / "sections" / name).read_bytes() == (
                 packaged_sections.joinpath(name).read_bytes()
             )
+        assert load_attachment_policy(installed) == load_attachment_policy(
+            Path(str(TODOS_MANAGER_DATA))
+        )
 
     def test_permission_denied_produces_structured_error(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
