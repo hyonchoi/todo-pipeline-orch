@@ -42,6 +42,7 @@ ATTACHMENT_POLICY = load_attachment_policy()
 ATTACHMENT_FIELD_LINE_RE = re.compile(
     r"^  -[ \t]+\*\*(?:Plan|Spec|Reference):\*\*(?:[ \t]+.*)?$"
 )
+TOP_LEVEL_SECTION_RE = re.compile(r"^##(?:[ \t]+|$)")
 
 
 @dataclass(frozen=True)
@@ -136,7 +137,13 @@ def validate_attachment_path(
             "Attachment path is not a regular file.",
             defect=ATTACHMENT_POLICY["errors"]["not_regular"],
         )
-    return resolved.relative_to(root).as_posix()
+    normalized = resolved.relative_to(root).as_posix()
+    if reference_input and "," in normalized:
+        raise AttachmentValidationError(
+            "Reference path contains a comma.",
+            defect="contains a literal comma",
+        )
+    return normalized
 
 
 def parse_stored_references(value: str) -> tuple[str, ...]:
@@ -196,6 +203,12 @@ def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ..
         re.search(
             r"(?im)^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\])\s+(?:\*\*)?"
             r"(?:Step\s+\d+\s*[:.)-]\s*)?"
+            r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
+            r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
+            text,
+        )
+        or re.search(
+            r"(?im)^\s*###\s+Task\s+\d+\s*:\s*(?:\*\*)?"
             r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
             r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
             text,
@@ -648,6 +661,9 @@ def apply_attachment_selection_to_todo(
                 index
                 for index in range(matching_start + 1, entries_end)
                 if ENTRY_HEADER_RE.match(_line_without_ending(document_lines[index]))
+                or TOP_LEVEL_SECTION_RE.match(
+                    _line_without_ending(document_lines[index])
+                )
             ),
             entries_end,
         )

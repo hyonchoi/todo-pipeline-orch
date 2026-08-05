@@ -669,6 +669,27 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
 
 
 @pytest.mark.parametrize(
+    ("text", "roles"),
+    [
+        (
+            "### Task 1: Update cache storage\n"
+            "Change `src/cache.py` to bound cache size.\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Plan",),
+        ),
+        (
+            "### Task 1: Verify cache behavior\n"
+            "Run `uv run pytest tests/test_cache.py`.\n",
+            ("Reference",),
+        ),
+    ],
+    ids=["implementation-task", "verification-only-task"],
+)
+def test_task_heading_plan_requires_mutation_target_and_verification(text, roles):
+    assert classify_attachment_document("docs/other/cache.md", text) == roles
+
+
+@pytest.mark.parametrize(
     ("relative", "roles"),
     [
         (
@@ -733,6 +754,23 @@ def test_reference_representation_has_no_literal_comma_escape(tmp_path):
         ("", "contains an empty path between separators"),
         ("docs/missing.md", "does not exist"),
     ]
+
+
+def test_reference_rejects_comma_in_normalized_symlink_target(tmp_path):
+    _write(tmp_path, "docs/context,notes.md")
+    (tmp_path / "docs" / "context-alias.md").symlink_to("context,notes.md")
+
+    with pytest.raises(AttachmentValidationError, match="contains a comma"):
+        validate_attachment_path(
+            tmp_path,
+            "docs/context-alias.md",
+            reference_input=True,
+        )
+
+    assert validate_attachment_path(
+        tmp_path,
+        "docs/context-alias.md",
+    ) == "docs/context,notes.md"
 
 
 def test_audit_validates_each_stored_reference_without_mutation(tmp_path):
@@ -923,6 +961,28 @@ def test_markdown_mutation_preserves_sibling_entries_and_surrounding_sections(
 
     expected_target = target.replace("docs/old-plan.md", "docs/new-plan.md")
     assert todos.read_text(encoding="utf-8") == prefix + first + expected_target + third + suffix
+
+
+def test_markdown_mutation_bounds_last_entry_at_next_top_level_section(tmp_path):
+    todos = tmp_path / "TODOS.md"
+    prefix = "## Entries\n\n"
+    target = "- [ ] **TODO-1: One** — Summary\n  - **What:** Work.\n\n"
+    notes = "## Notes\n\nKeep this suffix byte-for-byte.\n"
+    todos.write_text(prefix + target + notes, encoding="utf-8")
+
+    apply_attachment_selection_to_todo(
+        todos,
+        "TODO-1",
+        AttachmentSelection(plan="docs/plan.md"),
+        approved=True,
+    )
+
+    expected_target = target.replace(
+        "\n\n",
+        "\n  - **Plan:** docs/plan.md\n\n",
+        1,
+    )
+    assert todos.read_text(encoding="utf-8") == prefix + expected_target + notes
 
 
 def test_markdown_mutation_uses_fresh_text_read_under_lock(tmp_path, monkeypatch):
