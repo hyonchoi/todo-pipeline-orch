@@ -79,6 +79,7 @@ What:            <derived or answered>          [Confidence: high/medium/low]
 Pros:            <derived>
 Cons:            <derived>
 Context:         <path to design doc, or "(none found)">
+Plan:            <none detected, suggested path and reason, or numbered unresolved choices>
 Priority:        <derived or answered>          [Confidence: high/medium/low]
 Effort:          <derived or answered>          [Confidence: high/medium/low]
 Phase:           <derived>                      [Confidence: high/medium/low]
@@ -87,7 +88,6 @@ Test Coverage:   <derived>                      [Confidence: high/medium/low]
 Security Review: <derived>                      [Confidence: high/medium/low]
 UI Review:       <derived or answered>          [Confidence: high/medium/low]
 Depends on:      <derived or answered, or "(none)">
-Plan:            <path and state>
 Spec:            <path and state>
 Reference:       <paths and state>
 ======== END SYNTHESIS ========
@@ -98,6 +98,36 @@ These are pre-fills — confirm or edit each in the next step.
 The attachment rows use the `suggested`, `unresolved`, `none detected`, or
 `preserved` states from `sections/document-attachments.md`. They participate in
 the same synthesis confirmation and the subsequent full-entry preview.
+
+## Plan selection during `--add`
+
+Resolve the Plan row in the existing combined synthesis confirmation; do not
+add a separate yes/no prompt or write anything before the user accepts the
+final preview with `y`.
+
+- With zero qualified Plans, display `Plan: none detected`. Omit `Plan:` from
+  the assembled entry and preview. The user may create this non-actionable
+  TODO without choosing a Plan.
+- With one candidate, display the suggested normalized path and its relevance
+  reason. `confirm` accepts that one candidate; the user may instead edit it
+  to supply a different path or `none`.
+- With multiple candidates, display numbered paths and relevance reasons, and
+  mark `Plan` unresolved. A plain `confirm` rejects only the unresolved Plan
+  row and asks the user to select a number, provide `Plan: <path>`, or enter
+  `none`; it preserves the other confirmed synthesis fields.
+- For a manual `Plan: <path>` response, run the shared path normalization and
+  validation in `sections/document-attachments.md` without rerunning
+  attachment discovery or general research. Keep a valid normalized path for
+  the preview; report the shared validation error and request only a corrected
+  Plan value when invalid.
+- A `none` response resolves the Plan row by omitting it. Only a resolved
+  selected or manual Plan is emitted as `**Plan:** <normalized path>` in the
+  final entry preview.
+
+If the shared research budget is exhausted, disclose the skipped discovery
+source in the synthesis. Continue with the qualified records already found and
+apply the same zero, one, or multiple-candidate rule; do not spend more budget
+to resolve Plan selection.
 
 Confidence rule: fields answered directly by the user (via gap questions) are
 always `high`. Derived fields are `high` if backed by an exact match (design

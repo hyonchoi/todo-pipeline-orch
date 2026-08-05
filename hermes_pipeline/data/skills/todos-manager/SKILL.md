@@ -113,6 +113,15 @@ The skill supports seven subcommands. Each has its own workflow below.
    - **Depends on:** (optional; validate each TODO-<n> exists in TODOS.md or TODOS-archive.md)
    - **Assumptions:** (optional)
    - **Plan:**, **Spec:**, **Reference:** (optional attachment rows and states from `sections/document-attachments.md`; validate paths before confirmation)
+   - **Plan selection:** Keep this row in the same batched confirmation. With
+     zero qualified Plans, show `Plan: none detected` and allow confirmation
+     without a Plan. With one candidate, show its path and relevance reason;
+     `confirm` accepts it, or the user may edit it. With multiple candidates,
+     show numbered paths and reasons and leave Plan unresolved. In that case,
+     `confirm` must reject only Plan and request a selection, `Plan: <path>`,
+     or `none`. A manual path uses the shared attachment validation without
+     rerunning research. Do not show a Plan field in the preview until it is
+     resolved; `none` omits it and permits a non-actionable TODO.
    - If the reply contains an invalid edit (e.g. bad Depends-on ID, out-of-range
      Decisions value), report just that field's error and re-prompt for that
      field only — do not discard the other confirmed edits.
@@ -123,7 +132,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - [ ] **TODO-<n>: <Title>** — <Summary>
      - **What:** ...
      - **Why:** ...
-     [all fields, including Plan, Spec, and Reference attachment states]
+     [all resolved fields, including a selected or manual Plan, Spec, and Reference]
    ======== END PREVIEW ========
 
    Proceed? [y / edit / cancel]

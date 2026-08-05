@@ -67,11 +67,24 @@ def test_attachment_search_roots_are_validated_before_traversal():
 def test_attachment_roles_flow_through_synthesis_and_preview():
     auto_research = skill_text("sections/auto-research.md")
     policy = skill_text("sections/document-attachments.md")
-    assert "Plan:            <path and state>" in auto_research
+    assert (
+        "Plan:            <none detected, suggested path and reason, or numbered unresolved choices>"
+        in auto_research
+    )
     assert "Spec:            <path and state>" in auto_research
     assert "Reference:       <paths and state>" in auto_research
     assert "existing synthesis confirmation" in policy
     assert "subsequent full-entry preview" in policy
+
+
+def test_add_contract_covers_zero_one_and_multiple_plan_candidates():
+    skill = skill_text("SKILL.md")
+    scenarios = skill_text("sections/acceptance-scenarios.md")
+    for phrase in ("Plan: none detected", "one candidate", "multiple candidates"):
+        assert phrase in skill or phrase in scenarios
+    assert "confirm" in scenarios
+    assert "unresolved" in scenarios
+    assert "none" in scenarios
 
 
 def test_revise_always_runs_post_creation_attachment_discovery():

@@ -49,6 +49,86 @@
 
 ---
 
+### Plan selection scenarios for `--add`
+
+#### Scenario A1c: Zero qualified Plans
+
+**Setup:** Auto-research and attachment discovery find zero qualified Plan
+candidates within the shared budget.
+
+**Walkthrough:** The synthesis displays `Plan: none detected`. The user replies
+`confirm`, reviews a preview with no `**Plan:**` field, and types `y`.
+
+**Expected outcome:** The entry is written without `Plan:` and remains
+non-actionable. No separate Plan prompt appears.
+
+#### Scenario A1d: One candidate and an explicit current-context path
+
+**Setup:** The current task context explicitly names
+`docs/gstack/api-rate-limit-plan.md`, which validates as the one relevant Plan
+candidate. Its record includes the reason that it matches the TODO scope.
+
+**Walkthrough:** The synthesis displays the one candidate path and relevance
+reason as the Plan suggestion. The user replies `confirm` in the existing
+batched confirmation, then types `y` at the final preview.
+
+**Expected outcome:** The preview and written entry contain
+`**Plan:** docs/gstack/api-rate-limit-plan.md`. The path is selected only by
+that combined confirmation, not silently from current context.
+
+#### Scenario A1e: Multiple candidates remain unresolved
+
+**Setup:** Discovery finds multiple candidates: two relevant implementation
+plans with their relevance reasons.
+
+**Walkthrough:** The synthesis shows numbered paths, marks Plan unresolved,
+and the user replies `confirm`. The skill rejects only Plan and asks for a
+number, `Plan: <path>`, or `none`. The user selects one number, then confirms
+the unchanged remaining fields and types `y` at the existing preview gate.
+
+**Expected outcome:** No preview is shown while Plan is unresolved. The final
+entry contains only the selected normalized Plan path.
+
+#### Scenario A1f: Manual valid untracked Plan path
+
+**Setup:** No suggested Plan is selected. An untracked regular file
+`docs/superpowers/cache-rework-plan.md` exists inside the repository.
+
+**Walkthrough:** The user replies
+`Plan: docs/superpowers/cache-rework-plan.md`. The skill applies the shared
+path validation and does not rerun discovery or general research. The user
+then confirms the combined synthesis and types `y`.
+
+**Expected outcome:** The normalized manual path appears in the preview and
+written `**Plan:**` field.
+
+#### Scenario A1g: Invalid Plan path correction
+
+**Setup:** Plan is unresolved or being edited.
+
+**Walkthrough:** The user supplies `/tmp/outside-plan.md`. The skill reports
+`Error: Attachment path must be repository-relative.` with its shared
+remediation, retains the other confirmed fields, and requests only a corrected
+Plan value. The user supplies a valid repository-relative path and confirms.
+
+**Expected outcome:** No extra research runs, the invalid value never reaches
+the preview, and the corrected normalized value does.
+
+#### Scenario A1h: Budget exhaustion and cancellation
+
+**Setup:** The combined attachment-discovery and auto-research operation hits
+the 20-file or 10-search cap before every source is searched.
+
+**Walkthrough:** The synthesis discloses the skipped source and uses only
+qualified candidates found before exhaustion. The user cancels at the final
+preview instead of typing `y`.
+
+**Expected outcome:** The skill does not exceed the budget, does not make a
+new Plan guess after exhaustion, and `TODOS.md` remains byte-for-byte
+unchanged after cancellation.
+
+---
+
 ### Scenario A2: `--init` on new project
 
 **Setup:**
