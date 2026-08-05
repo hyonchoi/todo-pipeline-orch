@@ -191,14 +191,47 @@ def audit_attachment_fields(
     return findings
 
 
+_MUTATION_VERB_PATTERN = (
+    r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
+    r"migrate|modify|move|refactor|remove|rename|replace|update|write)"
+)
+_MUTATION_WORD_RE = re.compile(rf"\b{_MUTATION_VERB_PATTERN}\b", re.IGNORECASE)
+_MUTATION_START_RE = re.compile(rf"^{_MUTATION_VERB_PATTERN}\b", re.IGNORECASE)
+_ORDERED_MUTATION_RE = re.compile(
+    rf"(?im)^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\])\s+(?:\*\*)?"
+    rf"(?:Step\s+\d+\s*[:.)-]\s*)?{_MUTATION_VERB_PATTERN}\b"
+)
+_TASK_HEADING_RE = re.compile(
+    r"^###[ \t]+Task[ \t]+\d+[ \t]*:[ \t]*(?:\*\*)?(?P<title>.*)$",
+    re.IGNORECASE,
+)
+_TASK_BOUNDARY_RE = re.compile(r"^#{1,3}(?:[ \t]+|$)")
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_TARGET_DECLARATION_RE = re.compile(
+    r"^[ ]{0,3}(?:[-*][ \t]+)?(?:\*\*)?Targets?"
+    r"(?::(?:\*\*)?|\*\*:)[ \t]*(?P<value>.+)$",
+    re.IGNORECASE,
+)
+_VERIFICATION_PROSE_RE = re.compile(
+    r"\b(?:acceptance|checks?|checking|lints?|linting|tests?|testing|"
+    r"verif(?:y|ies|ied|ication))\b",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _TaskSection:
+    title: str
+    lines: tuple[str, ...]
+
+
 def _without_fenced_code(text: str) -> str:
-    """Return Markdown text with fenced examples removed."""
+    """Return Markdown text with column-zero fenced examples removed."""
     outside: list[str] = []
     fence_marker: str | None = None
     fence_length = 0
     for line in text.splitlines(keepends=True):
-        stripped = line.lstrip()
-        marker_match = re.match(r"(`{3,}|~{3,})", stripped)
+        marker_match = re.match(r"(`{3,}|~{3,})", line)
         if fence_marker is None:
             if marker_match is None:
                 outside.append(line)
@@ -207,7 +240,7 @@ def _without_fenced_code(text: str) -> str:
             fence_length = len(marker_match.group(1))
         elif re.fullmatch(
             rf"{re.escape(fence_marker)}{{{fence_length},}}[ \t]*(?:\r?\n)?",
-            stripped,
+            line,
         ):
             fence_marker = None
             fence_length = 0
@@ -215,22 +248,151 @@ def _without_fenced_code(text: str) -> str:
     return "".join(outside)
 
 
-def _has_concrete_implementation_target(text: str) -> bool:
-    mutation_verb = re.compile(
-        r"\b(?:add|build|change|configure|create|delete|edit|implement|integrate|"
-        r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
-        re.IGNORECASE,
-    )
+def _partition_task_sections(text: str) -> tuple[tuple[_TaskSection, ...], str]:
+    """Separate real Task sections from non-Task document content."""
+    task_sections: list[_TaskSection] = []
+    non_task_lines: list[str] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+
     for line in text.splitlines():
-        for code_span in re.finditer(r"`([^`\n]+)`", line):
-            if mutation_verb.search(line[: code_span.start()]) is None:
+        task_match = _TASK_HEADING_RE.match(line)
+        if task_match is not None:
+            if current_title is not None:
+                task_sections.append(_TaskSection(current_title, tuple(current_lines)))
+            current_title = task_match.group("title").rstrip("*").rstrip()
+            current_lines = [current_title]
+            non_task_lines.append("")
+            continue
+
+        if current_title is not None and _TASK_BOUNDARY_RE.match(line):
+            task_sections.append(_TaskSection(current_title, tuple(current_lines)))
+            current_title = None
+            current_lines = []
+
+        if current_title is None:
+            non_task_lines.append(line)
+        else:
+            current_lines.append(line)
+            non_task_lines.append("")
+
+    if current_title is not None:
+        task_sections.append(_TaskSection(current_title, tuple(current_lines)))
+
+    return tuple(task_sections), "\n".join(non_task_lines)
+
+
+def _is_verification_command(command: str) -> bool:
+    """Return whether an inline command expresses verification intent."""
+    tokens = command.strip().split()
+    if not tokens:
+        return False
+    if len(tokens) == 1 and re.search(r"[/\\]|\.[A-Za-z0-9_-]+$", tokens[0]):
+        return False
+
+    exact_intents = {
+        "build",
+        "check",
+        "checks",
+        "checking",
+        "lint",
+        "linting",
+        "test",
+        "tests",
+        "testing",
+        "verification",
+        "verify",
+    }
+    for token in tokens:
+        if "/" in token or "\\" in token:
+            continue
+        if re.search(r"\.[A-Za-z0-9_-]+$", token):
+            continue
+        parts = re.split(r"[-_.:=]+", token.strip("'\"`$()[]{}<> ").lower())
+        if any(
+            part in exact_intents or part.endswith(("test", "check", "lint"))
+            for part in parts
+            if part
+        ):
+            return True
+    return False
+
+
+def _is_concrete_implementation_target(value: str) -> bool:
+    target = value.strip().strip("`").rstrip(".,;")
+    if not target or _is_verification_command(target):
+        return False
+    return bool(
+        re.search(r"[/\\]|\.[A-Za-z0-9_-]+(?:\b|$)", target)
+        or re.search(r"\S+[ \t]+\S+", target)
+        or re.fullmatch(r"[A-Z][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z0-9_]+)*", target)
+    )
+
+
+def _has_concrete_implementation_target(
+    text: str,
+    *,
+    allow_target_declarations: bool = False,
+) -> bool:
+    in_verification_section = False
+    for line in text.splitlines():
+        if line.startswith(("    ", "\t")):
+            continue
+
+        heading_match = re.match(r"^#{1,6}[ \t]+(?P<title>.*)$", line)
+        if allow_target_declarations and heading_match is not None:
+            in_verification_section = bool(
+                _VERIFICATION_PROSE_RE.search(heading_match.group("title"))
+            )
+        if allow_target_declarations and in_verification_section:
+            continue
+
+        if allow_target_declarations:
+            declaration = _TARGET_DECLARATION_RE.match(line)
+            if declaration is not None:
+                value = declaration.group("value")
+                candidates = _INLINE_CODE_RE.findall(value) or [value]
+                if any(_is_concrete_implementation_target(item) for item in candidates):
+                    return True
+
+        for code_span in _INLINE_CODE_RE.finditer(line):
+            prefix = line[: code_span.start()]
+            if _MUTATION_WORD_RE.search(prefix) is None:
                 continue
-            target = code_span.group(1)
-            if re.search(r"\b(?:pytest|unittest|tox|nox)\b", target, re.IGNORECASE):
+            if _VERIFICATION_PROSE_RE.search(prefix) is not None:
                 continue
-            if re.search(r"[/\\]|\.[a-zA-Z0-9]+|\buv\s+run\b", target):
+            if _is_concrete_implementation_target(code_span.group(1)):
                 return True
     return False
+
+
+def _has_verification(text: str) -> bool:
+    for line in text.splitlines():
+        if line.startswith(("    ", "\t")):
+            continue
+        if _TARGET_DECLARATION_RE.match(line) is not None:
+            continue
+        if _VERIFICATION_PROSE_RE.search(_INLINE_CODE_RE.sub("", line)) is not None:
+            return True
+        if any(
+            _is_verification_command(code_span.group(1))
+            for code_span in _INLINE_CODE_RE.finditer(line)
+        ):
+            return True
+    return False
+
+
+def _task_is_semantic_plan(task: _TaskSection) -> bool:
+    task_text = "\n".join(task.lines)
+    task_body = "\n".join(task.lines[1:])
+    return bool(
+        _MUTATION_START_RE.match(task.title)
+        and _has_concrete_implementation_target(
+            task_text,
+            allow_target_declarations=True,
+        )
+        and _has_verification(task_body)
+    )
 
 
 def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ...]:
@@ -242,30 +404,14 @@ def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ..
         normalized.startswith("docs/gstack/")
         and any(marker in lower_text for marker in ("status: approved", "verdict:"))
     ) or normalized.startswith("docs/superpowers/plans/")
-    implementation_work = bool(
-        re.search(
-            r"(?im)^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\])\s+(?:\*\*)?"
-            r"(?:Step\s+\d+\s*[:.)-]\s*)?"
-            r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
-            r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
-            semantic_text,
-        )
-        or re.search(
-            r"(?im)^###\s+Task\s+\d+\s*:\s*(?:\*\*)?"
-            r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
-            r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
-            semantic_text,
-        )
+    task_sections, non_task_text = _partition_task_sections(semantic_text)
+    task_plan = any(_task_is_semantic_plan(task) for task in task_sections)
+    fallback_plan = bool(
+        _ORDERED_MUTATION_RE.search(non_task_text)
+        and _has_concrete_implementation_target(non_task_text)
+        and _has_verification(non_task_text)
     )
-    concrete_target = _has_concrete_implementation_target(semantic_text)
-    verification = bool(
-        re.search(
-            r"\b(?:verify|verification|test|acceptance)\b",
-            semantic_text,
-            re.IGNORECASE,
-        )
-    )
-    plan = recognized_plan or (implementation_work and concrete_target and verification)
+    plan = recognized_plan or task_plan or fallback_plan
     spec = bool(
         re.search(r"(?im)^#{2,4}\s+Outcome\b", text)
         and re.search(

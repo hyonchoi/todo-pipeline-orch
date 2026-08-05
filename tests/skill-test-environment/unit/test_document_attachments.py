@@ -701,6 +701,35 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
             "Verify with `uv run pytest tests/test_cache.py`.\n",
             ("Reference",),
         ),
+        (
+            "### Task 1: Build cache checks\n"
+            "Build: `uv run tpo test --phase build`.\n",
+            ("Reference",),
+        ),
+        (
+            "### Task 1: Update cache checks\n"
+            "Update: `npm test -- tests/cache.spec.ts`.\n",
+            ("Reference",),
+        ),
+        (
+            "    ```markdown\n"
+            "### Task 1: Update cache storage\n"
+            "Change `src/cache.py` to bound cache size.\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Plan",),
+        ),
+        (
+            "### Task 1: Update cache storage\n"
+            "Target: src/cache.py\n"
+            "Bound cache size during writes.\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n",
+            ("Plan",),
+        ),
+        (
+            "### Task 1: Update cache suite\n"
+            "Target: tests/cache.spec.ts\n",
+            ("Reference",),
+        ),
     ],
     ids=[
         "implementation-task",
@@ -708,6 +737,11 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
         "indented-task-example",
         "fenced-task-example",
         "verification-command-without-change-target",
+        "tpo-test-command-without-change-target",
+        "npm-test-command-without-change-target",
+        "indented-fence-before-real-task",
+        "separate-target-declaration",
+        "target-declaration-without-verification",
     ],
 )
 def test_task_heading_plan_requires_mutation_target_and_verification(text, roles):
