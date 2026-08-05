@@ -105,16 +105,12 @@ Resolve the Plan row in the existing combined synthesis confirmation; do not
 add a separate yes/no prompt or write anything before the user accepts the
 final preview with `y`.
 
-- With zero qualified Plans, display `Plan: none detected`. Omit `Plan:` from
-  the assembled entry and preview. The user may create this non-actionable
-  TODO without choosing a Plan.
-- With one candidate, display the suggested normalized path and its relevance
-  reason. `confirm` accepts that one candidate; the user may instead edit it
-  to supply a different path or `none`.
-- With multiple candidates, display numbered paths and relevance reasons, and
-  mark `Plan` unresolved. A plain `confirm` rejects only the unresolved Plan
-  row and asks the user to select a number, provide `Plan: <path>`, or enter
-  `none`; it preserves the other confirmed synthesis fields.
+Apply the authoritative candidate-cardinality state machine in
+`sections/document-attachments.md` without restating or overriding its
+zero/one/multiple confirmation rules here. Auto-research renders each candidate
+record and current role state, then delegates selection, explicit `none`, and
+plain-`confirm` handling to that shared policy.
+
 - For a manual `Plan: <path>` response, run the shared path normalization and
   validation in `sections/document-attachments.md` without rerunning
   attachment discovery or general research. Keep a valid normalized path for
@@ -126,8 +122,8 @@ final preview with `y`.
 
 If the shared research budget is exhausted, disclose the skipped discovery
 source in the synthesis. Continue with the qualified records already found and
-apply the same zero, one, or multiple-candidate rule; do not spend more budget
-to resolve Plan selection.
+apply the shared state machine; do not spend more budget to resolve Plan
+selection.
 
 Confidence rule: fields answered directly by the user (via gap questions) are
 always `high`. Derived fields are `high` if backed by an exact match (design

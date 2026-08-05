@@ -1,13 +1,30 @@
+import re
 from importlib.resources import files
 from pathlib import Path
 
 import hermes_pipeline.harness as harness
 
 DATA = files("hermes_pipeline").joinpath("data", "skills", "todos-manager")
+CANONICAL_ATTACHMENT_CONFIRMATION = (
+    "Attachments may be proposed by `--add` or `--revise`, but require explicit "
+    "user confirmation"
+)
 
 
 def skill_text(relative: str) -> str:
     return DATA.joinpath(*relative.split("/")).read_text(encoding="utf-8")
+
+
+def format_rules_block(text: str) -> str:
+    marker = "> **Format rules (enforced by `todos-manager` skill):**"
+    lines = text.splitlines()
+    start = lines.index(marker)
+    block = []
+    for line in lines[start:]:
+        if not line.startswith(">"):
+            break
+        block.append(line)
+    return "\n".join(block)
 
 
 def test_schema_defines_document_attachment_roles():
@@ -18,16 +35,29 @@ def test_schema_defines_document_attachment_roles():
     assert "supplementary" in schema
 
 
-def test_schema_copies_do_not_claim_spec_reference_are_revise_only():
-    copies = [
-        skill_text("sections/schema.md"),
-        skill_text("sections/id-assignment.md"),
-        Path("tests/skill-test-environment/demo-project/TODOS.md").read_text(),
-        Path(harness.__file__).read_text(),
-    ]
-    for text in copies:
-        assert "Spec:**/**Reference:** are `--revise`-only" not in text
-        assert "**Plan:**" in text
+def test_every_canonical_preamble_has_current_attachment_contract():
+    canonical_preamble = format_rules_block(skill_text("sections/schema.md"))
+    copies = {
+        "ID assignment template": skill_text("sections/id-assignment.md"),
+        "demo project": Path(
+            "tests/skill-test-environment/demo-project/TODOS.md"
+        ).read_text(encoding="utf-8"),
+        "harness fixture": harness._get_todos_for_fixture("happy-path"),
+        "repository TODOs": Path("TODOS.md").read_text(encoding="utf-8"),
+    }
+
+    for name, text in copies.items():
+        preamble = format_rules_block(text)
+        assert preamble == canonical_preamble, name
+        optional_fields = next(
+            line for line in preamble.splitlines() if "Optional fields:" in line
+        )
+        assert optional_fields.index("**Plan:**") < optional_fields.index("**Spec:**"), name
+        assert optional_fields.index("**Spec:**") < optional_fields.index(
+            "**Reference:**"
+        ), name
+        assert "Spec:**/**Reference:** are `--revise`-only" not in preamble, name
+        assert f"> - {CANONICAL_ATTACHMENT_CONFIRMATION}" in preamble, name
 
 
 def test_document_attachment_policy_is_shared_and_bounded():
@@ -77,6 +107,26 @@ def test_attachment_roles_flow_through_synthesis_and_preview():
     assert "subsequent full-entry preview" in policy
 
 
+def test_auto_research_delegates_confirmation_authority_to_shared_policy():
+    policy = skill_text("sections/document-attachments.md")
+    auto_research = skill_text("sections/auto-research.md")
+    assert '"one": "explicit-selection"' in policy
+    assert "authoritative candidate-cardinality state machine" in auto_research
+
+    contradictory_confirmation = re.compile(
+        r"(?:plain\s+)?`confirm`\s+accepts?[^.\n]{0,80}(?:one|lone)\s+candidate",
+        re.IGNORECASE,
+    )
+    for relative in (
+        "SKILL.md",
+        "sections/auto-research.md",
+        "sections/document-attachments.md",
+        "sections/revise.md",
+        "sections/acceptance-scenarios.md",
+    ):
+        assert not contradictory_confirmation.search(skill_text(relative)), relative
+
+
 def test_add_contract_covers_zero_one_and_multiple_plan_candidates():
     skill = skill_text("SKILL.md")
     scenarios = skill_text("sections/acceptance-scenarios.md")
@@ -85,6 +135,16 @@ def test_add_contract_covers_zero_one_and_multiple_plan_candidates():
     assert "confirm" in scenarios
     assert "unresolved" in scenarios
     assert "none" in scenarios
+
+
+def test_budget_exhaustion_scenario_resolves_plan_before_preview():
+    scenarios = skill_text("sections/acceptance-scenarios.md")
+    scenario = scenarios.split(
+        "#### Scenario A1h: Budget exhaustion and cancellation", 1
+    )[1].split("---", 1)[0]
+    resolution = "explicitly resolves the Plan row"
+    assert resolution in scenario
+    assert scenario.index(resolution) < scenario.index("final preview")
 
 
 def test_revise_always_runs_post_creation_attachment_discovery():

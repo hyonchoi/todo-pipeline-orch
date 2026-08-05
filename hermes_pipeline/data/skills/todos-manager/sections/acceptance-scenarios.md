@@ -117,12 +117,15 @@ the preview, and the corrected normalized value does.
 
 #### Scenario A1h: Budget exhaustion and cancellation
 
-**Setup:** The combined attachment-discovery and auto-research operation hits
-the 20-file or 10-search cap before every source is searched.
+**Setup:** The combined attachment-discovery and auto-research operation finds
+two qualified Plan candidates, then hits the 20-file or 10-search cap before
+every source is searched.
 
 **Walkthrough:** The synthesis discloses the skipped source and uses only
-qualified candidates found before exhaustion. The user cancels at the final
-preview instead of typing `y`.
+qualified candidates found before exhaustion. A plain `confirm` is rejected
+while Plan is unresolved. The user explicitly resolves the Plan row by
+selecting one candidate or entering `none`, confirms the synthesis, then
+cancels at the final preview instead of typing `y`.
 
 **Expected outcome:** The skill does not exceed the budget, does not make a
 new Plan guess after exhaustion, and `TODOS.md` remains byte-for-byte

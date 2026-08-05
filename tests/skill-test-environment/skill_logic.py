@@ -39,6 +39,9 @@ def load_attachment_policy(skill_root: Path | None = None) -> dict:
 
 
 ATTACHMENT_POLICY = load_attachment_policy()
+ATTACHMENT_FIELD_LINE_RE = re.compile(
+    r"^  -[ \t]+\*\*(?:Plan|Spec|Reference):\*\*(?:[ \t]+.*)?$"
+)
 
 
 @dataclass(frozen=True)
@@ -189,8 +192,14 @@ def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ..
         normalized.startswith("docs/gstack/")
         and any(marker in lower_text for marker in ("status: approved", "verdict:"))
     ) or normalized.startswith("docs/superpowers/plans/")
-    ordered_work = bool(
-        re.search(r"(?m)^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\]|#{2,4}\s+Task\b)", text)
+    implementation_work = bool(
+        re.search(
+            r"(?im)^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\])\s+(?:\*\*)?"
+            r"(?:Step\s+\d+\s*[:.)-]\s*)?"
+            r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
+            r"migrate|modify|move|refactor|remove|rename|replace|update|write)\b",
+            text,
+        )
     )
     concrete_target = bool(
         re.search(r"`[^`\n]*(?:[/\\]|\.[a-zA-Z0-9]+|uv run|pytest)[^`\n]*`", text)
@@ -198,10 +207,14 @@ def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ..
     verification = bool(
         re.search(r"\b(?:verify|verification|test|acceptance)\b", text, re.IGNORECASE)
     )
-    plan = recognized_plan or (ordered_work and concrete_target and verification)
+    plan = recognized_plan or (implementation_work and concrete_target and verification)
     spec = bool(
         re.search(r"(?im)^#{2,4}\s+Outcome\b", text)
-        and re.search(r"(?im)^#{2,4}\s+Acceptance(?: criteria)?\b", text)
+        and re.search(
+            r"(?im)^#{2,4}\s+(?:Acceptance(?: criteria)?|Requirements?|"
+            r"Compatibility and completion|[^\n#]*\bContract)\b",
+            text,
+        )
     )
     roles: list[str] = []
     if plan:
@@ -256,6 +269,20 @@ def discover_attachment_candidates(
         for term in re.findall(r"[A-Za-z0-9]{4,}", title_summary)
         if term.lower() not in generic_terms
     }
+    canonical_todo_id = (
+        re.fullmatch(r"TODO-[1-9]\d*", todo_id, re.IGNORECASE)
+        if todo_id is not None
+        else None
+    )
+    todo_id_pattern = (
+        re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(canonical_todo_id.group(0))}"
+            r"(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+        if canonical_todo_id is not None
+        else None
+    )
     for source, batches in sources:
         for batch in batches:
             if source == source_names[2]:
@@ -291,13 +318,27 @@ def discover_attachment_candidates(
                 )
                 relevant = (
                     ("explicit" in ATTACHMENT_POLICY["relevance"] and source == source_names[0])
-                    or ("todo-id" in ATTACHMENT_POLICY["relevance"] and todo_id is not None and todo_id.lower() in haystack)
+                    or (
+                        "todo-id" in ATTACHMENT_POLICY["relevance"]
+                        and todo_id_pattern is not None
+                        and todo_id_pattern.search(haystack) is not None
+                    )
                     or ("close-scope" in ATTACHMENT_POLICY["relevance"] and close_scope)
                     or ("concrete-target-overlap" in ATTACHMENT_POLICY["relevance"] and any(target in haystack for target in lowered_targets))
                 )
                 if not relevant:
                     continue
                 roles = classify_attachment_document(normalized, text)
+                if "Reference" in roles:
+                    try:
+                        validate_attachment_path(
+                            repository,
+                            raw_path,
+                            reference_input=True,
+                        )
+                    except AttachmentValidationError as exc:
+                        errors.append(f"{raw_path}: {exc}")
+                        continue
                 reason = "explicit task context" if source == source_names[0] else "strong relevance"
                 candidates.append(AttachmentCandidate(normalized, roles, reason, source, "valid"))
                 seen.add(normalized)
@@ -577,32 +618,85 @@ def apply_attachment_selection_to_todo(
         return False
 
     def transform(current: str) -> str:
-        blocks = extract_entry_blocks(current)
         wanted = int(todo_id.removeprefix("TODO-"))
-        matching = next(
+        document_lines = current.splitlines(keepends=True)
+        entries_spans = [
+            (start, end)
+            for heading, start, end in _section_spans(document_lines)
+            if heading == "## Entries"
+        ]
+        if len(entries_spans) != 1:
+            raise ValueError("TODOS.md must contain exactly one ## Entries section")
+        entries_start, entries_end = entries_spans[0]
+        matching_start = next(
             (
-                block
-                for block in blocks
-                if (match := ENTRY_HEADER_RE.match(block.splitlines()[0]))
+                index
+                for index in range(entries_start, entries_end)
+                if (
+                    match := ENTRY_HEADER_RE.match(
+                        _line_without_ending(document_lines[index])
+                    )
+                )
                 and int(match.group(2)) == wanted
             ),
             None,
         )
-        if matching is None:
+        if matching_start is None:
             raise ValueError(f"{todo_id} not found")
-        attachment_fields = set(ATTACHMENT_POLICY["fields"])
-        lines = [
+        matching_end = next(
+            (
+                index
+                for index in range(matching_start + 1, entries_end)
+                if ENTRY_HEADER_RE.match(_line_without_ending(document_lines[index]))
+            ),
+            entries_end,
+        )
+
+        entry_lines = document_lines[matching_start:matching_end]
+        trailing_blank_lines: list[str] = []
+        while entry_lines and not _line_without_ending(entry_lines[-1]).strip():
+            trailing_blank_lines.insert(0, entry_lines.pop())
+
+        retained_lines = [
             line
-            for line in matching.rstrip().splitlines()
-            if not any(f"**{field}:**" in line for field in attachment_fields)
+            for line in entry_lines
+            if ATTACHMENT_FIELD_LINE_RE.fullmatch(_line_without_ending(line)) is None
         ]
+        attachment_lines = []
         if selection.plan:
-            lines.append(f"  - **Plan:** {selection.plan}")
+            attachment_lines.append(f"  - **Plan:** {selection.plan}")
         if selection.spec:
-            lines.append(f"  - **Spec:** {selection.spec}")
+            attachment_lines.append(f"  - **Spec:** {selection.spec}")
         if selection.references:
-            lines.append(f"  - **Reference:** {', '.join(selection.references)}")
-        return current.replace(matching, "\n".join(lines), 1)
+            attachment_lines.append(
+                f"  - **Reference:** {', '.join(selection.references)}"
+            )
+
+        newline = _detect_newline(current)
+        if attachment_lines and retained_lines and not retained_lines[-1].endswith(
+            ("\n", "\r\n")
+        ):
+            retained_lines[-1] += newline
+        needs_terminal_newline = (
+            bool(trailing_blank_lines)
+            or matching_end < entries_end
+            or current.endswith(("\n", "\r\n"))
+        )
+        rendered_attachments = [
+            line
+            + (
+                newline
+                if index < len(attachment_lines) - 1 or needs_terminal_newline
+                else ""
+            )
+            for index, line in enumerate(attachment_lines)
+        ]
+        replacement = retained_lines + rendered_attachments + trailing_blank_lines
+        return "".join(
+            document_lines[:matching_start]
+            + replacement
+            + document_lines[matching_end:]
+        )
 
     atomic_update_todos(todos_path, transform)
     return True

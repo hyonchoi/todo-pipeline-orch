@@ -447,6 +447,24 @@ def test_discovery_honors_shared_read_and_search_budgets(tmp_path):
     assert result.skipped_source == "bounded search"
 
 
+def test_todo_id_relevance_uses_canonical_numeric_boundaries(tmp_path):
+    plan = "1. Change `src/cache.py`.\n2. Verify with `uv run pytest`.\n"
+    paths = tuple(
+        f"docs/superpowers/plans/TODO-{number}-plan.md"
+        for number in (4, 40, 400)
+    )
+    for path in paths:
+        _write(tmp_path, path, plan)
+
+    result = discover_attachment_candidates(
+        tmp_path,
+        search_batches=(paths,),
+        todo_id="TODO-4",
+    )
+
+    assert [candidate.path for candidate in result.candidates] == [paths[0]]
+
+
 def test_generic_subject_substring_does_not_establish_strong_relevance(tmp_path):
     plan = "1. Change `src/other.py`.\n2. Verify with `uv run pytest`.\n"
     _write(tmp_path, "docs/superpowers/plans/cache.md", plan)
@@ -538,6 +556,65 @@ def test_search_accounting_counts_empty_and_repeated_result_invocations(tmp_path
     assert result.reads == 2
 
 
+def test_discovery_rejects_reference_comma_immediately_after_classification(
+    tmp_path,
+):
+    relative = "docs/context,notes.md"
+    _write(tmp_path, relative, "Background material for the task.\n")
+
+    result = discover_attachment_candidates(
+        tmp_path,
+        explicit_paths=(relative,),
+    )
+
+    assert result.candidates == ()
+    assert result.errors == (f"{relative}: Reference path contains a comma.",)
+
+
+@pytest.mark.parametrize(
+    ("relative", "text", "roles"),
+    [
+        (
+            "docs/implementation,notes.md",
+            "TODO-40\n1. Change `src/cache.py`.\n2. Verify with `uv run pytest`.\n",
+            ("Plan",),
+        ),
+        (
+            "docs/requirements,notes.md",
+            "TODO-40\n## Outcome\nBound cache size.\n"
+            "## Acceptance criteria\n- enforced\n",
+            ("Spec",),
+        ),
+        (
+            "docs/combined,notes.md",
+            "TODO-40\n## Outcome\nBound cache size.\n"
+            "## Acceptance criteria\n- enforced\n"
+            "1. Change `src/cache.py`.\n2. Verify with `uv run pytest`.\n",
+            ("Plan", "Spec"),
+        ),
+    ],
+    ids=["plan", "spec", "combined"],
+)
+def test_discovery_allows_commas_for_non_reference_roles(
+    tmp_path,
+    relative,
+    text,
+    roles,
+):
+    _write(tmp_path, relative, text)
+
+    result = discover_attachment_candidates(
+        tmp_path,
+        search_batches=((relative,),),
+        todo_id="TODO-40",
+    )
+
+    assert [(candidate.path, candidate.roles) for candidate in result.candidates] == [
+        (relative, roles)
+    ]
+    assert result.errors == ()
+
+
 @pytest.mark.parametrize(
     ("relative", "text", "roles"),
     [
@@ -571,6 +648,43 @@ def test_search_accounting_counts_empty_and_repeated_result_invocations(tmp_path
     ids=["gstack", "superpowers", "fallback-plan", "spec", "combined"],
 )
 def test_recognized_and_fallback_document_formats(relative, text, roles):
+    assert classify_attachment_document(relative, text) == roles
+
+
+@pytest.mark.parametrize(
+    ("text", "roles"),
+    [
+        (
+            "- [ ] Add `src/cache.py`.\n- [ ] Verify with `uv run pytest`.\n",
+            ("Plan",),
+        ),
+        ("1. Run `uv run pytest`.\n", ("Reference",)),
+        ("1. Test `src/cache.py` with `uv run pytest`.\n", ("Reference",)),
+        ("1. Verify `src/cache.py` with `uv run pytest`.\n", ("Reference",)),
+    ],
+    ids=["implementation-checklist", "run-only", "test-only", "verify-only"],
+)
+def test_semantic_plan_requires_an_implementation_mutation(text, roles):
+    assert classify_attachment_document("docs/other/notes.md", text) == roles
+
+
+@pytest.mark.parametrize(
+    ("relative", "roles"),
+    [
+        (
+            "docs/superpowers/plans/2026-08-04-todo-40-document-attachments.md",
+            ("Plan",),
+        ),
+        (
+            "docs/superpowers/specs/2026-08-04-todo-40-document-attachments-design.md",
+            ("Spec",),
+        ),
+    ],
+    ids=["todo-40-plan", "todo-40-design-spec"],
+)
+def test_todo40_governing_documents_classify_by_actual_role(relative, roles):
+    text = Path(relative).read_text(encoding="utf-8")
+
     assert classify_attachment_document(relative, text) == roles
 
 
@@ -671,6 +785,144 @@ def test_markdown_mutation_matches_exact_todo_id(tmp_path):
     apply_attachment_selection_to_todo(todos, "TODO-1", AttachmentSelection(plan="docs/one.md"), approved=True)
     text = todos.read_text(encoding="utf-8")
     assert text.index("**Plan:** docs/one.md") > text.index("TODO-1: One")
+
+
+def test_markdown_mutation_preserves_attachment_label_mentions_in_other_fields(
+    tmp_path,
+):
+    todos = tmp_path / "TODOS.md"
+    todos.write_text(
+        "## Entries\n\n- [ ] **TODO-1: One** — Summary\n"
+        "  - **What:** Explain the **Plan:** role without changing this sentence.\n"
+        "  - **Why:** Preserve **Spec:** and **Reference:** mentions too.\n"
+        "  - **Plan:** docs/old-plan.md\n",
+        encoding="utf-8",
+    )
+
+    apply_attachment_selection_to_todo(
+        todos,
+        "TODO-1",
+        AttachmentSelection(plan="docs/new-plan.md"),
+        approved=True,
+    )
+
+    text = todos.read_text(encoding="utf-8")
+    assert "  - **What:** Explain the **Plan:** role without changing this sentence." in text
+    assert "  - **Why:** Preserve **Spec:** and **Reference:** mentions too." in text
+    assert "  - **Plan:** docs/old-plan.md" not in text
+    assert "  - **Plan:** docs/new-plan.md" in text
+
+
+def test_markdown_mutation_preserves_nested_attachment_examples(tmp_path):
+    todos = tmp_path / "TODOS.md"
+    nested_example = "    - **Plan:** docs/example-only.md"
+    todos.write_text(
+        "## Entries\n\n- [ ] **TODO-1: One** — Summary\n"
+        "  - **Context:** Example syntax follows.\n"
+        f"{nested_example}\n"
+        "  - **Plan:** docs/old-plan.md\n",
+        encoding="utf-8",
+    )
+
+    apply_attachment_selection_to_todo(
+        todos,
+        "TODO-1",
+        AttachmentSelection(plan="docs/new-plan.md"),
+        approved=True,
+    )
+
+    text = todos.read_text(encoding="utf-8")
+    assert nested_example in text
+    assert "  - **Plan:** docs/old-plan.md" not in text
+    assert "  - **Plan:** docs/new-plan.md" in text
+
+
+def test_markdown_mutation_replaces_only_selected_entry_span_under_entries(
+    tmp_path,
+):
+    todos = tmp_path / "TODOS.md"
+    repeated_entry = (
+        "- [ ] **TODO-1: One** — Summary\n"
+        "  - **What:** Keep the repeated example intact.\n"
+        "  - **Plan:** docs/old-plan.md\n"
+    )
+    todos.write_text(
+        "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 2\n\n"
+        "## Entry Schema\n\n```markdown\n"
+        f"{repeated_entry}```\n\n## Entries\n\n{repeated_entry}",
+        encoding="utf-8",
+    )
+    before = todos.read_text(encoding="utf-8")
+    schema_before = before.split("## Entry Schema", 1)[1].split("## Entries", 1)[0]
+
+    apply_attachment_selection_to_todo(
+        todos,
+        "TODO-1",
+        AttachmentSelection(plan="docs/new-plan.md"),
+        approved=True,
+    )
+
+    after = todos.read_text(encoding="utf-8")
+    schema_after = after.split("## Entry Schema", 1)[1].split("## Entries", 1)[0]
+    entries_after = after.split("## Entries", 1)[1]
+    assert schema_after == schema_before
+    assert "  - **Plan:** docs/old-plan.md" not in entries_after
+    assert "  - **Plan:** docs/new-plan.md" in entries_after
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 2\n",
+        (
+            "## Entries\n\n- [ ] **TODO-1: One** — First\n"
+            "  - **What:** First entry.\n\n"
+            "## Entries\n\n- [ ] **TODO-2: Two** — Second\n"
+            "  - **What:** Second entry.\n"
+        ),
+        "## Entries\n\n- [ ] **TODO-2: Two** — Second\n  - **What:** Second.\n",
+    ],
+    ids=["missing-entries", "duplicate-entries", "missing-todo"],
+)
+def test_markdown_mutation_rejects_invalid_target_without_writing(tmp_path, document):
+    todos = tmp_path / "TODOS.md"
+    todos.write_text(document, encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        apply_attachment_selection_to_todo(
+            todos,
+            "TODO-1",
+            AttachmentSelection(plan="docs/new-plan.md"),
+            approved=True,
+        )
+
+    assert todos.read_text(encoding="utf-8") == document
+
+
+def test_markdown_mutation_preserves_sibling_entries_and_surrounding_sections(
+    tmp_path,
+):
+    todos = tmp_path / "TODOS.md"
+    prefix = "# TODOS\n\n## Metadata\n\nNEXT_TODO_ID: 4\n\n## Entries\n\n"
+    first = "- [ ] **TODO-1: One** — First\n  - **What:** First entry.\n\n"
+    target = (
+        "- [ ] **TODO-2: Two** — Target\n"
+        "  - **What:** Target entry.\n"
+        "  - **Plan:** docs/old-plan.md\n\n"
+    )
+    third = "- [ ] **TODO-3: Three** — Third\n  - **What:** Third entry.\n\n"
+    suffix = "## Notes\n\nKeep this suffix byte-for-byte.\n"
+    todos.write_text(prefix + first + target + third + suffix, encoding="utf-8")
+
+    apply_attachment_selection_to_todo(
+        todos,
+        "TODO-2",
+        AttachmentSelection(plan="docs/new-plan.md"),
+        approved=True,
+    )
+
+    expected_target = target.replace("docs/old-plan.md", "docs/new-plan.md")
+    assert todos.read_text(encoding="utf-8") == prefix + first + expected_target + third + suffix
 
 
 def test_markdown_mutation_uses_fresh_text_read_under_lock(tmp_path, monkeypatch):
