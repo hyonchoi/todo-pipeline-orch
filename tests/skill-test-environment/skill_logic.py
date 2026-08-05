@@ -229,6 +229,9 @@ def discover_attachment_candidates(
     todo_id: str | None = None,
     subject_terms: tuple[str, ...] = (),
     target_paths: tuple[str, ...] = (),
+    title_summary: str = "",
+    reads_used: int = 0,
+    searches_used: int = 0,
     read_limit: int = ATTACHMENT_POLICY["read_limit"],
     search_limit: int = ATTACHMENT_POLICY["search_limit"],
     candidate_limit: int = ATTACHMENT_POLICY["candidate_limit"],
@@ -237,79 +240,61 @@ def discover_attachment_candidates(
     candidates: list[AttachmentCandidate] = []
     errors: list[str] = []
     seen: set[str] = set()
-    reads = 0
-    searches = 0
+    reads = reads_used
+    searches = searches_used
     exhausted = False
     skipped_source: str | None = None
     if search_paths:
         search_batches = (search_paths, *search_batches)
-    sources = (
-        ("explicit", explicit_paths, False),
-        ("git changed or untracked", git_paths, False),
-        ("bounded search", tuple(path for batch in search_batches for path in batch), True),
-    )
-    lowered_terms = tuple(term.lower() for term in subject_terms if term)
-
-    search_invocation_paths = {
-        path: invocation
-        for invocation, batch in enumerate(search_batches)
-        for path in batch
-    }
-    counted_searches: set[int] = set()
+    source_names = ATTACHMENT_POLICY["sources"]
+    sources = ((source_names[0], (explicit_paths,)), (source_names[1], (git_paths,)), (source_names[2], search_batches))
     lowered_targets = tuple(path.lower() for path in target_paths)
-    for source, paths, is_search in sources:
-        for raw_path in paths:
-            if len(candidates) >= candidate_limit:
-                skipped_source = source
-                break
-            if _attachment_path_is_excluded(raw_path):
-                continue
-            if is_search:
-                invocation = search_invocation_paths[raw_path]
-                if invocation not in counted_searches and searches >= search_limit:
+    scope_terms = {term.lower() for term in re.findall(r"[A-Za-z0-9]{4,}", title_summary)}
+    for source, batches in sources:
+        for batch in batches:
+            if source == source_names[2]:
+                if searches >= search_limit:
                     exhausted = True
                     skipped_source = source
                     break
-                if invocation not in counted_searches:
-                    searches += 1
-                    counted_searches.add(invocation)
-            if reads >= read_limit:
-                exhausted = True
+                searches += 1
+            for raw_path in batch:
+                if len(candidates) >= candidate_limit:
+                    skipped_source = source
+                    break
+                if _attachment_path_is_excluded(raw_path):
+                    continue
+                if reads >= read_limit:
+                    exhausted = True
+                    skipped_source = source
+                    break
+                try:
+                    normalized = validate_attachment_path(repository, raw_path)
+                except AttachmentValidationError as exc:
+                    errors.append(f"{raw_path}: {exc}")
+                    continue
+                reads += 1
+                if normalized in seen:
+                    continue
+                text = (repository.resolve() / normalized).read_text(encoding="utf-8")
+                haystack = f"{normalized}\n{text}".lower()
+                document_terms = set(re.findall(r"[a-z0-9]{4,}", haystack))
+                close_scope = len(scope_terms & document_terms) >= 2
+                relevant = (
+                    ("explicit" in ATTACHMENT_POLICY["relevance"] and source == source_names[0])
+                    or ("todo-id" in ATTACHMENT_POLICY["relevance"] and todo_id is not None and todo_id.lower() in haystack)
+                    or ("close-scope" in ATTACHMENT_POLICY["relevance"] and close_scope)
+                    or ("concrete-target-overlap" in ATTACHMENT_POLICY["relevance"] and any(target in haystack for target in lowered_targets))
+                )
+                if not relevant:
+                    continue
+                roles = classify_attachment_document(normalized, text)
+                reason = "explicit task context" if source == source_names[0] else "strong relevance"
+                candidates.append(AttachmentCandidate(normalized, roles, reason, source, "valid"))
+                seen.add(normalized)
+            if len(candidates) >= candidate_limit:
                 skipped_source = source
                 break
-            try:
-                normalized = validate_attachment_path(repository, raw_path)
-            except AttachmentValidationError as exc:
-                errors.append(f"{raw_path}: {exc}")
-                continue
-            reads += 1
-            if normalized in seen:
-                continue
-            text = (repository.resolve() / normalized).read_text(encoding="utf-8")
-            haystack = f"{normalized}\n{text}".lower()
-            relevant = (
-                source == "explicit"
-                or (todo_id is not None and todo_id.lower() in haystack)
-                or any(target in haystack for target in lowered_targets)
-            )
-            if not relevant:
-                continue
-            roles = classify_attachment_document(normalized, text)
-            relevance_reason = (
-                "explicit task context"
-                if source == "explicit"
-                else f"matches {todo_id or next(target for target in lowered_targets if target in haystack)}"
-            )
-            candidates.append(
-                AttachmentCandidate(
-                    path=normalized,
-                    roles=roles,
-                    relevance_reason=relevance_reason,
-                    source=source,
-                    validation="valid",
-                )
-            )
-            seen.add(normalized)
         if skipped_source is not None:
             break
 
@@ -333,6 +318,8 @@ class AttachmentWorkflow:
         command: str,
         candidates: tuple[AttachmentCandidate, ...] = (),
         existing: AttachmentSelection = AttachmentSelection(),
+        todos_path: Path | None = None,
+        todo_id: str | None = None,
     ):
         if command not in {"add", "revise"}:
             raise ValueError("command must be add or revise")
@@ -343,6 +330,9 @@ class AttachmentWorkflow:
         self._spec = existing.spec
         self._references = list(existing.references)
         self._existing = existing
+        self.todos_path = todos_path
+        self.todo_id = todo_id
+        self._references_changed = False
         self._none_roles: set[str] = set()
         self._combined_selected = False
         self._confirmed = False
@@ -382,7 +372,9 @@ class AttachmentWorkflow:
             if role == "Spec"
             else self._existing.references
         )
-        if existing and (role == "Reference" or current == existing):
+        if existing and (role != "Reference" and current == existing):
+            return "preserved"
+        if role == "Reference" and existing and not self._references_changed:
             return "preserved"
         if role in self._none_roles:
             return "none detected"
@@ -449,11 +441,11 @@ class AttachmentWorkflow:
         ]
         if number < 1 or number > len(combined):
             raise ValueError("invalid combined candidate number")
-        self._plan = combined[number - 1].path
-        if self._plan in self._references:
-            self._plan = None
+        path = combined[number - 1].path
+        if path in self._references:
             raise ValueError("Plan path is already present in Reference")
-        self._spec = combined[number - 1].path
+        self._plan = path
+        self._spec = path
         self._combined_selected = True
         self._changed()
 
@@ -482,12 +474,14 @@ class AttachmentWorkflow:
             raise ValueError("Reference path matches Plan or Spec")
         if normalized not in self._references:
             self._references.append(normalized)
+            self._references_changed = True
         self._changed()
 
     def remove_reference(self, stored_path: str) -> None:
         self._references = [
             reference for reference in self._references if reference != stored_path
         ]
+        self._references_changed = self._references != list(self._existing.references)
         self._changed()
 
     def confirm(self) -> AttachmentSelection:
@@ -515,13 +509,12 @@ class AttachmentWorkflow:
                 raise ValueError(f"{role} requires explicit selection")
 
         reference_candidates = self._role_candidates("Reference")
-        if not self._existing.references and "Reference" not in self._none_roles:
+        if not self._references and "Reference" not in self._none_roles:
             if len(reference_candidates) > 1:
                 raise ValueError("Reference is unresolved")
             if len(reference_candidates) == 1:
-                path = reference_candidates[0].path
-                if path not in {self._plan, self._spec} and path not in self._references:
-                    self._references.append(path)
+                if ATTACHMENT_POLICY["confirmation"]["one"] == "explicit-selection":
+                    raise ValueError("Reference requires explicit selection")
         self._confirmed = True
         return self.selection
 
@@ -529,13 +522,20 @@ class AttachmentWorkflow:
         self,
         *,
         approved: bool,
-        writer: Callable[[AttachmentSelection], None],
+        writer: Callable[[AttachmentSelection], None] | None = None,
     ) -> bool:
         if not self._confirmed:
             raise RuntimeError("attachment confirmation is required before preview approval")
         if not approved:
             return False
-        writer(self.selection)
+        if writer is not None:
+            writer(self.selection)
+        elif self.todos_path is not None and self.todo_id is not None:
+            apply_attachment_selection_to_todo(
+                self.todos_path, self.todo_id, self.selection, approved=True
+            )
+        else:
+            raise RuntimeError("writer or TODO target is required")
         return True
 
 
@@ -549,26 +549,48 @@ def apply_attachment_selection_to_todo(
     """Apply confirmed attachments to one real TODO Markdown entry."""
     if not approved:
         return False
-    original = todos_path.read_text(encoding="utf-8")
-    blocks = extract_entry_blocks(original)
-    matching = next((block for block in blocks if todo_id in block.splitlines()[0]), None)
-    if matching is None:
-        raise ValueError(f"{todo_id} not found")
-    attachment_fields = set(ATTACHMENT_POLICY["fields"])
-    lines = [
-        line
-        for line in matching.rstrip().splitlines()
-        if not any(f"**{field}:**" in line for field in attachment_fields)
-    ]
-    if selection.plan:
-        lines.append(f"  - **Plan:** {selection.plan}")
-    if selection.spec:
-        lines.append(f"  - **Spec:** {selection.spec}")
-    if selection.references:
-        lines.append(f"  - **Reference:** {', '.join(selection.references)}")
-    updated = original.replace(matching, "\n".join(lines), 1)
-    atomic_update_todos(todos_path, lambda _text: updated)
+
+    def transform(current: str) -> str:
+        blocks = extract_entry_blocks(current)
+        wanted = int(todo_id.removeprefix("TODO-"))
+        matching = next(
+            (
+                block
+                for block in blocks
+                if (match := ENTRY_HEADER_RE.match(block.splitlines()[0]))
+                and int(match.group(2)) == wanted
+            ),
+            None,
+        )
+        if matching is None:
+            raise ValueError(f"{todo_id} not found")
+        attachment_fields = set(ATTACHMENT_POLICY["fields"])
+        lines = [
+            line
+            for line in matching.rstrip().splitlines()
+            if not any(f"**{field}:**" in line for field in attachment_fields)
+        ]
+        if selection.plan:
+            lines.append(f"  - **Plan:** {selection.plan}")
+        if selection.spec:
+            lines.append(f"  - **Spec:** {selection.spec}")
+        if selection.references:
+            lines.append(f"  - **Reference:** {', '.join(selection.references)}")
+        return current.replace(matching, "\n".join(lines), 1)
+
+    atomic_update_todos(todos_path, transform)
     return True
+
+
+def audit_todo_markdown(repository: Path, todos_path: Path) -> list[AttachmentAuditFinding]:
+    """Parse and audit attachments from real TODO Markdown without writing."""
+    findings: list[AttachmentAuditFinding] = []
+    text = todos_path.read_text(encoding="utf-8")
+    for entry in parse_entries(text):
+        findings.extend(
+            audit_attachment_fields(repository, f"TODO-{entry['id']}", entry["fields"])
+        )
+    return findings
 
 
 def scan_ids(text: str) -> set[int]:

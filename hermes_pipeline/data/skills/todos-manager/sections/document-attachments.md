@@ -17,7 +17,7 @@ the human-readable rules that follow.
   "reference_separator": ",",
   "fields": ["Plan", "Spec", "Reference"],
   "excluded_parts": [".git", ".worktrees", "archive", "archives", "dist", "build", "generated", "node_modules", "vendor"],
-  "relevance": ["explicit", "todo-id", "concrete-target-overlap"],
+  "relevance": ["explicit", "todo-id", "close-scope", "concrete-target-overlap"],
   "errors": {
     "absolute": "is absolute, not repository-relative",
     "outside": "resolves outside the repository",

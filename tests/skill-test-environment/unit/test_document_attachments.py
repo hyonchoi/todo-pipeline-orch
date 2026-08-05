@@ -11,6 +11,7 @@ from tests.skill_test_environment.skill_logic import (
     AttachmentWorkflow,
     apply_attachment_selection_to_todo,
     audit_attachment_fields,
+    audit_todo_markdown,
     classify_attachment_document,
     discover_attachment_candidates,
     load_attachment_policy,
@@ -42,6 +43,8 @@ def test_packaged_markdown_policy_drives_the_harness():
     assert policy["version"] == 1
     assert policy["candidate_limit"] == 5
     assert policy["confirmation"]["one"] == "explicit-selection"
+    assert policy["sources"] == ["explicit", "git changed or untracked", "bounded search"]
+    assert policy["relevance"] == ["explicit", "todo-id", "close-scope", "concrete-target-overlap"]
 
 
 @pytest.mark.parametrize(
@@ -114,6 +117,21 @@ def test_preview_approval_mutates_actual_todo_markdown_only_after_approval(tmp_p
     assert "  - **Plan:** docs/plan.md" in todos.read_text(encoding="utf-8")
 
 
+def test_workflow_finish_owns_real_todo_mutation_and_cancellation(tmp_path):
+    _write(tmp_path, "docs/plan.md")
+    todos = tmp_path / "TODOS.md"
+    todos.write_text("## Entries\n\n- [ ] **TODO-1: One** — Summary here\n  - **What:** x\n", encoding="utf-8")
+    before = todos.read_bytes()
+    workflow = AttachmentWorkflow(tmp_path, command="revise", todos_path=todos, todo_id="TODO-1")
+    workflow.select_manual("Plan", "docs/plan.md")
+    workflow.confirm()
+
+    assert workflow.finish(approved=False) is False
+    assert todos.read_bytes() == before
+    assert workflow.finish(approved=True) is True
+    assert "**Plan:** docs/plan.md" in todos.read_text(encoding="utf-8")
+
+
 def test_ambiguity_blocks_preview_until_one_candidate_is_selected(tmp_path):
     _write(tmp_path, "docs/one.md")
     _write(tmp_path, "docs/two.md")
@@ -133,6 +151,15 @@ def test_ambiguity_blocks_preview_until_one_candidate_is_selected(tmp_path):
 
     workflow.select_candidate("Plan", 2)
     assert workflow.confirm().plan == "docs/two.md"
+
+
+def test_lone_reference_suggestion_requires_explicit_selection(tmp_path):
+    _write(tmp_path, "docs/context.md")
+    workflow = AttachmentWorkflow(tmp_path, command="add", candidates=(_candidate("docs/context.md", "Reference"),))
+    with pytest.raises(ValueError, match="Reference requires explicit selection"):
+        workflow.confirm()
+    workflow.select_candidate("Reference", 1)
+    assert workflow.confirm().references == ("docs/context.md",)
 
 
 def test_revise_preserves_replaces_and_removes_singletons(tmp_path):
@@ -213,6 +240,12 @@ def test_revise_references_append_deduplicate_remove_and_exclude_roles(tmp_path)
         "docs/adr/0001.md",
         "docs/adr/0002.md",
     )
+    assert workflow.role_state("Reference") == "selected"
+
+
+def test_unchanged_existing_references_report_preserved(tmp_path):
+    _write(tmp_path, "docs/context.md")
+    workflow = AttachmentWorkflow(tmp_path, command="revise", existing=AttachmentSelection(references=("docs/context.md",)))
     assert workflow.role_state("Reference") == "preserved"
 
 
@@ -251,6 +284,20 @@ def test_combined_plan_and_spec_requires_explicit_combined_choice(tmp_path):
         plan="docs/combined.md",
         spec="docs/combined.md",
     )
+
+
+def test_rejected_combined_selection_preserves_prior_plan(tmp_path):
+    for path in ("docs/prior.md", "docs/shared.md"):
+        _write(tmp_path, path)
+    workflow = AttachmentWorkflow(
+        tmp_path,
+        command="revise",
+        existing=AttachmentSelection(plan="docs/prior.md", references=("docs/shared.md",)),
+        candidates=(_candidate("docs/shared.md", "Plan", "Spec"),),
+    )
+    with pytest.raises(ValueError, match="already present in Reference"):
+        workflow.attach_combined(1)
+    assert workflow.selection.plan == "docs/prior.md"
 
 
 def test_invalid_manual_value_recovers_without_rediscovery(tmp_path):
@@ -308,12 +355,14 @@ def test_discovery_honors_shared_read_and_search_budgets(tmp_path):
             f"docs/superpowers/plans/TODO-40-{index}.md" for index in range(4)
         ),),
         todo_id="TODO-40",
-        read_limit=2,
-        search_limit=1,
+        read_limit=9,
+        search_limit=3,
+        reads_used=7,
+        searches_used=2,
     )
 
-    assert result.reads == 2
-    assert result.searches == 1
+    assert result.reads == 9
+    assert result.searches == 3
     assert result.exhausted is True
     assert result.skipped_source == "bounded search"
 
@@ -330,6 +379,27 @@ def test_generic_subject_substring_does_not_establish_strong_relevance(tmp_path)
     )
 
     assert result.candidates == ()
+
+
+def test_close_title_summary_scope_is_strong_relevance(tmp_path):
+    _write(tmp_path, "docs/superpowers/plans/cache-rework.md", "1. Change `src/other.py`.\n2. Verify tests.\n")
+    result = discover_attachment_candidates(
+        tmp_path,
+        search_batches=(("docs/superpowers/plans/cache-rework.md",),),
+        title_summary="Cache rework for bounded storage",
+    )
+    assert [candidate.path for candidate in result.candidates] == ["docs/superpowers/plans/cache-rework.md"]
+
+
+def test_search_accounting_counts_empty_and_repeated_result_invocations(tmp_path):
+    _write(tmp_path, "docs/plan.md", "1. Change `src/cache.py`.\n2. Verify tests.\n")
+    result = discover_attachment_candidates(
+        tmp_path,
+        search_batches=((), ("docs/plan.md",), ("docs/plan.md",)),
+        target_paths=("src/cache.py",),
+    )
+    assert result.searches == 3
+    assert result.reads == 2
 
 
 @pytest.mark.parametrize(
@@ -435,6 +505,50 @@ def test_audit_validates_each_stored_reference_without_mutation(tmp_path):
         ),
     ]
     assert fields == snapshot
+
+
+def test_audit_parses_real_todo_markdown_and_never_writes(tmp_path):
+    _write(tmp_path, "docs/valid.md")
+    todos = tmp_path / "TODOS.md"
+    todos.write_text(
+        "## Entries\n\n- [ ] **TODO-12: Audit** — Audit attachments\n"
+        "  - **What:** x\n  - **Plan:** docs/missing.md\n"
+        "  - **Spec:** docs/valid.md\n"
+        "  - **Reference:** docs/valid.md, , docs/also-missing.md\n",
+        encoding="utf-8",
+    )
+    before = todos.read_bytes()
+    findings = audit_todo_markdown(tmp_path, todos)
+    assert [(item.role, item.stored_path) for item in findings] == [
+        ("Plan", "docs/missing.md"), ("Reference", ""), ("Reference", "docs/also-missing.md")
+    ]
+    assert todos.read_bytes() == before
+
+
+def test_markdown_mutation_matches_exact_todo_id(tmp_path):
+    todos = tmp_path / "TODOS.md"
+    todos.write_text(
+        "## Entries\n\n- [ ] **TODO-10: Ten** — Summary ten\n  - **What:** ten\n\n"
+        "- [ ] **TODO-1: One** — Summary one\n  - **What:** one\n",
+        encoding="utf-8",
+    )
+    apply_attachment_selection_to_todo(todos, "TODO-1", AttachmentSelection(plan="docs/one.md"), approved=True)
+    text = todos.read_text(encoding="utf-8")
+    assert text.index("**Plan:** docs/one.md") > text.index("TODO-1: One")
+
+
+def test_markdown_mutation_uses_fresh_text_read_under_lock(tmp_path, monkeypatch):
+    from tests.skill_test_environment import skill_logic
+
+    todos = tmp_path / "TODOS.md"
+    todos.write_text("## Entries\n\n- [ ] **TODO-1: One** — Summary\n  - **What:** old\n", encoding="utf-8")
+    monkeypatch.setattr(
+        skill_logic,
+        "_before_todo_lock",
+        lambda: todos.write_text(todos.read_text(encoding="utf-8").replace("old", "fresh"), encoding="utf-8"),
+    )
+    apply_attachment_selection_to_todo(todos, "TODO-1", AttachmentSelection(plan="docs/plan.md"), approved=True)
+    assert "**What:** fresh" in todos.read_text(encoding="utf-8")
 
 
 def test_legacy_entry_without_attachments_remains_valid(tmp_path):
