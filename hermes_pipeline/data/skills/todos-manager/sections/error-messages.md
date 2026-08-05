@@ -54,6 +54,27 @@ Error: NEXT_TODO_ID must be a positive base-10 integer.
 Remediation: Run `todos-manager --audit` to repair the tracked metadata.
 ```
 
+Attachment audit findings identify the TODO, field, stored path, and exact
+defect. Emit one finding and its remediation per invalid path; do not rewrite
+the attachment value. Examples:
+
+```text
+- TODO-12 **Plan:** `docs/missing-plan.md` does not exist.
+  Remediation: Choose an existing document file.
+
+- TODO-13 **Spec:** `docs/specs` is a directory, not a regular file.
+  Remediation: Choose an existing document file.
+
+- TODO-14 **Plan:** `../outside-plan.md` resolves outside the repository.
+  Remediation: Choose a file inside the repository root.
+
+- TODO-15 **Spec:** `docs/external-spec.md` is a symlink that resolves outside the repository.
+  Remediation: Choose a file inside the repository root.
+
+- TODO-16 **Reference:** `docs/research,notes.md` contains a literal comma.
+  Remediation: Use one comma-separated Reference path per value; rename paths containing commas.
+```
+
 ### Error & Rescue Map
 
 | Error | Root Cause | Remediation |

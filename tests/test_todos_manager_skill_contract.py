@@ -110,3 +110,54 @@ def test_revise_rejects_reference_append_matching_plan_or_spec():
     assert (
         "normalized path matches the selected or existing Plan or Spec" in revise
     )
+
+
+def test_audit_validates_attachments_without_mutating_them():
+    skill = skill_text("SKILL.md")
+    required = [
+        "Validate every present attachment value",
+        "one path-specific finding per defect",
+        "never require, remove, replace, or repair attachments",
+    ]
+    for phrase in required:
+        assert phrase in skill
+
+
+def test_audit_errors_cover_each_attachment_path_defect():
+    errors = skill_text("sections/error-messages.md")
+    expected_examples = [
+        "docs/missing-plan.md` does not exist",
+        "docs/specs` is a directory, not a regular file",
+        "../outside-plan.md` resolves outside the repository",
+        "docs/external-spec.md` is a symlink that resolves outside the repository",
+        "docs/research,notes.md` contains a literal comma",
+    ]
+    for example in expected_examples:
+        assert example in errors
+    assert errors.count("Remediation: Choose an existing document file.") >= 2
+    assert errors.count("Remediation: Choose a file inside the repository root.") >= 2
+    assert (
+        "Remediation: Use one comma-separated Reference path per value; rename paths "
+        "containing commas."
+    ) in errors
+
+
+def test_acceptance_coverage_maps_the_authoritative_spec_boundary():
+    scenarios = skill_text("sections/acceptance-scenarios.md")
+    assert "## TODO-40 specification coverage" in scenarios
+    required_rows = [
+        "Role semantics and ownership",
+        "Discovery order and exclusions",
+        "Discovery budgets and exhaustion",
+        "Qualification, relevance, and classification",
+        "Path normalization and validation",
+        "Interaction and confirmation",
+        "`--add` candidate handling",
+        "`--revise` attachment mutation",
+        "Compatibility and non-mutating attachment audit",
+        "Packaged and installed parity",
+    ]
+    for row in required_rows:
+        assert row in scenarios
+    assert "TODO-39" in scenarios
+    assert "outside this suite" in scenarios

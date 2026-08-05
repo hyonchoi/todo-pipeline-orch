@@ -325,3 +325,26 @@ pre-existing order, and the explicit removal leaves only
 - Failed write: if replacement fails, `TODOS.md` remains byte-for-byte unchanged and `.hermes/todo_id_counter` is not advanced.
 - Conflict: if `NEXT_TODO_ID` points to an active TODO, reconciliation scans active plus archive IDs, writes the corrected value, and continues.
 - Misplaced metadata: `NEXT_TODO_ID` under `## Entry Schema`, `## Entries`, or outside canonical sections is invalid and is repaired to exactly one line under `## Metadata`.
+
+## TODO-40 specification coverage
+
+The authoritative contract is
+`docs/superpowers/specs/2026-08-04-todo-40-document-attachments-design.md`.
+The following table maps every requirement group to an acceptance scenario or
+repository contract test.
+
+| Requirement group | Covered by |
+|---|---|
+| Role semantics and ownership | `test_schema_defines_document_attachment_roles`, Scenarios A1i/A1j, and the schema contract cover Plan as execution authority, Spec as outcome contract, Reference as supplementary context, and the combined Plan-and-Spec role. TODO-40 owns attachment behavior. TODO-39 owns runtime selection, prompt consumption, worktree creation, and execution behavior; those behaviors are outside this suite. |
+| Discovery order and exclusions | `test_attachment_discovery_precedes_general_research`, `test_attachment_search_roots_are_validated_before_traversal`, and Scenario A1i cover explicit paths, Git-changed or untracked documents, bounded conventional-location fallback, rejected discovery roots, and exclusion of archives, generated artifacts, dependencies, `.git`, and linked worktrees. The shared policy rejects modification time as ownership evidence. |
+| Discovery budgets and exhaustion | `test_document_attachment_policy_is_shared_and_bounded` and Scenario A1h cover the shared 20-read/10-search cap, five reserved candidate reads, explicit-path priority, the five-qualified-candidate stop, disclosure of skipped sources, and manual-or-none fallback. |
+| Qualification, relevance, and classification | `test_document_attachment_policy_is_shared_and_bounded` plus Scenarios A1d/A1e/A1j cover recognized finalized gstack and Superpowers Plan formats, fallback ordered-work/target/verification qualification, explicit or scope-based relevance, rejection of generic keyword overlap, strongest-role classification, relevance reasons, and combined roles. |
+| Path normalization and validation | `test_attachment_search_roots_are_validated_before_traversal`, `test_audit_errors_cover_each_attachment_path_defect`, and Scenarios A1f/A1g cover existing regular files, repository containment, symlink escape, absolute/missing/directory/traversal rejection, tracked and untracked files, and normalized repository-relative POSIX storage. |
+| Attachment cardinality and Reference syntax | `test_schema_defines_document_attachment_roles`, `test_revise_rejects_reference_append_matching_plan_or_spec`, and Scenarios A1j/A1k cover one Plan, one Spec, ordered comma-separated References, literal-comma rejection, deduplication, and never duplicating a Plan or Spec as Reference. |
+| Validation recovery | Scenarios A1g/A1j and the exact examples in `sections/error-messages.md` cover path-specific defects and remediation, correction of only the invalid field, and no repeated discovery or general research. |
+| Interaction and confirmation | `test_attachment_roles_flow_through_synthesis_and_preview` and Scenarios A1c-A1k cover consolidated synthesis and preview gates, unresolved ambiguity, explicit combined-role selection, cancellation, and no write before confirmation. |
+| `--add` candidate handling | `test_add_contract_covers_zero_one_and_multiple_plan_candidates` and Scenarios A1c-A1h cover zero, one, and multiple candidates; manual tracked or untracked paths; omitted Plan; explicit `none`; ambiguity rejection; and budget exhaustion. |
+| `--revise` attachment mutation | `test_revise_always_runs_post_creation_attachment_discovery`, `test_revise_contract_preserves_and_explicitly_mutates_attachments`, and Scenarios A1i-A1k cover post-planning discovery, explicit-path precedence, Plan/Spec/Reference proposals, preservation, replacement, removal, append, normalization, ordered deduplication, and non-blocking warnings for invalid existing values. |
+| Compatibility and non-mutating attachment audit | `tests/test_todos_md.py`, `test_audit_validates_attachments_without_mutating_them`, `test_audit_errors_cover_each_attachment_path_defect`, and Scenario A5 cover legacy entries without Plan, Spec-only and Reference-only entries, optional attachments, path validation when present, one finding per defect, and no automatic attachment repair. |
+| Completion scenario matrix | Scenarios A1c-A1k plus the contract tests cover zero/one/multiple candidates, manual and omitted attachments, add and revise flows, combined roles, mutation semantics, Reference deduplication, precedence and limits, containment and symlink escape, recognized and fallback formats, no-write-before-confirmation, ambiguity, and legacy entries. |
+| Packaged and installed parity | `test_todos_manager_skill_is_packaged_data` requires `document-attachments.md`; `test_project_install_matches_packaged_skill_byte_for_byte` compares installed `SKILL.md` and every installed `sections/*.md` file byte-for-byte with package resources. |

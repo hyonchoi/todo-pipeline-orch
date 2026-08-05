@@ -173,6 +173,13 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Status marker valid?
    - ID format correct?
    - Dependency references (if any) exist in TODOS.md or TODOS-archive.md?
+   - Validate every present attachment value using
+     `sections/document-attachments.md`: validate Plan and Spec as single paths,
+     split Reference into its ordered comma-separated values, and report one path-specific finding per defect. Identify the TODO ID, attachment role,
+     stored path, and exact defect for missing files, directory targets,
+     containment or traversal escape, outside-target symlinks, and literal
+     commas in Reference paths. Attachments remain optional: `--audit` must
+     never require, remove, replace, or repair attachments.
 4. **Reconcile tracked state:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
 5. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
