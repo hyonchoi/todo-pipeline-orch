@@ -18,6 +18,10 @@ the human-readable rules that follow.
   "fields": ["Plan", "Spec", "Reference"],
   "excluded_parts": [".git", ".worktrees", "archive", "archives", "dist", "build", "generated", "node_modules", "vendor"],
   "relevance": ["explicit", "todo-id", "close-scope", "concrete-target-overlap"],
+  "close_scope": {
+    "minimum_specific_term_overlap": 2,
+    "generic_terms": ["acceptance", "change", "changes", "document", "documents", "implementation", "plan", "planning", "review", "scope", "spec", "task", "tasks", "test", "tests", "todo", "update", "updates", "verification", "verify", "work", "with", "from", "that", "this", "into", "using"]
+  },
   "errors": {
     "absolute": "is absolute, not repository-relative",
     "outside": "resolves outside the repository",
@@ -98,6 +102,11 @@ location, or author.
 Strong relevance signals are, in descending order: an explicit TODO ID or
 task context, close title/summary scope, and substantial overlap with concrete
 change targets. A generic subject substring alone is not strong relevance.
+For close-scope matching, lowercase the title and summary terms of at least
+four characters, discard every term listed in `close_scope.generic_terms`, and
+require at least `close_scope.minimum_specific_term_overlap` distinct remaining
+terms to occur in the candidate path or content. Generic planning vocabulary
+never contributes to the threshold, even when several generic terms overlap.
 Record the strongest applicable signal in `relevance_reason`.
 
 Classify each qualified document by role:

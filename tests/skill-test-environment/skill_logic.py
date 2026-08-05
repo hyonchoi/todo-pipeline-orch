@@ -249,7 +249,13 @@ def discover_attachment_candidates(
     source_names = ATTACHMENT_POLICY["sources"]
     sources = ((source_names[0], (explicit_paths,)), (source_names[1], (git_paths,)), (source_names[2], search_batches))
     lowered_targets = tuple(path.lower() for path in target_paths)
-    scope_terms = {term.lower() for term in re.findall(r"[A-Za-z0-9]{4,}", title_summary)}
+    close_scope_policy = ATTACHMENT_POLICY["close_scope"]
+    generic_terms = set(close_scope_policy["generic_terms"])
+    scope_terms = {
+        term.lower()
+        for term in re.findall(r"[A-Za-z0-9]{4,}", title_summary)
+        if term.lower() not in generic_terms
+    }
     for source, batches in sources:
         for batch in batches:
             if source == source_names[2]:
@@ -279,7 +285,10 @@ def discover_attachment_candidates(
                 text = (repository.resolve() / normalized).read_text(encoding="utf-8")
                 haystack = f"{normalized}\n{text}".lower()
                 document_terms = set(re.findall(r"[a-z0-9]{4,}", haystack))
-                close_scope = len(scope_terms & document_terms) >= 2
+                close_scope = (
+                    len(scope_terms & document_terms)
+                    >= close_scope_policy["minimum_specific_term_overlap"]
+                )
                 relevant = (
                     ("explicit" in ATTACHMENT_POLICY["relevance"] and source == source_names[0])
                     or ("todo-id" in ATTACHMENT_POLICY["relevance"] and todo_id is not None and todo_id.lower() in haystack)
@@ -376,6 +385,8 @@ class AttachmentWorkflow:
             return "preserved"
         if role == "Reference" and existing and not self._references_changed:
             return "preserved"
+        if role == "Reference" and self._references_changed:
+            return "selected"
         if role in self._none_roles:
             return "none detected"
         if current or (role == "Reference" and self._references):
@@ -389,6 +400,18 @@ class AttachmentWorkflow:
 
     def _changed(self) -> None:
         self._confirmed = False
+
+    @staticmethod
+    def _confirmation_action(candidate_count: int) -> str:
+        cardinality = (
+            "zero" if candidate_count == 0 else "one" if candidate_count == 1 else "multiple"
+        )
+        action = ATTACHMENT_POLICY["confirmation"][cardinality]
+        if action not in {"none", "explicit-selection"}:
+            raise RuntimeError(
+                f"unsupported attachment confirmation action: {action}"
+            )
+        return action
 
     def select_candidate(self, role: str, number: int) -> None:
         candidates = self._role_candidates(role)
@@ -430,6 +453,9 @@ class AttachmentWorkflow:
             self._spec = None
         else:
             self._references = []
+            self._references_changed = self._references != list(
+                self._existing.references
+            )
         self._none_roles.add(role)
         self._changed()
 
@@ -495,26 +521,26 @@ class AttachmentWorkflow:
             and not self._combined_selected
             and self._plan is None
             and self._spec is None
+            and self._confirmation_action(len(combined)) == "explicit-selection"
         ):
             raise ValueError("combined Plan and Spec choice requires explicit selection")
 
-        for role in ("Plan", "Spec"):
-            current = self._plan if role == "Plan" else self._spec
-            if current is not None or role in self._none_roles:
+        for role in ATTACHMENT_POLICY["fields"]:
+            selected = (
+                self._plan is not None
+                if role == "Plan"
+                else self._spec is not None
+                if role == "Spec"
+                else bool(self._references)
+            )
+            if selected or role in self._none_roles:
                 continue
-            candidates = self._role_candidates(role)
-            if len(candidates) > 1:
+            candidate_count = len(self._role_candidates(role))
+            if self._confirmation_action(candidate_count) != "explicit-selection":
+                continue
+            if candidate_count > 1:
                 raise ValueError(f"{role} is unresolved")
-            if len(candidates) == 1:
-                raise ValueError(f"{role} requires explicit selection")
-
-        reference_candidates = self._role_candidates("Reference")
-        if not self._references and "Reference" not in self._none_roles:
-            if len(reference_candidates) > 1:
-                raise ValueError("Reference is unresolved")
-            if len(reference_candidates) == 1:
-                if ATTACHMENT_POLICY["confirmation"]["one"] == "explicit-selection":
-                    raise ValueError("Reference requires explicit selection")
+            raise ValueError(f"{role} requires explicit selection")
         self._confirmed = True
         return self.selection
 

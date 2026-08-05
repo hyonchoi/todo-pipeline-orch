@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from tests.skill_test_environment import skill_logic
 from tests.skill_test_environment.skill_logic import (
     AttachmentCandidate,
     AttachmentSelection,
@@ -42,7 +43,11 @@ def test_packaged_markdown_policy_drives_the_harness():
 
     assert policy["version"] == 1
     assert policy["candidate_limit"] == 5
-    assert policy["confirmation"]["one"] == "explicit-selection"
+    assert policy["confirmation"] == {
+        "zero": "none",
+        "one": "explicit-selection",
+        "multiple": "explicit-selection",
+    }
     assert policy["sources"] == ["explicit", "git changed or untracked", "bounded search"]
     assert policy["relevance"] == ["explicit", "todo-id", "close-scope", "concrete-target-overlap"]
 
@@ -78,6 +83,63 @@ def test_add_candidate_cardinality_controls_confirmation(
         assert workflow.selection.plan is None
     else:
         assert workflow.confirm().plan == selected_plan
+
+
+@pytest.mark.parametrize("role", ["Plan", "Spec", "Reference"])
+@pytest.mark.parametrize(
+    ("candidate_count", "policy_key", "policy_action", "should_require_selection"),
+    [
+        (0, "zero", "explicit-selection", True),
+        (1, "one", "none", False),
+        (2, "multiple", "none", False),
+    ],
+    ids=["zero", "one", "multiple"],
+)
+def test_confirmation_policy_controls_every_role_cardinality(
+    tmp_path,
+    monkeypatch,
+    role,
+    candidate_count,
+    policy_key,
+    policy_action,
+    should_require_selection,
+):
+    confirmation = {
+        "zero": "none",
+        "one": "explicit-selection",
+        "multiple": "explicit-selection",
+    }
+    confirmation[policy_key] = policy_action
+    monkeypatch.setitem(skill_logic.ATTACHMENT_POLICY, "confirmation", confirmation)
+    candidates = tuple(
+        _candidate(f"docs/{role.lower()}-{number}.md", role)
+        for number in range(candidate_count)
+    )
+    workflow = AttachmentWorkflow(tmp_path, command="add", candidates=candidates)
+    for other_role in {"Plan", "Spec", "Reference"} - {role}:
+        workflow.choose_none(other_role)
+
+    if should_require_selection:
+        with pytest.raises(ValueError, match=role):
+            workflow.confirm()
+    else:
+        assert workflow.confirm() == AttachmentSelection()
+
+
+def test_confirmation_policy_controls_combined_role_choice(tmp_path, monkeypatch):
+    monkeypatch.setitem(
+        skill_logic.ATTACHMENT_POLICY,
+        "confirmation",
+        {"zero": "none", "one": "none", "multiple": "explicit-selection"},
+    )
+    workflow = AttachmentWorkflow(
+        tmp_path,
+        command="add",
+        candidates=(_candidate("docs/combined.md", "Plan", "Spec"),),
+    )
+    workflow.choose_none("Reference")
+
+    assert workflow.confirm() == AttachmentSelection()
 
 
 def test_add_supports_manual_and_omitted_attachments_without_early_write(tmp_path):
@@ -249,6 +311,24 @@ def test_unchanged_existing_references_report_preserved(tmp_path):
     assert workflow.role_state("Reference") == "preserved"
 
 
+def test_choose_none_reference_reports_field_wide_removal_as_selected(tmp_path):
+    for path in ("docs/adr/0001.md", "docs/context.md"):
+        _write(tmp_path, path)
+    workflow = AttachmentWorkflow(
+        tmp_path,
+        command="revise",
+        existing=AttachmentSelection(
+            references=("docs/adr/0001.md", "docs/context.md")
+        ),
+    )
+
+    workflow.choose_none("Reference")
+
+    assert workflow.selection.references == ()
+    assert workflow.role_state("Reference") == "selected"
+    assert workflow.confirm().references == ()
+
+
 @pytest.mark.parametrize("operation", ["select", "replace", "combined"])
 def test_plan_and_spec_selection_rejects_existing_reference_conflict(tmp_path, operation):
     _write(tmp_path, "docs/shared.md")
@@ -381,14 +461,70 @@ def test_generic_subject_substring_does_not_establish_strong_relevance(tmp_path)
     assert result.candidates == ()
 
 
-def test_close_title_summary_scope_is_strong_relevance(tmp_path):
-    _write(tmp_path, "docs/superpowers/plans/cache-rework.md", "1. Change `src/other.py`.\n2. Verify tests.\n")
+def test_generic_planning_overlap_does_not_establish_close_scope_relevance(tmp_path):
+    _write(
+        tmp_path,
+        "docs/superpowers/plans/unrelated.md",
+        "1. Change `src/other.py`.\n2. Verify tests for the implementation.\n",
+    )
+
     result = discover_attachment_candidates(
         tmp_path,
-        search_batches=(("docs/superpowers/plans/cache-rework.md",),),
-        title_summary="Cache rework for bounded storage",
+        search_batches=(("docs/superpowers/plans/unrelated.md",),),
+        title_summary="Change implementation and verify tests for unrelated migration",
     )
-    assert [candidate.path for candidate in result.candidates] == ["docs/superpowers/plans/cache-rework.md"]
+
+    assert result.candidates == ()
+
+
+def test_close_title_summary_scope_is_strong_relevance(tmp_path):
+    _write(
+        tmp_path,
+        "docs/superpowers/plans/cache-eviction.md",
+        "1. Change `src/other.py`.\n2. Verify tests.\n",
+    )
+    result = discover_attachment_candidates(
+        tmp_path,
+        search_batches=(("docs/superpowers/plans/cache-eviction.md",),),
+        title_summary="Cache eviction for bounded storage",
+    )
+    assert [candidate.path for candidate in result.candidates] == [
+        "docs/superpowers/plans/cache-eviction.md"
+    ]
+
+
+@pytest.mark.parametrize(
+    "close_scope_policy",
+    [
+        {"minimum_specific_term_overlap": 3, "generic_terms": []},
+        {
+            "minimum_specific_term_overlap": 2,
+            "generic_terms": ["cache", "eviction"],
+        },
+    ],
+    ids=["minimum-overlap", "generic-vocabulary"],
+)
+def test_close_scope_relevance_uses_structured_policy(
+    tmp_path, monkeypatch, close_scope_policy
+):
+    _write(
+        tmp_path,
+        "docs/superpowers/plans/cache-eviction.md",
+        "1. Change `src/other.py`.\n2. Verify tests.\n",
+    )
+    monkeypatch.setitem(
+        skill_logic.ATTACHMENT_POLICY,
+        "close_scope",
+        close_scope_policy,
+    )
+
+    result = discover_attachment_candidates(
+        tmp_path,
+        search_batches=(("docs/superpowers/plans/cache-eviction.md",),),
+        title_summary="Cache eviction for bounded storage",
+    )
+
+    assert result.candidates == ()
 
 
 def test_search_accounting_counts_empty_and_repeated_result_invocations(tmp_path):
