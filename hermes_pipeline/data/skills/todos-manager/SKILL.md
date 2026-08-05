@@ -57,6 +57,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 | Any step references the TODOS.md schema, field definitions, or canonical document layout | `sections/schema.md` |
 | Computing or validating TODO-<n> IDs | `sections/id-assignment.md` |
 | Executing `--add` step 4.5 (auto-research) | `sections/auto-research.md` |
+| Discovering or validating Plan, Spec, or Reference attachments for `--add` or `--revise` | `sections/document-attachments.md` |
 | `--convert` detects header-based format (Mode B: `## Open`/`## Completed` + `### Title` entries) | `sections/convert-mode-b.md` |
 | Entry boundary parsing (--archive, --revise) | `sections/entry-boundary.md` |
 | Executing `--list` | `sections/list.md` |
@@ -96,7 +97,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Validation: 10–200 characters, non-empty.
 4. **Prompt for summary:** "One-line summary after the em dash (required):"
    - Validation: Non-empty, 10–100 characters.
-5. **Auto-research (step 4.5):** Read `sections/auto-research.md`. Execute the research phase: collect signals, derive field drafts, ask gap questions one at a time, show synthesis block.
+5. **Auto-research (step 4.5):** Read `sections/auto-research.md` and `sections/document-attachments.md`. Execute the research phase and shared attachment discovery: collect signals, derive field drafts, discover bounded document candidates, ask gap questions one at a time, show synthesis block.
 6. **Confirm or edit fields** (pre-filled from auto-research):
    - Present all fields from the synthesis block in a single message, in the same
      order shown there, with their `Confidence:` tags. Instruction: "Reply
@@ -201,9 +202,8 @@ The skill supports seven subcommands. Each has its own workflow below.
 
 ### `--revise`: Revise an existing TODO entry with AI-pre-filled suggestions
 
-**Exception:** `**Spec:**` and `**Reference:**` are never AI-pre-filled or auto-detected (e.g. no scanning `docs/pipeline/TODO-<n>-*.md` and offering it as a suggestion) — the user must type these values verbatim. A wrong guessed path is worse than an empty field. These two fields also never appear in `--add`'s auto-research (see step 4.5).
-
-Read `sections/revise.md` and follow its steps in full.
+Read `sections/revise.md` and `sections/document-attachments.md`, then follow
+their steps in full.
 
 ---
 

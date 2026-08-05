@@ -19,14 +19,16 @@ couldn't resolve. Never ask what can be determined.
 
 ## Research budget cap
 
-To prevent unbounded file reads on large codebases, the auto-research phase must enforce
-hard limits during signal collection:
+To prevent unbounded file reads on large codebases, the combined auto-research
+and document-attachment discovery operation must enforce hard limits during
+signal collection. Read `sections/document-attachments.md` when discovering
+attachments; it shares these counters and must not start a second budget.
 
-- **Max 20 files read** during the research phase (includes TODOS.md, TODOS-archive.md, design docs, and implied source files)
-- **Max 10 grep/search invocations** to match keywords across files
+- **Max 20 files read** across research and attachment discovery (includes TODOS.md, TODOS-archive.md, design docs, attachment candidates, and implied source files)
+- **Max 10 grep/search invocations** across research and attachment discovery
 - If the cap is hit before all signals are collected, **stop researching immediately** and treat any field still undetermined as a gap
 - Fall through to the gap-detection question flow rather than continuing to read additional files
-- Document which signals were skipped due to cap exhaustion (e.g., "source file inspection skipped — budget exhausted")
+- Document which signals or attachment sources were skipped due to cap exhaustion (e.g., "source file inspection skipped — budget exhausted")
 
 ## Field derivation rules
 
