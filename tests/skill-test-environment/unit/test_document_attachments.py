@@ -737,6 +737,13 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
             ("Plan",),
         ),
         (
+            "### Task 1: Cache storage\n"
+            "Target: src/cache.py\n"
+            "Verify with `uv run pytest tests/test_cache.py`.\n"
+            "    1. Update `src/cache.py` to bound cache size.\n",
+            ("Reference",),
+        ),
+        (
             "```markdown```\n"
             "### Task 1: Update cache storage\n"
             "Change `src/cache.py` to bound cache size.\n"
@@ -756,6 +763,7 @@ def test_semantic_plan_requires_an_implementation_mutation(text, roles):
         "separate-target-declaration",
         "target-declaration-without-verification",
         "ordered-mutation-in-task-body",
+        "indented-ordered-mutation",
         "inline-backticks-before-real-task",
     ],
 )
@@ -781,10 +789,79 @@ def test_task_heading_plan_requires_mutation_target_and_verification(text, roles
             "Target: src/cache.py\n"
             "No tests are required.\n"
         ),
+        (
+            "### Task 1: Update cache storage\n"
+            "Target: src/cache.py\n"
+            "Test coverage is documented elsewhere.\n"
+        ),
+        (
+            "### Task 1: Update cache storage\n"
+            "Target: src/cache.py\n"
+            "Tests will not run: `uv run pytest tests/test_cache.py`.\n"
+        ),
+        (
+            "### Task 1: Update style policy\n"
+            "Target: pyproject.toml\n"
+            "Lint rules are documented elsewhere.\n"
+        ),
+        (
+            "### Task 1: Update health behavior\n"
+            "Target: src/health.py\n"
+            "- Health checks are documented elsewhere.\n"
+        ),
     ],
-    ids=["health-check-noun", "lint-noun", "negated-tests"],
+    ids=[
+        "health-check-noun",
+        "lint-noun",
+        "negated-tests",
+        "descriptive-test-coverage",
+        "future-negated-test-command",
+        "descriptive-lint-state",
+        "bulleted-verification-noun",
+    ],
 )
 def test_task_verification_requires_an_affirmative_action(text):
+    assert classify_attachment_document("docs/other/cache.md", text) == (
+        "Reference",
+    )
+
+
+@pytest.mark.parametrize(
+    "acceptance",
+    [
+        "- Cache writes never exceed the configured bound.\n",
+        "- [ ] Cache writes never exceed the configured bound.\n",
+        "1. Cache writes never exceed the configured bound.\n",
+    ],
+    ids=["criterion", "checkbox", "ordered-step"],
+)
+def test_task_acceptance_criteria_supply_verification(acceptance):
+    text = (
+        "### Task 1: Update cache storage\n"
+        "Target: src/cache.py\n"
+        "#### Acceptance Criteria\n"
+        f"{acceptance}"
+    )
+
+    assert classify_attachment_document("docs/other/cache.md", text) == ("Plan",)
+
+
+@pytest.mark.parametrize(
+    "acceptance",
+    [
+        "",
+        "Acceptance criteria are documented elsewhere.\n",
+    ],
+    ids=["empty-section", "descriptive-noun-mention"],
+)
+def test_task_acceptance_criteria_require_a_concrete_item(acceptance):
+    text = (
+        "### Task 1: Update cache storage\n"
+        "Target: src/cache.py\n"
+        "#### Acceptance Criteria\n"
+        f"{acceptance}"
+    )
+
     assert classify_attachment_document("docs/other/cache.md", text) == (
         "Reference",
     )

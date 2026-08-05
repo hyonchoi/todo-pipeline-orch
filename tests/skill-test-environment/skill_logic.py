@@ -197,10 +197,6 @@ _MUTATION_VERB_PATTERN = (
 )
 _MUTATION_WORD_RE = re.compile(rf"\b{_MUTATION_VERB_PATTERN}\b", re.IGNORECASE)
 _MUTATION_START_RE = re.compile(rf"^{_MUTATION_VERB_PATTERN}\b", re.IGNORECASE)
-_ORDERED_MUTATION_RE = re.compile(
-    rf"(?im)^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\])\s+(?:\*\*)?"
-    rf"(?:Step\s+\d+\s*[:.)-]\s*)?{_MUTATION_VERB_PATTERN}\b"
-)
 _TASK_HEADING_RE = re.compile(
     r"^###[ \t]+Task[ \t]+\d+[ \t]*:[ \t]*(?:\*\*)?(?P<title>.*)$",
     re.IGNORECASE,
@@ -212,8 +208,12 @@ _TARGET_DECLARATION_RE = re.compile(
     r"(?::(?:\*\*)?|\*\*:)[ \t]*(?P<value>.+)$",
     re.IGNORECASE,
 )
-_MARKDOWN_LIST_PREFIX_RE = re.compile(
-    r"^\s*(?:\d+[.)]|[-*](?:\s+\[[ xX]\])?)\s+"
+_MARKDOWN_HEADING_RE = re.compile(
+    r"^(?P<marks>#{1,6})[ \t]+(?P<title>.*)$"
+)
+_MARKDOWN_LIST_ITEM_RE = re.compile(
+    r"^(?:(?P<ordered>\d+[.)])|(?P<bullet>[-+*])"
+    r"(?:[ \t]+\[(?P<checked>[ xX])\])?)[ \t]+(?P<text>.+)$"
 )
 _MARKDOWN_STEP_PREFIX_RE = re.compile(
     r"^(?:\*\*)?Step\s+\d+\s*[:.)-]\s*",
@@ -224,14 +224,26 @@ _VERIFICATION_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 _RUN_VERIFICATION_RE = re.compile(
-    r"^(?:execute|run)\b.*\b(?:build|checks?|lint(?:ing)?|tests?|verification)\b",
+    r"^(?:execute|run)\b",
     re.IGNORECASE,
 )
-_NEGATED_VERIFICATION_RE = re.compile(
+_VERIFICATION_NOUN_RE = re.compile(
+    r"\b(?:build|checks?|lint(?:ing)?|tests?|verification)\b",
+    re.IGNORECASE,
+)
+_COMMAND_INTENT_RE = re.compile(
+    r"^(?:build|check|confirm|execute|lint|run|test|validate|verify)\b",
+    re.IGNORECASE,
+)
+_NON_EXECUTION_RE = re.compile(
     r"^(?:do\s+not|don't|never|no|omit|skip|without)\b"
     r"|^(?:execute|run)\s+no\b"
-    r"|^(?:build|checks?|lint(?:ing)?|tests?|verification)\b.*"
-    r"\b(?:not\s+(?:needed|required)|optional|unnecessary)\b",
+    r"|\b(?:can|could|may|might|must|shall|should|will|would)\s+not\b",
+    re.IGNORECASE,
+)
+_DESCRIPTIVE_VERIFICATION_STATE_RE = re.compile(
+    r"^(?:check|lint|test)(?:[ \t]+[^\s`.,:;]+){1,5}[ \t]+"
+    r"(?:are|can|could|has|have|is|may|might|must|shall|should|was|were|will|would)\b",
     re.IGNORECASE,
 )
 _VERIFICATION_SECTION_RE = re.compile(
@@ -239,13 +251,28 @@ _VERIFICATION_SECTION_RE = re.compile(
     r"tests?(?:\s+commands?)?|verification)(?:\s+steps?)?$",
     re.IGNORECASE,
 )
-_NON_ACTION_VERIFICATION_NOUN_RE = re.compile(r"^lint\s+rules?\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
 class _TaskSection:
     title: str
     lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _MarkdownLine:
+    raw: str
+    text: str
+    list_kind: str | None = None
+    heading_level: int | None = None
+    heading_title: str | None = None
+
+
+@dataclass(frozen=True)
+class _PlanSignals:
+    mutation: bool = False
+    target: bool = False
+    verification: bool = False
 
 
 def _fence_opener(line: str) -> tuple[str, int] | None:
@@ -370,10 +397,47 @@ def _is_concrete_implementation_target(value: str) -> bool:
     )
 
 
-def _markdown_action_text(line: str) -> str:
-    text = _MARKDOWN_LIST_PREFIX_RE.sub("", line.strip())
-    text = _MARKDOWN_STEP_PREFIX_RE.sub("", text)
-    return text.strip("* \t")
+def _markdown_lines(text: str) -> tuple[_MarkdownLine, ...]:
+    """Parse non-code Markdown lines into the states used by Plan signals."""
+    parsed: list[_MarkdownLine] = []
+    for raw_line in text.splitlines():
+        if raw_line.startswith("\t") or len(raw_line) - len(raw_line.lstrip(" ")) >= 4:
+            continue
+
+        raw = raw_line.lstrip(" ")
+        heading = _MARKDOWN_HEADING_RE.match(raw)
+        if heading is not None:
+            title = heading.group("title").strip()
+            parsed.append(
+                _MarkdownLine(
+                    raw=raw,
+                    text=title,
+                    heading_level=len(heading.group("marks")),
+                    heading_title=title,
+                )
+            )
+            continue
+
+        item = _MARKDOWN_LIST_ITEM_RE.match(raw)
+        list_kind: str | None = None
+        text_value = raw
+        if item is not None:
+            text_value = item.group("text")
+            if item.group("ordered") is not None:
+                list_kind = "ordered"
+            elif item.group("checked") is not None:
+                list_kind = "checklist"
+            else:
+                list_kind = "bullet"
+        text_value = _MARKDOWN_STEP_PREFIX_RE.sub("", text_value)
+        parsed.append(
+            _MarkdownLine(
+                raw=raw,
+                text=text_value.strip("* \t"),
+                list_kind=list_kind,
+            )
+        )
+    return tuple(parsed)
 
 
 def _is_verification_section(title: str) -> bool:
@@ -381,81 +445,155 @@ def _is_verification_section(title: str) -> bool:
     return _VERIFICATION_SECTION_RE.fullmatch(normalized) is not None
 
 
-def _is_affirmative_verification_action(line: str) -> bool:
-    action = _markdown_action_text(_INLINE_CODE_RE.sub("", line))
-    if _NEGATED_VERIFICATION_RE.search(action) is not None:
+def _verification_section_kind(line: _MarkdownLine) -> str | None:
+    if line.heading_title is None:
+        return None
+    normalized = _INLINE_CODE_RE.sub("", line.heading_title).strip("*#: \t")
+    if line.heading_level == 4 and normalized.casefold() == "acceptance criteria":
+        return "acceptance"
+    if _is_verification_section(line.heading_title):
+        return "verification"
+    return None
+
+
+def _is_affirmative_verification_action(
+    line: _MarkdownLine,
+    *,
+    in_verification_section: bool,
+) -> bool:
+    action = _INLINE_CODE_RE.sub("", line.text).strip("* \t")
+    if _NON_EXECUTION_RE.search(action) is not None:
         return False
-    if _NON_ACTION_VERIFICATION_NOUN_RE.search(action) is not None:
+    if _DESCRIPTIVE_VERIFICATION_STATE_RE.search(action) is not None:
         return False
     if _VERIFICATION_ACTION_RE.search(action) is not None:
         return True
-    if _RUN_VERIFICATION_RE.search(action) is not None:
-        return True
-    return any(
-        _is_verification_command(code_span.group(1))
-        for code_span in _INLINE_CODE_RE.finditer(line)
+    command_spans = tuple(
+        code_span.group(1)
+        for code_span in _INLINE_CODE_RE.finditer(line.text)
     )
+    has_command = any(_is_verification_command(command) for command in command_spans)
+    if _RUN_VERIFICATION_RE.search(action) is not None:
+        return has_command or _VERIFICATION_NOUN_RE.search(action) is not None
+    if has_command and _COMMAND_INTENT_RE.search(action) is not None:
+        return True
 
-
-def _has_concrete_implementation_target(
-    text: str,
-    *,
-    allow_target_declarations: bool = False,
-) -> bool:
-    in_verification_section = False
-    for line in text.splitlines():
-        if line.startswith(("    ", "\t")):
-            continue
-
-        heading_match = re.match(r"^#{1,6}[ \t]+(?P<title>.*)$", line)
-        if allow_target_declarations and heading_match is not None:
-            in_verification_section = _is_verification_section(
-                heading_match.group("title")
-            )
-        if allow_target_declarations and in_verification_section:
-            continue
-
-        if allow_target_declarations:
-            declaration = _TARGET_DECLARATION_RE.match(line)
-            if declaration is not None:
-                value = declaration.group("value")
-                candidates = _INLINE_CODE_RE.findall(value) or [value]
-                if any(_is_concrete_implementation_target(item) for item in candidates):
-                    return True
-
-        for code_span in _INLINE_CODE_RE.finditer(line):
-            prefix = line[: code_span.start()]
-            if _MUTATION_WORD_RE.search(prefix) is None:
-                continue
-            if _is_affirmative_verification_action(line):
-                continue
-            if _is_concrete_implementation_target(code_span.group(1)):
-                return True
+    command_only = not action.strip(" .:;,-")
+    if has_command and command_only and (
+        line.list_kind is not None or in_verification_section
+    ):
+        return True
     return False
 
 
-def _has_verification(text: str) -> bool:
-    for line in text.splitlines():
-        if line.startswith(("    ", "\t")):
+def _is_concrete_acceptance_item(line: _MarkdownLine) -> bool:
+    if line.list_kind is None:
+        return False
+    criterion = _INLINE_CODE_RE.sub(" command ", line.text)
+    return len(re.findall(r"[A-Za-z0-9][A-Za-z0-9_.-]*", criterion)) >= 2
+
+
+def _line_has_concrete_implementation_target(
+    line: _MarkdownLine,
+    *,
+    allow_target_declarations: bool,
+    in_verification_section: bool,
+) -> bool:
+    if in_verification_section or line.heading_title is not None:
+        return False
+
+    if allow_target_declarations:
+        declaration = _TARGET_DECLARATION_RE.match(line.raw)
+        if declaration is not None:
+            value = declaration.group("value")
+            candidates = _INLINE_CODE_RE.findall(value) or [value]
+            return any(_is_concrete_implementation_target(item) for item in candidates)
+
+    if _is_affirmative_verification_action(
+        line,
+        in_verification_section=False,
+    ):
+        return False
+    for code_span in _INLINE_CODE_RE.finditer(line.text):
+        prefix = line.text[: code_span.start()]
+        if _MUTATION_WORD_RE.search(prefix) is None:
             continue
-        if _TARGET_DECLARATION_RE.match(line) is not None:
-            continue
-        if _is_affirmative_verification_action(line):
+        if _is_concrete_implementation_target(code_span.group(1)):
             return True
     return False
 
 
-def _task_is_semantic_plan(task: _TaskSection) -> bool:
-    task_text = "\n".join(task.lines)
-    task_body = "\n".join(task.lines[1:])
-    return bool(
-        (_MUTATION_START_RE.match(task.title) or _ORDERED_MUTATION_RE.search(task_body))
-        and _has_concrete_implementation_target(
-            task_text,
-            allow_target_declarations=True,
+def _plan_signals(
+    text: str,
+    *,
+    task_title: str | None = None,
+    allow_target_declarations: bool = False,
+    allow_acceptance_criteria: bool = False,
+) -> _PlanSignals:
+    lines = _markdown_lines(text)
+    mutation = bool(task_title and _MUTATION_START_RE.match(task_title))
+    target = False
+    verification = False
+
+    if task_title is not None:
+        title_line = _MarkdownLine(raw=task_title, text=task_title)
+        target = _line_has_concrete_implementation_target(
+            title_line,
+            allow_target_declarations=False,
+            in_verification_section=False,
         )
-        and _has_verification(task_body)
+
+    section_kind: str | None = None
+    for line in lines:
+        if line.heading_title is not None:
+            section_kind = (
+                _verification_section_kind(line)
+                if allow_target_declarations or allow_acceptance_criteria
+                else None
+            )
+            continue
+
+        in_verification_section = section_kind is not None
+        if (
+            not in_verification_section
+            and line.list_kind in {"checklist", "ordered"}
+            and _MUTATION_START_RE.match(line.text)
+        ):
+            mutation = True
+
+        if _line_has_concrete_implementation_target(
+            line,
+            allow_target_declarations=allow_target_declarations,
+            in_verification_section=in_verification_section,
+        ):
+            target = True
+
+        if _TARGET_DECLARATION_RE.match(line.raw) is not None:
+            continue
+        if _is_affirmative_verification_action(
+            line,
+            in_verification_section=in_verification_section,
+        ):
+            verification = True
+        elif (
+            allow_acceptance_criteria
+            and section_kind == "acceptance"
+            and _is_concrete_acceptance_item(line)
+        ):
+            verification = True
+
+    return _PlanSignals(mutation, target, verification)
+
+
+def _task_is_semantic_plan(task: _TaskSection) -> bool:
+    task_body = "\n".join(task.lines[1:])
+    signals = _plan_signals(
+        task_body,
+        task_title=task.title,
+        allow_target_declarations=True,
+        allow_acceptance_criteria=True,
     )
+    return signals.mutation and signals.target and signals.verification
 
 
 def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ...]:
@@ -469,10 +607,11 @@ def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ..
     ) or normalized.startswith("docs/superpowers/plans/")
     task_sections, non_task_text = _partition_task_sections(semantic_text)
     task_plan = any(_task_is_semantic_plan(task) for task in task_sections)
-    fallback_plan = bool(
-        _ORDERED_MUTATION_RE.search(non_task_text)
-        and _has_concrete_implementation_target(non_task_text)
-        and _has_verification(non_task_text)
+    fallback_signals = _plan_signals(non_task_text)
+    fallback_plan = (
+        fallback_signals.mutation
+        and fallback_signals.target
+        and fallback_signals.verification
     )
     plan = recognized_plan or task_plan or fallback_plan
     spec = bool(
