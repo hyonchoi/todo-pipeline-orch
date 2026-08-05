@@ -123,41 +123,97 @@ def test_audit_validates_attachments_without_mutating_them():
         assert phrase in skill
 
 
-def test_audit_errors_cover_each_attachment_path_defect():
+def test_audit_errors_cover_each_representable_attachment_path_defect():
     errors = skill_text("sections/error-messages.md")
+    normalized_errors = " ".join(errors.split())
     expected_examples = [
         "docs/missing-plan.md` does not exist",
         "docs/specs` is a directory, not a regular file",
         "../outside-plan.md` resolves outside the repository",
         "docs/external-spec.md` is a symlink that resolves outside the repository",
-        "docs/research,notes.md` contains a literal comma",
+        "docs/one.md, , docs/two.md` contains an empty Reference item",
     ]
     for example in expected_examples:
         assert example in errors
     assert errors.count("Remediation: Choose an existing document file.") >= 2
     assert errors.count("Remediation: Choose a file inside the repository root.") >= 2
-    assert (
-        "Remediation: Use one comma-separated Reference path per value; rename paths "
-        "containing commas."
-    ) in errors
+    assert "Every stored comma is a Reference separator" in normalized_errors
+    assert "never infer a literal-comma path from stored text" in normalized_errors
+    assert "docs/research,notes.md` contains a literal comma" not in errors
 
 
 def test_acceptance_coverage_maps_the_authoritative_spec_boundary():
     scenarios = skill_text("sections/acceptance-scenarios.md")
     assert "## TODO-40 specification coverage" in scenarios
-    required_rows = [
-        "Role semantics and ownership",
-        "Discovery order and exclusions",
-        "Discovery budgets and exhaustion",
-        "Qualification, relevance, and classification",
-        "Path normalization and validation",
-        "Interaction and confirmation",
-        "`--add` candidate handling",
-        "`--revise` attachment mutation",
-        "Compatibility and non-mutating attachment audit",
-        "Packaged and installed parity",
-    ]
-    for row in required_rows:
-        assert row in scenarios
-    assert "TODO-39" in scenarios
-    assert "outside this suite" in scenarios
+    table = scenarios.split("## TODO-40 specification coverage", 1)[1]
+    rows = {}
+    for line in table.splitlines():
+        if not line.startswith("|") or line.startswith("|---"):
+            continue
+        cells = [cell.strip() for cell in line.strip("|").split("|")]
+        if cells[0] == "Requirement group":
+            assert cells == ["Requirement group", "Executable coverage", "Mapping"]
+            continue
+        assert len(cells) == 3
+        rows[cells[0]] = (cells[1], cells[2])
+
+    expected = {
+        "Role semantics and ownership": (
+            "test_combined_plan_and_spec_requires_explicit_combined_choice",
+        ),
+        "Discovery order and exclusions": (
+            "test_discovery_obeys_precedence_candidate_limit_and_exclusions",
+        ),
+        "Discovery budgets and exhaustion": (
+            "test_discovery_honors_shared_read_and_search_budgets",
+        ),
+        "Qualification, relevance, and classification": (
+            "test_recognized_and_fallback_document_formats",
+        ),
+        "Path normalization and validation": (
+            "test_path_validation_normalizes_inside_paths_and_rejects_escape",
+        ),
+        "Attachment cardinality and Reference syntax": (
+            "test_add_candidate_cardinality_controls_confirmation",
+            "test_reference_representation_has_no_literal_comma_escape",
+            "test_revise_references_append_deduplicate_remove_and_exclude_roles",
+        ),
+        "Validation recovery": (
+            "test_invalid_manual_value_recovers_without_rediscovery",
+        ),
+        "Interaction and confirmation": (
+            "test_ambiguity_blocks_preview_until_one_candidate_is_selected",
+            "test_add_supports_manual_and_omitted_attachments_without_early_write",
+        ),
+        "`--add` candidate handling": (
+            "test_add_candidate_cardinality_controls_confirmation",
+            "test_add_supports_manual_and_omitted_attachments_without_early_write",
+        ),
+        "`--revise` attachment mutation": (
+            "test_revise_preserves_replaces_and_removes_singletons",
+            "test_revise_warns_about_invalid_existing_paths_without_blocking_other_edits",
+            "test_revise_references_append_deduplicate_remove_and_exclude_roles",
+        ),
+        "Compatibility and non-mutating attachment audit": (
+            "test_legacy_entry_without_attachments_remains_valid",
+            "test_audit_validates_each_stored_reference_without_mutation",
+        ),
+        "Completion scenario matrix": (
+            "test_add_candidate_cardinality_controls_confirmation",
+            "test_discovery_honors_shared_read_and_search_budgets",
+            "test_recognized_and_fallback_document_formats",
+            "test_path_validation_normalizes_inside_paths_and_rejects_escape",
+            "test_legacy_entry_without_attachments_remains_valid",
+        ),
+        "Packaged and installed parity": (
+            "test_project_install_matches_packaged_skill_byte_for_byte",
+        ),
+    }
+    assert set(rows) == set(expected)
+    for requirement, test_names in expected.items():
+        executable, mapping = rows[requirement]
+        for test_name in test_names:
+            assert test_name in executable
+        assert mapping
+    assert "TODO-39" in rows["Role semantics and ownership"][1]
+    assert "outside this suite" in rows["Role semantics and ownership"][1]

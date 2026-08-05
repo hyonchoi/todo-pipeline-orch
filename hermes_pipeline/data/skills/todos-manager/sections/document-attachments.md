@@ -98,9 +98,14 @@ missing paths, directories, traversal that resolves outside the repository,
 and an outside-target symlink. A symlink whose resolved regular-file target is
 inside the repository is stored as the resolved repository-relative POSIX path.
 
-`Reference` is a comma-separated list of normalized paths. Reject a candidate
-path containing a literal comma; commas are separators and cannot appear in a
-Reference path. `Plan` and `Spec` each contain one normalized path only.
+`Reference` is a comma-separated list of normalized paths. At candidate
+validation, when one detected or explicitly supplied filesystem path is known
+to be a single path, reject it if that path contains a literal comma. There is
+no escaping syntax. In a stored `Reference:` value every comma is
+unconditionally a separator: split on every comma, trim each item, reject an
+empty item, and validate each non-empty item as a separate path. Audit must
+never infer that two stored items were one literal-comma path. `Plan` and
+`Spec` each contain one normalized path only.
 
 Use these exact validation errors and remediation text:
 

@@ -16,6 +16,492 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+@dataclass(frozen=True)
+class AttachmentCandidate:
+    path: str
+    roles: tuple[str, ...]
+    relevance_reason: str
+    source: str
+
+
+@dataclass(frozen=True)
+class AttachmentSelection:
+    plan: str | None = None
+    spec: str | None = None
+    references: tuple[str, ...] = ()
+
+
+class AttachmentValidationError(ValueError):
+    def __init__(self, message: str, *, defect: str):
+        super().__init__(message)
+        self.defect = defect
+
+
+@dataclass(frozen=True)
+class AttachmentAuditFinding:
+    todo_id: str
+    role: str
+    stored_path: str
+    defect: str
+
+
+@dataclass(frozen=True)
+class AttachmentDiscoveryResult:
+    candidates: tuple[AttachmentCandidate, ...]
+    reads: int
+    searches: int
+    exhausted: bool
+    skipped_source: str | None
+    errors: tuple[str, ...] = ()
+
+
+def validate_attachment_path(
+    repository: Path,
+    raw_path: str,
+    *,
+    reference_input: bool = False,
+) -> str:
+    """Validate and normalize one attachment candidate.
+
+    A comma is rejected only at the boundary where one Reference candidate is
+    supplied. Once stored, commas unconditionally delimit separate paths.
+    """
+    if reference_input and "," in raw_path:
+        raise AttachmentValidationError(
+            "Reference path contains a comma.",
+            defect="contains a literal comma",
+        )
+    lexical = Path(raw_path)
+    if lexical.is_absolute():
+        raise AttachmentValidationError(
+            "Attachment path must be repository-relative.",
+            defect="is absolute, not repository-relative",
+        )
+
+    root = repository.resolve()
+    unresolved = root / lexical
+    is_symlink = unresolved.is_symlink()
+    resolved = unresolved.resolve()
+    if not resolved.is_relative_to(root):
+        if is_symlink:
+            raise AttachmentValidationError(
+                "Attachment path is a symlink that resolves outside the repository.",
+                defect="is a symlink that resolves outside the repository",
+            )
+        raise AttachmentValidationError(
+            "Attachment path resolves outside the repository.",
+            defect="resolves outside the repository",
+        )
+    if not resolved.is_file():
+        raise AttachmentValidationError(
+            "Attachment path does not exist or is not a regular file.",
+            defect="does not exist or is not a regular file",
+        )
+    return resolved.relative_to(root).as_posix()
+
+
+def parse_stored_references(value: str) -> tuple[str, ...]:
+    """Parse canonical Reference storage; every comma is a separator."""
+    paths = tuple(part.strip() for part in value.split(","))
+    if any(not path for path in paths):
+        raise AttachmentValidationError(
+            "Reference contains an empty path between separators.",
+            defect="contains an empty path between separators",
+        )
+    return paths
+
+
+def audit_attachment_fields(
+    repository: Path,
+    todo_id: str,
+    fields: dict[str, str],
+) -> list[AttachmentAuditFinding]:
+    """Return attachment defects without mutating the supplied entry fields."""
+    findings: list[AttachmentAuditFinding] = []
+    for role in ("Plan", "Spec"):
+        stored = fields.get(role)
+        if not stored:
+            continue
+        try:
+            validate_attachment_path(repository, stored)
+        except AttachmentValidationError as exc:
+            findings.append(
+                AttachmentAuditFinding(todo_id, role, stored, exc.defect)
+            )
+
+    reference_value = fields.get("Reference")
+    if reference_value:
+        try:
+            stored_references = parse_stored_references(reference_value)
+        except AttachmentValidationError as exc:
+            findings.append(
+                AttachmentAuditFinding(todo_id, "Reference", "", exc.defect)
+            )
+        else:
+            for stored in stored_references:
+                try:
+                    validate_attachment_path(repository, stored)
+                except AttachmentValidationError as exc:
+                    findings.append(
+                        AttachmentAuditFinding(
+                            todo_id,
+                            "Reference",
+                            stored,
+                            exc.defect,
+                        )
+                    )
+    return findings
+
+
+def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ...]:
+    """Classify a relevant document by its strongest attachment roles."""
+    normalized = relative_path.replace("\\", "/")
+    lower_text = text.lower()
+    recognized_plan = (
+        normalized.startswith("docs/gstack/")
+        and any(marker in lower_text for marker in ("status: approved", "verdict:"))
+    ) or normalized.startswith("docs/superpowers/plans/")
+    ordered_work = bool(
+        re.search(r"(?m)^\s*(?:\d+[.)]|[-*]\s+\[[ xX]\]|#{2,4}\s+Task\b)", text)
+    )
+    concrete_target = bool(
+        re.search(r"`[^`\n]*(?:[/\\]|\.[a-zA-Z0-9]+|uv run|pytest)[^`\n]*`", text)
+    )
+    verification = bool(
+        re.search(r"\b(?:verify|verification|test|acceptance)\b", text, re.IGNORECASE)
+    )
+    plan = recognized_plan or (ordered_work and concrete_target and verification)
+    spec = bool(
+        re.search(r"(?im)^#{2,4}\s+Outcome\b", text)
+        and re.search(r"(?im)^#{2,4}\s+Acceptance(?: criteria)?\b", text)
+    )
+    roles: list[str] = []
+    if plan:
+        roles.append("Plan")
+    if spec:
+        roles.append("Spec")
+    if not roles:
+        roles.append("Reference")
+    return tuple(roles)
+
+
+def _attachment_path_is_excluded(relative_path: str) -> bool:
+    parts = Path(relative_path).parts
+    excluded_parts = {
+        ".git",
+        ".worktrees",
+        "archive",
+        "archives",
+        "dist",
+        "build",
+        "generated",
+        "node_modules",
+        "vendor",
+    }
+    return any(part.lower() in excluded_parts for part in parts)
+
+
+def discover_attachment_candidates(
+    repository: Path,
+    *,
+    explicit_paths: tuple[str, ...] = (),
+    git_paths: tuple[str, ...] = (),
+    search_paths: tuple[str, ...] = (),
+    todo_id: str | None = None,
+    subject_terms: tuple[str, ...] = (),
+    read_limit: int = 20,
+    search_limit: int = 10,
+    candidate_limit: int = 5,
+) -> AttachmentDiscoveryResult:
+    """Execute bounded discovery in explicit, Git, then search precedence."""
+    candidates: list[AttachmentCandidate] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    reads = 0
+    searches = 0
+    exhausted = False
+    skipped_source: str | None = None
+    sources = (
+        ("explicit", explicit_paths, False),
+        ("git changed or untracked", git_paths, False),
+        ("bounded search", search_paths, True),
+    )
+    lowered_terms = tuple(term.lower() for term in subject_terms if term)
+
+    for source, paths, is_search in sources:
+        for raw_path in paths:
+            if len(candidates) >= candidate_limit:
+                skipped_source = source
+                break
+            if _attachment_path_is_excluded(raw_path):
+                continue
+            if is_search:
+                if searches >= search_limit:
+                    exhausted = True
+                    skipped_source = source
+                    break
+                searches += 1
+            if reads >= read_limit:
+                exhausted = True
+                skipped_source = source
+                break
+            try:
+                normalized = validate_attachment_path(repository, raw_path)
+            except AttachmentValidationError as exc:
+                errors.append(f"{raw_path}: {exc}")
+                continue
+            reads += 1
+            if normalized in seen:
+                continue
+            text = (repository.resolve() / normalized).read_text(encoding="utf-8")
+            haystack = f"{normalized}\n{text}".lower()
+            relevant = (
+                source == "explicit"
+                or (todo_id is not None and todo_id.lower() in haystack)
+                or any(term in haystack for term in lowered_terms)
+            )
+            if not relevant:
+                continue
+            roles = classify_attachment_document(normalized, text)
+            relevance_reason = (
+                "explicit task context"
+                if source == "explicit"
+                else f"matches {todo_id or next(term for term in lowered_terms if term in haystack)}"
+            )
+            candidates.append(
+                AttachmentCandidate(
+                    path=normalized,
+                    roles=roles,
+                    relevance_reason=relevance_reason,
+                    source=source,
+                )
+            )
+            seen.add(normalized)
+        if skipped_source is not None:
+            break
+
+    return AttachmentDiscoveryResult(
+        candidates=tuple(candidates),
+        reads=reads,
+        searches=searches,
+        exhausted=exhausted,
+        skipped_source=skipped_source,
+        errors=tuple(errors),
+    )
+
+
+class AttachmentWorkflow:
+    """Deterministic interaction model for add/revise attachment gates."""
+
+    def __init__(
+        self,
+        repository: Path,
+        *,
+        command: str,
+        candidates: tuple[AttachmentCandidate, ...] = (),
+        existing: AttachmentSelection = AttachmentSelection(),
+    ):
+        if command not in {"add", "revise"}:
+            raise ValueError("command must be add or revise")
+        self.repository = repository
+        self.command = command
+        self.candidates = candidates
+        self._plan = existing.plan
+        self._spec = existing.spec
+        self._references = list(existing.references)
+        self._existing = existing
+        self._none_roles: set[str] = set()
+        self._combined_selected = False
+        self._confirmed = False
+        self.discovery_runs = 1
+        existing_fields = {
+            role: value
+            for role, value in (
+                ("Plan", existing.plan),
+                ("Spec", existing.spec),
+                ("Reference", ", ".join(existing.references)),
+            )
+            if value
+        }
+        self.warnings = audit_attachment_fields(
+            repository,
+            "existing TODO",
+            existing_fields,
+        )
+
+    @property
+    def selection(self) -> AttachmentSelection:
+        return AttachmentSelection(
+            plan=self._plan,
+            spec=self._spec,
+            references=tuple(self._references),
+        )
+
+    def _role_candidates(self, role: str) -> list[AttachmentCandidate]:
+        return [candidate for candidate in self.candidates if role in candidate.roles]
+
+    def role_state(self, role: str) -> str:
+        current = self._plan if role == "Plan" else self._spec if role == "Spec" else None
+        existing = (
+            self._existing.plan
+            if role == "Plan"
+            else self._existing.spec
+            if role == "Spec"
+            else self._existing.references
+        )
+        if existing and current == existing:
+            return "preserved"
+        if role in self._none_roles:
+            return "none detected"
+        if current or (role == "Reference" and self._references):
+            return "selected"
+        count = len(self._role_candidates(role))
+        if count == 0:
+            return "none detected"
+        if count == 1:
+            return "suggested"
+        return "unresolved"
+
+    def _changed(self) -> None:
+        self._confirmed = False
+
+    def select_candidate(self, role: str, number: int) -> None:
+        candidates = self._role_candidates(role)
+        if number < 1 or number > len(candidates):
+            raise ValueError(f"invalid {role} candidate number")
+        path = candidates[number - 1].path
+        if role == "Plan":
+            self._plan = path
+        elif role == "Spec":
+            self._spec = path
+        else:
+            self.append_reference(path)
+            return
+        self._none_roles.discard(role)
+        self._changed()
+
+    def select_manual(self, role: str, raw_path: str) -> None:
+        if role == "Reference":
+            self.append_reference(raw_path)
+            return
+        normalized = validate_attachment_path(self.repository, raw_path)
+        if role == "Plan":
+            self._plan = normalized
+        elif role == "Spec":
+            self._spec = normalized
+        else:
+            raise ValueError(f"unknown attachment role: {role}")
+        self._none_roles.discard(role)
+        self._changed()
+
+    def choose_none(self, role: str) -> None:
+        if role == "Plan":
+            self._plan = None
+        elif role == "Spec":
+            self._spec = None
+        else:
+            self._references = []
+        self._none_roles.add(role)
+        self._changed()
+
+    def attach_combined(self, number: int) -> None:
+        combined = [
+            candidate
+            for candidate in self.candidates
+            if {"Plan", "Spec"}.issubset(candidate.roles)
+        ]
+        if number < 1 or number > len(combined):
+            raise ValueError("invalid combined candidate number")
+        self._plan = combined[number - 1].path
+        self._spec = combined[number - 1].path
+        self._combined_selected = True
+        self._changed()
+
+    def replace(self, role: str, raw_path: str) -> None:
+        if self.command != "revise" or role not in {"Plan", "Spec"}:
+            raise ValueError("replace applies only to Plan or Spec during revise")
+        self.select_manual(role, raw_path)
+
+    def remove(self, role: str) -> None:
+        if self.command != "revise" or role not in {"Plan", "Spec"}:
+            raise ValueError("remove applies only to Plan or Spec during revise")
+        if role == "Plan":
+            self._plan = None
+        else:
+            self._spec = None
+        self._none_roles.add(role)
+        self._changed()
+
+    def append_reference(self, raw_path: str) -> None:
+        normalized = validate_attachment_path(
+            self.repository,
+            raw_path,
+            reference_input=True,
+        )
+        if normalized in {self._plan, self._spec}:
+            raise ValueError("Reference path matches Plan or Spec")
+        if normalized not in self._references:
+            self._references.append(normalized)
+        self._changed()
+
+    def remove_reference(self, stored_path: str) -> None:
+        self._references = [
+            reference for reference in self._references if reference != stored_path
+        ]
+        self._changed()
+
+    def confirm(self) -> AttachmentSelection:
+        combined = [
+            candidate
+            for candidate in self.candidates
+            if {"Plan", "Spec"}.issubset(candidate.roles)
+        ]
+        if (
+            combined
+            and not self._combined_selected
+            and self._plan is None
+            and self._spec is None
+        ):
+            raise ValueError("combined Plan and Spec choice requires explicit selection")
+
+        for role in ("Plan", "Spec"):
+            current = self._plan if role == "Plan" else self._spec
+            if current is not None or role in self._none_roles:
+                continue
+            candidates = self._role_candidates(role)
+            if len(candidates) > 1:
+                raise ValueError(f"{role} is unresolved")
+            if len(candidates) == 1:
+                if role == "Plan":
+                    self._plan = candidates[0].path
+                else:
+                    self._spec = candidates[0].path
+
+        reference_candidates = self._role_candidates("Reference")
+        if not self._existing.references and "Reference" not in self._none_roles:
+            if len(reference_candidates) > 1:
+                raise ValueError("Reference is unresolved")
+            if len(reference_candidates) == 1:
+                path = reference_candidates[0].path
+                if path not in {self._plan, self._spec} and path not in self._references:
+                    self._references.append(path)
+        self._confirmed = True
+        return self.selection
+
+    def finish(
+        self,
+        *,
+        approved: bool,
+        writer: Callable[[AttachmentSelection], None],
+    ) -> bool:
+        if not self._confirmed:
+            raise RuntimeError("attachment confirmation is required before preview approval")
+        if not approved:
+            return False
+        writer(self.selection)
+        return True
+
+
 def scan_ids(text: str) -> set[int]:
     """Return all TODO-N IDs found in markdown text."""
     return {int(m) for m in re.findall(r"TODO-(\d+)", text)}

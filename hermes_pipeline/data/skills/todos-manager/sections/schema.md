@@ -40,7 +40,7 @@ TODOS.md is stored at the repo root. Each entry occupies a single markdown list 
 | **Resolved design:** | Design decisions (zero or more) |
 | **Plan:** | Single repository-relative path to executable implementation instructions. The execution authority and sole actionability gate. |
 | **Spec:** | Single repository-relative path to the authoritative outcome contract. |
-| **Reference:** | Comma-separated repository-relative paths to supplementary context; literal commas are not allowed in a path. |
+| **Reference:** | Comma-separated repository-relative paths to supplementary context. Every stored comma is a separator; there is no escaping syntax, so a single path containing a literal comma cannot be represented or stored. |
 
 ## Example: complete entry
 

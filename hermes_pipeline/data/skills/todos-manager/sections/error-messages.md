@@ -71,9 +71,18 @@ the attachment value. Examples:
 - TODO-15 **Spec:** `docs/external-spec.md` is a symlink that resolves outside the repository.
   Remediation: Choose a file inside the repository root.
 
-- TODO-16 **Reference:** `docs/research,notes.md` contains a literal comma.
-  Remediation: Use one comma-separated Reference path per value; rename paths containing commas.
+- TODO-16 **Reference:** `docs/one.md, , docs/two.md` contains an empty Reference item.
+  Remediation: Remove the extra separator or supply a repository-relative path between separators.
 ```
+
+Every stored comma is a Reference separator, with no escaping syntax. Audit
+splits first and validates each trimmed item, so it must never infer a
+literal-comma path from stored text. For example,
+`docs/research,notes.md` deterministically represents the two stored paths
+`docs/research` and `notes.md`; audit reports findings for either token only
+when that token fails path validation. A detected or manually selected single
+filesystem path containing a comma is rejected before preview and storage with
+`Error: Reference path contains a comma.`
 
 ### Error & Rescue Map
 
