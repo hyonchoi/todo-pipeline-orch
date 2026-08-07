@@ -142,6 +142,19 @@ def test_confirmation_policy_controls_combined_role_choice(tmp_path, monkeypatch
     assert workflow.confirm() == AttachmentSelection()
 
 
+def test_combined_candidate_can_be_explicitly_declined(tmp_path):
+    workflow = AttachmentWorkflow(
+        tmp_path,
+        command="add",
+        candidates=(_candidate("docs/combined.md", "Plan", "Spec"),),
+    )
+    workflow.choose_none("Plan")
+    workflow.choose_none("Spec")
+    workflow.choose_none("Reference")
+
+    assert workflow.confirm() == AttachmentSelection()
+
+
 def test_add_supports_manual_and_omitted_attachments_without_early_write(tmp_path):
     _write(tmp_path, "docs/manual plan.md")
     writes = []
@@ -569,6 +582,25 @@ def test_discovery_rejects_reference_comma_immediately_after_classification(
 
     assert result.candidates == ()
     assert result.errors == (f"{relative}: Reference path contains a comma.",)
+
+
+@pytest.mark.parametrize("excluded_target", [".git/config", "archive/plan.md"])
+def test_discovery_rechecks_exclusions_after_symlink_resolution(
+    tmp_path, excluded_target
+):
+    target = _write(tmp_path, excluded_target, "TODO-40\nBackground material.\n")
+    alias = tmp_path / "docs" / "alias.md"
+    alias.parent.mkdir(parents=True, exist_ok=True)
+    alias.symlink_to(target)
+
+    result = discover_attachment_candidates(
+        tmp_path,
+        explicit_paths=("docs/alias.md",),
+        todo_id="TODO-40",
+    )
+
+    assert result.candidates == ()
+    assert result.reads == 0
 
 
 @pytest.mark.parametrize(

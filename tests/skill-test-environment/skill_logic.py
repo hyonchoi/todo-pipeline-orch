@@ -782,6 +782,8 @@ def discover_attachment_candidates(
                 except AttachmentValidationError as exc:
                     errors.append(f"{raw_path}: {exc}")
                     continue
+                if _attachment_path_is_excluded(normalized):
+                    continue
                 reads += 1
                 if normalized in seen:
                     continue
@@ -1038,6 +1040,7 @@ class AttachmentWorkflow:
             and not self._combined_selected
             and self._plan is None
             and self._spec is None
+            and not {"Plan", "Spec"}.issubset(self._none_roles)
             and self._confirmation_action(len(combined)) == "explicit-selection"
         ):
             raise ValueError("combined Plan and Spec choice requires explicit selection")
