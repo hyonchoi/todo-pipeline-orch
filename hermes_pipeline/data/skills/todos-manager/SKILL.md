@@ -57,6 +57,7 @@ This skill is a decision-tree skeleton. Steps below point to on-demand sections.
 | Any step references the TODOS.md schema, field definitions, or canonical document layout | `sections/schema.md` |
 | Computing or validating TODO-<n> IDs | `sections/id-assignment.md` |
 | Executing `--add` step 4.5 (auto-research) | `sections/auto-research.md` |
+| Discovering or validating Plan, Spec, or Reference attachments for `--add` or `--revise` | `sections/document-attachments.md` |
 | `--convert` detects header-based format (Mode B: `## Open`/`## Completed` + `### Title` entries) | `sections/convert-mode-b.md` |
 | Entry boundary parsing (--archive, --revise) | `sections/entry-boundary.md` |
 | Executing `--list` | `sections/list.md` |
@@ -96,7 +97,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Validation: 10–200 characters, non-empty.
 4. **Prompt for summary:** "One-line summary after the em dash (required):"
    - Validation: Non-empty, 10–100 characters.
-5. **Auto-research (step 4.5):** Read `sections/auto-research.md`. Execute the research phase: collect signals, derive field drafts, ask gap questions one at a time, show synthesis block.
+5. **Attachment discovery and auto-research (step 4.5):** Read `sections/document-attachments.md` and `sections/auto-research.md`. Validate explicit attachment paths, reserve their reads, and complete attachment discovery before general research. Then collect the remaining research signals under the shared counters and derive field drafts only after attachment discovery. Ask gap questions one at a time and show the combined synthesis block.
 6. **Confirm or edit fields** (pre-filled from auto-research):
    - Present all fields from the synthesis block in a single message, in the same
      order shown there, with their `Confidence:` tags. Instruction: "Reply
@@ -111,6 +112,17 @@ The skill supports seven subcommands. Each has its own workflow below.
    - **Context:** (optional)
    - **Depends on:** (optional; validate each TODO-<n> exists in TODOS.md or TODOS-archive.md)
    - **Assumptions:** (optional)
+   - **Plan:**, **Spec:**, **Reference:** (optional attachment rows and states from `sections/document-attachments.md`; validate paths before confirmation)
+   - **Plan selection:** Keep this row in the same batched confirmation. With
+     zero qualified Plans, show `Plan: none detected` and allow confirmation
+     without a Plan. With one candidate, show its path and relevance reason as
+     a suggestion; require an explicit candidate selection, `Plan: <path>`, or
+     `none` before `confirm`. With multiple candidates,
+     show numbered paths and reasons and leave Plan unresolved. In that case,
+     `confirm` must reject only Plan and request a selection, `Plan: <path>`,
+     or `none`. A manual path uses the shared attachment validation without
+     rerunning research. Do not show a Plan field in the preview until it is
+     resolved; `none` omits it and permits a non-actionable TODO.
    - If the reply contains an invalid edit (e.g. bad Depends-on ID, out-of-range
      Decisions value), report just that field's error and re-prompt for that
      field only — do not discard the other confirmed edits.
@@ -121,7 +133,7 @@ The skill supports seven subcommands. Each has its own workflow below.
    - [ ] **TODO-<n>: <Title>** — <Summary>
      - **What:** ...
      - **Why:** ...
-     [all fields]
+     [all resolved fields, including a selected or manual Plan, Spec, and Reference]
    ======== END PREVIEW ========
 
    Proceed? [y / edit / cancel]
@@ -162,6 +174,19 @@ The skill supports seven subcommands. Each has its own workflow below.
    - Status marker valid?
    - ID format correct?
    - Dependency references (if any) exist in TODOS.md or TODOS-archive.md?
+   - Validate every present attachment value using
+     `sections/document-attachments.md`: validate Plan and Spec as single paths.
+     For Reference, treat every stored comma as a separator, trim and validate
+     each non-empty item independently, and report empty items without stopping
+     validation of the remaining items. Because stored
+     Reference text has no escaping syntax, never infer a literal-comma path
+     after splitting; literal-comma candidates are rejected before storage.
+     Report one path-specific finding per defect that the stored representation
+     can express. Identify the TODO ID, attachment role,
+     stored path, and exact defect for missing files, directory targets,
+     containment or traversal escape, outside-target symlinks, and empty
+     Reference items. Attachments remain optional: `--audit` must
+     never require, remove, replace, or repair attachments.
 4. **Reconcile tracked state:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
 5. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
@@ -201,9 +226,8 @@ The skill supports seven subcommands. Each has its own workflow below.
 
 ### `--revise`: Revise an existing TODO entry with AI-pre-filled suggestions
 
-**Exception:** `**Spec:**` and `**Reference:**` are never AI-pre-filled or auto-detected (e.g. no scanning `docs/pipeline/TODO-<n>-*.md` and offering it as a suggestion) — the user must type these values verbatim. A wrong guessed path is worse than an empty field. These two fields also never appear in `--add`'s auto-research (see step 4.5).
-
-Read `sections/revise.md` and follow its steps in full.
+Read `sections/revise.md` and `sections/document-attachments.md`, then follow
+their steps in full.
 
 ---
 

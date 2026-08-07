@@ -54,6 +54,36 @@ Error: NEXT_TODO_ID must be a positive base-10 integer.
 Remediation: Run `todos-manager --audit` to repair the tracked metadata.
 ```
 
+Attachment audit findings identify the TODO, field, stored path, and exact
+defect. Emit one finding and its remediation per invalid path; do not rewrite
+the attachment value. Examples:
+
+```text
+- TODO-12 **Plan:** `docs/missing-plan.md` does not exist.
+  Remediation: Choose an existing document file.
+
+- TODO-13 **Spec:** `docs/specs` is a directory, not a regular file.
+  Remediation: Choose an existing document file.
+
+- TODO-14 **Plan:** `../outside-plan.md` resolves outside the repository.
+  Remediation: Choose a file inside the repository root.
+
+- TODO-15 **Spec:** `docs/external-spec.md` is a symlink that resolves outside the repository.
+  Remediation: Choose a file inside the repository root.
+
+- TODO-16 **Reference:** `docs/one.md, , docs/two.md` contains an empty Reference item.
+  Remediation: Remove the extra separator or supply a repository-relative path between separators.
+```
+
+Every stored comma is a Reference separator, with no escaping syntax. Audit
+splits first and validates each trimmed item, so it must never infer a
+literal-comma path from stored text. For example,
+`docs/research,notes.md` deterministically represents the two stored paths
+`docs/research` and `notes.md`; audit reports findings for either token only
+when that token fails path validation. A detected or manually selected single
+filesystem path containing a comma is rejected before preview and storage with
+`Error: Reference path contains a comma.`
+
 ### Error & Rescue Map
 
 | Error | Root Cause | Remediation |

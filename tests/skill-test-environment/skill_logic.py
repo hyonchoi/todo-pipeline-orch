@@ -13,7 +13,1186 @@ import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from importlib.resources import files
 from pathlib import Path
+
+
+def load_attachment_policy(skill_root: Path | None = None) -> dict:
+    """Parse the executable policy embedded in the authoritative skill Markdown."""
+    root = skill_root or files("hermes_pipeline.data").joinpath(
+        "skills", "todos-manager"
+    )
+    source = root / "sections" / "document-attachments.md"
+    text = source.read_text(encoding="utf-8")
+    match = re.search(
+        r"```json todos-manager-attachment-policy\n(.*?)\n```",
+        text,
+        re.DOTALL,
+    )
+    if match is None:
+        raise RuntimeError("authoritative attachment policy block is missing")
+    for relative in ("SKILL.md", "sections/auto-research.md", "sections/revise.md"):
+        route = (root / relative).read_text(encoding="utf-8")
+        if "sections/document-attachments.md" not in route:
+            raise RuntimeError(f"{relative} is disconnected from attachment policy")
+    return json.loads(match.group(1))
+
+
+ATTACHMENT_POLICY = load_attachment_policy()
+ATTACHMENT_FIELD_LINE_RE = re.compile(
+    r"^  -[ \t]+\*\*(?:Plan|Spec|Reference):\*\*(?:[ \t]+.*)?$"
+)
+TOP_LEVEL_SECTION_RE = re.compile(r"^##(?:[ \t]+|$)")
+
+
+@dataclass(frozen=True)
+class AttachmentCandidate:
+    path: str
+    roles: tuple[str, ...]
+    relevance_reason: str
+    source: str
+    validation: str
+
+
+@dataclass(frozen=True)
+class AttachmentSelection:
+    plan: str | None = None
+    spec: str | None = None
+    references: tuple[str, ...] = ()
+
+
+class AttachmentValidationError(ValueError):
+    def __init__(self, message: str, *, defect: str):
+        super().__init__(message)
+        self.defect = defect
+
+
+@dataclass(frozen=True)
+class AttachmentAuditFinding:
+    todo_id: str
+    role: str
+    stored_path: str
+    defect: str
+
+
+@dataclass(frozen=True)
+class AttachmentDiscoveryResult:
+    candidates: tuple[AttachmentCandidate, ...]
+    reads: int
+    searches: int
+    exhausted: bool
+    skipped_source: str | None
+    errors: tuple[str, ...] = ()
+
+
+def validate_attachment_path(
+    repository: Path,
+    raw_path: str,
+    *,
+    reference_input: bool = False,
+) -> str:
+    """Validate and normalize one attachment candidate.
+
+    A comma is rejected only at the boundary where one Reference candidate is
+    supplied. Once stored, commas unconditionally delimit separate paths.
+    """
+    if reference_input and "," in raw_path:
+        raise AttachmentValidationError(
+            "Reference path contains a comma.",
+            defect="contains a literal comma",
+        )
+    lexical = Path(raw_path)
+    if lexical.is_absolute():
+        raise AttachmentValidationError(
+            "Attachment path must be repository-relative.",
+            defect=ATTACHMENT_POLICY["errors"]["absolute"],
+        )
+
+    root = repository.resolve()
+    unresolved = root / lexical
+    is_symlink = unresolved.is_symlink()
+    resolved = unresolved.resolve()
+    if not resolved.is_relative_to(root):
+        if is_symlink:
+            raise AttachmentValidationError(
+                "Attachment path is a symlink that resolves outside the repository.",
+                defect=ATTACHMENT_POLICY["errors"]["symlink_outside"],
+            )
+        raise AttachmentValidationError(
+            "Attachment path resolves outside the repository.",
+            defect=ATTACHMENT_POLICY["errors"]["outside"],
+        )
+    if not resolved.exists():
+        raise AttachmentValidationError(
+            "Attachment path does not exist.",
+            defect=ATTACHMENT_POLICY["errors"]["missing"],
+        )
+    if resolved.is_dir():
+        raise AttachmentValidationError(
+            "Attachment path is a directory, not a regular file.",
+            defect=ATTACHMENT_POLICY["errors"]["directory"],
+        )
+    if not resolved.is_file():
+        raise AttachmentValidationError(
+            "Attachment path is not a regular file.",
+            defect=ATTACHMENT_POLICY["errors"]["not_regular"],
+        )
+    normalized = resolved.relative_to(root).as_posix()
+    if reference_input and "," in normalized:
+        raise AttachmentValidationError(
+            "Reference path contains a comma.",
+            defect="contains a literal comma",
+        )
+    return normalized
+
+
+def parse_stored_references(value: str) -> tuple[str, ...]:
+    """Parse canonical Reference storage; every comma is a separator."""
+    return tuple(part.strip() for part in value.split(ATTACHMENT_POLICY["reference_separator"]))
+
+
+def audit_attachment_fields(
+    repository: Path,
+    todo_id: str,
+    fields: dict[str, str],
+) -> list[AttachmentAuditFinding]:
+    """Return attachment defects without mutating the supplied entry fields."""
+    findings: list[AttachmentAuditFinding] = []
+    for role in ("Plan", "Spec"):
+        stored = fields.get(role)
+        if not stored:
+            continue
+        try:
+            validate_attachment_path(repository, stored)
+        except AttachmentValidationError as exc:
+            findings.append(
+                AttachmentAuditFinding(todo_id, role, stored, exc.defect)
+            )
+
+    reference_value = fields.get("Reference")
+    if reference_value:
+        for stored in parse_stored_references(reference_value):
+            if not stored:
+                findings.append(
+                    AttachmentAuditFinding(
+                        todo_id,
+                        "Reference",
+                        "",
+                        ATTACHMENT_POLICY["errors"]["empty_reference"],
+                    )
+                )
+                continue
+            try:
+                validate_attachment_path(repository, stored)
+            except AttachmentValidationError as exc:
+                findings.append(
+                    AttachmentAuditFinding(todo_id, "Reference", stored, exc.defect)
+                )
+    return findings
+
+
+_MUTATION_VERB_PATTERN = (
+    r"(?:add|build|change|configure|create|delete|edit|implement|integrate|"
+    r"migrate|modify|move|refactor|remove|rename|replace|update|write)"
+)
+_MUTATION_WORD_RE = re.compile(rf"\b{_MUTATION_VERB_PATTERN}\b", re.IGNORECASE)
+_MUTATION_START_RE = re.compile(rf"^{_MUTATION_VERB_PATTERN}\b", re.IGNORECASE)
+_TASK_HEADING_RE = re.compile(
+    r"^###[ \t]+Task[ \t]+\d+[ \t]*:[ \t]*(?:\*\*)?(?P<title>.*)$",
+    re.IGNORECASE,
+)
+_TASK_BOUNDARY_RE = re.compile(r"^#{1,3}(?:[ \t]+|$)")
+_INLINE_CODE_RE = re.compile(r"`([^`\n]+)`")
+_TARGET_DECLARATION_RE = re.compile(
+    r"^[ ]{0,3}(?:[-*][ \t]+)?(?:\*\*)?Targets?"
+    r"(?::(?:\*\*)?|\*\*:)[ \t]*(?P<value>.+)$",
+    re.IGNORECASE,
+)
+_MARKDOWN_HEADING_RE = re.compile(
+    r"^(?P<marks>#{1,6})[ \t]+(?P<title>.*)$"
+)
+_MARKDOWN_LIST_ITEM_RE = re.compile(
+    r"^(?:(?P<ordered>\d+[.)])|(?P<bullet>[-+*])"
+    r"(?:[ \t]+\[(?P<checked>[ xX])\])?)[ \t]+(?P<text>.+)$"
+)
+_MARKDOWN_STEP_PREFIX_RE = re.compile(
+    r"^(?:\*\*)?Step\s+\d+\s*[:.)-]\s*",
+    re.IGNORECASE,
+)
+_VERIFICATION_ACTION_RE = re.compile(
+    r"^(?:check|confirm|lint|test|validate|verify)\b",
+    re.IGNORECASE,
+)
+_RUN_VERIFICATION_RE = re.compile(
+    r"^(?:execute|run)\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_NOUN_RE = re.compile(
+    r"\b(?:build|checks?|lint(?:ing)?|tests?|verification)\b",
+    re.IGNORECASE,
+)
+_COMMAND_INTENT_RE = re.compile(
+    r"^(?:build|check|confirm|execute|lint|run|test|validate|verify)\b",
+    re.IGNORECASE,
+)
+_NEGATED_AUXILIARY_PATTERN = (
+    r"(?:cannot|[a-z]+n(?:'|\N{RIGHT SINGLE QUOTATION MARK})t|"
+    r"(?:am|are|can|could|did|do|does|had|has|have|"
+    r"is|may|might|must|need|shall|should|was|were|will|would)[ \t]+not)"
+)
+_NEGATED_AUXILIARY_RE = re.compile(
+    rf"^{_NEGATED_AUXILIARY_PATTERN}\b",
+    re.IGNORECASE,
+)
+_NON_EXECUTION_RE = re.compile(
+    r"^(?:do\s+not|don't|never|no|omit|skip|without)\b"
+    r"|^(?:execute|run)\s+no\b"
+    rf"|\b{_NEGATED_AUXILIARY_PATTERN}(?:[ \t]+[a-z]+){{0,2}}[ \t]+"
+    r"(?:be[ \t]+)?(?:execut(?:e|ed|ing)|perform(?:ed|ing)?|"
+    r"run|running|required|needed|necessary)\b",
+    re.IGNORECASE,
+)
+_DESCRIPTIVE_VERIFICATION_STATE_RE = re.compile(
+    r"^(?:check|lint|test)(?:[ \t]+[^\s`.,:;]+){1,5}[ \t]+"
+    r"(?:are|can|could|has|have|is|may|might|must|shall|should|was|were|will|would)\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_NOUN_SUBJECT_RE = re.compile(
+    r"^(?:lint(?:ing)?[ \t]+(?:policy|rules?|status)|"
+    r"test(?:ing)?[ \t]+(?:coverage|results?|status|suite))\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_SECTION_RE = re.compile(
+    r"^(?:acceptance(?:\s+criteria)?|build\s+verification|checks?|lint(?:ing)?|"
+    r"tests?(?:\s+commands?)?|verification)(?:\s+steps?)?$",
+    re.IGNORECASE,
+)
+_ACCEPTANCE_TOPIC_FRAGMENT_RE = re.compile(
+    r"^(?:acceptance(?:[ \t]+criteria)?|checks?|tests?|testing|"
+    r"verification(?:[ \t]+steps?)?)$",
+    re.IGNORECASE,
+)
+_ACCEPTANCE_OUTCOME_RE = re.compile(
+    r"\b(?:accepts?|allows?|are|blocks?|bounds?|can|cannot|completes?|"
+    r"contains?|creates?|does?|exists?|exits?|fails?|has|have|is|must|"
+    r"passes?|rejects?|remains?|returns?|should|stays?|succeeds?|"
+    r"will|would)\b"
+    r"|\bnever[ \t]+[a-z][a-z0-9_-]*\b"
+    r"|(?:<=|>=|==|!=|<|>|\bat[ \t]+(?:least|most)\b|"
+    r"\bno[ \t]+more[ \t]+than\b)",
+    re.IGNORECASE,
+)
+
+
+@dataclass(frozen=True)
+class _TaskSection:
+    title: str
+    lines: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _MarkdownLine:
+    raw: str
+    text: str
+    list_kind: str | None = None
+    heading_level: int | None = None
+    heading_title: str | None = None
+
+
+@dataclass(frozen=True)
+class _PlanSignals:
+    mutation: bool = False
+    target: bool = False
+    verification: bool = False
+
+
+def _fence_opener(line: str) -> tuple[str, int] | None:
+    """Parse a complete column-zero Markdown fence opening line."""
+    opening = re.fullmatch(
+        r"(?P<marker>`{3,}|~{3,})(?P<info>[^\r\n]*)(?:\r?\n)?",
+        line,
+    )
+    if opening is None:
+        return None
+    marker = opening.group("marker")
+    if marker.startswith("`") and "`" in opening.group("info"):
+        return None
+    return marker[0], len(marker)
+
+
+def _without_fenced_code(text: str) -> str:
+    """Return Markdown text with column-zero fenced examples removed."""
+    outside: list[str] = []
+    fence_marker: str | None = None
+    fence_length = 0
+    for line in text.splitlines(keepends=True):
+        if fence_marker is None:
+            opener = _fence_opener(line)
+            if opener is None:
+                outside.append(line)
+                continue
+            fence_marker, fence_length = opener
+        elif re.fullmatch(
+            rf"{re.escape(fence_marker)}{{{fence_length},}}[ \t]*(?:\r?\n)?",
+            line,
+        ):
+            fence_marker = None
+            fence_length = 0
+        outside.append("\n" if line.endswith(("\n", "\r\n")) else "")
+    return "".join(outside)
+
+
+def _partition_task_sections(text: str) -> tuple[tuple[_TaskSection, ...], str]:
+    """Separate real Task sections from non-Task document content."""
+    task_sections: list[_TaskSection] = []
+    non_task_lines: list[str] = []
+    current_title: str | None = None
+    current_lines: list[str] = []
+
+    for line in text.splitlines():
+        task_match = _TASK_HEADING_RE.match(line)
+        if task_match is not None:
+            if current_title is not None:
+                task_sections.append(_TaskSection(current_title, tuple(current_lines)))
+            current_title = task_match.group("title").rstrip("*").rstrip()
+            current_lines = [current_title]
+            non_task_lines.append("")
+            continue
+
+        if current_title is not None and _TASK_BOUNDARY_RE.match(line):
+            task_sections.append(_TaskSection(current_title, tuple(current_lines)))
+            current_title = None
+            current_lines = []
+
+        if current_title is None:
+            non_task_lines.append(line)
+        else:
+            current_lines.append(line)
+            non_task_lines.append("")
+
+    if current_title is not None:
+        task_sections.append(_TaskSection(current_title, tuple(current_lines)))
+
+    return tuple(task_sections), "\n".join(non_task_lines)
+
+
+def _is_verification_command(command: str) -> bool:
+    """Return whether an inline command expresses verification intent."""
+    tokens = command.strip().split()
+    if not tokens:
+        return False
+    if len(tokens) == 1 and re.search(r"[/\\]|\.[A-Za-z0-9_-]+$", tokens[0]):
+        return False
+    if len(tokens) == 1 and re.fullmatch(
+        r"[A-Z][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z0-9_]+)*",
+        tokens[0],
+    ):
+        return False
+
+    exact_intents = {
+        "build",
+        "check",
+        "checks",
+        "checking",
+        "lint",
+        "linting",
+        "test",
+        "tests",
+        "testing",
+        "verification",
+        "verify",
+    }
+    for token in tokens:
+        if "/" in token or "\\" in token:
+            continue
+        if re.search(r"\.[A-Za-z0-9_-]+$", token):
+            continue
+        parts = re.split(r"[-_.:=]+", token.strip("'\"`$()[]{}<> ").lower())
+        if any(
+            part in exact_intents or part.endswith(("test", "check", "lint"))
+            for part in parts
+            if part
+        ):
+            return True
+    return False
+
+
+def _is_concrete_implementation_target(value: str) -> bool:
+    target = value.strip().strip("`").rstrip(".,;")
+    if not target or _is_verification_command(target):
+        return False
+    return bool(
+        re.search(r"[/\\]|\.[A-Za-z0-9_-]+(?:\b|$)", target)
+        or re.search(r"\S+[ \t]+\S+", target)
+        or re.fullmatch(r"[A-Z][A-Za-z0-9_]*(?:(?:::|\.)[A-Za-z0-9_]+)*", target)
+    )
+
+
+def _markdown_lines(text: str) -> tuple[_MarkdownLine, ...]:
+    """Parse non-code Markdown lines into the states used by Plan signals."""
+    parsed: list[_MarkdownLine] = []
+    for raw_line in text.splitlines():
+        if raw_line.startswith("\t") or len(raw_line) - len(raw_line.lstrip(" ")) >= 4:
+            continue
+
+        raw = raw_line.lstrip(" ")
+        heading = _MARKDOWN_HEADING_RE.match(raw)
+        if heading is not None:
+            title = heading.group("title").strip()
+            parsed.append(
+                _MarkdownLine(
+                    raw=raw,
+                    text=title,
+                    heading_level=len(heading.group("marks")),
+                    heading_title=title,
+                )
+            )
+            continue
+
+        item = _MARKDOWN_LIST_ITEM_RE.match(raw)
+        list_kind: str | None = None
+        text_value = raw
+        if item is not None:
+            text_value = item.group("text")
+            if item.group("ordered") is not None:
+                list_kind = "ordered"
+            elif item.group("checked") is not None:
+                list_kind = "checklist"
+            else:
+                list_kind = "bullet"
+        text_value = _MARKDOWN_STEP_PREFIX_RE.sub("", text_value)
+        parsed.append(
+            _MarkdownLine(
+                raw=raw,
+                text=text_value.strip("* \t"),
+                list_kind=list_kind,
+            )
+        )
+    return tuple(parsed)
+
+
+def _is_verification_section(title: str) -> bool:
+    normalized = _INLINE_CODE_RE.sub("", title).strip("*#: \t")
+    return _VERIFICATION_SECTION_RE.fullmatch(normalized) is not None
+
+
+def _verification_section_kind(line: _MarkdownLine) -> str | None:
+    if line.heading_title is None:
+        return None
+    normalized = _INLINE_CODE_RE.sub("", line.heading_title).strip("*#: \t")
+    if line.heading_level == 4 and normalized.casefold() == "acceptance criteria":
+        return "acceptance"
+    if _is_verification_section(line.heading_title):
+        return "verification"
+    return None
+
+
+def _is_affirmative_verification_action(
+    line: _MarkdownLine,
+    *,
+    in_verification_section: bool,
+) -> bool:
+    action = _INLINE_CODE_RE.sub("", line.text).strip("* \t")
+    command_spans = tuple(
+        code_span.group(1)
+        for code_span in _INLINE_CODE_RE.finditer(line.text)
+    )
+    has_command = any(_is_verification_command(command) for command in command_spans)
+
+    action_match = _VERIFICATION_ACTION_RE.match(action)
+    if action_match is not None:
+        remainder = action[action_match.end() :].strip()
+        if (
+            remainder
+            and _NEGATED_AUXILIARY_RE.match(remainder) is None
+            and not re.match(r"^(?:never|no|without)\b", remainder, re.IGNORECASE)
+            and _VERIFICATION_NOUN_SUBJECT_RE.match(action) is None
+        ):
+            return True
+        if not remainder and has_command:
+            return True
+
+    run_match = _RUN_VERIFICATION_RE.match(action)
+    if run_match is not None:
+        remainder = action[run_match.end() :].strip()
+        if re.match(r"^(?:never|no|without)\b", remainder, re.IGNORECASE):
+            return False
+        if _NEGATED_AUXILIARY_RE.match(remainder) is not None:
+            return False
+        return has_command or _VERIFICATION_NOUN_RE.search(action) is not None
+    if has_command and _COMMAND_INTENT_RE.search(action) is not None:
+        return True
+
+    if _NON_EXECUTION_RE.search(action) is not None:
+        return False
+    if _DESCRIPTIVE_VERIFICATION_STATE_RE.search(action) is not None:
+        return False
+
+    command_only = not action.strip(" .:;,-")
+    if has_command and command_only and (
+        line.list_kind is not None or in_verification_section
+    ):
+        return True
+    return False
+
+
+def _is_concrete_acceptance_item(line: _MarkdownLine) -> bool:
+    if line.list_kind is None:
+        return False
+    criterion = _INLINE_CODE_RE.sub(" command ", line.text).strip("* \t .:;,-")
+    if _NON_EXECUTION_RE.search(criterion) is not None:
+        return False
+    if _ACCEPTANCE_TOPIC_FRAGMENT_RE.fullmatch(criterion) is not None:
+        return False
+    return _ACCEPTANCE_OUTCOME_RE.search(criterion) is not None
+
+
+def _line_has_concrete_implementation_target(
+    line: _MarkdownLine,
+    *,
+    allow_target_declarations: bool,
+    allow_action_heading: bool,
+    in_verification_section: bool,
+) -> bool:
+    if in_verification_section or (
+        line.heading_title is not None and not allow_action_heading
+    ):
+        return False
+
+    if allow_target_declarations:
+        declaration = _TARGET_DECLARATION_RE.match(line.raw)
+        if declaration is not None:
+            value = declaration.group("value")
+            candidates = _INLINE_CODE_RE.findall(value) or [value]
+            return any(_is_concrete_implementation_target(item) for item in candidates)
+
+    if _is_affirmative_verification_action(
+        line,
+        in_verification_section=False,
+    ):
+        return False
+    for code_span in _INLINE_CODE_RE.finditer(line.text):
+        prefix = line.text[: code_span.start()]
+        if _MUTATION_WORD_RE.search(prefix) is None:
+            continue
+        if _is_concrete_implementation_target(code_span.group(1)):
+            return True
+    return False
+
+
+def _plan_signals(
+    text: str,
+    *,
+    task_title: str | None = None,
+    allow_target_declarations: bool = False,
+    allow_acceptance_criteria: bool = False,
+) -> _PlanSignals:
+    lines = _markdown_lines(text)
+    mutation = bool(task_title and _MUTATION_START_RE.match(task_title))
+    target = False
+    verification = False
+
+    if task_title is not None:
+        title_line = _MarkdownLine(raw=task_title, text=task_title)
+        target = _line_has_concrete_implementation_target(
+            title_line,
+            allow_target_declarations=False,
+            allow_action_heading=False,
+            in_verification_section=False,
+        )
+
+    section_kind: str | None = None
+    for line in lines:
+        action_heading = False
+        if line.heading_title is not None:
+            next_section_kind = (
+                _verification_section_kind(line)
+                if allow_target_declarations or allow_acceptance_criteria
+                else None
+            )
+            section_kind = next_section_kind
+            action_heading = bool(
+                task_title is not None
+                and line.heading_level == 4
+                and next_section_kind is None
+            )
+            if not action_heading:
+                continue
+
+        in_verification_section = section_kind is not None
+        if (
+            not in_verification_section
+            and (
+                line.list_kind in {"checklist", "ordered"}
+                or action_heading
+            )
+            and _MUTATION_START_RE.match(line.text)
+        ):
+            mutation = True
+
+        if _line_has_concrete_implementation_target(
+            line,
+            allow_target_declarations=allow_target_declarations,
+            allow_action_heading=action_heading,
+            in_verification_section=in_verification_section,
+        ):
+            target = True
+
+        if _TARGET_DECLARATION_RE.match(line.raw) is not None:
+            continue
+        if _is_affirmative_verification_action(
+            line,
+            in_verification_section=in_verification_section,
+        ):
+            verification = True
+        elif (
+            allow_acceptance_criteria
+            and section_kind == "acceptance"
+            and _is_concrete_acceptance_item(line)
+        ):
+            verification = True
+
+    return _PlanSignals(mutation, target, verification)
+
+
+def _task_is_semantic_plan(task: _TaskSection) -> bool:
+    task_body = "\n".join(task.lines[1:])
+    signals = _plan_signals(
+        task_body,
+        task_title=task.title,
+        allow_target_declarations=True,
+        allow_acceptance_criteria=True,
+    )
+    return signals.mutation and signals.target and signals.verification
+
+
+def classify_attachment_document(relative_path: str, text: str) -> tuple[str, ...]:
+    """Classify a relevant document by its strongest attachment roles."""
+    normalized = relative_path.replace("\\", "/")
+    lower_text = text.lower()
+    semantic_text = _without_fenced_code(text)
+    recognized_plan = (
+        normalized.startswith("docs/gstack/")
+        and any(marker in lower_text for marker in ("status: approved", "verdict:"))
+    ) or normalized.startswith("docs/superpowers/plans/")
+    task_sections, non_task_text = _partition_task_sections(semantic_text)
+    task_plan = any(_task_is_semantic_plan(task) for task in task_sections)
+    fallback_signals = _plan_signals(non_task_text)
+    fallback_plan = (
+        fallback_signals.mutation
+        and fallback_signals.target
+        and fallback_signals.verification
+    )
+    plan = recognized_plan or task_plan or fallback_plan
+    spec = bool(
+        re.search(r"(?im)^#{2,4}\s+Outcome\b", text)
+        and re.search(
+            r"(?im)^#{2,4}\s+(?:Acceptance(?: criteria)?|Requirements?|"
+            r"Compatibility and completion|[^\n#]*\bContract)\b",
+            text,
+        )
+    )
+    roles: list[str] = []
+    if plan:
+        roles.append("Plan")
+    if spec:
+        roles.append("Spec")
+    if not roles:
+        roles.append("Reference")
+    return tuple(roles)
+
+
+def _attachment_path_is_excluded(relative_path: str) -> bool:
+    parts = Path(relative_path).parts
+    excluded_parts = set(ATTACHMENT_POLICY["excluded_parts"])
+    return any(part.lower() in excluded_parts for part in parts)
+
+
+def discover_attachment_candidates(
+    repository: Path,
+    *,
+    explicit_paths: tuple[str, ...] = (),
+    git_paths: tuple[str, ...] = (),
+    search_paths: tuple[str, ...] = (),
+    search_batches: tuple[tuple[str, ...], ...] = (),
+    todo_id: str | None = None,
+    subject_terms: tuple[str, ...] = (),
+    target_paths: tuple[str, ...] = (),
+    title_summary: str = "",
+    reads_used: int = 0,
+    searches_used: int = 0,
+    read_limit: int = ATTACHMENT_POLICY["read_limit"],
+    search_limit: int = ATTACHMENT_POLICY["search_limit"],
+    candidate_limit: int = ATTACHMENT_POLICY["candidate_limit"],
+) -> AttachmentDiscoveryResult:
+    """Execute bounded discovery in explicit, Git, then search precedence."""
+    candidates: list[AttachmentCandidate] = []
+    errors: list[str] = []
+    seen: set[str] = set()
+    reads = reads_used
+    searches = searches_used
+    exhausted = False
+    skipped_source: str | None = None
+    if search_paths:
+        search_batches = (search_paths, *search_batches)
+    source_names = ATTACHMENT_POLICY["sources"]
+    sources = ((source_names[0], (explicit_paths,)), (source_names[1], (git_paths,)), (source_names[2], search_batches))
+    lowered_targets = tuple(path.lower() for path in target_paths)
+    close_scope_policy = ATTACHMENT_POLICY["close_scope"]
+    generic_terms = set(close_scope_policy["generic_terms"])
+    scope_terms = {
+        term.lower()
+        for term in re.findall(r"[A-Za-z0-9]{4,}", title_summary)
+        if term.lower() not in generic_terms
+    }
+    canonical_todo_id = (
+        re.fullmatch(r"TODO-[1-9]\d*", todo_id, re.IGNORECASE)
+        if todo_id is not None
+        else None
+    )
+    todo_id_pattern = (
+        re.compile(
+            rf"(?<![A-Za-z0-9]){re.escape(canonical_todo_id.group(0))}"
+            r"(?![A-Za-z0-9])",
+            re.IGNORECASE,
+        )
+        if canonical_todo_id is not None
+        else None
+    )
+    for source, batches in sources:
+        for batch in batches:
+            if source == source_names[2]:
+                if searches >= search_limit:
+                    exhausted = True
+                    skipped_source = source
+                    break
+                searches += 1
+            for raw_path in batch:
+                if len(candidates) >= candidate_limit:
+                    skipped_source = source
+                    break
+                if _attachment_path_is_excluded(raw_path):
+                    continue
+                if reads >= read_limit:
+                    exhausted = True
+                    skipped_source = source
+                    break
+                try:
+                    normalized = validate_attachment_path(repository, raw_path)
+                except AttachmentValidationError as exc:
+                    errors.append(f"{raw_path}: {exc}")
+                    continue
+                if _attachment_path_is_excluded(normalized):
+                    continue
+                reads += 1
+                if normalized in seen:
+                    continue
+                text = (repository.resolve() / normalized).read_text(encoding="utf-8")
+                haystack = f"{normalized}\n{text}".lower()
+                document_terms = set(re.findall(r"[a-z0-9]{4,}", haystack))
+                close_scope = (
+                    len(scope_terms & document_terms)
+                    >= close_scope_policy["minimum_specific_term_overlap"]
+                )
+                relevant = (
+                    ("explicit" in ATTACHMENT_POLICY["relevance"] and source == source_names[0])
+                    or (
+                        "todo-id" in ATTACHMENT_POLICY["relevance"]
+                        and todo_id_pattern is not None
+                        and todo_id_pattern.search(haystack) is not None
+                    )
+                    or ("close-scope" in ATTACHMENT_POLICY["relevance"] and close_scope)
+                    or ("concrete-target-overlap" in ATTACHMENT_POLICY["relevance"] and any(target in haystack for target in lowered_targets))
+                )
+                if not relevant:
+                    continue
+                roles = classify_attachment_document(normalized, text)
+                if "Reference" in roles:
+                    try:
+                        validate_attachment_path(
+                            repository,
+                            raw_path,
+                            reference_input=True,
+                        )
+                    except AttachmentValidationError as exc:
+                        errors.append(f"{raw_path}: {exc}")
+                        continue
+                reason = "explicit task context" if source == source_names[0] else "strong relevance"
+                candidates.append(AttachmentCandidate(normalized, roles, reason, source, "valid"))
+                seen.add(normalized)
+            if len(candidates) >= candidate_limit:
+                skipped_source = source
+                break
+        if skipped_source is not None:
+            break
+
+    return AttachmentDiscoveryResult(
+        candidates=tuple(candidates),
+        reads=reads,
+        searches=searches,
+        exhausted=exhausted,
+        skipped_source=skipped_source,
+        errors=tuple(errors),
+    )
+
+
+class AttachmentWorkflow:
+    """Deterministic interaction model for add/revise attachment gates."""
+
+    def __init__(
+        self,
+        repository: Path,
+        *,
+        command: str,
+        candidates: tuple[AttachmentCandidate, ...] = (),
+        existing: AttachmentSelection = AttachmentSelection(),
+        todos_path: Path | None = None,
+        todo_id: str | None = None,
+    ):
+        if command not in {"add", "revise"}:
+            raise ValueError("command must be add or revise")
+        self.repository = repository
+        self.command = command
+        self.candidates = candidates
+        self._plan = existing.plan
+        self._spec = existing.spec
+        self._references = list(existing.references)
+        self._existing = existing
+        self.todos_path = todos_path
+        self.todo_id = todo_id
+        self._references_changed = False
+        self._none_roles: set[str] = set()
+        self._combined_selected = False
+        self._confirmed = False
+        self.discovery_runs = 1
+        existing_fields = {
+            role: value
+            for role, value in (
+                ("Plan", existing.plan),
+                ("Spec", existing.spec),
+                ("Reference", ", ".join(existing.references)),
+            )
+            if value
+        }
+        self.warnings = audit_attachment_fields(
+            repository,
+            "existing TODO",
+            existing_fields,
+        )
+
+    @property
+    def selection(self) -> AttachmentSelection:
+        return AttachmentSelection(
+            plan=self._plan,
+            spec=self._spec,
+            references=tuple(self._references),
+        )
+
+    def _role_candidates(self, role: str) -> list[AttachmentCandidate]:
+        return [candidate for candidate in self.candidates if role in candidate.roles]
+
+    def role_state(self, role: str) -> str:
+        current = self._plan if role == "Plan" else self._spec if role == "Spec" else None
+        existing = (
+            self._existing.plan
+            if role == "Plan"
+            else self._existing.spec
+            if role == "Spec"
+            else self._existing.references
+        )
+        if existing and (role != "Reference" and current == existing):
+            return "preserved"
+        if role == "Reference" and existing and not self._references_changed:
+            return "preserved"
+        if role == "Reference" and self._references_changed:
+            return "selected"
+        if role in self._none_roles:
+            return "none detected"
+        if current or (role == "Reference" and self._references):
+            return "selected"
+        count = len(self._role_candidates(role))
+        if count == 0:
+            return "none detected"
+        if count == 1:
+            return "suggested"
+        return "unresolved"
+
+    def _changed(self) -> None:
+        self._confirmed = False
+
+    @staticmethod
+    def _confirmation_action(candidate_count: int) -> str:
+        cardinality = (
+            "zero" if candidate_count == 0 else "one" if candidate_count == 1 else "multiple"
+        )
+        action = ATTACHMENT_POLICY["confirmation"][cardinality]
+        if action not in {"none", "explicit-selection"}:
+            raise RuntimeError(
+                f"unsupported attachment confirmation action: {action}"
+            )
+        return action
+
+    def select_candidate(self, role: str, number: int) -> None:
+        candidates = self._role_candidates(role)
+        if number < 1 or number > len(candidates):
+            raise ValueError(f"invalid {role} candidate number")
+        path = candidates[number - 1].path
+        if role in {"Plan", "Spec"} and path in self._references:
+            raise ValueError(f"{role} path is already present in Reference")
+        if role == "Plan":
+            self._plan = path
+        elif role == "Spec":
+            self._spec = path
+        else:
+            self.append_reference(path)
+            return
+        self._none_roles.discard(role)
+        self._changed()
+
+    def select_manual(self, role: str, raw_path: str) -> None:
+        if role == "Reference":
+            self.append_reference(raw_path)
+            return
+        normalized = validate_attachment_path(self.repository, raw_path)
+        if role in {"Plan", "Spec"} and normalized in self._references:
+            raise ValueError(f"{role} path is already present in Reference")
+        if role == "Plan":
+            self._plan = normalized
+        elif role == "Spec":
+            self._spec = normalized
+        else:
+            raise ValueError(f"unknown attachment role: {role}")
+        self._none_roles.discard(role)
+        self._changed()
+
+    def choose_none(self, role: str) -> None:
+        if role == "Plan":
+            self._plan = None
+        elif role == "Spec":
+            self._spec = None
+        else:
+            self._references = []
+            self._references_changed = self._references != list(
+                self._existing.references
+            )
+        self._none_roles.add(role)
+        self._changed()
+
+    def attach_combined(self, number: int) -> None:
+        combined = [
+            candidate
+            for candidate in self.candidates
+            if {"Plan", "Spec"}.issubset(candidate.roles)
+        ]
+        if number < 1 or number > len(combined):
+            raise ValueError("invalid combined candidate number")
+        path = combined[number - 1].path
+        if path in self._references:
+            raise ValueError("Plan path is already present in Reference")
+        self._plan = path
+        self._spec = path
+        self._combined_selected = True
+        self._changed()
+
+    def replace(self, role: str, raw_path: str) -> None:
+        if self.command != "revise" or role not in {"Plan", "Spec"}:
+            raise ValueError("replace applies only to Plan or Spec during revise")
+        self.select_manual(role, raw_path)
+
+    def remove(self, role: str) -> None:
+        if self.command != "revise" or role not in {"Plan", "Spec"}:
+            raise ValueError("remove applies only to Plan or Spec during revise")
+        if role == "Plan":
+            self._plan = None
+        else:
+            self._spec = None
+        self._none_roles.add(role)
+        self._changed()
+
+    def append_reference(self, raw_path: str) -> None:
+        normalized = validate_attachment_path(
+            self.repository,
+            raw_path,
+            reference_input=True,
+        )
+        if normalized in {self._plan, self._spec}:
+            raise ValueError("Reference path matches Plan or Spec")
+        if normalized not in self._references:
+            self._references.append(normalized)
+            self._references_changed = True
+        self._changed()
+
+    def remove_reference(self, stored_path: str) -> None:
+        self._references = [
+            reference for reference in self._references if reference != stored_path
+        ]
+        self._references_changed = self._references != list(self._existing.references)
+        self._changed()
+
+    def confirm(self) -> AttachmentSelection:
+        combined = [
+            candidate
+            for candidate in self.candidates
+            if {"Plan", "Spec"}.issubset(candidate.roles)
+        ]
+        if (
+            combined
+            and not self._combined_selected
+            and self._plan is None
+            and self._spec is None
+            and not {"Plan", "Spec"}.issubset(self._none_roles)
+            and self._confirmation_action(len(combined)) == "explicit-selection"
+        ):
+            raise ValueError("combined Plan and Spec choice requires explicit selection")
+
+        for role in ATTACHMENT_POLICY["fields"]:
+            selected = (
+                self._plan is not None
+                if role == "Plan"
+                else self._spec is not None
+                if role == "Spec"
+                else bool(self._references)
+            )
+            if selected or role in self._none_roles:
+                continue
+            candidate_count = len(self._role_candidates(role))
+            if self._confirmation_action(candidate_count) != "explicit-selection":
+                continue
+            if candidate_count > 1:
+                raise ValueError(f"{role} is unresolved")
+            raise ValueError(f"{role} requires explicit selection")
+        self._confirmed = True
+        return self.selection
+
+    def finish(
+        self,
+        *,
+        approved: bool,
+        writer: Callable[[AttachmentSelection], None] | None = None,
+    ) -> bool:
+        if not self._confirmed:
+            raise RuntimeError("attachment confirmation is required before preview approval")
+        if not approved:
+            return False
+        if writer is not None:
+            writer(self.selection)
+        elif self.todos_path is not None and self.todo_id is not None:
+            apply_attachment_selection_to_todo(
+                self.todos_path, self.todo_id, self.selection, approved=True
+            )
+        else:
+            raise RuntimeError("writer or TODO target is required")
+        return True
+
+
+def apply_attachment_selection_to_todo(
+    todos_path: Path,
+    todo_id: str,
+    selection: AttachmentSelection,
+    *,
+    approved: bool,
+) -> bool:
+    """Apply confirmed attachments to one real TODO Markdown entry."""
+    if not approved:
+        return False
+
+    def transform(current: str) -> str:
+        wanted = int(todo_id.removeprefix("TODO-"))
+        document_lines = current.splitlines(keepends=True)
+        entries_spans = [
+            (start, end)
+            for heading, start, end in _section_spans(document_lines)
+            if heading == "## Entries"
+        ]
+        if len(entries_spans) != 1:
+            raise ValueError("TODOS.md must contain exactly one ## Entries section")
+        entries_start, entries_end = entries_spans[0]
+        matching_start = next(
+            (
+                index
+                for index in range(entries_start, entries_end)
+                if (
+                    match := ENTRY_HEADER_RE.match(
+                        _line_without_ending(document_lines[index])
+                    )
+                )
+                and int(match.group(2)) == wanted
+            ),
+            None,
+        )
+        if matching_start is None:
+            raise ValueError(f"{todo_id} not found")
+        matching_end = next(
+            (
+                index
+                for index in range(matching_start + 1, entries_end)
+                if ENTRY_HEADER_RE.match(_line_without_ending(document_lines[index]))
+                or TOP_LEVEL_SECTION_RE.match(
+                    _line_without_ending(document_lines[index])
+                )
+            ),
+            entries_end,
+        )
+
+        entry_lines = document_lines[matching_start:matching_end]
+        trailing_blank_lines: list[str] = []
+        while entry_lines and not _line_without_ending(entry_lines[-1]).strip():
+            trailing_blank_lines.insert(0, entry_lines.pop())
+
+        retained_lines = [
+            line
+            for line in entry_lines
+            if ATTACHMENT_FIELD_LINE_RE.fullmatch(_line_without_ending(line)) is None
+        ]
+        attachment_lines = []
+        if selection.plan:
+            attachment_lines.append(f"  - **Plan:** {selection.plan}")
+        if selection.spec:
+            attachment_lines.append(f"  - **Spec:** {selection.spec}")
+        if selection.references:
+            attachment_lines.append(
+                f"  - **Reference:** {', '.join(selection.references)}"
+            )
+
+        newline = _detect_newline(current)
+        if attachment_lines and retained_lines and not retained_lines[-1].endswith(
+            ("\n", "\r\n")
+        ):
+            retained_lines[-1] += newline
+        needs_terminal_newline = (
+            bool(trailing_blank_lines)
+            or matching_end < entries_end
+            or current.endswith(("\n", "\r\n"))
+        )
+        rendered_attachments = [
+            line
+            + (
+                newline
+                if index < len(attachment_lines) - 1 or needs_terminal_newline
+                else ""
+            )
+            for index, line in enumerate(attachment_lines)
+        ]
+        replacement = retained_lines + rendered_attachments + trailing_blank_lines
+        return "".join(
+            document_lines[:matching_start]
+            + replacement
+            + document_lines[matching_end:]
+        )
+
+    atomic_update_todos(todos_path, transform)
+    return True
+
+
+def audit_todo_markdown(repository: Path, todos_path: Path) -> list[AttachmentAuditFinding]:
+    """Parse and audit attachments from real TODO Markdown without writing."""
+    findings: list[AttachmentAuditFinding] = []
+    text = todos_path.read_text(encoding="utf-8")
+    for entry in parse_entries(text):
+        findings.extend(
+            audit_attachment_fields(repository, f"TODO-{entry['id']}", entry["fields"])
+        )
+    return findings
 
 
 def scan_ids(text: str) -> set[int]:

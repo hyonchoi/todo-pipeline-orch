@@ -14,17 +14,22 @@ from hermes_pipeline.cli import (
 )
 from hermes_pipeline.config import Config
 from hermes_pipeline.phases import load_profile_prerequisites
+from tests.skill_test_environment.skill_logic import load_attachment_policy
+
+TODOS_MANAGER_DATA = files("hermes_pipeline.data").joinpath(
+    "skills", "todos-manager"
+)
 
 
 def test_todos_manager_skill_is_packaged_data():
     """SKILL.md and sections/ are importable via importlib.resources."""
-    data_root = files("hermes_pipeline.data")
-    skill_md = data_root.joinpath("skills", "todos-manager", "SKILL.md")
+    skill_md = TODOS_MANAGER_DATA.joinpath("SKILL.md")
     assert skill_md.is_file()
-    sections_dir = data_root.joinpath("skills", "todos-manager", "sections")
+    sections_dir = TODOS_MANAGER_DATA.joinpath("sections")
     section_names = {p.name for p in sections_dir.iterdir()}
     assert "schema.md" in section_names
     assert "id-assignment.md" in section_names
+    assert "document-attachments.md" in section_names
 
 
 class FakeArgs:
@@ -543,6 +548,37 @@ class TestCmdSkillsInstall:
 
         assert result == 0
         assert (tmp_path / ".claude" / "skills" / "todos-manager" / "SKILL.md").is_file()
+
+    def test_project_install_matches_packaged_skill_byte_for_byte(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        config = Config(projects_dir=tmp_path / "projects")
+
+        result = _cmd_skills_install(
+            FakeArgs(target="codex", scope="project"), config
+        )
+
+        assert result == 0
+        installed = tmp_path / ".agents" / "skills" / "todos-manager"
+        assert (installed / "SKILL.md").read_bytes() == (
+            TODOS_MANAGER_DATA.joinpath("SKILL.md").read_bytes()
+        )
+        packaged_sections = TODOS_MANAGER_DATA.joinpath("sections")
+        packaged_names = {
+            path.name for path in packaged_sections.iterdir() if path.name.endswith(".md")
+        }
+        installed_names = {
+            path.name for path in (installed / "sections").iterdir() if path.suffix == ".md"
+        }
+        assert installed_names == packaged_names
+        for name in sorted(packaged_names):
+            assert (installed / "sections" / name).read_bytes() == (
+                packaged_sections.joinpath(name).read_bytes()
+            )
+        assert load_attachment_policy(installed) == load_attachment_policy(
+            Path(str(TODOS_MANAGER_DATA))
+        )
 
     def test_permission_denied_produces_structured_error(self, tmp_path, monkeypatch, capsys):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)

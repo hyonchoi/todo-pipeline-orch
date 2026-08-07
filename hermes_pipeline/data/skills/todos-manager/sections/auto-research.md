@@ -4,7 +4,10 @@
 
 After the user provides a title and summary, silently research the codebase to
 derive all todo fields. Only ask targeted questions for gaps that research
-couldn't resolve. Never ask what can be determined.
+couldn't resolve. Never ask what can be determined. Run
+`sections/document-attachments.md` first so explicit paths and all bounded
+attachment sources are handled before general research consumes the shared
+budget.
 
 ## Research signals — collect silently before any output
 
@@ -19,14 +22,16 @@ couldn't resolve. Never ask what can be determined.
 
 ## Research budget cap
 
-To prevent unbounded file reads on large codebases, the auto-research phase must enforce
-hard limits during signal collection:
+To prevent unbounded file reads on large codebases, the combined auto-research
+and document-attachment discovery operation must enforce hard limits during
+signal collection. Read `sections/document-attachments.md` when discovering
+attachments; it shares these counters and must not start a second budget.
 
-- **Max 20 files read** during the research phase (includes TODOS.md, TODOS-archive.md, design docs, and implied source files)
-- **Max 10 grep/search invocations** to match keywords across files
+- **Max 20 files read** across research and attachment discovery (includes TODOS.md, TODOS-archive.md, design docs, attachment candidates, and implied source files)
+- **Max 10 grep/search invocations** across research and attachment discovery
 - If the cap is hit before all signals are collected, **stop researching immediately** and treat any field still undetermined as a gap
 - Fall through to the gap-detection question flow rather than continuing to read additional files
-- Document which signals were skipped due to cap exhaustion (e.g., "source file inspection skipped — budget exhausted")
+- Document which signals or attachment sources were skipped due to cap exhaustion (e.g., "source file inspection skipped — budget exhausted")
 
 ## Field derivation rules
 
@@ -74,6 +79,7 @@ What:            <derived or answered>          [Confidence: high/medium/low]
 Pros:            <derived>
 Cons:            <derived>
 Context:         <path to design doc, or "(none found)">
+Plan:            <none detected, suggested path and reason, or numbered unresolved choices>
 Priority:        <derived or answered>          [Confidence: high/medium/low]
 Effort:          <derived or answered>          [Confidence: high/medium/low]
 Phase:           <derived>                      [Confidence: high/medium/low]
@@ -82,10 +88,42 @@ Test Coverage:   <derived>                      [Confidence: high/medium/low]
 Security Review: <derived>                      [Confidence: high/medium/low]
 UI Review:       <derived or answered>          [Confidence: high/medium/low]
 Depends on:      <derived or answered, or "(none)">
+Spec:            <path and state>
+Reference:       <paths and state>
 ======== END SYNTHESIS ========
 
 These are pre-fills — confirm or edit each in the next step.
 ```
+
+The attachment rows use the `suggested`, `unresolved`, `none detected`, or
+`preserved` states from `sections/document-attachments.md`. They participate in
+the same synthesis confirmation and the subsequent full-entry preview.
+
+## Plan selection during `--add`
+
+Resolve the Plan row in the existing combined synthesis confirmation; do not
+add a separate yes/no prompt or write anything before the user accepts the
+final preview with `y`.
+
+Apply the authoritative candidate-cardinality state machine in
+`sections/document-attachments.md` without restating or overriding its
+zero/one/multiple confirmation rules here. Auto-research renders each candidate
+record and current role state, then delegates selection, explicit `none`, and
+plain-`confirm` handling to that shared policy.
+
+- For a manual `Plan: <path>` response, run the shared path normalization and
+  validation in `sections/document-attachments.md` without rerunning
+  attachment discovery or general research. Keep a valid normalized path for
+  the preview; report the shared validation error and request only a corrected
+  Plan value when invalid.
+- A `none` response resolves the Plan row by omitting it. Only a resolved
+  selected or manual Plan is emitted as `**Plan:** <normalized path>` in the
+  final entry preview.
+
+If the shared research budget is exhausted, disclose the skipped discovery
+source in the synthesis. Continue with the qualified records already found and
+apply the shared state machine; do not spend more budget to resolve Plan
+selection.
 
 Confidence rule: fields answered directly by the user (via gap questions) are
 always `high`. Derived fields are `high` if backed by an exact match (design
