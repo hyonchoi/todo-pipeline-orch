@@ -57,3 +57,7 @@ ignore = [
 [tool.pytest.ini_options]
 python_files = ["test_*.py", "runner.py"]
 testpaths = ["tests"]
+norecursedirs = ["skill_test_environment"]
+
+[tool.coverage.report]
+fail_under = 88
