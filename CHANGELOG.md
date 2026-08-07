@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-08-07
+
+### Added
+- Add repository-local Plan, Spec, and Reference attachments to `todos-manager --add` and `--revise`, with bounded discovery, explicit confirmation, and attachment auditing.
+
+### Fixed
+- Reject attachment symlinks that resolve into excluded repository paths and allow combined Plan/Spec candidates to be explicitly declined.
+
 ## [0.7.0] - 2026-08-04
 
 ### Added

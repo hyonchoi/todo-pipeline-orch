@@ -38,8 +38,9 @@ TODOS.md is stored at the repo root. Each entry occupies a single markdown list 
 | **Assumptions:** | Preconditions |
 | **Completed:** | Version + date (set when done) |
 | **Resolved design:** | Design decisions (zero or more) |
-| **Spec:** | Single path to the authoritative deliverable (e.g. from office-hours / grill-with-docs / spec skills) — drives the pipeline's first phase. `--revise`-only: never AI-suggested, never part of `--add` auto-research; always user-typed verbatim. |
-| **Reference:** | Comma-separated list of supplementary/background paths, threaded into the pipeline's first phase prompt. Same `--revise`-only, never-auto-suggested rule as `Spec:`. Not a synonym for `Context:`, which stays free-text prose. Paths must not contain literal commas (the list is split on `,`). |
+| **Plan:** | Single repository-relative path to executable implementation instructions. The execution authority and sole actionability gate. |
+| **Spec:** | Single repository-relative path to the authoritative outcome contract. |
+| **Reference:** | Comma-separated repository-relative paths to supplementary context. Every stored comma is a separator; there is no escaping syntax, so a single path containing a literal comma cannot be represented or stored. |
 
 ## Example: complete entry
 
@@ -78,8 +79,8 @@ NEXT_TODO_ID: <n>
 > - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
 > - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
 > - Required fields: **What:**, **Why:**, **Decisions:**
-> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
-> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Plan:**, **Spec:**, **Reference:**
+> - Attachments may be proposed by `--add` or `--revise`, but require explicit user confirmation
 > - ID: sequential, immutable TODO-<n>
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 

@@ -49,6 +49,148 @@
 
 ---
 
+### Plan selection scenarios for `--add`
+
+#### Scenario A1c: Zero qualified Plans
+
+**Setup:** Auto-research and attachment discovery find zero qualified Plan
+candidates within the shared budget.
+
+**Walkthrough:** The synthesis displays `Plan: none detected`. The user replies
+`confirm`, reviews a preview with no `**Plan:**` field, and types `y`.
+
+**Expected outcome:** The entry is written without `Plan:` and remains
+non-actionable. No separate Plan prompt appears.
+
+#### Scenario A1d: One candidate and an explicit current-context path
+
+**Setup:** The current task context explicitly names
+`docs/gstack/api-rate-limit-plan.md`, which validates as the one relevant Plan
+candidate. Its record includes the reason that it matches the TODO scope.
+
+**Walkthrough:** The synthesis displays the one candidate path and relevance
+reason as the Plan suggestion. A plain `confirm` requests explicit Plan
+selection; the user selects candidate `1`, confirms the existing batched
+confirmation, then types `y` at the final preview.
+
+**Expected outcome:** The preview and written entry contain
+`**Plan:** docs/gstack/api-rate-limit-plan.md`. The path is selected only by
+that combined confirmation, not silently from current context.
+
+#### Scenario A1e: Multiple candidates remain unresolved
+
+**Setup:** Discovery finds multiple candidates: two relevant implementation
+plans with their relevance reasons.
+
+**Walkthrough:** The synthesis shows numbered paths, marks Plan unresolved,
+and the user replies `confirm`. The skill rejects only Plan and asks for a
+number, `Plan: <path>`, or `none`. The user selects one number, then confirms
+the unchanged remaining fields and types `y` at the existing preview gate.
+
+**Expected outcome:** No preview is shown while Plan is unresolved. The final
+entry contains only the selected normalized Plan path.
+
+#### Scenario A1f: Manual valid untracked Plan path
+
+**Setup:** No suggested Plan is selected. An untracked regular file
+`docs/superpowers/cache-rework-plan.md` exists inside the repository.
+
+**Walkthrough:** The user replies
+`Plan: docs/superpowers/cache-rework-plan.md`. The skill applies the shared
+path validation and does not rerun discovery or general research. The user
+then confirms the combined synthesis and types `y`.
+
+**Expected outcome:** The normalized manual path appears in the preview and
+written `**Plan:**` field.
+
+#### Scenario A1g: Invalid Plan path correction
+
+**Setup:** Plan is unresolved or being edited.
+
+**Walkthrough:** The user supplies `/tmp/outside-plan.md`. The skill reports
+`Error: Attachment path must be repository-relative.` with its shared
+remediation, retains the other confirmed fields, and requests only a corrected
+Plan value. The user supplies a valid repository-relative path and confirms.
+
+**Expected outcome:** No extra research runs, the invalid value never reaches
+the preview, and the corrected normalized value does.
+
+#### Scenario A1h: Budget exhaustion and cancellation
+
+**Setup:** The combined attachment-discovery and auto-research operation finds
+two qualified Plan candidates, then hits the 20-file or 10-search cap before
+every source is searched.
+
+**Walkthrough:** The synthesis discloses the skipped source and uses only
+qualified candidates found before exhaustion. A plain `confirm` is rejected
+while Plan is unresolved. The user explicitly resolves the Plan row by
+selecting one candidate or entering `none`, confirms the synthesis, then
+cancels at the final preview instead of typing `y`.
+
+**Expected outcome:** The skill does not exceed the budget, does not make a
+new Plan guess after exhaustion, and `TODOS.md` remains byte-for-byte
+unchanged after cancellation.
+
+---
+
+### Post-planning attachment scenarios for `--revise`
+
+#### Scenario A1i: Three-session planning attachment
+
+**Setup:** A user creates `TODO-12` with `todos-manager --add`. In a later
+session, they invoke an explicit planning skill that creates and finalizes
+`docs/gstack/cache-rework-plan.md` and `docs/gstack/cache-rework-spec.md`.
+The active TODO has no ordinary gaps and has no existing attachments.
+
+**Walkthrough:** The user invokes `todos-manager --revise`, selects `TODO-12`,
+and provides the explicit invoking-skill paths. Attachment discovery validates
+those paths first, then uses Git-changed fallback and bounded conventional
+search only for remaining candidates. The synthesis offers the plan and spec;
+the user confirms them and approves the preview.
+
+**Expected outcome:** Revision does not exit just because ordinary fields have
+no gaps. The selected Plan and Spec appear in the preview and are written only
+after its existing confirmation and preview gates.
+
+#### Scenario A1j: Combined role, ambiguity, and invalid edit correction
+
+**Setup:** A finalized document strongly qualifies as both an executable Plan
+and authoritative Spec. A second qualified Plan candidate also exists.
+
+**Walkthrough:** The synthesis offers `attach as Plan and Spec` for the
+combined-role document and leaves Plan unresolved because of the second
+candidate. `confirm` is rejected until the user explicitly selects the
+combined role or another Plan choice. If the user supplies an invalid
+edit-path, the skill reports the shared validation error and re-prompts only
+that attachment field.
+
+**Expected outcome:** No candidate is silently selected, the combined document
+is not added as a Reference, and the invalid edit never causes discovery or
+general research to run again.
+
+#### Scenario A1k: Preservation, replacement, removal, and ordered References
+
+**Setup:** `TODO-12` has `Plan: docs/old-plan.md`,
+`Spec: docs/old-spec.md`, and References in this order:
+`docs/adr/0001.md, docs/context.md`. The old Spec file is now missing.
+
+**Walkthrough:** The synthesis warns about the invalid existing Spec but marks
+all attachment values preserved. The user sends `Plan: replace docs/new-plan.md`,
+`Spec: remove`, and `Reference: append docs/new-plan.md`. The skill normalizes
+the Reference candidate, rejects it because it matches the selected Plan, and
+re-prompts only Reference. The user sends `Reference: append docs/context.md`
+and `Reference: append docs/adr/0002.md`, then later sends
+`Reference: remove docs/context.md` before preview.
+
+**Expected outcome:** The Plan changes only because of `replace`; the invalid
+existing Spec warning does not block that unrelated edit and the explicit
+`remove` deletes the Spec. The selected Plan is never also attached as a
+Reference. A valid Reference append normalizes then deduplicates, retains
+pre-existing order, and the explicit removal leaves only
+`docs/adr/0001.md, docs/adr/0002.md`. Cancel at the preview writes nothing.
+
+---
+
 ### Scenario A2: `--init` on new project
 
 **Setup:**
@@ -187,3 +329,26 @@
 - Failed write: if replacement fails, `TODOS.md` remains byte-for-byte unchanged and `.hermes/todo_id_counter` is not advanced.
 - Conflict: if `NEXT_TODO_ID` points to an active TODO, reconciliation scans active plus archive IDs, writes the corrected value, and continues.
 - Misplaced metadata: `NEXT_TODO_ID` under `## Entry Schema`, `## Entries`, or outside canonical sections is invalid and is repaired to exactly one line under `## Metadata`.
+
+## TODO-40 specification coverage
+
+The authoritative contract is
+`docs/superpowers/specs/2026-08-04-todo-40-document-attachments-design.md`.
+The following table maps every requirement group to an acceptance scenario or
+repository contract test.
+
+| Requirement group | Executable coverage | Mapping |
+|---|---|---|
+| Role semantics and ownership | `test_packaged_markdown_policy_drives_the_harness`; `test_combined_plan_and_spec_requires_explicit_combined_choice` | The harness parses the authoritative packaged policy and executes Plan/Spec combined-role behavior. TODO-40 owns attachment behavior; TODO-39 owns runtime selection, prompt consumption, worktree creation, and execution behavior, which remain outside this suite. |
+| Discovery order and exclusions | `test_discovery_obeys_precedence_candidate_limit_and_exclusions` | Executes explicit, Git-changed/untracked, then bounded-search precedence; verifies the five-candidate stop and excluded archive paths. |
+| Discovery budgets and exhaustion | `test_discovery_honors_shared_read_and_search_budgets`; `test_generic_subject_substring_does_not_establish_strong_relevance` | Executes invocation-counted searches, bounded reads, exhaustion, skipped-source reporting, and strong relevance. |
+| Qualification, relevance, and classification | `test_recognized_and_fallback_document_formats` | Executes recognized gstack/Superpowers formats, semantic fallback Plan qualification, Spec classification, and combined roles. |
+| Path normalization and validation | `test_path_validation_normalizes_inside_paths_and_rejects_escape` | Executes normalization plus absolute/traversal containment, directory, and outside-symlink rejection. |
+| Attachment cardinality and Reference syntax | `test_add_candidate_cardinality_controls_confirmation`; `test_reference_representation_has_no_literal_comma_escape`; `test_revise_references_append_deduplicate_remove_and_exclude_roles` | Executes zero/one/multiple cardinality, deterministic comma-separated storage, literal-comma candidate rejection, ordered deduplication, and Plan/Spec exclusion. |
+| Validation recovery | `test_invalid_manual_value_recovers_without_rediscovery` | Executes field-local correction and verifies discovery runs only once. |
+| Interaction and confirmation | `test_ambiguity_blocks_preview_until_one_candidate_is_selected`; `test_add_supports_manual_and_omitted_attachments_without_early_write`; `test_preview_approval_mutates_actual_todo_markdown_only_after_approval` | Executes unresolved-confirm rejection, preview blocking, cancellation, and real TODO Markdown mutation only after approval. |
+| `--add` candidate handling | `test_add_candidate_cardinality_controls_confirmation`; `test_add_supports_manual_and_omitted_attachments_without_early_write` | Executes zero/one/multiple, manual, omitted, and explicit-none add outcomes. |
+| `--revise` attachment mutation | `test_revise_preserves_replaces_and_removes_singletons`; `test_revise_warns_about_invalid_existing_paths_without_blocking_other_edits`; `test_revise_references_append_deduplicate_remove_and_exclude_roles` | Executes preservation, explicit replacement/removal, non-blocking invalid-existing warnings, Reference append/removal, ordering, and deduplication. |
+| Compatibility and non-mutating attachment audit | `test_legacy_entry_without_attachments_remains_valid`; `test_audit_validates_each_stored_reference_without_mutation` | Executes optional legacy compatibility, tokenized Reference audit, path findings, and non-mutation. |
+| Completion scenario matrix | `test_add_candidate_cardinality_controls_confirmation`; `test_discovery_honors_shared_read_and_search_budgets`; `test_recognized_and_fallback_document_formats`; `test_path_validation_normalizes_inside_paths_and_rejects_escape`; `test_legacy_entry_without_attachments_remains_valid` | Together with the dedicated add, revise, interaction, Reference, audit, and install rows, covers every completion item in the authoritative design. |
+| Packaged and installed parity | `test_project_install_matches_packaged_skill_byte_for_byte` | Executes a project-scoped install and compares `SKILL.md`, the full section filename set, and every section byte-for-byte with package resources. |

@@ -25,8 +25,8 @@ NEXT_TODO_ID: <n>
 > - Entry header: `- [ ] **TODO-<n>: <Title>** — <Summary>`
 > - Status: `[ ]` pending, `[→]` in progress, `[x]` done, `[~]` on hold
 > - Required fields: **What:**, **Why:**, **Decisions:**
-> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Spec:**, **Reference:**
-> - **Spec:**/**Reference:** are `--revise`-only (never suggested by `--add` or auto-research); always typed verbatim
+> - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**, **Plan:**, **Spec:**, **Reference:**
+> - Attachments may be proposed by `--add` or `--revise`, but require explicit user confirmation
 > - ID: sequential, immutable TODO-<n>
 > - Completed entries: archived to `TODOS-archive.md` via `todos-manager --archive`
 
