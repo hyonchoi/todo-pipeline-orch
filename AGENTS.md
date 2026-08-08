@@ -78,36 +78,33 @@ Start with these sources when relevant:
 
 ## Version and changelog synchronization
 
-Do not bump the version merely because behavior changed. Version bumps belong
-to an explicit release/versioning task.
+Every pull request must add release intent under `.changeset/`:
 
-Whenever a version is bumped, update all four release artifacts in the same
-commit:
+- Use `npm run changeset` for a patch, minor, or major release and put the
+  pull request's user-facing changelog text in the generated Markdown file.
+- Use `npm run changeset -- --empty` only when the pull request intentionally
+  has no release or changelog impact.
 
-1. `VERSION`
-2. `pyproject.toml` (`project.version`)
-3. `uv.lock` (regenerate with `uv sync`; never hand-edit it)
-4. `CHANGELOG.md` (Keep a Changelog entry dated for the release)
+Do not manually bump versions or add generated release sections to
+`CHANGELOG.md`. The Changesets Version Packages pull request consumes the
+pending `.changeset/*.md` files, updates `package.json` and `CHANGELOG.md`, then
+runs the repository synchronization command to update `VERSION`,
+`pyproject.toml`, and `uv.lock` together. Consumed fragments are deleted by
+Changesets and remain available in git history.
 
-`VERSION`, `pyproject.toml`, and the `hermes-pipeline` entry in `uv.lock` must
-contain the same three-part semantic version, and `CHANGELOG.md` must contain
-that release. This remains required when an automated release tool updates only
-some of the files.
-
-Verify after a bump:
+Verify release metadata with:
 
 ```bash
-cat VERSION
-grep '^version' pyproject.toml
-grep -A1 'name = "hermes-pipeline"' uv.lock
-head -10 CHANGELOG.md
+npm ci
+npm run release:check
 ```
 
 ## Documentation and generated plans
 
-- Update user-facing documentation and `CHANGELOG.md` only when the requested
-  change warrants it. Do not create documentation churn for internal-only
-  edits.
+- Update user-facing documentation only when the requested change warrants it.
+  Put release notes in the pull request's changeset fragment; do not edit the
+  generated `CHANGELOG.md` directly. Avoid documentation churn for
+  internal-only edits.
 - `docs/gstack/` is the canonical gstack project-document directory. If
   `~/.gstack/projects/todo-pipeline-orchestrator` is needed and absent, point it
   to `docs/gstack` with a symlink.
