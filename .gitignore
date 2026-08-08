@@ -63,6 +63,9 @@ htmlcov/
 .tox/
 .nox/
 
+# ---- Node.js release tooling ----
+node_modules/
+
 # ---- uv ----
 .venv/
 # Keep uv.lock committed for reproducible installs; uncomment to ignore instead

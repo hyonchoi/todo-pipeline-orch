@@ -254,6 +254,24 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 
 Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orch/issues).
 
+Pull requests record their release intent with
+[Changesets](https://github.com/changesets/changesets). Install the locked
+release tooling with Node.js 20 or newer, then create a changeset:
+
+```bash
+npm ci
+npm run changeset
+```
+
+The generated `.changeset/*.md` file contains that pull request's semantic
+version bump and changelog text. Use `npm run changeset -- --empty` only when a
+pull request intentionally has no release or changelog impact.
+
+After changes land on `main`, automation collects pending fragments into a
+Version Packages pull request. Merging it updates `CHANGELOG.md`, synchronizes
+the Python package version files, consumes the fragments, and lets the existing
+auto-tag workflow create the matching `vX.Y.Z` tag.
+
 ## License
 
 See LICENSE for details.
