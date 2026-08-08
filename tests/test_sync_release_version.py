@@ -9,6 +9,7 @@ import pytest
 from scripts.sync_release_version import (
     VersionConsistencyError,
     check_consistency,
+    finalize_release_evidence,
     package_version,
     synchronize,
 )
@@ -41,7 +42,7 @@ def _write_release_files(root: Path, *, version: str = "1.2.3") -> None:
 
 def test_repository_release_metadata_is_consistent():
     root = Path(__file__).resolve().parents[1]
-    assert check_consistency(root) == "0.7.2"
+    assert check_consistency(root) == package_version(root)
 
 
 def test_synchronize_copies_package_version_and_regenerates_lock(mocker, tmp_path):
@@ -105,3 +106,51 @@ def test_package_version_rejects_non_semver(tmp_path):
 
     with pytest.raises(VersionConsistencyError, match="invalid version"):
         package_version(tmp_path)
+
+
+def _write_candidate_evidence(root: Path, filename: str) -> Path:
+    candidate = (
+        root
+        / "docs/release-evidence/agent-clients/candidate-source-snapshot"
+        / filename
+    )
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_text(
+        "# gstack candidate qualification\n\n"
+        "- Evidence status: `candidate/source-snapshot`\n"
+        "- Release: `not selected`\n"
+        "- Source VERSION: `1.2.3`\n"
+        "- Source commit: `abc123`\n"
+        "- Result: `PASS`\n\n"
+        "This qualifies discovery against the recorded source snapshot. It is not\n"
+        "release-final evidence and does not select a release version.\n\n"
+        "## Captured evidence\n\nunchanged transcript\n"
+    )
+    return candidate
+
+
+def test_finalize_release_evidence_preserves_snapshot_and_sets_release(tmp_path):
+    for filename in ("gstack-claude.md", "gstack-codex.md"):
+        _write_candidate_evidence(tmp_path, filename)
+
+    finalize_release_evidence(tmp_path, "1.3.0")
+
+    for filename in ("gstack-claude.md", "gstack-codex.md"):
+        release = (
+            tmp_path / "docs/release-evidence/agent-clients/1.3.0" / filename
+        ).read_text()
+        assert "# gstack release qualification" in release
+        assert "- Evidence status: `release-final`" in release
+        assert "- Release: `1.3.0`" in release
+        assert "- Source VERSION: `1.3.0`" in release
+        assert "- Source commit: `abc123`" in release
+        assert "unchanged transcript" in release
+
+
+def test_finalize_release_evidence_fails_before_writing_partial_release(tmp_path):
+    _write_candidate_evidence(tmp_path, "gstack-claude.md")
+
+    with pytest.raises(VersionConsistencyError, match="gstack-codex.md"):
+        finalize_release_evidence(tmp_path, "1.3.0")
+
+    assert not (tmp_path / "docs/release-evidence/agent-clients/1.3.0").exists()

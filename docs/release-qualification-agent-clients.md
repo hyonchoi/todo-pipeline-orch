@@ -77,27 +77,27 @@ enablement, Hermes dispatch, or external-client completion cannot be verified
 for either matrix cell, record that cell as `FAIL` with the exact limitation.
 A direct client probe does not qualify the Hermes dispatcher.
 
-Before `/ship` selects a version, store an honest qualification snapshot under
+Before Changesets selects a version, store an honest qualification snapshot under
 `docs/release-evidence/agent-clients/candidate-source-snapshot/`. It must say
 `Evidence status: candidate/source-snapshot` and `Release: not selected`, and
 must record the source `VERSION` and commit that were actually qualified. A
 candidate `PASS` is useful review evidence, but it does not satisfy the
 release-specific blocking rule.
 
-During the release commit, `/ship` owns the version decision and evidence
-finalization:
+During the Version Packages release commit, Changesets owns the version
+decision and `scripts/sync_release_version.py` finalizes the evidence:
 
 1. Select and synchronize the release version.
 2. Re-run qualification if the recorded environment, discovery output, or
    qualified source has changed.
-3. Copy each current passing candidate artifact to
+3. Copy each current candidate artifact to
    `docs/release-evidence/agent-clients/<release>/`.
 4. Set `Evidence status: release-final`, set `Release` to the selected version,
    and ensure `Source VERSION` matches it. Preserve the exact qualified source
 commit, discovery commands/output, representative invocation command/transcript,
 and fixture-isolation evidence.
 5. Include those versioned artifacts in the same release commit and run the
-   evidence validation tests.
+   evidence validation tests. A recorded `FAIL` remains `FAIL` and blocks CI.
 
 `Unverified` pairs are unsupported and non-blocking until authoritative
 evidence promotes their package metadata. Changing only documentation or

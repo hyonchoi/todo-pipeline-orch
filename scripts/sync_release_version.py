@@ -12,6 +12,7 @@ from pathlib import Path
 
 PACKAGE_NAME = "hermes-pipeline"
 SEMVER_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
+EVIDENCE_FILES = ("gstack-claude.md", "gstack-codex.md")
 
 
 class VersionConsistencyError(ValueError):
@@ -47,6 +48,69 @@ def _replace_pyproject_version(text: str, version: str) -> str:
             "pyproject.toml [project] section must contain one string version"
         )
     return text[: section_match.start("body")] + updated_body + text[section_match.end("body") :]
+
+
+def _replace_once(text: str, old: str, new: str, *, source: Path) -> str:
+    if text.count(old) != 1:
+        raise VersionConsistencyError(
+            f"{source} must contain exactly one {old.strip()!r} marker"
+        )
+    return text.replace(old, new, 1)
+
+
+def finalize_release_evidence(root: Path, version: str) -> None:
+    """Finalize current candidate snapshots for a selected release version."""
+    evidence_root = root / "docs/release-evidence/agent-clients"
+    candidate_root = evidence_root / "candidate-source-snapshot"
+    release_root = evidence_root / version
+    rendered: dict[str, str] = {}
+
+    for filename in EVIDENCE_FILES:
+        source = candidate_root / filename
+        if not source.is_file():
+            raise VersionConsistencyError(f"missing candidate evidence: {source}")
+        text = source.read_text()
+        text = _replace_once(
+            text,
+            " candidate qualification\n",
+            " release qualification\n",
+            source=source,
+        )
+        text = _replace_once(
+            text,
+            "- Evidence status: `candidate/source-snapshot`\n",
+            "- Evidence status: `release-final`\n",
+            source=source,
+        )
+        text = _replace_once(
+            text,
+            "- Release: `not selected`\n",
+            f"- Release: `{version}`\n",
+            source=source,
+        )
+        text, replacements = re.subn(
+            r"(?m)^- Source VERSION: `[0-9]+\.[0-9]+\.[0-9]+`$",
+            f"- Source VERSION: `{version}`",
+            text,
+            count=1,
+        )
+        if replacements != 1:
+            raise VersionConsistencyError(
+                f"{source} must contain one semantic Source VERSION field"
+            )
+        text = _replace_once(
+            text,
+            "This qualifies discovery against the recorded source snapshot. It is not\n"
+            "release-final evidence and does not select a release version.\n",
+            "This release-final artifact records the passing qualification at the source\n"
+            f"commit above for release `{version}`.\n",
+            source=source,
+        )
+        rendered[filename] = text
+
+    release_root.mkdir(parents=True, exist_ok=True)
+    for filename, text in rendered.items():
+        (release_root / filename).write_text(text)
 
 
 def synchronize(root: Path) -> str:
@@ -124,6 +188,7 @@ def main() -> int:
 
     if not args.check:
         synchronize(root)
+        finalize_release_evidence(root, package_version(root))
     version = check_consistency(root)
     print(f"release metadata is consistent at {version}")
     return 0
