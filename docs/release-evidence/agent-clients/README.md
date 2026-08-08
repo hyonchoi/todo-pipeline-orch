@@ -1,6 +1,6 @@
 # Agent Client Release Evidence
 
-Before `/ship` selects a release version, store manual agent-client
+Before Changesets selects a release version, store manual agent-client
 qualification results as candidate/source-snapshot evidence:
 
 ```text
@@ -10,8 +10,8 @@ docs/release-evidence/agent-clients/candidate-source-snapshot/<profile>-<client>
 Candidate evidence must explicitly use `Release: not selected`; the current
 source `VERSION` is evidence metadata, not a release decision.
 
-After `/ship` selects the exact release, finalize the passing artifacts under a
-directory named for that release:
+After Changesets selects the exact release, the repository release-version
+command finalizes the artifacts under a directory named for that release:
 
 ```text
 docs/release-evidence/agent-clients/<release>/<profile>-<client>.md
@@ -64,12 +64,14 @@ substitute.
 
 ## Release commit finalization
 
-`/ship` selects the release version. In the release commit, copy the current
-candidate/source-snapshot artifacts into `<release>/`, change their evidence
-status to `release-final`, set `Release` and `Source VERSION` to the selected
-version, and retain the exact source commit, commands, and captured output. If
-any recorded fact has changed, re-run qualification first. Commit the versioned
-artifacts with the other synchronized release files and run:
+Changesets selects the release version. In the release commit,
+`scripts/sync_release_version.py` copies the current candidate/source-snapshot
+artifacts into `<release>/`, changes their evidence status to `release-final`,
+sets `Release` and `Source VERSION` to the selected version, and retains the
+exact source commit, commands, result, and captured output. If any recorded fact
+has changed, update the candidate by re-running qualification before merging
+the Version Packages pull request. Commit the versioned artifacts with the
+other synchronized release files and run:
 
 ```bash
 rtk env -u VIRTUAL_ENV uv run --locked pytest -q tests/test_release_qualification_evidence.py

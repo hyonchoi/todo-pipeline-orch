@@ -194,7 +194,7 @@ def test_candidate_evidence_does_not_claim_a_final_release():
     protocol = Path("docs/release-qualification-agent-clients.md").read_text()
     schema = (EVIDENCE_ROOT / "README.md").read_text()
     for document in (protocol, schema):
-        assert "`/ship`" in document
+        assert "Changesets" in document
         assert "candidate/source-snapshot" in document
         assert "release commit" in document
 
