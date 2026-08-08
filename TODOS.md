@@ -2,7 +2,7 @@
 
 ## Metadata
 
-NEXT_TODO_ID: 43
+NEXT_TODO_ID: 44
 
 ## Entry Schema
 
@@ -92,3 +92,13 @@ NEXT_TODO_ID: 43
   - **Context:** `docs/gstack/hyonchoi-main-design-20260729-010845.md`
   - **Depends on:** `TODO-41`
   - **Decisions:** Priority `P3`, Effort `M`, Phase `2 (Design)`, Branch `feature/per-project-prompt-client`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+
+- [ ] **TODO-43: Refactor production orchestration hotspots** — Extract cohesive boundaries from oversized CLI, harness, and Kanban functions
+  - **What:** Incrementally extract cohesive, testable boundaries from `cli._tick_project`, `harness.run_harness`/`_poll_kanban_phases`, and `kanban_tasks.create_prepared_todo_phases`; preserve public behavior, cancellation/recovery semantics, durable-state ordering, and existing CLI contracts. Broad redesign and unrelated cleanup are out of scope.
+  - **Why:** Reduce maintenance and regression risk in oversized orchestration functions while their behavior remains protected by strong tests.
+  - **Pros:** Smaller review surfaces, clearer ownership, easier focused testing, and safer future changes to pipeline orchestration.
+  - **Cons:** High regression potential around state transitions and external-process cleanup; temporary adapter layers may be needed while boundaries move.
+  - **Context:** `hermes_pipeline/cli.py`, `hermes_pipeline/harness.py`, `hermes_pipeline/kanban_tasks.py`, `docs/ARCHITECTURE.md`
+  - **Depends on:** (none)
+  - **Assumptions:** Refactoring will be divided into independently reviewable, behavior-preserving slices; existing provider-free tests remain the primary regression gate, with live Hermes validation identified separately where necessary.
+  - **Decisions:** Priority `P2`, Effort `L`, Phase `2 (Design)`, Branch `feature/refactor-production-orchestration-hotspots`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`

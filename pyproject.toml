@@ -1,6 +1,6 @@
 [project]
 name = "hermes-pipeline"
-version = "0.7.1"
+version = "0.7.2"
 description = "Autonomous TODOS.md pipeline orchestrator (Hermes-agent selection, kanban, merge-gating)"
 requires-python = ">=3.12"
 dependencies = [
@@ -57,3 +57,7 @@ ignore = [
 [tool.pytest.ini_options]
 python_files = ["test_*.py", "runner.py"]
 testpaths = ["tests"]
+norecursedirs = ["skill_test_environment"]
+
+[tool.coverage.report]
+fail_under = 88
