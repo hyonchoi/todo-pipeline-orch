@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3
+
+### Patch Changes
+
+- 83a69c7: Adopt Changesets fragments and an automated Version Packages pull request for release versioning and changelog generation.
+- 5a62958: Finalize versioned agent-client evidence during Changesets releases and keep release metadata tests version-independent.
+
 All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
@@ -8,32 +15,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.7.2] - 2026-08-07
 
 ### Added
+
 - Add project-specific agent instructions and track the production orchestration refactor as TODO-43.
 
 ### Changed
+
 - Strengthen CI with locked dependency sync, four-artifact release consistency checks, and an 88% coverage floor.
 
 ## [0.7.1] - 2026-08-07
 
 ### Added
+
 - Add repository-local Plan, Spec, and Reference attachments to `todos-manager --add` and `--revise`, with bounded discovery, explicit confirmation, and attachment auditing.
 
 ### Fixed
+
 - Reject attachment symlinks that resolve into excluded repository paths and allow combined Plan/Spec candidates to be explicitly declined.
 
 ## [0.7.0] - 2026-08-04
 
 ### Added
+
 - Set `prompt_client` to `claude` or `codex` so phase prompts use the correct client name and skill invocation syntax.
 - `tpo doctor` now reports agent-client prerequisites, backed by release qualification evidence for supported gstack and Superpowers workflows.
 - Hermes phase registration now uses a non-spawnable barrier with durable crash recovery, preventing partial task chains from dispatching.
 - `tpo doctor` now verifies Hermes-owned dispatcher prerequisites against the assigned Hermes profile's local skill registry.
 
 ### Changed
+
 - Phase prompts are fully rendered before tick persistence or Hermes task creation, so template errors cannot strand an active tick.
 - Release qualification evidence distinguishes candidate source snapshots from release-final artifacts, making support claims traceable to the shipped version.
 
 ### Fixed
+
 - Uncertain Hermes task creation, cleanup, and barrier completion now fail closed without releasing partial task chains.
 - Prior-tick reconciliation now runs before new TODO selection and safely retries interrupted registration commits.
 - Manual gate phases now remain in the dependency chain, so downstream executable phases wait for human approval.
@@ -46,16 +60,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.6] - 2026-07-28
 
 ### Added
+
 - `tpo tick` now uses the bundled selection prompt by default, so new projects can run without creating `.hermes/prompts/selection.md`.
 - The selection prompt now tells the agent to explain why no TODO was selected, making empty or blocked ticks easier to diagnose.
 
 ### Changed
+
 - Missing pipeline contracts now fall back to the dedicated `pipeline` assignee and warn when that Hermes profile is unavailable.
 - Per-project TOML overlays now preserve the project-local state directory used during selection.
 - Kanban gate phases now stay manually blocked instead of inheriting parent completion.
 - The default `gstack` profile now ends at Phase 8 PR handoff: `/ship` opens or updates a PR and does not merge it.
 
 ### Fixed
+
 - Selection parsing now handles warning-prefixed JSON, quoted `"null"` picks, and fenced final answers without letting earlier example JSON override the real decision.
 - Picked-none ticks now log the selection rationale so operators can see why the circuit breaker observed no progress.
 - Eval docs and runner now use the bundled selection prompt by default while still allowing explicit prompt overrides.
@@ -66,25 +83,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.4] - 2026-07-28
 
 ### Changed
+
 - New users now get a shorter `tpo` onboarding path from the README and getting-started tutorial.
 - Documentation now separates installed CLI commands from agent-only `todos-manager` skill invocations.
 - Historical modularization notes now label legacy command names so they do not conflict with current `tpo` usage.
 
 ### Fixed
+
 - README and tutorial links now point to current pipeline contract, CLI, and TODO manager references.
 
 ## [0.6.3] - 2026-07-27
 
 ### Added
+
 - `tpo skills install --reinstall` now gives users an explicit way to replace an installed todos-manager skill after reviewing local changes.
 - `tpo skills uninstall` can remove installed todos-manager skills for Claude, Codex, or both targets with an explicit `--yes` confirmation.
 
 ### Changed
+
 - todos-manager now stores the next TODO ID in tracked project state and reconciles it before assigning new IDs.
 - TODO ID updates now use locked, atomic file replacement so concurrent writers cannot silently reuse or skip IDs.
 - `tpo recover-counter` now rebuilds the legacy counter cache from tracked TODO metadata when the tracked state is valid.
 
 ### Fixed
+
 - Skill install and uninstall now preflight all selected targets before replacing or removing installed skills.
 - Failed skill replacement or uninstall cleanup now preserves recoverable backups and reports failure instead of pretending the operation fully succeeded.
 - Stale, duplicated, malformed, CRLF, and archive-only TODO ID metadata now reconcile consistently across the bundled skill docs and the executable test oracle.
@@ -92,26 +114,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.2] - 2026-07-27
 
 ### Changed
+
 - `tpo config init` now writes active default values for the supported global config keys, so generated config files are immediately editable without uncommenting placeholders.
 - Global config now exposes only the runtime settings that are still used: `projects_dir`, `state_dir`, logging, retention, and Slack channel.
 
 ### Fixed
+
 - Existing config files that still contain removed historical keys no longer block runtime commands.
 - `PIPELINE_PROJECTS_DIR` remains a deprecated fallback when `projects_dir` is not set in a config file.
 - `tpo config get` now reports file attribution for active config entries even when their value matches the built-in default.
 
 ### Removed
+
 - Unused global config entries and obsolete state-lock helper code that no longer participates in tick, harness, or counter workflows.
 
 ## [0.6.1] - 2026-07-26
 
 ### Deprecated
+
 - `PIPELINE_PROJECTS_DIR` remains supported as an environment override for compatibility, but users should migrate to `tpo config set projects_dir <path>`.
 
 ### Migration
+
 - If you set `PIPELINE_PROJECTS_DIR` in your shell profile, run `tpo config set projects_dir <your-path>` once, then remove the shell export when convenient.
 
 ### Added
+
 - `tpo config` subcommand: `init`, `get`, `set`, `path`
 - Global config loading from `${XDG_CONFIG_HOME:-~/.config}/tpo/config.yaml`, `~/.tpo/config.yaml`, and the legacy `${HERMES_HOME:-~/.hermes}/tpo.yaml` fallback.
 - `_validate_project_slug()` — rejects path traversal (`..`), leading dashes, and CLI flag injection
@@ -119,13 +147,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.6.0] - 2026-07-24
 
 ### Changed
+
 - **BREAKING:** CLI renamed from `pipeline-watch`/`hermes-pipeline` to `tpo`. Reinstall with `uv tool install hermes-pipeline` to get the new name. `pipeline-watch` and `hermes-pipeline` still work for one release — each prints a deprecation warning to stderr before dispatching, and will be removed in the next version bump.
 - The `todos-manager` skill is now bundled as package data (`hermes_pipeline/data/skills/todos-manager/`) instead of living outside the package at `skills/todos-manager/`. `uv tool install` now works end-to-end without a manual clone step.
 
 ### Added
+
 - `tpo skills install [--target {codex|claude|all}] [--scope {user|project}] [--force]` — installs the bundled `todos-manager` skill to `~/.claude/skills/`, `~/.agents/skills/`, or both.
 
 ### Removed
+
 - `scripts/install-todos-manager.sh` — superseded by `tpo skills install`.
 
 ## [0.5.10] - 2026-07-24
@@ -235,6 +266,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.5.0] - 2026-07-16
 
 ### Added
+
 - **`--kanban {null,hermes}` flag** — Opt-in real kanban adapter for the mock integration test harness, wired to a dedicated tenant with tick_id-labeled card bodies (TODO-20). Default (`null`) behavior is unchanged.
 - **Preflight validation** — `hermes kanban list --tenant` check with actionable error if the kanban board is unreachable.
 - **Kanban-as-scheduler polling** — `run_harness` now drives real pipeline phases end-to-end through `_poll_kanban_phases`, reusing `register_todo_phases`, `get_todo_kanban_status`, and `all_phases_complete` from the production kanban module instead of a harness-only phase loop.
@@ -242,6 +274,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Gate task auto-completion** — `_auto_complete_gate_tasks` automatically completes downstream gate tasks once their parent phase finishes, including the ready/`None` → done transition (fast phases that complete between polls without ever being observed as `running`).
 
 ### Fixed
+
 - **Invalid `KanbanOutcome` literal** — `"failed"` corrected to `"abandoned"` across all call sites.
 - **Silent kanban-cleanup gaps** — Added cleanup on `continue_on_failure=False` phase failure and convergence-halt paths.
 - **Kanban phase-completion gap** — Phases that complete between polls without passing through `running` (ready/`None` → done) no longer leave downstream gate tasks blocked.
@@ -249,6 +282,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.11] - 2026-07-15
 
 ### Added
+
 - **Mock integration test harness** — Repeatable, verifiable end-to-end pipeline testing. Creates mock projects with preset TODOs, runs the full pipeline through isolated temp directories, monitors phase transitions, generates JSONL event logs and structured findings reports. Supports iterative fix cycles with `--loop` to diff reports across runs.
 - **`hermes-pipeline` CLI entrypoint** — Registered alias for the Hermes Pipeline CLI, accessible from any terminal.
 - **`hermes-pipeline test` subcommand** — Drives the mock harness via `--fixture`, `--loop`, `--phase`, `--keep`, `--timeout`, and `--convergence-threshold` flags.
@@ -258,71 +292,86 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Environment threading for subprocess isolation** — Phase subprocesses inherit only test-scoped environment variables, preventing the harness from reading user-level config or credentials.
 
 ### Fixed
+
 - **Harness phase failure reporting** — Timeout and convergence-halt events are recorded in the JSONL event log so reports reflect the actual failure mode instead of silent truncation.
 - **Version test resilience** — Version parsing no longer fails when the VERSION file contains unexpected trailing content.
 
 ### Changed
+
 - **Test report module** — New `test_report.py` provides `generate_report`, `summarize_report`, `diff_reports`, and `summarize_diff` for structured pipeline analysis.
 
 ## [0.4.10] - 2026-07-14
 
 ### Added
+
 - **`todos-manager --revise` subcommand** — revise an existing TODO entry by filling missing or weak fields with AI-pre-filled suggestions. Selects an entry by TODO-ID, scans for gaps (What, Why, Decisions, optional fields), auto-researches the codebase scoped to gaps, presents a synthesis block with confidence tags, and writes the updated entry back to TODOS.md. Reuses the auto-research phase from `--add`. Only revises active entries — archived entries are never modified.
 - **Entry boundary parsing spec** — shared algorithm for identifying TODO entry start/end positions in TODOS.md. Used by both `--archive` and `--revise` to extract entries without DRY violations.
 
 ### Changed
+
 - **`todos-manager --add` subcommand revised** — after you provide a title and summary, auto-researches the codebase to pre-fill TODO fields (What, Why, Decisions) before the interactive prompts. Reduces manual typing for entries that correspond to existing code areas.
 - **TODOS Manager skill updated to seven subcommands** — `--revise` is now documented alongside `--init`, `--add`, `--convert`, `--audit`, `--archive`, and `--list`.
 
 ## [0.4.8] - 2026-07-13
 
 ### Added
+
 - **`todos-manager --list` subcommand** — report-only listing of active TODO entries as a markdown table (ID, status, title, summary). Pass `--all` to also show archived entries from `TODOS-archive.md` in a separate table. Modifies no files.
 - **`todos-manager --convert` header-based transformation (Mode B)** — converts header-based TODOS.md entries (freeform text, title-as-header, no schema fields) into the canonical enforced format. Creates dated backup files and a reference document. Idempotent — already-converted files are skipped.
 
 ### Fixed
+
 - **Decision agent JSON parser crashes on CLI backend warnings** — `_parse()` no longer requires the response to start with a code fence. CLI backends that prepend stderr-style warning lines before the fenced JSON block now parse correctly. The parser also tolerates one-line fenced JSON, missing closing fences, and trailing prose after fenced blocks.
 
 ### Changed
+
 - **TODOS Manager skill updated to six subcommands** — `--list` is now documented alongside `--init`, `--add`, `--convert`, `--audit`, and `--archive`. Updated ARCHITECTURE.md, CLAUDE.md, README.md, and how-to guide to match.
 
 ## [0.4.7] - 2026-07-13
 
 ### Added
+
 - **Skill test environment (Phase 1)** — `tests/skill-test-environment/` provides a structural unit test suite for the `todos-manager` skill: a demo-project TODOS.md/TODOS-archive.md fixture, golden YAML assertion files for each subcommand (`--add`, `--init`, `--audit`, `--archive`), and pure-Python verification modules (`skill_logic.py`, `verify.py`) covering ID sequencing, entry parsing, format validation, and archive logic. Runs in under 5 seconds with zero token cost: `uv run pytest tests/skill-test-environment/unit/ -v`. Phase 2 (agent-driven, AI-judged semantic validation) is deferred.
 
 ## [0.3.2] - 2026-06-19
 
 ### Added
+
 - **`--verbose` / `--debug` logging flags** — `--verbose` increases log detail (selection results, lock state, tick_id). `--debug` enables full debug logging (agent call summaries, circuit breaker transitions, kanban registration)
 - **`recover-counter` subcommand** — scans `TODOS.md` for the highest `TODO-N` ID and initializes `.hermes/todo_id_counter`; prevents ID collisions when bootstrapping a project with hand-written TODOs
 
 ### Fixed
+
 - **`--debug` flag now enables `pipeline.verbose` logger** — verbose log lines are now visible in debug mode (they were previously only shown with `--verbose`)
 
 ## [0.3.3] - 2026-06-23
 
 ### Added
+
 - **Multi-project scan loop** — `pipeline-watch tick` without a project argument now scans all active projects in `projects_dir`, running one selection per project under a single global lock. `pipeline-watch kill` without a project argument similarly scans all projects
 - **Per-project configuration** — `<project>/.hermes/project.toml` for filtering (`enabled = false` to archive) and per-project Slack channel via `[notifications] slack_channel`
 - **Project discovery** — new `project_config` module with `_discover_projects()`, `_is_enabled()`, and `_resolve_slack_channel()` for filesystem-based project filtering
 
 ### Changed
+
 - **Selection model default** — `SelectionConfig.model` defaults to `"auto"` instead of `"claude-opus-4-7"`. Hermes resolves `"auto"` to the current best model, so the pipeline stays current without reconfiguring.
 - **`tick` subcommand** — optional `project` argument; when omitted, scans all active projects instead of requiring a specific project
 - **`kill` subcommand** — optional `project` argument; when omitted, scans all projects for in-flight phases
 - **State migration** — first-run migration of global state (`~/.hermes/`) to per-project state (`<project>/.hermes/`) via new `state_migration` module
 
 ### Fixed
+
 - **Kill across projects** — `kill --todo` now searches all project state directories for the specified TODO, returns exit code 2 if not found anywhere
 - **Slug validation** — `_validate_project_slug` rejects single-character slugs and invalid directory names during project discovery, preventing misconfigured projects from entering the scan loop
 
 ### Removed
+
 - **Circuit breaker cron backoff** — The circuit breaker no longer adjusts the Hermes cron interval (backoff/resume). `backoff_interval_min` and `backed_off` are removed from config and circuit state. The gateway service owns tick scheduling.
 
 ## [0.3.1] - 2026-06-16
 
 ### Added
+
 - **`pipeline-watch tick` subcommand** — kanban-as-scheduler pipeline tick: selects a TODO via Hermes agent, registers phases as kanban tasks with `--parent` dependency chain, and observes circuit breaker
 - **Kanban task registration** — `register_todo_phases` creates phases as kanban tasks with `--idempotency-key` for dedup and `--parent` for sequential execution
 - **Circuit breaker outcome observation** — `observe_outcomes` writes phase completion/failure outcomes to JSONL sidecars; `observe_from_outcomes` reads outcomes to drive circuit breaker state
@@ -331,9 +380,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`.hermes/prompts/` tracking** — prompt templates are tracked in git; runtime state (decisions, outcomes, locks) is ignored
 
 ### Changed
+
 - **Tutorial updated** — `pipeline-watch tick` is the primary workflow for development and debugging; Hermes cron is optional for production
 
 ### Fixed
+
 - **Circuit breaker config loaded once per tick** — eliminated duplicate TOML overlay reads and `CircuitBreaker` instantiations
 - **Project slug validation** — rejects path traversal (`..`, `.`) and CLI flag injection (`--help`, `-v`) in project slugs
 - **Partial registration detection** — expected phase keys are now persisted after kanban task registration; `all_phases_complete` verifies all expected phases are present before returning true
@@ -344,6 +395,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.1.0] - 2026-06-11
 
 ### Added
+
 - Initial release: `pipeline-watch` CLI with auto-tick, merge, and status commands
 - Auto-tick discovery: scans projects for TODOS.md changes and selects eligible TODOs
 - Phase 9 merge orchestration: confirm, version bump, and git merge to main
@@ -353,14 +405,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Configuration via environment variables: `PIPELINE_LOCK_DIR`, `PIPELINE_PROJECTS_DIR`, etc.
 
 ### Fixed
+
 - Improved error messages for invalid arguments (e.g., non-numeric `todo_id`)
 
 ### Changed
+
 - Updated Python version requirement from >=3.14 to >=3.9 for broader compatibility
 
 ## [0.2.0] - 2026-06-14
 
 ### Added
+
 - **Hermes decision engine** — LLM-driven selection replaces deterministic selection (`decision/` module with context builder, agent, schema, store)
 - **SHA-pinned prompts** — prompts stored with SHA-256 checksums; mismatch alerts at selection time
 - **Injection fences** — fence-tag injection neutralized in untrusted regions of the decision pipeline
@@ -375,11 +430,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Hermes state machine** — docs for phase lifecycle (state machine table)
 
 ### Changed
+
 - **Directory structure flattened** — `hermes-pipeline/src/hermes_pipeline/` → `hermes_pipeline/`; `hermes-pipeline/tests/` → `tests/`; `hermes-pipeline/configs/` → `configs/`
 - **Raised minimum Python version** from >=3.9 to >=3.12
 - **Decision-driven pipeline** — watcher and CLI pruned to delegate selection and scheduling to Hermes
 
 ### Fixed
+
 - **Hallucinated picks rejected** — LLM must pick a TODO that exists in TODOS.md; rejects hallucinated IDs
 - **Atomic state writes** — `set_merge_status` and `ready_for_review` use tmp+rename to prevent partial writes
 - **Best-effort outcome sidecar** — `set_merge_status` doesn't fail if sidecar write fails
@@ -388,6 +445,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Canonical RFR filename** — decision context normalizes filename and checks PID liveness on sweep
 
 ### Removed
+
 - **Deterministic `selection.py`** — replaced by Hermes LLM-driven decision engine
 - **`pipeline-watch auto` subcommand** — scheduling moved to Hermes cron (`hermes cron set pipeline-tick */5 * * * *`)
 - **System crontab registration** — `install-cron.sh` removed; tick schedule managed via `hermes cron set`
@@ -396,20 +454,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.0] - 2026-06-15
 
 ### Added
+
 - **Hermes adapter** — `hermes_pipeline/hermes_adapter.py` with `hermes_call()` (simple one-shot queries) and `hermes_agent_call()` (agent-style subprocess with PID tracking). All LLM traffic now routes through `hermes chat -q` instead of direct Anthropic SDK calls.
 - **HermesCallError and HermesAgentResult** — structured error and result types for Hermes CLI failures and agent outcomes.
 - **.env file support** — `.env` files are now git-ignored (`.env.example` is allowed).
 - **CI action pinning** — GitHub Actions pinned to SHA hashes for supply-chain security.
 
 ### Changed
+
 - **Decision agent** — `_anthropic_call()` replaced with `_hermes_call()`; no longer imports the `anthropic` package. Timeout is computed from `max_tokens` (1s per 100 tokens, min 30s, max 300s).
 - **Phase execution** — `_run_claude_subprocess()` replaced with `hermes_agent_call()`. Tool and turn constraints are now encoded as prompt headers since `hermes chat -q` lacks `--tools`/`--turns` flags.
 - **Requirements** — Anthropic API key is no longer needed for runtime selection (eval suite still checks for it as a skip gate). Hermes CLI must be installed and authenticated (`hermes login`) instead.
 
 ### Removed
+
 - **Anthropic SDK dependency** — `anthropic>=0.40` removed from `pyproject.toml`. The orchestrator no longer calls the Anthropic API directly.
 
 ### Fixed
+
 - **Process group kill on timeout** — `hermes_agent_call()` kills the entire process group (hermes + children) on timeout instead of only the parent process, preventing orphaned subprocesses.
 - **stderr capture on agent timeout** — after SIGKILL, agent timeout path now captures stderr for diagnostics.
 - **Transient spawn retry** — `hermes_call()` and `hermes_agent_call()` retry up to 2 times on transient OSError before failing, improving resilience against brief network hiccups.
@@ -421,6 +483,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.4] - 2026-06-29
 
 ### Added
+
 - **Ship gate (Phase 9)** — New `phase_9_ship` blocked kanban task that holds every completed TODO in-flight until a human approves via `pipeline-watch approve`. The blocked gate replaces the `terminal: true` flag on Phase 8, keeping the pipeline loop running until approval.
 - **`pipeline-watch approve` subcommand** — Deterministically ships an approved TODO: bumps VERSION/pyproject.toml/CHANGELOG on the work branch, gates on CI-green, and squash-merges to main with `--match-head-commit`. Idempotent — re-running on an already-merged PR just completes the gate.
 - **SHA-staleness guard** — Refuses to merge if the PR head SHA has changed since review. `--force --force` (double pass) bypasses this guard and writes an audit log entry.
@@ -432,17 +495,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`bump_in_pr`** — Writes VERSION, pyproject.toml, and CHANGELOG on the work branch, commits, and pushes. Restores the original branch after completion (even on failure).
 
 ### Changed
+
 - **`Phase` dataclass** — `gate` flag added; `prompt`, `tools`, `turns` now optional with defaults so gate phases need no LLM fields.
 - **`configs/phases.yaml`** — `phase_9_ship` added as a `gate: true` phase; `terminal: true` moved from Phase 8 to Phase 9.
 - **`register_todo_phases`** — Gate phases are created with `--initial-status blocked` and no `--goal` flags (pure markers, never dispatched to an agent).
 - **`_tick_project`** — Calls `maybe_ship_ready` before the `all_phases_complete` early-return, so the "ready to ship" alert fires even though the blocked gate keeps `all_phases_complete` returning False.
 
 ### Fixed
+
 - **Branch left on `work_branch` after bump failure** — `bump_in_pr` wraps `git checkout work_branch` in try/finally that restores the original branch, so a CI-red refusal or merge failure doesn't leave the operator on the wrong branch.
 
 ## [0.4.0] - 2026-07-07
 
 ### Added
+
 - **Code review phase (Phase 5)** — New `phase_5_review` phase runs gstack `/review` skill autonomously via `hermes chat -q` between development and CSO. Pre-review snapshot captures HEAD and diff; post-review runs pytest and either commits fixes (`review_clean`) or restores the worktree (`review_reverted_test_failure`, `review_timeout`, `review_skipped_no_diff`). Machine-verified outcomes enable deterministic pipeline progression.
 - **`hermes_pipeline/review_phase.py`** — New module owning the code-owned review lifecycle: `capture_pre_review_state()`, `_run_hermes_subprocess()`, `run_pytest()`, `restore_worktree()`, `finalize_review()`, `write_review_artifacts()`, `commit_all()`.
 - **Phase 5 config entry** — Added `phase_5_review` to `configs/phases.yaml` with `tools: "Read,Edit,Bash"`, `turns: 30`, `timeout: 2400`, positioned between `phase_4_development` and `phase_6_1_cso`.
@@ -450,42 +516,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Comprehensive tests** — New test modules `tests/test_phases.py` (config validation), `tests/test_phases_invoke.py` (routing tests), and `tests/test_review_phase.py` (unit tests with real git repo fixtures for capture/restore/finalize logic).
 
 ### Changed
+
 - **`hermes_pipeline/phases.py`** — Added `_invoke_review_phase()` and routing in `_invoke_hermes()` to dispatch `phase_5_review` through the code-owned lifecycle instead of the generic rc-check path.
 - **Phase order** — `configs/phases.yaml` now has 9 phases with `phase_5_review` inserted between development and CSO.
 
 ### Fixed
+
 - **Path traversal in artifact filenames** — `todo_id` is now validated against a strict pattern before use in file paths, preventing directory escape.
 - **Secret leakage in review artifacts** — Hermes stdout embedded in committed findings is now redacted of API keys, tokens, and other sensitive patterns.
 - **Race condition in `restore_worktree`** — Documented the isolated-worktree assumption; sequential `reset --hard` + `clean -fd` is safe under that constraint.
 - **Missing git author config** — `commit_all()` now sets explicit `user.name`/`user.email` via `-c` flags, preventing failures when no global git config exists.
 
 ### Added (docs)
+
 - **Architecture overview** — `docs/ARCHITECTURE.md` documents lane structure, phase execution flow, and data flow across the pipeline.
 
 ## [0.4.4] - 2026-07-10
 
 ### Added
+
 - **`pipeline-watch install-profile`** — Installs the bundled pipeline Hermes profile for unattended kanban execution. Use `--force` to reinstall after SOUL.md changes. See 0.4.6 below for a follow-up fix to how the profile is created.
 - **`--assignee` flag on `init`** — Set the Hermes profile assignee when creating the project contract: `pipeline-watch init <project> --assignee pipeline`.
 - **Doctor profile verification** — `doctor` now checks that a non-default assignee profile exists in Hermes. Fails exit code 2 if the profile is missing, with cause/fix guidance.
 - **Bundled pipeline profile** — New in-package `data/profiles/pipeline/` with SOUL.md. Ships in the wheel.
 
 ### Changed
+
 - **`phases.yaml` moved in-package** — Resolved via `importlib.resources` instead of repo-relative path. Works from installed wheel.
 - **Hatchling wheel config** — `pyproject.toml` configured to include `hermes_pipeline` package data in wheel.
 
 ## [0.4.6] - 2026-07-11
 
 ### Changed
+
 - **`install-profile` clones the active profile instead of installing a bare distribution** — `hermes profile install` only copies files present in the source distribution, so the bundled `distribution.yaml` (SOUL.md only) produced a `pipeline` profile with no `config.yaml`/`.env`/skills, unusable without manual setup. `install-profile` now runs `hermes profile create pipeline --clone` to inherit a working baseline from the currently-active profile, then overlays the bundled pipeline-specific `SOUL.md` on top. `--force` deletes any existing `pipeline` profile first.
 - **`install-profile` error handling hardened** — `hermes profile delete`'s exit code is now checked instead of ignored; `hermes profile show` is wrapped in the same "Hermes not on PATH" handling as the other Hermes calls and surfaces its stderr on failure; the parsed profile path is validated as a real directory before `SOUL.md` is copied into it.
 
 ### Removed
+
 - **`hermes_pipeline/data/profiles/pipeline/distribution.yaml`** — no longer used now that `install-profile` clones instead of installing a distribution.
 
 ## [0.4.3] - 2026-07-10
 
 ### Added
+
 - **`pipeline-watch init` subcommand** — Writes the default pipeline execution contract (`.hermes/pipeline.toml`) for a project, declaring assignee and tool capabilities. Idempotent — use `--force` to regenerate after editing `configs/phases.yaml`. Capabilities are computed from phase definitions, not hardcoded.
 - **`pipeline-watch doctor` subcommand** — Verifies a project's pipeline execution contract against `configs/phases.yaml`. Exit codes: 0 (clean), 1 (capability drift), 2 (missing/invalid contract).
 - **Pipeline execution contract** — Versioned TOML manifest (`.hermes/pipeline.toml`) that declares per-project assignee and tool capabilities. Ticks validate the contract at start: missing contract falls back to computed defaults, stale version or capability mismatch fails the tick with a remediation message.
@@ -493,33 +567,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.4.1] - 2026-07-08
 
 ### Added
+
 - **Plan Gate (phase_2b_plan_gate)** — Human review checkpoint between Autoplan and Writing Plan. Autoplan produces a decision sheet (`## Decisions` section) that is parsed into a structured JSON artifact. The gate blocks the pipeline until a human approves or rejects the plan via `pipeline-watch approve-plan`.
 - **`pipeline-watch approve-plan` subcommand** — Approve (`--approve`) or reject (`--reject --reason ...`) plan-gate decision sheets. Supports `--override q_id=LABEL` to correct individual recommendations without re-running Autoplan. Override injection protection via sanitization.
 - **Risk classifier** — Keyword-based high-risk TODO classification (dependency, architecture, security, data, broad scope). Projects with rejection history are automatically classified as high-risk, triggering the plan gate.
 
 ### Changed
+
 - **Phase list** — New `phase_2b_plan_gate` gate phase between `phase_2_autoplan` and `phase_3_writing_plan`. Gate phases are registered as blocked kanban tasks (never dispatched to an agent).
 - **Dispatcher** — `maybe_plan_gate_ready` alert fires when plan-gate is blocked but pre-gate phases are complete, notifying via Slack.
 - **Runner** — `_invoke_hermes` short-circuits gate phases (approved → skip, blocked/rejected → raise).
 - **`all_phases_complete`** — Rejected plan-gate (archived) no longer stalls the tick; rejection sidecar on disk is the authoritative signal.
 
 ### Added (internal)
+
 - **Decision sheet schema** — `DecisionSheet` / `DecisionQuestion` / `_Option` frozen dataclasses with full validation (unique question IDs, label matching, answer ∈ options, positive todo_id, schema versioning).
 - **Gate status check** — `check_gate_status()` pure read of gate state from kanban + rejection sidecar. Returns `GateStatus` enum (BLOCKED, READY, RUNNING, FAILED, UNKNOWN).
 
 ## [0.4.2] - 2026-07-09
 
 ### Added
+
 - **TODOS Manager skill v2.1** — Rewrote `skills/todos-manager/SKILL.md` to enforce canonical TODOS.md schema with five subcommands (`--init`, `--add`, `--convert`, `--audit`, `--archive`). Schema requires What/Why/Decisions fields, supports Pros/Cons/Context/Depends on/Assumptions/Completed/Resolved design. Stable TODO-<n> IDs computed by scanning both TODOS.md and TODOS-archive.md. Completed entries archive to `TODOS-archive.md`. Skill source lives at `skills/todos-manager/SKILL.md` (git-tracked); install via `scripts/install-todos-manager.sh` to symlink to `~/.claude/skills/` and `~/.agents/skills/`.
 
 ### Changed
+
 - **TODOS.md preamble** — Added format rules blockquote documenting the enforced schema, status markers, required/optional fields, and ID assignment rules.
 - **`.claude/` gitignore** — Added `.claude/` to `.gitignore` so agent-client skill installs remain local-only (platform-neutral skill source at `skills/todos-manager/`).
 
 ### Removed
+
 - **`.claude/skills/todos-manager/SKILL.md`** — Removed from git tracking; skill now lives at `skills/todos-manager/SKILL.md` (git-tracked) and installs via symlink.
 
 ### Planned
+
 - Dashboard UI for pipeline status
 - Slack/Discord notifications for merge events
 - Migration guides for breaking changes
