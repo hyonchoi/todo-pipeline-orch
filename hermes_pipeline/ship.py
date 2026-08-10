@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+import tomllib
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -207,25 +208,42 @@ def _run_git(args: list[str], *, cwd: Path | str) -> str:
 
 
 def _bump_version(project_dir: Path | str) -> tuple[str, str]:
-    """Increment the patch version of the VERSION file (inline former merge.py helper)."""
+    """Increment the patch version from pyproject.toml or a legacy VERSION file."""
     project_dir = Path(project_dir)
+    pyproject = project_dir / "pyproject.toml"
     version_file = project_dir / "VERSION"
+    pyproject_version: str | None = None
+    version_file_value: str | None = None
+    if pyproject.exists():
+        try:
+            value = tomllib.loads(pyproject.read_text()).get("project", {}).get("version")
+        except tomllib.TOMLDecodeError as exc:
+            raise ShipError(f"invalid pyproject.toml: {exc}") from exc
+        if not isinstance(value, str):
+            raise ShipError("pyproject.toml has no string [project].version")
+        pyproject_version = value
     if version_file.exists():
-        current = version_file.read_text().strip()
-    else:
-        current = "0.1.0"
+        version_file_value = version_file.read_text().strip()
+    if pyproject_version and version_file_value and pyproject_version != version_file_value:
+        raise ShipError(
+            "pyproject.toml and VERSION disagree: "
+            f"{pyproject_version!r} != {version_file_value!r}"
+        )
+    current = pyproject_version or version_file_value
+    if current is None:
+        raise ShipError("project has neither pyproject.toml nor VERSION version metadata")
     parts = current.split(".")
-    if len(parts) >= 3:
+    if len(parts) == 3 and all(part.isdigit() for part in parts):
         major, minor, patch = int(parts[0]), int(parts[1]), int(parts[2])
         patch += 1
         new_version = f"{major}.{minor}.{patch}"
     else:
-        new_version = "0.1.1"
+        raise ShipError(f"project version is not three-part SemVer: {current!r}")
     return new_version, f"bump to {new_version}"
 
 
 def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tuple[str, str]:
-    """Bump VERSION/pyproject/CHANGELOG on work_branch, commit, push.
+    """Bump available version manifests and CHANGELOG on work_branch.
 
     Returns (new_version, new_head_sha). The pushed commit becomes part of the
     squash merge, so the caller MUST re-baseline the sidecar's pr_head_sha to
@@ -235,23 +253,41 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
     merge failure) never leaves the operator on the wrong branch.
     """
     project_dir = Path(project_dir)
-    new_version, _label = _bump_version(project_dir)
 
     orig_branch = _run_git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=project_dir)
     try:
         _run_git(["checkout", work_branch], cwd=project_dir)
+        new_version, _label = _bump_version(project_dir)
+        staged: list[str] = []
 
-        (project_dir / "VERSION").write_text(f"{new_version}\n")
+        version_file = project_dir / "VERSION"
+        if version_file.exists():
+            version_file.write_text(f"{new_version}\n")
+            staged.append("VERSION")
 
         pyproject = project_dir / "pyproject.toml"
-        text = pyproject.read_text()
-        new_text = re.sub(
-            r'(?m)^version = "[^"]*"',
-            f'version = "{new_version}"',
-            text,
-            count=1,
-        )
-        pyproject.write_text(new_text)
+        if pyproject.exists():
+            text = pyproject.read_text()
+            new_text, replacements = re.subn(
+                r'(?m)^(version\s*=\s*)"[^"]*"\s*$',
+                rf'\g<1>"{new_version}"',
+                text,
+                count=1,
+            )
+            if replacements != 1:
+                raise ShipError(
+                    "pyproject.toml must contain one string [project].version"
+                )
+            pyproject.write_text(new_text)
+            staged.append("pyproject.toml")
+            if (project_dir / "uv.lock").exists():
+                subprocess.run(
+                    ["uv", "lock"],
+                    cwd=project_dir,
+                    check=True,
+                    timeout=GIT_TIMEOUT,
+                )
+                staged.append("uv.lock")
 
         changelog = project_dir / "CHANGELOG.md"
         timestamp = datetime.now(UTC).isoformat().replace("+00:00", "Z")
@@ -263,8 +299,9 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
             changelog.write_text(entry + "\n" + changelog.read_text())
         else:
             changelog.write_text(f"# Changelog\n{entry}")
+        staged.append("CHANGELOG.md")
 
-        _run_git(["add", "VERSION", "pyproject.toml", "CHANGELOG.md"], cwd=project_dir)
+        _run_git(["add", *staged], cwd=project_dir)
         _run_git(
             ["commit", "-m", f"chore: bump to {new_version} for TODO-{todo_id}"],
             cwd=project_dir,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import subprocess
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,14 @@ def _field(document: str, name: str) -> str:
     return match.group(1).strip("`")
 
 
+def _source_version(document: str) -> str:
+    for field in ("Source version", "Source VERSION"):
+        match = re.search(rf"^- {field}: (.+)$", document, re.MULTILINE)
+        if match is not None:
+            return match.group(1).strip("`")
+    raise AssertionError("missing source version field")
+
+
 def _section(document: str, heading: str) -> str:
     match = re.search(
         rf"^### {re.escape(heading)}\n(?P<body>.*?)(?=^### |\Z)",
@@ -77,7 +86,7 @@ def test_candidate_artifact_has_every_required_field(client: str):
 
     assert _field(document, "Evidence status") == "candidate/source-snapshot"
     assert _field(document, "Release") == "not selected"
-    assert re.fullmatch(r"\d+\.\d+\.\d+", _field(document, "Source VERSION"))
+    assert re.fullmatch(r"\d+\.\d+\.\d+", _field(document, "Source version"))
     assert re.fullmatch(r"[0-9a-f]{40}", _field(document, "Source commit"))
     assert _field(document, "Profile/client") == f"gstack / {client}"
     assert re.fullmatch(
@@ -194,14 +203,14 @@ def test_candidate_evidence_does_not_claim_a_final_release():
     protocol = Path("docs/release-qualification-agent-clients.md").read_text()
     schema = (EVIDENCE_ROOT / "README.md").read_text()
     for document in (protocol, schema):
-        assert "Changesets" in document
+        assert "Python" in document
         assert "candidate/source-snapshot" in document
         assert "release commit" in document
 
 
 @pytest.mark.parametrize("client", ("claude", "codex"))
 def test_release_final_artifact_matches_selected_version_and_candidate(client: str):
-    version = Path("VERSION").read_text().strip()
+    version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
     assert re.fullmatch(r"\d+\.\d+\.\d+", version)
 
     candidate = (CANDIDATE_ROOT / f"gstack-{client}.md").read_text()
@@ -209,7 +218,7 @@ def test_release_final_artifact_matches_selected_version_and_candidate(client: s
 
     assert _field(release, "Evidence status") == "release-final"
     assert _field(release, "Release") == version
-    assert _field(release, "Source VERSION") == version
+    assert _source_version(release) == version
     assert _field(release, "Source commit") == _field(candidate, "Source commit")
     assert _field(release, "Profile/client") == f"gstack / {client}"
     assert _field(release, "Result") == "PASS"

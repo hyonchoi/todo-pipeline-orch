@@ -160,6 +160,62 @@ def test_bump_in_pr_writes_files_and_pushes(mocker, tmp_path):
     assert any(c.startswith("git checkout main") for c in flat)
 
 
+def test_bump_in_pr_pyproject_only_does_not_create_version_file(mocker, tmp_path):
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.3.3"\n'
+    )
+    (tmp_path / "uv.lock").write_text(
+        '[[package]]\nname = "demo"\nversion = "0.3.3"\n'
+    )
+    (tmp_path / "CHANGELOG.md").write_text("# Changelog\n")
+
+    def fake_run(cmd, **kw):
+        stdout = "main\n" if "--abbrev-ref" in cmd else "newsha999\n"
+        return mocker.Mock(returncode=0, stdout=stdout, stderr="")
+
+    mocker.patch("hermes_pipeline.ship.subprocess.run", side_effect=fake_run)
+    version, _sha = bump_in_pr(
+        project_dir=tmp_path, work_branch="todo-5-feat", todo_id=5
+    )
+    assert version == "0.3.4"
+    assert not (tmp_path / "VERSION").exists()
+    assert 'version = "0.3.4"' in (tmp_path / "pyproject.toml").read_text()
+
+
+def test_bump_in_pr_version_only_remains_supported(mocker, tmp_path):
+    (tmp_path / "VERSION").write_text("0.3.3\n")
+
+    def fake_run(cmd, **kw):
+        stdout = "main\n" if "--abbrev-ref" in cmd else "newsha999\n"
+        return mocker.Mock(returncode=0, stdout=stdout, stderr="")
+
+    mocker.patch("hermes_pipeline.ship.subprocess.run", side_effect=fake_run)
+    version, _sha = bump_in_pr(
+        project_dir=tmp_path, work_branch="todo-5-feat", todo_id=5
+    )
+    assert version == "0.3.4"
+    assert (tmp_path / "VERSION").read_text() == "0.3.4\n"
+    assert not (tmp_path / "pyproject.toml").exists()
+
+
+def test_bump_in_pr_rejects_conflicting_manifests(mocker, tmp_path):
+    from hermes_pipeline.ship import _bump_version
+
+    (tmp_path / "VERSION").write_text("0.3.3\n")
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "demo"\nversion = "0.3.4"\n'
+    )
+    with pytest.raises(ShipError, match="disagree"):
+        _bump_version(tmp_path)
+
+
+def test_bump_in_pr_rejects_missing_manifest(mocker, tmp_path):
+    from hermes_pipeline.ship import _bump_version
+
+    with pytest.raises(ShipError, match="neither"):
+        _bump_version(tmp_path)
+
+
 def test_bump_in_pr_restores_original_branch_on_failure(mocker, tmp_path):
     """bump_in_pr restores the original branch even if bump fails."""
     (tmp_path / "VERSION").write_text("0.3.3\n")

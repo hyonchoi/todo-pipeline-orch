@@ -1,6 +1,6 @@
 # Agent Client Release Evidence
 
-Before Changesets selects a release version, store manual agent-client
+Before the Python release workflow selects a release version, store manual agent-client
 qualification results as candidate/source-snapshot evidence:
 
 ```text
@@ -8,9 +8,9 @@ docs/release-evidence/agent-clients/candidate-source-snapshot/<profile>-<client>
 ```
 
 Candidate evidence must explicitly use `Release: not selected`; the current
-source `VERSION` is evidence metadata, not a release decision.
+source version is evidence metadata, not a release decision.
 
-After Changesets selects the exact release, the repository release-version
+After the workflow selects the exact release, the repository release-version
 command finalizes the artifacts under a directory named for that release:
 
 ```text
@@ -32,7 +32,7 @@ Each artifact must include:
 
 - Evidence status: `candidate/source-snapshot` or `release-final`
 - Release (`not selected` for candidate evidence)
-- Qualified source VERSION and full source commit
+- Qualified source version and full source commit
 - Profile/client pair
 - UTC timestamp
 - Operating system and version
@@ -64,10 +64,10 @@ substitute.
 
 ## Release commit finalization
 
-Changesets selects the release version. In the release commit,
-`scripts/sync_release_version.py` copies the current candidate/source-snapshot
+The Python changeset workflow selects the release version. In the release commit,
+`scripts/release_changesets.py apply` copies the current candidate/source-snapshot
 artifacts into `<release>/`, changes their evidence status to `release-final`,
-sets `Release` and `Source VERSION` to the selected version, and retains the
+sets `Release` and `Source version` to the selected version, and retains the
 exact source commit, commands, result, and captured output. If any recorded fact
 has changed, update the candidate by re-running qualification before merging
 the Version Packages pull request. Commit the versioned artifacts with the

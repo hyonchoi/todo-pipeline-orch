@@ -255,22 +255,65 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orch/issues).
 
 Pull requests record their release intent with
-[Changesets](https://github.com/changesets/changesets). Install the locked
-release tooling with Node.js 20 or newer, then create a changeset:
+[Changesets-style fragments](https://github.com/changesets/changesets) managed
+by the repository's Python release command. This workflow requires Python and
+`uv`; it does not require Node.js, npm, or the Changesets client.
+
+Choose the semantic-version impact and provide the user-facing changelog entry:
 
 ```bash
-npm ci
-npm run changeset
+uv run python scripts/release_changesets.py add --bump patch --summary "Describe the user-facing change."
 ```
 
-The generated `.changeset/*.md` file contains that pull request's semantic
-version bump and changelog text. Use `npm run changeset -- --empty` only when a
-pull request intentionally has no release or changelog impact.
+Use `patch` for backward-compatible fixes, `minor` for backward-compatible
+features, and `major` for breaking changes. The generated `.changeset/*.md`
+file contains the selected bump and changelog text and should be committed with
+the pull request. If a pull request intentionally has no release or changelog
+impact, record that decision explicitly:
+
+```bash
+uv run python scripts/release_changesets.py add --empty
+```
+
+Before opening or updating the pull request, verify both its release intent and
+the repository's release metadata:
+
+```bash
+uv run python scripts/release_changesets.py status --since origin/main
+uv run python scripts/release_changesets.py check
+```
 
 After changes land on `main`, automation collects pending fragments into a
-Version Packages pull request. Merging it updates `CHANGELOG.md`, synchronizes
-the Python package version files, consumes the fragments, and lets the existing
-auto-tag workflow create the matching `vX.Y.Z` tag.
+Version Packages pull request. The highest pending bump determines the next
+version. That pull request updates `pyproject.toml`, regenerates `uv.lock`, adds
+the release section to `CHANGELOG.md`, and consumes the fragments. Merging it
+lets the existing auto-tag workflow create the matching `vX.Y.Z` tag.
+
+`pyproject.toml` is the sole editable version manifest. Do not add or update a
+`VERSION` file, edit `uv.lock` by hand, or manually add generated release
+sections to `CHANGELOG.md`.
+
+### Release automation token
+
+The Version Packages workflow uses a fine-grained GitHub personal access token
+so that its branch pushes and pull-request updates can trigger the repository's
+normal automation. Create a token restricted to this repository with these
+repository permissions:
+
+- **Contents:** Read and write
+- **Pull requests:** Read and write
+
+Add the token under **Settings → Secrets and variables → Actions** as a
+repository secret named `CHANGESETS_TOKEN`. The workflow passes that secret
+only to checkout, authenticated Git operations, and the GitHub CLI. Never put
+the token in a tracked file, command output, changeset fragment, or pull-request
+description.
+
+If the token belongs to an organization account, complete any required SSO
+authorization and ensure the organization permits fine-grained personal access
+tokens. Token expiration or revoked access will prevent the workflow from
+pushing `changeset-release/main` or creating and updating the Version Packages
+pull request.
 
 ## License
 
