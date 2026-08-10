@@ -261,3 +261,15 @@ def test_finalize_release_evidence_fails_before_partial_release(tmp_path):
     with pytest.raises(ReleaseError, match="gstack-codex.md"):
         finalize_release_evidence(tmp_path, "1.3.0")
     assert not (tmp_path / "docs/release-evidence/agent-clients/1.3.0").exists()
+
+
+def test_release_workflow_only_edits_an_open_same_repository_pr():
+    workflow = Path(".github/workflows/release.yml").read_text()
+
+    assert 'gh pr view "${BRANCH}"' not in workflow
+    assert (
+        'gh pr list --repo "${GITHUB_REPOSITORY}" --state open --base main '
+        '--head "${GITHUB_REPOSITORY_OWNER}:${BRANCH}"' in workflow
+    )
+    assert 'if [ -n "${PR_NUMBER}" ]; then' in workflow
+    assert 'gh pr edit "${PR_NUMBER}"' in workflow
