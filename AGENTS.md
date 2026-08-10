@@ -57,8 +57,15 @@ Start with these sources when relevant:
   breaking change.
 - Do not add dependencies unless the standard library and existing dependencies
   cannot reasonably solve the problem.
-- Do not stage, commit, push, merge, delete worktrees, or open/update a pull
-  request unless the user requests that action.
+- When implementation work is organized into explicit TDD tasks, treat each
+  completed task as a commit boundary. Finish its red-green-refactor cycle, run
+  the task-focused checks, and create one atomic commit before starting the next
+  task. Stage only the files or hunks that belong to that task, and do not commit
+  an incomplete task or known failing tests unless the user explicitly requests
+  a checkpoint commit.
+- Outside that TDD workflow, do not stage or commit unless the user requests it.
+  Do not push, merge, delete worktrees, or open/update a pull request unless the
+  user requests that action.
 
 ## `TODOS.md` management
 
