@@ -33,7 +33,7 @@ This runs an all-deterministic guard set, then ships:
 2. **Sidecar check**: reads the ship sidecar to find the PR, branch, and SHA
 3. **Guard: dirty tree**: refuses if the working tree has uncommitted changes (cannot be bypassed)
 4. **Guard: SHA staleness**: refuses if the PR head SHA changed since review (bypass with `--force --force`)
-5. **Bump in PR**: bumps VERSION, pyproject.toml, CHANGELOG.md on the work branch and pushes
+5. **Bump in PR**: bumps `pyproject.toml` or a legacy `VERSION` manifest, regenerates `uv.lock` when present, updates `CHANGELOG.md`, and pushes. If both manifests exist, they must agree and are updated together; a pyproject-only project does not gain a `VERSION` file.
 6. **Gate: CI green**: checks GitHub status checks. Waits for nothing — if CI is red, refuses and tells you to re-run once green. The bump commit is already pushed.
 7. **Squash merge**: merges the PR at the exact head SHA with `gh pr merge --squash --match-head-commit`
 8. **Complete gate**: marks the kanban gate task as `done`

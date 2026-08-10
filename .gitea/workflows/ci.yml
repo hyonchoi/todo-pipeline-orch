@@ -31,16 +31,10 @@ jobs:
           enable-cache: true
 
       - name: Install dependencies
-        run: uv sync --python ${{ matrix.python-version }}
+        run: uv sync --locked --python ${{ matrix.python-version }}
 
-      - name: Check version file consistency
-        run: |
-          PYPROJ=$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)
-          VFILE=$(tr -d '[:space:]' < VERSION)
-          if [ "$PYPROJ" != "$VFILE" ]; then
-            echo "::error=VERSION ($VFILE) and pyproject.toml ($PYPROJ) differ"
-            exit 1
-          fi
+      - name: Check release metadata consistency
+        run: uv run --python ${{ matrix.python-version }} python scripts/release_changesets.py check
 
       - name: Run tests
         run: uv run --python ${{ matrix.python-version }} pytest --cov=hermes_pipeline --cov-report=term-missing

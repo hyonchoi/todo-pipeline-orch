@@ -30,7 +30,7 @@ isolated environment and commit only the captured evidence.
   without an unknown-skill error.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-claude.md`.
-- Required fields: evidence status, release, qualified source VERSION and
+- Required fields: evidence status, release, qualified source version and
   commit, profile/client pair, UTC timestamp, OS, client version, distribution
   versions, exact skill/plugin sources, discovery commands and their captured
   output, invocation forms, result, and verifier.
@@ -59,7 +59,7 @@ isolated environment and commit only the captured evidence.
   without an unknown-skill error.
 - Evidence artifact:
   `docs/release-evidence/agent-clients/<release>/gstack-codex.md`.
-- Required fields: evidence status, release, qualified source VERSION and
+- Required fields: evidence status, release, qualified source version and
   commit, profile/client pair, UTC timestamp, OS, client version, distribution
   versions, exact skill/plugin sources, discovery commands and their captured
   output, invocation forms, result, and verifier.
@@ -77,15 +77,15 @@ enablement, Hermes dispatch, or external-client completion cannot be verified
 for either matrix cell, record that cell as `FAIL` with the exact limitation.
 A direct client probe does not qualify the Hermes dispatcher.
 
-Before Changesets selects a version, store an honest qualification snapshot under
+Before the Python release workflow selects a version, store an honest qualification snapshot under
 `docs/release-evidence/agent-clients/candidate-source-snapshot/`. It must say
 `Evidence status: candidate/source-snapshot` and `Release: not selected`, and
-must record the source `VERSION` and commit that were actually qualified. A
+must record the source version and commit that were actually qualified. A
 candidate `PASS` is useful review evidence, but it does not satisfy the
 release-specific blocking rule.
 
-During the Version Packages release commit, Changesets owns the version
-decision and `scripts/sync_release_version.py` finalizes the evidence:
+During the Version Packages release commit, `scripts/release_changesets.py`
+owns the version decision and finalizes the evidence:
 
 1. Select and synchronize the release version.
 2. Re-run qualification if the recorded environment, discovery output, or
@@ -93,7 +93,7 @@ decision and `scripts/sync_release_version.py` finalizes the evidence:
 3. Copy each current candidate artifact to
    `docs/release-evidence/agent-clients/<release>/`.
 4. Set `Evidence status: release-final`, set `Release` to the selected version,
-   and ensure `Source VERSION` matches it. Preserve the exact qualified source
+   and ensure `Source version` matches it. Preserve the exact qualified source
 commit, discovery commands/output, representative invocation command/transcript,
 and fixture-isolation evidence.
 5. Include those versioned artifacts in the same release commit and run the

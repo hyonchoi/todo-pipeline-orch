@@ -9,8 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
-  pull-requests: write
+  contents: read
 
 jobs:
   version:
@@ -20,27 +19,45 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4
         with:
           fetch-depth: 0
-
-      - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4
-        with:
-          node-version: 22
-          cache: npm
+          token: ${{ secrets.CHANGESETS_TOKEN }}
 
       - name: Set up uv
         uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf  # v3
         with:
           enable-cache: true
 
-      - name: Install release dependencies
-        run: npm ci
+      - name: Install dependencies
+        run: uv sync --locked
 
-      - name: Create or update Version Packages pull request
-        uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b  # v1.8.0
-        with:
-          version: npm run release:version
-          title: "chore(release): version packages"
-          commit: "chore(release): version packages"
-          createGithubReleases: false
+      - name: Apply pending changesets
+        run: |
+          git switch -C changeset-release/main
+          uv run python scripts/release_changesets.py apply
+
+      - name: Push release branch and create or update pull request
+        run: |
+          if git diff --quiet; then
+            echo "No pending release metadata changes"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add --all -- .changeset CHANGELOG.md pyproject.toml uv.lock docs/release-evidence/agent-clients
+          git commit -m "chore(release): version packages"
+
+          BRANCH="changeset-release/main"
+          REMOTE_SHA=$(git ls-remote origin "refs/heads/${BRANCH}" | cut -f1)
+          if [ -n "${REMOTE_SHA}" ]; then
+            git push --force-with-lease="refs/heads/${BRANCH}:${REMOTE_SHA}" origin "HEAD:refs/heads/${BRANCH}"
+          else
+            git push origin "HEAD:refs/heads/${BRANCH}"
+          fi
+
+          if gh pr view "${BRANCH}" --json number >/dev/null 2>&1; then
+            gh pr edit "${BRANCH}" --title "chore(release): version packages" --body "Automated Python release metadata update from pending changesets."
+          else
+            gh pr create --base main --head "${BRANCH}" --title "chore(release): version packages" --body "Automated Python release metadata update from pending changesets."
+          fi
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.CHANGESETS_TOKEN }}

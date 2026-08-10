@@ -13,35 +13,15 @@ for the full plan.
 - Python 3.12+, managed via `uv`.
 - Use `uv sync` / `uv run` / `uv add` for dependency and execution management.
 
-## CRITICAL: Version bump sync — ALL 4 files, always together
+## CRITICAL: Python-native release metadata
 
-This is a uv-managed Python project. `gstack-version-bump` (used by `/ship` Step 12) only
-writes **VERSION** + package.json — it does NOT know about Python's pyproject.toml or uv.lock,
-and it silently no-ops on files it doesn't recognize. Bumping VERSION alone leaves this repo
-in a drifted state every time unless you fix it manually.
-
-Whenever VERSION is bumped (by `/ship`, or manually), ALL FOUR of these must be updated
-**in the same commit**:
-
-1. **`VERSION`** — 3-digit `MAJOR.MINOR.PATCH` (e.g. `0.4.11`)
-2. **`pyproject.toml`** — `version = "MAJOR.MINOR.PATCH"` (must match VERSION exactly)
-3. **`uv.lock`** — run `uv sync` after editing pyproject.toml to regenerate the
-   `hermes-pipeline` package entry's version; do NOT hand-edit uv.lock
-4. **`CHANGELOG.md`** — new `## [X.Y.Z] - YYYY-MM-DD` entry
-
-**After any version bump, before committing, verify sync:**
-
-```bash
-cat VERSION
-grep '^version' pyproject.toml
-grep -A1 'name = "hermes-pipeline"' uv.lock
-head -10 CHANGELOG.md
-```
-
-VERSION, pyproject.toml, and uv.lock's hermes-pipeline entry must all be the same 3-digit
-number, and CHANGELOG.md must have an entry for the exact VERSION being shipped. If `/ship`
-or any version-bump tool only touched VERSION, treat that as incomplete — always finish the
-sync manually before pushing.
+`pyproject.toml` is the sole version manifest. Feature pull requests add release
+intent under `.changeset/`; they do not edit the version or generated changelog.
+Use `uv run python scripts/release_changesets.py add` to create a fragment and
+`uv run python scripts/release_changesets.py check` to verify that
+`pyproject.toml`, `uv.lock`, and `CHANGELOG.md` agree. The automated Version
+Packages pull request consumes fragments, selects the highest semantic-version
+bump, regenerates `uv.lock`, and updates `CHANGELOG.md`.
 
 ## TODOS.md management
 

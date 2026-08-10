@@ -2,7 +2,7 @@
 
 - Evidence status: `candidate/source-snapshot`
 - Release: `not selected`
-- Source VERSION: `0.7.0`
+- Source version: `0.7.0`
 - Source commit: `32c108f754abe4fd8d1b54575d0a155455fc9be2`
 - Profile/client: `gstack / codex`
 - Timestamp: `2026-07-30T23:07:18Z`

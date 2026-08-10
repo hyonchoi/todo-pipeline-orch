@@ -80,23 +80,21 @@ Start with these sources when relevant:
 
 Every pull request must add release intent under `.changeset/`:
 
-- Use `npm run changeset` for a patch, minor, or major release and put the
-  pull request's user-facing changelog text in the generated Markdown file.
-- Use `npm run changeset -- --empty` only when the pull request intentionally
-  has no release or changelog impact.
+- Use `uv run python scripts/release_changesets.py add --bump patch|minor|major
+  --summary "..."` and put the pull request's user-facing changelog text in
+  the generated Markdown file.
+- Use `uv run python scripts/release_changesets.py add --empty` only when the
+  pull request intentionally has no release or changelog impact.
 
 Do not manually bump versions or add generated release sections to
-`CHANGELOG.md`. The Changesets Version Packages pull request consumes the
-pending `.changeset/*.md` files, updates `package.json` and `CHANGELOG.md`, then
-runs the repository synchronization command to update `VERSION`,
-`pyproject.toml`, and `uv.lock` together. Consumed fragments are deleted by
-Changesets and remain available in git history.
+`CHANGELOG.md`. The Version Packages pull request consumes pending
+`.changeset/*.md` files, updates `pyproject.toml`, regenerates `uv.lock`, and
+updates `CHANGELOG.md`. Consumed fragments remain available in git history.
 
 Verify release metadata with:
 
 ```bash
-npm ci
-npm run release:check
+uv run python scripts/release_changesets.py check
 ```
 
 ## Documentation and generated plans
