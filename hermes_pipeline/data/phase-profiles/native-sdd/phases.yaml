@@ -1,0 +1,48 @@
+requires_plan: true
+phases:
+  - phase_key: "phase_4_development"
+    name: "Phase 4: Native SDD/TDD Implementation"
+    prompt: |
+      Implement {todo_id} from its approved Plan using native subagents and test-driven development.
+
+      Read the repository instructions, the selected TODO entry, and {plan_path}. Re-open the Plan before implementation and exit nonzero if it is missing, unreadable, contradictory, or insufficient to execute safely. Work on {todo_id} only.
+
+      Start from main and create a task branch using repository conventions. Preserve unrelated tracked and untracked work. Write the branch name to .hermes/pipeline_branch.txt.
+
+      Execute the Plan's ordered tasks with a fresh native implementer subagent for each task. For every task:
+      1. Follow red -> green -> refactor. Add the focused test first and verify that it fails for the intended reason.
+      2. Make the smallest implementation that passes, then refactor without changing behavior.
+      3. Run the task-focused checks and inspect the resulting diff.
+      4. Stage explicit files or hunks and create exactly one atomic commit per Plan task.
+      5. Have the coordinator review the task result before starting the next task.
+
+      Never commit a red, incomplete, or known-failing task. If native subagents are unavailable, the Plan is contradictory, or safe completion is impossible, exit nonzero. Do not implement inline and do not ask questions in this unattended phase.
+    tools: "Read,Write,Edit,Bash"
+    turns: 100
+    timeout: 7200
+  - phase_key: "phase_5_review"
+    name: "Phase 5: Independent Code Review"
+    prompt: |
+      Perform a fresh independent review of main...HEAD for {todo_id}. Review correctness, security, data safety, concurrency, API compatibility, migrations, performance, and test coverage against {plan_path} and repository instructions.
+
+      Apply every valid finding and run the relevant focused checks. If fixes are needed, stage only the review changes and create one review-fix commit. Do not rewrite, squash, or amend the implementation commits. If a material finding cannot be resolved safely, exit nonzero and leave no uncommitted changes.
+    tools: "Read,Write,Edit,Bash"
+    turns: 30
+    timeout: 2400
+  - phase_key: "phase_8_finish_branch"
+    name: "Phase 8: Create Pull Request"
+    prompt: |
+      Finish the branch for {todo_id} and hand it to a human reviewer.
+
+      Verify that the current branch matches .hermes/pipeline_branch.txt, the worktree is clean, and all repository-required checks pass. Follow the repository's release metadata, documentation, and pull-request policies.
+
+      Make only required release, documentation, or pull-request metadata changes, and commit those as one separate atomic commit. Do not add implementation fixes merely to bypass a failed check; exit nonzero instead.
+
+      Push the recorded branch and create or update the pull request with gh. Verify the pull request head branch and SHA, then output its URL. Do not merge the pull request. Exit nonzero if the remote or authentication is unavailable, checks fail, or the pull request cannot be verified.
+    tools: "Read,Write,Edit,Bash"
+    turns: 30
+    timeout: 2400
+  - phase_key: "phase_9_human_review"
+    name: "Phase 9: Human Review Gate"
+    gate: true
+    terminal: true

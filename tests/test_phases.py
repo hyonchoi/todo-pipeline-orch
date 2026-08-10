@@ -48,6 +48,8 @@ def extract_bundled_skill_references(profile, phases):
         }
     if profile == "agent-skills":
         return set(re.findall(r"\bagent-skills:[a-z][a-z0-9-]*", prompt_text))
+    if profile == "native-sdd":
+        return {"ai-coding-agents"}
     raise AssertionError(f"missing test-owned extraction pattern for {profile}")
 
 
@@ -624,6 +626,73 @@ def test_agent_skills_phases_yaml_non_gate_phases_reference_skills():
     assert "agent-skills:code-review-and-quality" in phases["phase_4_review"].prompt
     assert "agent-skills:security-and-hardening" in phases["phase_5_security"].prompt
     assert "agent-skills:ship" in phases["phase_7_ship"].prompt
+
+
+NATIVE_SDD_PHASE_ORDER = [
+    "phase_4_development",
+    "phase_5_review",
+    "phase_8_finish_branch",
+    "phase_9_human_review",
+]
+
+
+def test_native_sdd_profile_contract():
+    profile = load_phase_profile(resolve_profile_phases_path("native-sdd"))
+    phases = {phase.phase_key: phase for phase in profile.phases}
+
+    assert profile.requires_plan is True
+    assert list(phases) == NATIVE_SDD_PHASE_ORDER
+    assert (phases["phase_4_development"].turns, phases["phase_4_development"].timeout) == (100, 7200)
+    assert (phases["phase_5_review"].turns, phases["phase_5_review"].timeout) == (30, 2400)
+    assert (phases["phase_8_finish_branch"].turns, phases["phase_8_finish_branch"].timeout) == (30, 2400)
+    gate = phases["phase_9_human_review"]
+    assert gate.gate is True
+    assert gate.terminal is True
+
+
+def test_native_sdd_profile_prompts_enforce_plan_tdd_sdd_and_pr_handoff():
+    phases = {
+        phase.phase_key: phase
+        for phase in load_phases(resolve_profile_phases_path("native-sdd"))
+    }
+    development = phases["phase_4_development"].prompt
+    development_lower = development.lower()
+    review = phases["phase_5_review"].prompt
+    finish = phases["phase_8_finish_branch"].prompt
+    combined = "\n".join(phase.prompt for phase in phases.values()).lower()
+
+    for phrase in (
+        "{plan_path}",
+        "fresh native implementer subagent",
+        "red -> green -> refactor",
+        "exactly one atomic commit per plan task",
+        "do not implement inline",
+        ".hermes/pipeline_branch.txt",
+    ):
+        assert phrase in development_lower
+    assert "fresh independent review" in review.lower()
+    assert "one review-fix commit" in review
+    assert "main...HEAD" in review
+    assert ".hermes/pipeline_branch.txt" in finish
+    assert "create or update the pull request" in finish.lower()
+    assert "do not merge" in finish.lower()
+    assert "gstack" not in combined
+    assert "superpowers" not in combined
+    assert "agent-skills:" not in combined
+
+
+def test_native_sdd_prerequisites_only_require_hermes_dispatcher_skill():
+    metadata = load_profile_prerequisites("native-sdd")
+
+    assert extract_bundled_skill_references(
+        "native-sdd", load_phases(resolve_profile_phases_path("native-sdd"))
+    ) == {"ai-coding-agents"}
+    assert [item.skill_id for item in metadata.skills] == ["ai-coding-agents"]
+    skill = metadata.skills[0]
+    assert skill.distribution_owner == "hermes"
+    assert skill.support == "Conditional"
+    assert skill.clients["claude"].invocation == "claude -p"
+    assert skill.clients["codex"].invocation == "codex exec"
 
 
 

@@ -36,3 +36,4 @@ def test_unknown_profile_error_excludes_identity_directory_names():
     assert "hermes-identity" not in message
     assert "gstack" in message
     assert "agent-skills" in message
+    assert "native-sdd" in message
