@@ -129,6 +129,18 @@ and create calls back-to-back for harnesses and direct callers. Production uses
 the split API so tick persistence stays immediately before the first external
 mutation.
 
+Profiles may set top-level `requires_plan: true`. After normal TODO selection
+and before phase rendering or tick persistence, `_tick_project` resolves the
+selected entry's single `Plan:` path, verifies that it stays inside the project
+after symlink resolution, and requires a readable regular file. Failure records
+`failed_to_spawn` with `plan_validation_failed` and creates no kanban tasks.
+
+The `native-sdd` profile uses that gate and contains four phases: native
+subagent-driven TDD with one atomic commit per Plan task, independent code
+review, verified PR creation, and an unassigned terminal human-review gate.
+Only the Hermes `ai-coding-agents` dispatcher skill is required; client-side
+gstack, superpowers, and agent-skills workflows are not part of this profile.
+
 Phase 5 (code review) is not special-cased in code — its prompt instructs the agent to run
 `/review` in Claude Code or `$review` in Codex, and the review lifecycle
 (pass/fail/revert) is entirely the agent's responsibility,
@@ -177,7 +189,8 @@ All pipeline state lives under `<project>/.hermes/`:
    chains. A non-spawnable registration barrier prevents partial chains from
    running; it is completed only after the complete chain is durable. Profiles
    may define manual gates with sticky `needs_input` blocks, but the default
-   `gstack` profile ends at Phase 8 PR handoff.
+   `gstack` profile ends at Phase 8 PR handoff. `native-sdd` keeps the same
+   merge-aware Phase 8 handoff key and follows it with a terminal human gate.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review` in Claude Code or `$review` in Codex, and the agent owns the review lifecycle end-to-end.
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.

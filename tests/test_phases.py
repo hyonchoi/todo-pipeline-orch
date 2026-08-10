@@ -54,7 +54,7 @@ def extract_bundled_skill_references(profile, phases):
 
 
 def test_prerequisite_metadata_covers_every_bundled_skill_reference():
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         metadata = load_profile_prerequisites(profile)
         declared = {item.skill_id for item in metadata.skills}
         phases = load_phases(resolve_profile_phases_path(profile))
@@ -142,7 +142,7 @@ def _documented_prerequisite_row(profile, item):
 def test_documented_prerequisite_rows_match_all_package_metadata_fields():
     readme = Path("README.md").read_text()
     reference = Path("docs/reference-cli.md").read_text()
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         metadata = load_profile_prerequisites(profile)
         for item in metadata.skills:
             row = _documented_prerequisite_row(profile, item)
@@ -170,7 +170,7 @@ tpo doctor <project>
 
 def test_profile_guide_lists_exact_metadata_skill_inventories():
     guide = Path("docs/howto-agent-skills-profile.md").read_text()
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         marker = f"- **`{profile}`**"
         start = guide.index(marker)
         boundaries = (
@@ -213,7 +213,7 @@ def test_profile_guide_documents_complete_profile_data_and_doctor_error():
 
 def test_release_qualification_covers_conditional_pairs():
     guide = Path("docs/release-qualification-agent-clients.md").read_text()
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         for item in load_profile_prerequisites(profile).skills:
             if item.support != "Conditional":
                 continue
@@ -842,7 +842,7 @@ def test_render_phase_prompt_does_not_rewrite_unrelated_text():
     assert out.endswith(template)
 
 
-@pytest.mark.parametrize("profile", ["gstack", "agent-skills"])
+@pytest.mark.parametrize("profile", ["gstack", "agent-skills", "native-sdd"])
 @pytest.mark.parametrize(
     ("client", "product", "forbidden_product"),
     [

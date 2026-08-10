@@ -26,7 +26,7 @@ A profile is a directory under
 `hermes_pipeline/data/phase-profiles/<name>/` containing both `phases.yaml` and
 `prerequisites.yaml`. The first file defines the pipeline's phase sequence; the
 second is the structured source of truth for client support, discovery, and
-invocation metadata. `tpo doctor` loads both files unconditionally. Two
+invocation metadata. `tpo doctor` loads both files unconditionally. Three
 profiles are bundled:
 
 - **`gstack`** (default) — the gstack/superpowers workflow. Skills:
@@ -41,6 +41,9 @@ profiles are bundled:
   `agent-skills:code-review-and-quality`, `agent-skills:code-reviewer`,
   `agent-skills:security-and-hardening`, `agent-skills:security-auditor`,
   `agent-skills:ship`.
+- **`native-sdd`** — Plan-gated native subagent TDD, independent review, PR
+  creation, and a human gate, without gstack, superpowers, or client workflow
+  skills. Skills: `ai-coding-agents`.
 
 A project's `.hermes/pipeline.toml` contract records which profile it runs via the `profile` field. Switching profiles changes the prompts and required tool capabilities for every phase.
 
@@ -114,7 +117,8 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
 ## Adding a new profile
 
 1. Create `hermes_pipeline/data/phase-profiles/<name>/phases.yaml` following
-   the same schema as the bundled profiles (`phase_key`, `name`, `prompt`,
+   the same schema as the bundled profiles (optional top-level
+   `requires_plan`, plus `phase_key`, `name`, `prompt`,
    `tools`, `turns`, `timeout` per phase; gate phases use `gate: true`).
 2. Create the mandatory sibling
    `hermes_pipeline/data/phase-profiles/<name>/prerequisites.yaml`. It has this
