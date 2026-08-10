@@ -267,9 +267,14 @@ def test_release_workflow_only_edits_an_open_same_repository_pr():
     workflow = Path(".github/workflows/release.yml").read_text()
 
     assert 'gh pr view "${BRANCH}"' not in workflow
+    assert 'gh pr list --repo "${GITHUB_REPOSITORY}"' in workflow
+    assert "--state open" in workflow
+    assert "--base main" in workflow
+    assert '--head "${BRANCH}"' in workflow
+    assert "--json number,isCrossRepository" in workflow
     assert (
-        'gh pr list --repo "${GITHUB_REPOSITORY}" --state open --base main '
-        '--head "${GITHUB_REPOSITORY_OWNER}:${BRANCH}"' in workflow
+        "--jq 'map(select(.isCrossRepository == false))[0].number // empty'"
+        in workflow
     )
     assert 'if [ -n "${PR_NUMBER}" ]; then' in workflow
     assert 'gh pr edit "${PR_NUMBER}"' in workflow
