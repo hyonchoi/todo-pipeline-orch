@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.7.4
+
+### Patch Changes
+
+- Fix Version Packages automation to create a new pull request after the previous release pull request was merged.
+
+- Fix release automation to find and update an existing open Version Packages pull request.
+
+- Replace the npm Changesets dependency with Python-native release fragments, version aggregation, changelog generation, and automated Version Packages pull requests.
+
 ## 0.7.3
 
 ### Patch Changes
