@@ -1047,6 +1047,7 @@ def _tick_project(
     )
     from .phases import (
         PhasePromptRenderError,
+        load_phase_profile,
         load_profile_prerequisites,
         resolve_profile_phases_path,
     )
@@ -1054,14 +1055,16 @@ def _tick_project(
     try:
         contract = load_contract(project_state)
         phases_path = resolve_profile_phases_path(contract.profile)
-        phases = load_phases(phases_path)
+        phase_profile = load_phase_profile(phases_path)
+        phases = list(phase_profile.phases)
         prerequisites = load_profile_prerequisites(contract.profile)
     except ContractMissingError:
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
         phases_path = resolve_profile_phases_path("gstack")
-        phases = load_phases(phases_path)
+        phase_profile = load_phase_profile(phases_path)
+        phases = list(phase_profile.phases)
         prerequisites = load_profile_prerequisites("gstack")
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
@@ -1343,6 +1346,28 @@ def _tick_project(
             _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
+    plan_path = None
+    if phase_profile.requires_plan:
+        from .todos_md import TodoPlanValidationError, resolve_todo_plan
+
+        try:
+            plan_path = resolve_todo_plan(project_dir, todos_path, picked)
+        except TodoPlanValidationError as exc:
+            _record_failed_to_spawn(
+                project_state,
+                tick_id,
+                picked,
+                exc,
+                reason="plan_validation_failed",
+            )
+            cb.observe(picked=None, counts_as_no_progress=True)
+            log.error(
+                "project %s: selected TODO failed Plan validation: code=%s",
+                project_slug,
+                exc.code,
+            )
+            return
+
     # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
     from .kanban_tasks import create_prepared_todo_phases, prepare_todo_phases
 
@@ -1354,6 +1379,7 @@ def _tick_project(
             board_slug=project_slug,
             phases_path=phases_path,
             prompt_client=config.prompt_client,
+            plan_path=plan_path,
         )
     except PhasePromptRenderError as exc:
         _record_failed_to_spawn(

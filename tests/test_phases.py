@@ -8,8 +8,10 @@ import yaml
 
 from hermes_pipeline.contract import ContractSchemaError
 from hermes_pipeline.phases import (
+    PhaseProfile,
     PhasePromptRenderError,
     _render_phase_prompt,
+    load_phase_profile,
     load_phases,
     load_profile_prerequisites,
     resolve_profile_phases_path,
@@ -365,6 +367,33 @@ def test_load_phases_from_yaml(tmp_path):
     assert phases[1].timeout == 1800  # default
 
 
+def test_load_phase_profile_reads_requires_plan(tmp_path):
+    p = tmp_path / "phases.yaml"
+    p.write_text("requires_plan: true\n" + FIXTURE)
+
+    profile = load_phase_profile(p)
+
+    assert profile == PhaseProfile(phases=tuple(load_phases(p)), requires_plan=True)
+
+
+def test_load_phase_profile_defaults_requires_plan_false(tmp_path):
+    p = tmp_path / "phases.yaml"
+    p.write_text(FIXTURE)
+
+    assert load_phase_profile(p).requires_plan is False
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_load_phase_profile_rejects_non_boolean_requires_plan(tmp_path, value):
+    p = tmp_path / "phases.yaml"
+    data = yaml.safe_load(FIXTURE)
+    data["requires_plan"] = value
+    p.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    with pytest.raises(ValueError, match="requires_plan.*boolean"):
+        load_phase_profile(p)
+
+
 @pytest.mark.parametrize("timeout", ["2400", True, 0, -1])
 def test_load_phases_rejects_invalid_timeout(tmp_path, timeout):
     phases_path = tmp_path / "phases.yaml"
@@ -626,6 +655,19 @@ def test_render_phase_prompt_both_spec_and_reference():
     )
     assert "Spec (authoritative): docs/pipeline/TODO-25-spec.md\n" in out
     assert "Reference material: docs/notes/a.md, docs/notes/b.md\n" in out
+
+
+def test_render_phase_prompt_includes_plan_path_and_placeholder():
+    out = _render_phase_prompt(
+        "Implement {plan_path}",
+        todo_id="TODO-25",
+        tick_id="01JT",
+        project_slug="demo",
+        plan_path="docs/plans/TODO-25.md",
+    )
+
+    assert "Plan (execution authority): docs/plans/TODO-25.md\n" in out
+    assert out.endswith("Implement docs/plans/TODO-25.md")
 
 
 def test_render_phase_prompt_only_spec():

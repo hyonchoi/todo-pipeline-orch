@@ -658,6 +658,7 @@ def prepare_todo_phases(
     board_slug: str,
     phases_path: str | Path | None = None,
     prompt_client: PromptClient = "claude",
+    plan_path: str | None = None,
 ) -> list[PreparedPhaseTask]:
     if not re.fullmatch(r"TODO-\d+", todo_id):
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
@@ -669,6 +670,7 @@ def prepare_todo_phases(
             todo_id=todo_id,
             tick_id=tick_id,
             project_slug=board_slug,
+            plan_path=plan_path,
             prompt_client=prompt_client,
             template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
         )

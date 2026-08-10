@@ -1,4 +1,4 @@
-"""Standalone TODOS.md Spec:/Reference: field extractor.
+"""Standalone TODOS.md attachment field extraction and Plan validation.
 
 Not a full markdown parser, and not a reuse of the todos-manager skill's
 prose-based logic (which isn't Python-importable, being an LLM-facing
@@ -20,8 +20,17 @@ _ENTRY_HEADER_RE = re.compile(
 )
 _SPEC_RE = re.compile(r"^\s*-\s*\*\*Spec:\*\*[ \t]*(.+?)[ \t]*$", re.MULTILINE)
 _REFERENCE_RE = re.compile(r"^\s*-\s*\*\*Reference:\*\*[ \t]*(.+?)[ \t]*$", re.MULTILINE)
+_PLAN_RE = re.compile(r"^\s*-\s*\*\*Plan:\*\*[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 
 _EMPTY_RESULT = {"spec": None, "references": []}
+
+
+class TodoPlanValidationError(ValueError):
+    """A selected TODO does not have one safe, readable Plan attachment."""
+
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
 
 
 def find_todo_fields(todos_md_path: Path, todo_id: str) -> dict:
@@ -45,19 +54,9 @@ def find_todo_fields(todos_md_path: Path, todo_id: str) -> dict:
 
 
 def _extract(text: str, todo_id: str) -> dict:
-    headers = list(_ENTRY_HEADER_RE.finditer(text))
-    start = None
-    end = len(text)
-    for i, m in enumerate(headers):
-        if m.group(1) == todo_id:
-            start = m.end()
-            if i + 1 < len(headers):
-                end = headers[i + 1].start()
-            break
-    if start is None:
+    block = _entry_block(text, todo_id)
+    if block is None:
         return dict(_EMPTY_RESULT)
-
-    block = text[start:end]
 
     spec_match = _SPEC_RE.search(block)
     spec = spec_match.group(1).strip() or None if spec_match else None
@@ -72,3 +71,66 @@ def _extract(text: str, todo_id: str) -> dict:
         references = [r.strip() for r in raw.split(",") if r.strip()]
 
     return {"spec": spec, "references": references}
+
+
+def _entry_block(text: str, todo_id: str) -> str | None:
+    headers = list(_ENTRY_HEADER_RE.finditer(text))
+    start = None
+    end = len(text)
+    for i, m in enumerate(headers):
+        if m.group(1) == todo_id:
+            start = m.end()
+            if i + 1 < len(headers):
+                end = headers[i + 1].start()
+            break
+    if start is None:
+        return None
+    return text[start:end]
+
+
+def resolve_todo_plan(project_dir: Path, todos_md_path: Path, todo_id: str) -> str:
+    """Return one validated repository-relative Plan path for ``todo_id``."""
+    try:
+        text = todos_md_path.read_text()
+    except (FileNotFoundError, OSError) as exc:
+        raise TodoPlanValidationError("missing") from exc
+
+    block = _entry_block(text, todo_id)
+    if block is None:
+        raise TodoPlanValidationError("missing")
+    matches = [value.strip() for value in _PLAN_RE.findall(block)]
+    if len(matches) > 1:
+        raise TodoPlanValidationError("duplicate")
+    if not matches or not matches[0]:
+        raise TodoPlanValidationError("missing")
+
+    raw_path = Path(matches[0])
+    if raw_path.is_absolute():
+        raise TodoPlanValidationError("absolute")
+
+    root = project_dir.resolve()
+    candidate = project_dir / raw_path
+    unresolved = candidate.resolve(strict=False)
+    try:
+        unresolved.relative_to(root)
+    except ValueError as exc:
+        raise TodoPlanValidationError("outside_repository") from exc
+    try:
+        resolved = candidate.resolve(strict=True)
+    except FileNotFoundError as exc:
+        raise TodoPlanValidationError("missing_file") from exc
+    except OSError as exc:
+        raise TodoPlanValidationError("unreadable") from exc
+    try:
+        resolved.relative_to(root)
+    except ValueError as exc:
+        raise TodoPlanValidationError("outside_repository") from exc
+    if not resolved.is_file():
+        raise TodoPlanValidationError("not_regular_file")
+    try:
+        with open(resolved, "rb"):
+            pass
+    except OSError as exc:
+        raise TodoPlanValidationError("unreadable") from exc
+
+    return raw_path.as_posix()
