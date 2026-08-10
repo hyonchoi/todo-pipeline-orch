@@ -54,8 +54,9 @@ jobs:
             git push origin "HEAD:refs/heads/${BRANCH}"
           fi
 
-          if gh pr view "${BRANCH}" --json number >/dev/null 2>&1; then
-            gh pr edit "${BRANCH}" --title "chore(release): version packages" --body "Automated Python release metadata update from pending changesets."
+          PR_NUMBER=$(gh pr list --repo "${GITHUB_REPOSITORY}" --state open --base main --head "${GITHUB_REPOSITORY_OWNER}:${BRANCH}" --json number --jq '.[0].number // empty')
+          if [ -n "${PR_NUMBER}" ]; then
+            gh pr edit "${PR_NUMBER}" --title "chore(release): version packages" --body "Automated Python release metadata update from pending changesets."
           else
             gh pr create --base main --head "${BRANCH}" --title "chore(release): version packages" --body "Automated Python release metadata update from pending changesets."
           fi
