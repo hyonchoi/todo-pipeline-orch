@@ -95,9 +95,17 @@ local skill registry; remote worker prerequisites remain operator-provisioned.
 | `agent-skills` | `agent-skills:security-and-hardening` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:security-auditor` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `native-sdd` | `ai-coding-agents` | hermes | `Hermes skill registry` / `claude -p` | `Hermes skill registry` / `codex exec` | Conditional |
 
 See [agent client release qualification](docs/release-qualification-agent-clients.md)
 for the evidence required to advertise a `Conditional` pair.
+
+Use `tpo init <project> --profile native-sdd` for an implementation-only
+workflow that requires the selected TODO's `Plan:` file, runs one native
+subagent-driven TDD task per commit, performs an independent review, opens a
+pull request, and stops at a human gate. It does not require gstack,
+superpowers, or client-side workflow skills. See the
+[native SDD profile guide](docs/howto-native-sdd-profile.md).
 
 ## Core workflows
 

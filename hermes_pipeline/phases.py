@@ -30,6 +30,7 @@ _ALLOWED_PROMPT_FIELDS = frozenset(
         "todo_id",
         "tick_id",
         "project_slug",
+        "plan_path",
         "agent_product",
         "skill_prefix",
         "superpowers_skill_prefix",
@@ -95,6 +96,12 @@ class Phase:
     timeout: int = 1800
     terminal: bool = False
     gate: bool = False
+
+
+@dataclass(frozen=True)
+class PhaseProfile:
+    phases: tuple[Phase, ...]
+    requires_plan: bool = False
 
 
 @dataclass(frozen=True)
@@ -244,12 +251,15 @@ def load_profile_prerequisites(profile: str) -> ProfilePrerequisites:
     )
 
 
-def load_phases(config_path: Path | str | None = None) -> list[Phase]:
+def load_phase_profile(config_path: Path | str | None = None) -> PhaseProfile:
     if config_path is None:
         config_path = resolve_profile_phases_path("gstack")
     config_path = Path(config_path)
     with open(config_path) as f:
         data = yaml.safe_load(f)
+    requires_plan = data.get("requires_plan", False) if isinstance(data, dict) else False
+    if type(requires_plan) is not bool:
+        raise ValueError(f"{config_path}: requires_plan must be a boolean")
     raw_phases = data.get("phases") if isinstance(data, dict) else None
     if not isinstance(raw_phases, list) or not raw_phases:
         raise ValueError(f"{config_path}: phases must contain at least one phase")
@@ -262,7 +272,12 @@ def load_phases(config_path: Path | str | None = None) -> list[Phase]:
                 f"{config_path}:{source}: timeout must be a positive integer"
             )
         phases.append(phase)
-    return phases
+    return PhaseProfile(phases=tuple(phases), requires_plan=requires_plan)
+
+
+def load_phases(config_path: Path | str | None = None) -> list[Phase]:
+    """Load the phase list while preserving the historical public API."""
+    return list(load_phase_profile(config_path).phases)
 
 
 def _now_iso() -> str:
@@ -313,6 +328,7 @@ def _render_phase_prompt(
     todo_id: str,
     tick_id: str,
     project_slug: str,
+    plan_path: str | None = None,
     spec_path: str | None = None,
     reference_paths: list[str] | None = None,
     prompt_client: PromptClient = "claude",
@@ -326,7 +342,7 @@ def _render_phase_prompt(
     substitution for phases that want to weave pipeline and client vocabulary
     into prose.
 
-    `spec_path`/`reference_paths` are optional, pre-validated (existence +
+    `plan_path`/`spec_path`/`reference_paths` are optional, pre-validated (existence +
     project_dir containment already checked by the caller) TODOS.md
     Spec:/Reference: values for the pipeline's first phase only. Omitted
     entirely when absent so prompt output for TODOs without these fields
@@ -341,6 +357,8 @@ def _render_phase_prompt(
         f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
     )
     spec_reference_block = ""
+    if plan_path:
+        spec_reference_block += f"Plan (execution authority): {plan_path}\n"
     if spec_path:
         spec_reference_block += f"Spec (authoritative): {spec_path}\n"
     if reference_paths:
@@ -359,6 +377,7 @@ def _render_phase_prompt(
         todo_id=todo_id,
         tick_id=tick_id,
         project_slug=project_slug,
+        plan_path=plan_path or "",
         **vocabulary,
     )
     return header + body

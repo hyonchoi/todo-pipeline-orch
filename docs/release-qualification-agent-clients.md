@@ -10,6 +10,30 @@ isolated environment and commit only the captured evidence.
 
 ## Conditional pairs
 
+### `native-sdd` / `claude`
+
+This pair uses only the same Hermes-owned `ai-coding-agents` registry and
+bounded `claude -p` dispatcher contract qualified for `gstack` / `claude`.
+Qualification therefore requires the Hermes enabled-skill discovery and
+dispatcher invocation portions of that matrix cell; gstack and superpowers
+discovery or invocation checks do not apply. The release workflow explicitly
+maps this pair to the canonical `gstack-claude.md` artifact; its Hermes
+dispatcher evidence is shared, while its gstack-specific sections are ignored
+for `native-sdd` qualification. Missing or failing canonical evidence blocks
+both mapped pairs.
+
+### `native-sdd` / `codex`
+
+This pair uses only the same Hermes-owned `ai-coding-agents` registry and
+bounded `codex exec` dispatcher contract qualified for `gstack` / `codex`.
+Qualification therefore requires the Hermes enabled-skill discovery and
+dispatcher invocation portions of that matrix cell; gstack and superpowers
+discovery or invocation checks do not apply. The release workflow explicitly
+maps this pair to the canonical `gstack-codex.md` artifact; its Hermes
+dispatcher evidence is shared, while its gstack-specific sections are ignored
+for `native-sdd` qualification. Missing or failing canonical evidence blocks
+both mapped pairs.
+
 ### `gstack` / `claude`
 
 - Environment prerequisites: record the exact Hermes, Claude Code, gstack, and

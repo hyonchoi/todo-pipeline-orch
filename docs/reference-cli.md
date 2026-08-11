@@ -95,6 +95,7 @@ tpo init myproject
 tpo init myproject --force
 tpo init myproject --assignee pipeline
 tpo init myproject --profile agent-skills
+tpo init myproject --profile native-sdd
 ```
 
 **Arguments:**
@@ -103,7 +104,7 @@ tpo init myproject --profile agent-skills
 | `project` | Yes | Project slug |
 | `--force` | No | Overwrite an existing contract |
 | `--assignee` | No | Set the assignee field (e.g. `--assignee pipeline`) |
-| `--profile` | No | Pipeline skill-set profile (`gstack` or `agent-skills`). Default: `gstack`. Determines which `phases.yaml` (and required capabilities) the contract is written against — see [Use the agent-skills profile](howto-agent-skills-profile.md). |
+| `--profile` | No | Pipeline workflow profile (`gstack`, `agent-skills`, or `native-sdd`). Default: `gstack`. Determines which `phases.yaml` and capabilities the contract uses. See [profile selection](howto-agent-skills-profile.md) and [native SDD](howto-native-sdd-profile.md). |
 
 Capabilities are computed from `phases.yaml` at write time, not hardcoded.
 
@@ -222,6 +223,7 @@ Profile prerequisites come from the package metadata used by `tpo doctor`:
 | `agent-skills` | `agent-skills:security-and-hardening` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:security-auditor` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
+| `native-sdd` | `ai-coding-agents` | hermes | `Hermes skill registry` / `claude -p` | `Hermes skill registry` / `codex exec` | Conditional |
 
 `Conditional` requires the named external skill to be installed and
 discoverable by the selected client. Hermes-owned registry prerequisites are

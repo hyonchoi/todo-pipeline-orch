@@ -480,6 +480,99 @@ def test_register_todo_phases_late_render_failure_is_atomic(tmp_path, mocker):
     run.assert_not_called()
 
 
+def test_prepare_todo_phases_requires_plan_for_plan_gated_profile(tmp_path):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.todos_md import TodoPlanValidationError
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: 'Implement from {plan_path}'\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+    )
+
+    with pytest.raises(TodoPlanValidationError, match="missing"):
+        prepare_todo_phases(
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            board_slug="demo",
+            phases_path=phases_path,
+        )
+
+
+def test_register_todo_phases_resolves_plan_before_task_creation(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import register_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: 'Implement from {plan_path}'\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+    )
+    (tmp_path / "TODOS.md").write_text(
+        "- [ ] **TODO-41: Example** — work\n"
+        "  - **Plan:** docs/plan.md\n"
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "plan.md").write_text("# Plan\n")
+    create = mocker.patch(
+        "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+        return_value=["t_00000001"],
+    )
+
+    assert register_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        board_slug="demo",
+        project_dir=tmp_path,
+        phases_path=phases_path,
+    ) == ["t_00000001"]
+
+    prepared = create.call_args.kwargs["prepared"]
+    assert "Implement from docs/plan.md" in prepared[0].body
+
+
+def test_register_todo_phases_rejects_missing_plan_before_task_creation(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import register_todo_phases
+    from hermes_pipeline.todos_md import TodoPlanValidationError
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        "    prompt: valid\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+    )
+    (tmp_path / "TODOS.md").write_text("- [ ] **TODO-41: Example** — work\n")
+    create = mocker.patch(
+        "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
+    )
+
+    with pytest.raises(TodoPlanValidationError, match="missing"):
+        register_todo_phases(
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            board_slug="demo",
+            project_dir=tmp_path,
+            phases_path=phases_path,
+        )
+
+    create.assert_not_called()
+
+
 def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import (
         PreparedPhaseTask,

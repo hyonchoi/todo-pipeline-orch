@@ -8,12 +8,15 @@ import yaml
 
 from hermes_pipeline.contract import ContractSchemaError
 from hermes_pipeline.phases import (
+    PhaseProfile,
     PhasePromptRenderError,
     _render_phase_prompt,
+    load_phase_profile,
     load_phases,
     load_profile_prerequisites,
     resolve_profile_phases_path,
 )
+from scripts.release_changesets import CONDITIONAL_PAIR_EVIDENCE
 
 FIXTURE = """
 phases:
@@ -46,11 +49,13 @@ def extract_bundled_skill_references(profile, phases):
         }
     if profile == "agent-skills":
         return set(re.findall(r"\bagent-skills:[a-z][a-z0-9-]*", prompt_text))
+    if profile == "native-sdd":
+        return {"ai-coding-agents"}
     raise AssertionError(f"missing test-owned extraction pattern for {profile}")
 
 
 def test_prerequisite_metadata_covers_every_bundled_skill_reference():
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         metadata = load_profile_prerequisites(profile)
         declared = {item.skill_id for item in metadata.skills}
         phases = load_phases(resolve_profile_phases_path(profile))
@@ -138,7 +143,7 @@ def _documented_prerequisite_row(profile, item):
 def test_documented_prerequisite_rows_match_all_package_metadata_fields():
     readme = Path("README.md").read_text()
     reference = Path("docs/reference-cli.md").read_text()
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         metadata = load_profile_prerequisites(profile)
         for item in metadata.skills:
             row = _documented_prerequisite_row(profile, item)
@@ -166,7 +171,7 @@ tpo doctor <project>
 
 def test_profile_guide_lists_exact_metadata_skill_inventories():
     guide = Path("docs/howto-agent-skills-profile.md").read_text()
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         marker = f"- **`{profile}`**"
         start = guide.index(marker)
         boundaries = (
@@ -209,7 +214,7 @@ def test_profile_guide_documents_complete_profile_data_and_doctor_error():
 
 def test_release_qualification_covers_conditional_pairs():
     guide = Path("docs/release-qualification-agent-clients.md").read_text()
-    for profile in ("gstack", "agent-skills"):
+    for profile in ("gstack", "agent-skills", "native-sdd"):
         for item in load_profile_prerequisites(profile).skills:
             if item.support != "Conditional":
                 continue
@@ -224,15 +229,14 @@ def test_candidate_evidence_inventory_matches_conditional_pairs():
     )
     conditional_pairs = {
         (profile, client)
-        for profile in ("gstack", "agent-skills")
+        for profile in ("gstack", "agent-skills", "native-sdd")
         for item in load_profile_prerequisites(profile).skills
         if item.support == "Conditional"
         for client in ("claude", "codex")
     }
 
-    expected_names = {
-        f"{profile}-{client}.md" for profile, client in conditional_pairs
-    }
+    assert set(CONDITIONAL_PAIR_EVIDENCE) == conditional_pairs
+    expected_names = set(CONDITIONAL_PAIR_EVIDENCE.values())
     assert {path.name for path in evidence_root.glob("*.md")} == expected_names
 
 
@@ -363,6 +367,33 @@ def test_load_phases_from_yaml(tmp_path):
     assert phases[0].name == "Phase 2: Autoplan"
     assert phases[0].turns == 20
     assert phases[1].timeout == 1800  # default
+
+
+def test_load_phase_profile_reads_requires_plan(tmp_path):
+    p = tmp_path / "phases.yaml"
+    p.write_text("requires_plan: true\n" + FIXTURE)
+
+    profile = load_phase_profile(p)
+
+    assert profile == PhaseProfile(phases=tuple(load_phases(p)), requires_plan=True)
+
+
+def test_load_phase_profile_defaults_requires_plan_false(tmp_path):
+    p = tmp_path / "phases.yaml"
+    p.write_text(FIXTURE)
+
+    assert load_phase_profile(p).requires_plan is False
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_load_phase_profile_rejects_non_boolean_requires_plan(tmp_path, value):
+    p = tmp_path / "phases.yaml"
+    data = yaml.safe_load(FIXTURE)
+    data["requires_plan"] = value
+    p.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    with pytest.raises(ValueError, match="requires_plan.*boolean"):
+        load_phase_profile(p)
 
 
 @pytest.mark.parametrize("timeout", ["2400", True, 0, -1])
@@ -597,6 +628,73 @@ def test_agent_skills_phases_yaml_non_gate_phases_reference_skills():
     assert "agent-skills:ship" in phases["phase_7_ship"].prompt
 
 
+NATIVE_SDD_PHASE_ORDER = [
+    "phase_4_development",
+    "phase_5_review",
+    "phase_8_finish_branch",
+    "phase_9_human_review",
+]
+
+
+def test_native_sdd_profile_contract():
+    profile = load_phase_profile(resolve_profile_phases_path("native-sdd"))
+    phases = {phase.phase_key: phase for phase in profile.phases}
+
+    assert profile.requires_plan is True
+    assert list(phases) == NATIVE_SDD_PHASE_ORDER
+    assert (phases["phase_4_development"].turns, phases["phase_4_development"].timeout) == (100, 7200)
+    assert (phases["phase_5_review"].turns, phases["phase_5_review"].timeout) == (30, 2400)
+    assert (phases["phase_8_finish_branch"].turns, phases["phase_8_finish_branch"].timeout) == (30, 2400)
+    gate = phases["phase_9_human_review"]
+    assert gate.gate is True
+    assert gate.terminal is True
+
+
+def test_native_sdd_profile_prompts_enforce_plan_tdd_sdd_and_pr_handoff():
+    phases = {
+        phase.phase_key: phase
+        for phase in load_phases(resolve_profile_phases_path("native-sdd"))
+    }
+    development = phases["phase_4_development"].prompt
+    development_lower = development.lower()
+    review = phases["phase_5_review"].prompt
+    finish = phases["phase_8_finish_branch"].prompt
+    combined = "\n".join(phase.prompt for phase in phases.values()).lower()
+
+    for phrase in (
+        "{plan_path}",
+        "fresh native implementer subagent",
+        "red -> green -> refactor",
+        "exactly one atomic commit per plan task",
+        "do not implement inline",
+        ".hermes/pipeline_branch.txt",
+    ):
+        assert phrase in development_lower
+    assert "fresh independent review" in review.lower()
+    assert "one review-fix commit" in review
+    assert "main...HEAD" in review
+    assert ".hermes/pipeline_branch.txt" in finish
+    assert "create or update the pull request" in finish.lower()
+    assert "do not merge" in finish.lower()
+    assert "gstack" not in combined
+    assert "superpowers" not in combined
+    assert "agent-skills:" not in combined
+
+
+def test_native_sdd_prerequisites_only_require_hermes_dispatcher_skill():
+    metadata = load_profile_prerequisites("native-sdd")
+
+    assert extract_bundled_skill_references(
+        "native-sdd", load_phases(resolve_profile_phases_path("native-sdd"))
+    ) == {"ai-coding-agents"}
+    assert [item.skill_id for item in metadata.skills] == ["ai-coding-agents"]
+    skill = metadata.skills[0]
+    assert skill.distribution_owner == "hermes"
+    assert skill.support == "Conditional"
+    assert skill.clients["claude"].invocation == "claude -p"
+    assert skill.clients["codex"].invocation == "codex exec"
+
+
 
 def test_render_phase_prompt_no_spec_reference_unchanged():
     """Regression guard: omitting spec/reference kwargs must produce
@@ -626,6 +724,19 @@ def test_render_phase_prompt_both_spec_and_reference():
     )
     assert "Spec (authoritative): docs/pipeline/TODO-25-spec.md\n" in out
     assert "Reference material: docs/notes/a.md, docs/notes/b.md\n" in out
+
+
+def test_render_phase_prompt_includes_plan_path_and_placeholder():
+    out = _render_phase_prompt(
+        "Implement {plan_path}",
+        todo_id="TODO-25",
+        tick_id="01JT",
+        project_slug="demo",
+        plan_path="docs/plans/TODO-25.md",
+    )
+
+    assert "Plan (execution authority): docs/plans/TODO-25.md\n" in out
+    assert out.endswith("Implement docs/plans/TODO-25.md")
 
 
 def test_render_phase_prompt_only_spec():
@@ -731,7 +842,7 @@ def test_render_phase_prompt_does_not_rewrite_unrelated_text():
     assert out.endswith(template)
 
 
-@pytest.mark.parametrize("profile", ["gstack", "agent-skills"])
+@pytest.mark.parametrize("profile", ["gstack", "agent-skills", "native-sdd"])
 @pytest.mark.parametrize(
     ("client", "product", "forbidden_product"),
     [

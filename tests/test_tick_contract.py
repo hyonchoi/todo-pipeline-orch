@@ -107,6 +107,7 @@ class TestTickContractAssignee:
             for call in mock_run.call_args_list
         )
 
+
     def test_tick_no_contract_warns_when_pipeline_profile_missing(self, tmp_path, mocker, caplog):
         """Implicit fallback verifies the pipeline profile and warns if unavailable."""
         mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
@@ -203,9 +204,9 @@ class TestTickContractAssignee:
         )
         from hermes_pipeline import phases as phases_mod
         from hermes_pipeline.phases import resolve_profile_phases_path
-        spy_load_phases = mocker.patch(
-            "hermes_pipeline.cli.load_phases",
-            wraps=phases_mod.load_phases,
+        spy_load_profile = mocker.patch(
+            "hermes_pipeline.phases.load_phase_profile",
+            wraps=phases_mod.load_phase_profile,
         )
 
         projects_dir = tmp_path / "projects"
@@ -227,7 +228,7 @@ class TestTickContractAssignee:
         agent_skills_path = resolve_profile_phases_path("agent-skills")
         assert any(
             call.args and call.args[0] == agent_skills_path
-            for call in spy_load_phases.call_args_list
+            for call in spy_load_profile.call_args_list
         )
 
 
@@ -518,3 +519,94 @@ class TestTickPromptPreparation:
         create.assert_not_called()
         assert "failed to write outcome sidecar: error_type=OSError" in caplog.text
         assert "disk full" not in caplog.text
+
+
+class TestTickPlanRequirement:
+    @staticmethod
+    def _configure_profile(project_dir, tmp_path, mocker):
+        profile_dir = tmp_path / "native-sdd"
+        profile_dir.mkdir()
+        phases_path = profile_dir / "phases.yaml"
+        phases_path.write_text(
+            "requires_plan: true\n"
+            "phases:\n"
+            "  - phase_key: phase_4_development\n"
+            "    name: Development\n"
+            "    prompt: 'Implement {plan_path}'\n"
+            "    tools: Read,Write,Edit,Bash\n"
+            "    turns: 10\n"
+        )
+        (profile_dir / "prerequisites.yaml").write_text(
+            "schema_version: 1\nprofile: native-sdd\nskills: []\n"
+        )
+        mocker.patch(
+            "hermes_pipeline.phases.resolve_profile_phases_path",
+            return_value=phases_path,
+        )
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "default"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "native-sdd"\n'
+        )
+
+    def test_missing_plan_fails_before_tick_persistence_or_kanban(
+        self, tmp_path, mocker
+    ):
+        tick_id = "01PLANFAIL"
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        persist = mocker.patch("hermes_pipeline.cli._persist_tick_id")
+        prepare = mocker.patch("hermes_pipeline.kanban_tasks.prepare_todo_phases")
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
+        )
+
+        _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id=tick_id,
+            mocker=mocker,
+        )
+
+        persist.assert_not_called()
+        prepare.assert_not_called()
+        create.assert_not_called()
+        outcomes = _read_outcomes(project_state)
+        assert outcomes[-1].detail == {
+            "todo_id": "TODO-10",
+            "reason": "plan_validation_failed",
+            "error_type": "TodoPlanValidationError",
+        }
+
+    def test_valid_plan_is_passed_to_prompt_preparation(self, tmp_path, mocker):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        plan = project_dir / "docs" / "plan.md"
+        plan.parent.mkdir()
+        plan.write_text("# Plan\n")
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "- [ ] **TODO-10: Test** — summary\n"
+            "  - **Plan:** docs/plan.md\n"
+        )
+        prepare = mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            return_value=["prepared"],
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["task-1"],
+        )
+
+        _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id="01PLANOK",
+            mocker=mocker,
+        )
+
+        assert prepare.call_args.kwargs["plan_path"] == "docs/plan.md"

@@ -71,7 +71,7 @@ NEXT_TODO_ID: 44
   - **Assumptions:** `Plan:` is intended as a new actionable field distinct from the current `Spec:` field, and migration/backfill of existing TODOs can be handled as part of this change or a follow-up.
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/plan-gated-worktree-selection`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
 
-- [ ] **TODO-40: Add Plan field prompt to todos-manager --add** — Ask to attach detected plan files as `Plan:` when adding a TODO
+- [x] **TODO-40: Add Plan field prompt to todos-manager --add** — Ask to attach detected plan files as `Plan:` when adding a TODO
   - **What:** Revise the bundled and installed `todos-manager` `--add` workflow so auto-research detects relevant written plan files in the current context and asks whether to add one as the TODO entry's `Plan:` field value. Update the schema/instructions to document `Plan:` as an optional field, define how it differs from `Spec:`/`Reference:`, and cover the behavior in skill test fixtures or acceptance scenarios.
   - **Why:** If TODO selection becomes plan-gated, `todos-manager --add` must help users preserve the plan path at creation time instead of making them remember to revise the entry afterward.
   - **Pros:** Makes newly added TODOs pipeline-actionable when a plan already exists, reduces missed metadata, and keeps the add flow aligned with plan-gated selection.
@@ -83,6 +83,7 @@ NEXT_TODO_ID: 44
   - **Plan:** docs/superpowers/plans/2026-08-04-todo-40-document-attachments.md
   - **Reference:** CONTEXT.md, docs/adr/0001-plan-is-the-execution-authority.md
   - **Decisions:** Priority `P1`, Effort `M`, Phase `4 (Development)`, Branch `feature/todos-add-plan-field`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Completed:** v0.7.1 (2026-08-07)
 
 - [ ] **TODO-42: Add per-project prompt client overrides** — Support mixed Claude/Codex worker fleets in one project scan
   - **What:** Add an optional per-project `prompt_client` override, with the global value as default; define contract precedence, migration, doctor output, and multi-project tests.

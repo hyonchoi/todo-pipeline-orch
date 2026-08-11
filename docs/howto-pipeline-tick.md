@@ -38,16 +38,17 @@ tick:
      a. Migrate per-project state (one-time)
      b. Check prior tick (per-project)
      c. Run selection (per-project)
-     d. Render every phase body from the selected profile for prompt_client
-     e. Persist current_tick_id.txt and the tick_started outcome
-     f. Create the prepared Hermes kanban tasks
+     d. Validate the selected TODO's Plan when the profile requires one
+     e. Render every phase body from the selected profile for prompt_client
+     f. Persist current_tick_id.txt and the tick_started outcome
+     g. Create the prepared Hermes kanban tasks
   4. Release lock
 ```
 
-Steps 3d–3f form the production registration boundary. If any body fails to
-render, the tick records `failed_to_spawn` without persisting the current tick
-or creating a Hermes task. Persistence occurs only after all bodies are valid
-and immediately before the first task creation.
+Steps 3d–3g form the production registration boundary. If Plan validation or
+any body render fails, the tick records `failed_to_spawn` without persisting
+the current tick or creating a Hermes task. Persistence occurs only after all
+bodies are valid and immediately before the first task creation.
 
 ### 2. Check what the selection picked
 
@@ -86,8 +87,8 @@ to `running`
 automatically — the orchestrator doesn't need to manage the handoff. When
 phase 4 completes, phase 5 (`phase_5_review`) transitions to `running`, and
 when phase 5 completes, phase 6.1 (CSO) transitions to `running`. Human gate
-phases are not parent-chained, so they cannot be auto-unblocked by the kanban
-scheduler.
+gate phases remain in the parent chain but are unassigned, have no goal, and
+carry a sticky `needs_input` block, so a worker cannot auto-run them.
 
 Client-dependent gstack prompts use Claude Code slash syntax (for example,
 `/review` and `/ship`) when `prompt_client=claude`, and Codex dollar syntax

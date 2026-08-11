@@ -1,0 +1,13 @@
+schema_version: 1
+profile: native-sdd
+skills:
+  - skill_id: ai-coding-agents
+    distribution_owner: hermes
+    support: Conditional
+    clients:
+      claude:
+        discovery_root: Hermes skill registry
+        invocation: claude -p
+      codex:
+        discovery_root: Hermes skill registry
+        invocation: codex exec
