@@ -36,7 +36,7 @@ jobs:
 
       - name: Push release branch and create or update pull request
         run: |
-          if git diff --quiet; then
+          if [ -z "$(git status --porcelain)" ]; then
             echo "No pending release metadata changes"
             exit 0
           fi
