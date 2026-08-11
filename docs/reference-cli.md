@@ -246,6 +246,7 @@ requires `hermes login` and access to the `mock-project` tenant.
 
 ```bash
 tpo test --fixture happy-path
+tpo test --fixture happy-path --profile gstack
 tpo test --fixture happy-path --phase phase_2_autoplan
 tpo test --fixture happy-path --convergence-threshold 2
 ```
@@ -254,7 +255,8 @@ tpo test --fixture happy-path --convergence-threshold 2
 | Arg | Required | Default | Description |
 |-----|----------|---------|-------------|
 | `--fixture` | Yes | — | Fixture name. Only `happy-path` is implemented. |
-| `--phase` | No | — | Run only the named phase in isolation (e.g. `phase_2_autoplan`). |
+| `--profile` | No | `gstack` | Bundled phase profile to test. Unknown profiles and profile/client pairs with `Unverified` prerequisites fail before workspace creation or kanban registration. |
+| `--phase` | No | — | Run only the named executable phase from the selected profile (e.g. `phase_2_autoplan`). Gate phases are rejected because they cannot execute independently. |
 | `--timeout` | No | `86400` | Overall run timeout in seconds. Cooperatively stops polling, then reclaims and archives the tick's Hermes tasks. |
 | `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before circuit breaker halts the run. |
 | `--keep` | No | — | Preserve the temporary directory after the run for inspection. |
@@ -265,9 +267,11 @@ tpo test --fixture happy-path --convergence-threshold 2
 |------|---------|
 | 0 | All phases passed |
 | 1 | Phase failure, convergence halt, or timeout |
-| 2 | Preflight or setup error (missing dependency, `mock-project` tenant unreachable) |
+| 2 | Profile, prerequisite, preflight, or setup error (including unknown/unsupported profile, missing Conditional skill, missing dependency, or unreachable `mock-project` tenant) |
 
 **Kanban preflight behavior:**
+- Resolves the selected profile and rejects `Unverified` prerequisites before external checks.
+- Verifies locally discoverable Conditional Hermes skills against the `pipeline` assignee before workspace creation.
 - Runs a preflight check (`hermes kanban list --tenant mock-project`) before phase execution. Timeouts after 15 s.
 - Creates a kanban card in the fixture's `mock-project` tenant (never suffixed with tick ID).
 - Card body includes `tick_id`, `fixture_name`, and `state_dir` metadata for debug tracing.

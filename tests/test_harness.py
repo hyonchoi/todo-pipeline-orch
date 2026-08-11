@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -16,10 +17,15 @@ from hermes_pipeline.harness import (
     ConvergenceDetector,
     ConvergenceHaltError,
     HarnessMonitor,
+    HarnessProfileError,
     HarnessResult,
+    _build_harness_profile_data,
     _classify_error_class,
     _ConvergenceMonitor,
+    _offline_terminal_phase_key,
     _prune_retained_state,
+    _validate_profile_prerequisites,
+    _with_offline_terminal_workflow,
     create_mock_project,
     filter_phases,
     isolate_config,
@@ -69,6 +75,29 @@ class TestCreateMockProject:
         assert result["project_slug"] == "mock-project"
         assert result["todo_id"] == 1
         assert result["fixture_name"] == "happy-path"
+
+    @pytest.mark.parametrize("profile_name", ["gstack", "agent-skills"])
+    def test_create_mock_project_writes_selected_profile_and_plan(
+        self, tmp_path: Path, profile_name: str
+    ):
+        result = create_mock_project(tmp_path, "happy-path", profile_name)
+
+        contract = tomllib.loads((tmp_path / ".hermes" / "pipeline.toml").read_text())
+        todos = (tmp_path / "TODOS.md").read_text()
+        plan_path = tmp_path / "docs" / "harness" / "TODO-1-plan.md"
+        assert result["profile"] == profile_name
+        assert contract["profile"] == profile_name
+        assert set(contract["capabilities"]) == {"Read", "Write", "Edit", "Bash"}
+        assert "**Plan:** docs/harness/TODO-1-plan.md" in todos
+        assert plan_path.is_file()
+        assert "confirm they fail" in plan_path.read_text().lower()
+        assert subprocess.run(
+            ["git", "status", "--short"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == ""
 
     def test_create_mock_project_omits_harness_owned_and_legacy_state(
         self, tmp_path: Path
@@ -253,6 +282,118 @@ class TestFilterPhases:
         filtered = filter_phases(all_phases, "phase_9_ship")
         assert len(filtered) == 1
         assert filtered[0].gate is True
+
+
+class TestHarnessProfileTopology:
+    def test_offline_terminal_uses_executable_terminal(self):
+        phases = [
+            Phase(phase_key="develop", name="Develop"),
+            Phase(phase_key="finish", name="Finish", terminal=True),
+        ]
+
+        target = _offline_terminal_phase_key(phases, "direct-terminal")
+        rewritten = _with_offline_terminal_workflow(phases, target)
+
+        assert target == "finish"
+        assert "local terminal workflow" in rewritten[-1].prompt.lower()
+
+    def test_offline_terminal_uses_predecessor_of_terminal_gate(self):
+        phases = [
+            Phase(phase_key="develop", name="Develop"),
+            Phase(phase_key="ship", name="Ship"),
+            Phase(phase_key="review", name="Review", gate=True, terminal=True),
+        ]
+
+        assert _offline_terminal_phase_key(phases, "gate-terminal") == "ship"
+
+    @pytest.mark.parametrize(
+        "phases",
+        (
+            [Phase(phase_key="develop", name="Develop")],
+            [
+                Phase(phase_key="one", name="One", terminal=True),
+                Phase(phase_key="two", name="Two", terminal=True),
+            ],
+            [Phase(phase_key="gate", name="Gate", gate=True, terminal=True)],
+        ),
+    )
+    def test_invalid_terminal_topology_fails_closed(self, phases):
+        with pytest.raises(HarnessProfileError, match="invalid_terminal_topology"):
+            _offline_terminal_phase_key(phases, "broken")
+
+    def test_harness_profile_data_preserves_top_level_metadata(self):
+        source = {"requires_plan": True, "custom": {"owner": "test"}, "phases": []}
+
+        result = _build_harness_profile_data(
+            source,
+            [Phase(phase_key="develop", name="Develop", terminal=True)],
+        )
+
+        assert result["requires_plan"] is True
+        assert result["custom"] == {"owner": "test"}
+        assert result["phases"][0]["phase_key"] == "develop"
+        assert source["phases"] == []
+
+    def test_unverified_profile_fails_before_preflight_or_workspace(self, mocker):
+        preflight = mocker.patch("hermes_pipeline.harness.preflight_check")
+        mkdtemp = mocker.patch("hermes_pipeline.harness.tempfile.mkdtemp")
+
+        with pytest.raises(HarnessProfileError, match="unverified_prerequisites"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+                profile_name="agent-skills",
+            )
+
+        preflight.assert_not_called()
+        mkdtemp.assert_not_called()
+
+    def test_gate_only_phase_fails_before_preflight_or_workspace(self, mocker):
+        from hermes_pipeline.phases import load_profile_prerequisites
+
+        mocker.patch(
+            "hermes_pipeline.phases.load_profile_prerequisites",
+            return_value=load_profile_prerequisites("gstack"),
+        )
+        preflight = mocker.patch("hermes_pipeline.harness.preflight_check")
+        mkdtemp = mocker.patch("hermes_pipeline.harness.tempfile.mkdtemp")
+
+        with pytest.raises(HarnessProfileError, match="gate_phase_not_executable"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only="phase_8_ship",
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+                profile_name="agent-skills",
+            )
+
+        preflight.assert_not_called()
+        mkdtemp.assert_not_called()
+
+    def test_missing_conditional_skill_fails_profile_preflight(self, mocker):
+        from hermes_pipeline.phases import load_profile_prerequisites
+
+        mocker.patch(
+            "hermes_pipeline.harness.verify_hermes_skill_registry_prerequisite",
+            return_value=(False, "missing"),
+        )
+
+        with pytest.raises(
+            HarnessProfileError, match="missing_conditional_prerequisite"
+        ):
+            _validate_profile_prerequisites(
+                profile_name="gstack",
+                prompt_client="claude",
+                prerequisites=load_profile_prerequisites("gstack"),
+            )
 
 
 class TestIsolateConfig:
@@ -1214,7 +1355,10 @@ class TestKanbanModeHermes:
         )
 
         assert result.exit_code == 0
-        preflight.assert_called_once_with(prompt_client=expected)
+        preflight.assert_called_once()
+        assert preflight.call_args.kwargs["prompt_client"] == expected
+        assert preflight.call_args.kwargs["profile_name"] == "gstack"
+        assert preflight.call_args.kwargs["prerequisites"].profile == "gstack"
         assert poll.call_args.kwargs["prompt_client"] == expected
 
     def test_run_harness_separates_project_from_artifacts(

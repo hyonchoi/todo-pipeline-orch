@@ -1,9 +1,12 @@
 """Tests for cli.py — test subcommand."""
 
 
+import logging
+from types import SimpleNamespace
+
 import pytest
 
-from hermes_pipeline.cli import build_parser, main
+from hermes_pipeline.cli import _cmd_test, build_parser, main
 
 
 class TestBuildParser:
@@ -54,6 +57,59 @@ def test_test_subcommand_parsing():
     args = parser.parse_args(["test", "--fixture", "happy-path"])
     assert args.command == "test"
     assert args.fixture == "happy-path"
+    assert args.profile == "gstack"
+
+
+def test_test_subcommand_profile_flag():
+    parser = build_parser()
+
+    args = parser.parse_args(
+        ["test", "--fixture", "happy-path", "--profile", "agent-skills"]
+    )
+
+    assert args.profile == "agent-skills"
+
+
+def test_cmd_test_forwards_selected_profile(mocker):
+    run = mocker.patch("hermes_pipeline.harness.run_harness")
+    run.return_value = SimpleNamespace(exit_code=0)
+    args = SimpleNamespace(
+        fixture="happy-path",
+        profile="agent-skills",
+        loop=False,
+        phase=None,
+        keep=False,
+        timeout=60,
+        convergence_threshold=3,
+    )
+
+    assert _cmd_test(args, config=None) == 0
+    assert run.call_args.kwargs["profile_name"] == "agent-skills"
+
+
+def test_cmd_test_reports_profile_errors_without_detail(mocker, caplog):
+    from hermes_pipeline.harness import HarnessProfileError
+
+    run = mocker.patch("hermes_pipeline.harness.run_harness")
+    run.side_effect = HarnessProfileError(
+        "missing_conditional_prerequisite", "native-sdd", "private detail"
+    )
+    args = SimpleNamespace(
+        fixture="happy-path",
+        profile="native-sdd",
+        loop=False,
+        phase=None,
+        keep=False,
+        timeout=60,
+        convergence_threshold=3,
+    )
+
+    with caplog.at_level(logging.ERROR):
+        assert _cmd_test(args, config=None) == 2
+
+    assert "code=missing_conditional_prerequisite" in caplog.text
+    assert "profile=native-sdd" in caplog.text
+    assert "private detail" not in caplog.text
 
 def test_test_subcommand_loop_flag():
     """Verify --loop flag is parsed."""

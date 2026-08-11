@@ -16,7 +16,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .config import PromptClient
+from .profile_prerequisites import (
+    HERMES_SKILL_REGISTRY_ROOT,
+    unverified_prerequisite_ids,
+    verify_hermes_skill_registry_prerequisite,
+)
 
 log = logging.getLogger(__name__)
 
@@ -34,10 +41,46 @@ _MOCK_PROJECT_GITIGNORE = """\
 __pycache__/
 *.py[cod]
 """
+_HARNESS_ASSIGNEE = "pipeline"
+_HARNESS_PLAN_PATH = "docs/harness/TODO-1-plan.md"
+_HARNESS_PLAN = """\
+# TODO-1 Mock Name Normalization Plan
+
+1. Add focused tests for `normalize_names` covering whitespace trimming, empty
+   values, lowercasing, input order, and an empty input list. Run the focused
+   tests and confirm they fail because the implementation does not exist.
+2. Create `mock_transform.py` and implement
+   `normalize_names(names: list[str]) -> list[str]` using only the Python
+   standard library.
+3. Run `uv run pytest`, inspect the diff, and commit the tested fixture change.
+
+Acceptance requires `normalize_names([" Alice ", "", "BOB"])` to return
+`["alice", "bob"]`, `normalize_names([])` to return `[]`, and the generated
+fixture worktree to be clean after its implementation phases complete.
+"""
 
 
-def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
+class HarnessProfileError(ValueError):
+    """A selected profile cannot be executed safely by the harness."""
+
+    def __init__(self, code: str, profile_name: str, detail: str = "") -> None:
+        super().__init__(code)
+        self.code = code
+        self.profile_name = profile_name
+        self.detail = detail
+
+
+def create_mock_project(
+    path: Path, fixture_name: str, profile_name: str = "gstack"
+) -> dict[str, Any]:
     """Create a mock project in *path* for integration testing."""
+    from .contract import required_capabilities
+    from .phases import load_phases, resolve_profile_phases_path
+
+    profile_path = resolve_profile_phases_path(profile_name)
+    profile_phases = load_phases(profile_path)
+    capabilities = sorted(required_capabilities(profile_phases))
+
     path.mkdir(parents=True, exist_ok=True)
 
     _env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
@@ -50,17 +93,22 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     (path / "TODOS.md").write_text(todos_content)
     (path / "README.md").write_text(f"# Mock Project — {fixture_name}\n")
     (path / ".gitignore").write_text(_MOCK_PROJECT_GITIGNORE)
+    plan_path = path / _HARNESS_PLAN_PATH
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(_HARNESS_PLAN)
 
     hermes_dir = path / ".hermes"
     hermes_dir.mkdir()
 
     # Create pipeline.toml contract for assignee configuration
+    capabilities_toml = ", ".join(f'"{item}"' for item in capabilities)
     pipeline_toml = (
         "# Pipeline execution contract — read at tick start.\n"
         "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         "schema_version = 2\n"
-        'assignee = "pipeline"\n'
-        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        f'assignee = "{_HARNESS_ASSIGNEE}"\n'
+        f"capabilities = [{capabilities_toml}]\n"
+        f'profile = "{profile_name}"\n'
     )
     (path / ".hermes" / "pipeline.toml").write_text(pipeline_toml)
 
@@ -73,6 +121,7 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
         "todo_id": todo_id,
         "branch": f"feat/mock-{fixture_name}",
         "fixture_name": fixture_name,
+        "profile": profile_name,
     }
 
 
@@ -93,6 +142,7 @@ def _get_todos_for_fixture(fixture_name: str) -> str:
             "  - **What:** Create `mock_transform.py` with `normalize_names(names: list[str]) -> list[str]`. For each input string, strip surrounding whitespace, discard empty strings after stripping, lowercase the remaining value, and preserve input order. Return an empty list for empty input.\n"
             "  - **Why:** Provide a small, executable feature that exercises the complete harness pipeline without external services.\n"
             "  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feat/mock-happy-path`, Language `Python 3.12+`, Dependencies `standard library only`, Test Coverage `required`, Security Review `not-required`\n"
+            f"  - **Plan:** {_HARNESS_PLAN_PATH}\n"
             "  - **Acceptance criteria:** `normalize_names([\" Alice \", \"\", \"BOB\"])` returns `[\"alice\", \"bob\"]`; `normalize_names([])` returns `[]`; tests run with `uv run pytest`.\n"
         )
     else:
@@ -103,7 +153,12 @@ def _get_todo_id_for_fixture(fixture_name: str) -> int:
     return 1
 
 
-def preflight_check(*, prompt_client: PromptClient = "claude") -> None:
+def preflight_check(
+    *,
+    prompt_client: PromptClient = "claude",
+    profile_name: str | None = None,
+    prerequisites=None,
+) -> None:
     """Verify required CLI tools are available."""
     from .hermes_adapter import AgentClientDependencyError, HermesDependencyError
 
@@ -124,6 +179,12 @@ def preflight_check(*, prompt_client: PromptClient = "claude") -> None:
         raise AgentClientDependencyError(
             f"{prompt_client} CLI for the selected prompt client "
             f"({selected_product}) is not installed or not on PATH."
+        )
+    if profile_name is not None and prerequisites is not None:
+        _validate_profile_prerequisites(
+            profile_name=profile_name,
+            prompt_client=prompt_client,
+            prerequisites=prerequisites,
         )
 
 
@@ -203,7 +264,6 @@ _POLL_CANCELLATION_TIMEOUT = 65.0
 # Maximum characters in error messages captured by the harness
 _ERROR_MESSAGE_MAX = 500
 
-_OFFLINE_TERMINAL_PHASE_KEY = "phase_8_finish_branch"
 _OFFLINE_TERMINAL_PROMPT = """\
 Run the harness local terminal workflow.
 
@@ -567,14 +627,79 @@ def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
     )
 
 
-def _with_offline_terminal_workflow(phases: list[Phase]) -> list[Phase]:
+def _offline_terminal_phase_key(
+    phases: list[Phase], profile_name: str = "<selected>"
+) -> str:
+    """Return the executable phase that must be made safe for an offline run."""
+    terminal_indexes = [index for index, phase in enumerate(phases) if phase.terminal]
+    if len(terminal_indexes) != 1:
+        raise HarnessProfileError(
+            "invalid_terminal_topology",
+            profile_name,
+            "expected exactly one terminal phase",
+        )
+    terminal_index = terminal_indexes[0]
+    terminal = phases[terminal_index]
+    if not terminal.gate:
+        return terminal.phase_key
+    for phase in reversed(phases[:terminal_index]):
+        if not phase.gate:
+            return phase.phase_key
+    raise HarnessProfileError(
+        "invalid_terminal_topology",
+        profile_name,
+        "terminal gate has no executable predecessor",
+    )
+
+
+def _with_offline_terminal_workflow(
+    phases: list[Phase], terminal_phase_key: str
+) -> list[Phase]:
     """Replace the network-only final phase for the no-remote harness fixture."""
     return [
         replace(phase, prompt=_OFFLINE_TERMINAL_PROMPT)
-        if phase.phase_key == _OFFLINE_TERMINAL_PHASE_KEY
+        if phase.phase_key == terminal_phase_key
         else phase
         for phase in phases
     ]
+
+
+def _build_harness_profile_data(
+    profile_data: dict[str, Any], phases: list[Phase]
+) -> dict[str, Any]:
+    """Preserve profile metadata while replacing phases for the harness run."""
+    harness_profile_data = dict(profile_data)
+    harness_profile_data["phases"] = [asdict(phase) for phase in phases]
+    return harness_profile_data
+
+
+def _validate_profile_prerequisites(
+    *, profile_name: str, prompt_client: PromptClient, prerequisites
+) -> None:
+    unverified = unverified_prerequisite_ids(prerequisites, prompt_client)
+    if unverified:
+        raise HarnessProfileError(
+            "unverified_prerequisites",
+            profile_name,
+            ", ".join(unverified),
+        )
+    for prerequisite in prerequisites.skills:
+        client = prerequisite.clients[prompt_client]
+        if (
+            prerequisite.support == "Conditional"
+            and client.discovery_root == HERMES_SKILL_REGISTRY_ROOT
+        ):
+            verified, _detail = verify_hermes_skill_registry_prerequisite(
+                assignee=_HARNESS_ASSIGNEE,
+                skill_id=prerequisite.skill_id,
+                runner=subprocess.run,
+            )
+            if not verified:
+                raise HarnessProfileError(
+                    "missing_conditional_prerequisite",
+                    profile_name,
+                    prerequisite.skill_id,
+                )
 
 
 @contextmanager
@@ -712,11 +837,17 @@ def run_harness(
     timeout: int,
     convergence_threshold: int,
     config: Any = None,
+    profile_name: str = "gstack",
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
+    from .contract import PROFILE_NAME_RE
     from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .logging_setup import new_tick_id
-    from .phases import load_phases
+    from .phases import (
+        load_phases,
+        load_profile_prerequisites,
+        resolve_profile_phases_path,
+    )
     from .test_report import (
         diff_reports,
         generate_report,
@@ -726,7 +857,36 @@ def run_harness(
 
     prompt_client = getattr(config, "prompt_client", "claude")
 
-    preflight_check(prompt_client=prompt_client)
+    if not isinstance(profile_name, str) or not PROFILE_NAME_RE.fullmatch(profile_name):
+        raise HarnessProfileError("invalid_profile_name", "<invalid>")
+    profile_path = resolve_profile_phases_path(profile_name)
+    profile_data = yaml.safe_load(profile_path.read_text())
+    if not isinstance(profile_data, dict):
+        raise HarnessProfileError("invalid_profile_data", profile_name)
+    all_phases = load_phases(profile_path)
+    prerequisites = load_profile_prerequisites(profile_name)
+    unverified = unverified_prerequisite_ids(prerequisites, prompt_client)
+    if unverified:
+        raise HarnessProfileError(
+            "unverified_prerequisites",
+            profile_name,
+            ", ".join(unverified),
+        )
+    offline_terminal_phase_key = _offline_terminal_phase_key(all_phases, profile_name)
+    phases = all_phases
+    if phase_only:
+        phases = filter_phases(all_phases, phase_only)
+        if phases[0].gate:
+            raise HarnessProfileError(
+                "gate_phase_not_executable", profile_name, phases[0].phase_key
+            )
+    phases = _with_offline_terminal_workflow(phases, offline_terminal_phase_key)
+
+    preflight_check(
+        prompt_client=prompt_client,
+        profile_name=profile_name,
+        prerequisites=prerequisites,
+    )
 
     # Allocate under ~/.hermes/tmp rather than the OS default temp root: on
     # macOS, tempfile.mkdtemp() resolves under /var/folders/..., which is a
@@ -741,7 +901,7 @@ def run_harness(
     artifacts_dir.mkdir(parents=True)
     workspace_quiescent = True
     try:
-        fixture = create_mock_project(project_dir, fixture_name)
+        fixture = create_mock_project(project_dir, fixture_name, profile_name)
 
         state_dir = project_dir / ".hermes"
 
@@ -751,12 +911,6 @@ def run_harness(
         error_holder: dict[str, Any] = {}
         monitor = _ConvergenceMonitor(base_monitor, detector, error_holder)
 
-        all_phases = load_phases()
-        phases = all_phases
-        if phase_only:
-            phases = filter_phases(all_phases, phase_only)
-        phases = _with_offline_terminal_workflow(phases)
-
         tick_id = new_tick_id()
 
         _kanban_preflight(tenant=fixture["project_slug"])
@@ -764,11 +918,9 @@ def run_harness(
         # Always register an explicit harness profile. The full profile keeps
         # every production phase key while substituting the offline terminal
         # workflow for the no-remote fixture.
-        import yaml as _yaml
-
         _phases_path_override = artifacts_dir / "harness-phases.yaml"
         _phases_path_override.write_text(
-            _yaml.dump({"phases": [asdict(p) for p in phases]})
+            yaml.safe_dump(_build_harness_profile_data(profile_data, phases))
         )
 
         checkpoint_dir = state_dir / "pipeline_checkpoints"
@@ -780,7 +932,16 @@ def run_harness(
         timed_out_phase: str | None = None
         with isolate_config(state_dir=state_dir):
             # Emit initial event so the events log file exists for report generation
-            base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
+            base_monitor(
+                "run_started",
+                {
+                    "tick_id": tick_id,
+                    "kanban_mode": "hermes",
+                    "profile": profile_name,
+                    "fixture_name": fixture_name,
+                    "prompt_client": prompt_client,
+                },
+            )
 
             import threading
 
@@ -891,6 +1052,7 @@ def run_harness(
         status_map = get_todo_kanban_status(fixture["project_slug"], tick_id)
         print(
             f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
+            f"profile={profile_name} "
             f"phases={status_map} "
             f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
         )

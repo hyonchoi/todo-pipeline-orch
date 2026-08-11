@@ -32,6 +32,11 @@ def generate_report(jsonl_path: Path, output_dir: Path) -> dict[str, Any]:
         if line.strip():
             events.append(json.loads(line))
 
+    run_started = next(
+        (event for event in events if event.get("event_type") == "run_started"),
+        {},
+    )
+
     phases_by_key: dict[str, dict[str, Any]] = {}
     for event in events:
         key = event.get("phase_key")
@@ -76,6 +81,10 @@ def generate_report(jsonl_path: Path, output_dir: Path) -> dict[str, Any]:
     failed = sum(1 for p in phases_list if p["status"] in ("failed", "timeout", "blocked"))
 
     report = {
+        "profile": run_started.get("profile"),
+        "fixture_name": run_started.get("fixture_name"),
+        "tick_id": run_started.get("tick_id"),
+        "prompt_client": run_started.get("prompt_client"),
         "total_phases": len(phases_list),
         "passed_phases": passed,
         "failed_phases": failed,
@@ -88,6 +97,11 @@ def generate_report(jsonl_path: Path, output_dir: Path) -> dict[str, Any]:
     report_md = output_dir / "report.md"
     md_lines = [
         "# Pipeline Test Report",
+        "",
+        f"**Profile:** {report['profile'] or 'unknown'}",
+        f"**Fixture:** {report['fixture_name'] or 'unknown'}",
+        f"**Tick:** {report['tick_id'] or 'unknown'}",
+        f"**Prompt client:** {report['prompt_client'] or 'unknown'}",
         "",
         f"**Summary:** {passed}/{len(phases_list)} phases passed, {failed} failed.",
         "",
@@ -130,7 +144,9 @@ def summarize_report(report_path: Path) -> str:
         p for p in data["phases"] if p["status"] in ("failed", "timeout", "blocked")
     ]
 
-    summary = f"{passed}/{total} phases passed"
+    profile = data.get("profile")
+    prefix = f"[profile={profile}] " if profile else ""
+    summary = f"{prefix}{passed}/{total} phases passed"
     if failed_phases:
         failures = ", ".join(f"{p['phase_key']}: {p['status']}" for p in failed_phases)
         summary += f"; failed: {failures}"
