@@ -36,6 +36,25 @@ def test_verify_registry_skill_uses_selected_assignee():
     ]
 
 
+def test_verify_registry_skill_accepts_hermes_rich_table_output():
+    stdout = """\
+             Installed Skills (enabled only)
+┏━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━┳━━━━━━━┳━━━━━━━━━┓
+┃ Name             ┃ Category ┃ Source ┃ Trust ┃ Status  ┃
+┡━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━╇━━━━━━━╇━━━━━━━━━┩
+│ ai-coding-agents │          │ local  │ local │ enabled │
+└──────────────────┴──────────┴────────┴───────┴─────────┘
+0 hub-installed, 0 builtin, 1 local — 1 enabled shown
+"""
+
+    def runner(cmd, **kwargs):
+        return CompletedProcess(cmd, 0, stdout=stdout, stderr="")
+
+    assert verify_hermes_skill_registry_prerequisite(
+        assignee="pipeline", skill_id="ai-coding-agents", runner=runner
+    ) == (True, "")
+
+
 def test_verify_registry_skill_fails_closed_on_timeout():
     def runner(cmd, **kwargs):
         raise TimeoutExpired(cmd, 10)

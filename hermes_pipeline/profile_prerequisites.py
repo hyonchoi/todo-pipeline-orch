@@ -52,6 +52,11 @@ def verify_hermes_skill_registry_prerequisite(
         return False, f"`{' '.join(cmd)}` failed (rc={result.returncode})."
     enabled_skill_names: set[str] = set()
     for line in (result.stdout or "").splitlines():
+        if "│" in line:
+            cells = [cell.strip() for cell in line.split("│") if cell.strip()]
+            if len(cells) >= 2 and cells[-1] == "enabled":
+                enabled_skill_names.add(cells[0])
+            continue
         columns = line.split()
         if len(columns) == 1 or (columns and columns[-1] == "enabled"):
             enabled_skill_names.add(columns[0])
