@@ -932,7 +932,16 @@ def run_harness(
         timed_out_phase: str | None = None
         with isolate_config(state_dir=state_dir):
             # Emit initial event so the events log file exists for report generation
-            base_monitor("run_started", {"tick_id": tick_id, "kanban_mode": "hermes"})
+            base_monitor(
+                "run_started",
+                {
+                    "tick_id": tick_id,
+                    "kanban_mode": "hermes",
+                    "profile": profile_name,
+                    "fixture_name": fixture_name,
+                    "prompt_client": prompt_client,
+                },
+            )
 
             import threading
 

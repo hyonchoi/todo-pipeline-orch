@@ -10,13 +10,32 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tomllib
+from importlib.resources import files
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 import yaml
 
-from hermes_pipeline.harness import run_harness
+from hermes_pipeline.harness import _offline_terminal_phase_key, run_harness
+from hermes_pipeline.phases import (
+    load_phases,
+    load_profile_prerequisites,
+    resolve_profile_phases_path,
+)
+
+
+def _supported_bundled_profiles() -> list[str]:
+    root = files("hermes_pipeline").joinpath("data", "phase-profiles")
+    profiles = []
+    for candidate in root.iterdir():
+        if not candidate.is_dir() or not candidate.joinpath("phases.yaml").is_file():
+            continue
+        prerequisites = load_profile_prerequisites(candidate.name)
+        if all(item.support != "Unverified" for item in prerequisites.skills):
+            profiles.append(candidate.name)
+    return sorted(profiles)
 
 
 @pytest.fixture(autouse=True)
@@ -27,12 +46,11 @@ def _skip_preflight(monkeypatch):
     )
 
 
+@pytest.mark.parametrize("profile_name", _supported_bundled_profiles())
 def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
-    tmp_path, monkeypatch, mocker
+    tmp_path, monkeypatch, mocker, profile_name
 ):
     """The no-remote fixture has a successful local terminal phase contract."""
-    from hermes_pipeline.phases import load_phases
-
     workspace = tmp_path / "harness-run"
     monkeypatch.setattr(
         "hermes_pipeline.harness.tempfile.mkdtemp",
@@ -45,7 +63,10 @@ def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
     )
     mocker.patch("hermes_pipeline.harness.time.sleep")
     mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
-    expected_phase_keys = [phase.phase_key for phase in load_phases()]
+    selected_profile_path = resolve_profile_phases_path(profile_name)
+    selected_phases = load_phases(selected_profile_path)
+    expected_phase_keys = [phase.phase_key for phase in selected_phases]
+    offline_terminal_key = _offline_terminal_phase_key(selected_phases, profile_name)
     completed = {phase_key: "done" for phase_key in expected_phase_keys}
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
@@ -60,6 +81,7 @@ def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
         timeout=60,
         convergence_threshold=3,
         config=None,
+        profile_name=profile_name,
     )
 
     profile_path = Path(register.call_args.kwargs["phases_path"])
@@ -68,7 +90,7 @@ def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
     terminal = next(
         phase
         for phase in profile["phases"]
-        if phase["phase_key"] == "phase_8_finish_branch"
+        if phase["phase_key"] == offline_terminal_key
     )
 
     assert registered_phase_keys == expected_phase_keys
@@ -81,12 +103,20 @@ def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
         capture_output=True,
         text=True,
     ).stdout == ""
+    contract = tomllib.loads(
+        (workspace / "project" / ".hermes" / "pipeline.toml").read_text()
+    )
+    assert contract["profile"] == profile_name
     assert result.exit_code == 0
     assert result.report_path is not None
     report = json.loads(result.report_path.read_text())
+    assert report["profile"] == profile_name
+    assert report["fixture_name"] == "happy-path"
+    assert report["prompt_client"] == "claude"
     assert [phase["phase_key"] for phase in report["phases"]] == expected_phase_keys
     assert all(phase["status"] == "completed" for phase in report["phases"])
     assert "passed" in result.summary
+    assert f"profile={profile_name}" in result.summary
 
 
 @pytest.mark.skip(reason="phases.run deleted in Task 4; restored when Task 5 rewrites harness dispatch")
