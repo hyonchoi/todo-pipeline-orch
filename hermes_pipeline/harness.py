@@ -53,6 +53,16 @@ fixture worktree to be clean after its implementation phases complete.
 """
 
 
+class HarnessProfileError(ValueError):
+    """A selected profile cannot be executed safely by the harness."""
+
+    def __init__(self, code: str, profile_name: str, detail: str = "") -> None:
+        super().__init__(code)
+        self.code = code
+        self.profile_name = profile_name
+        self.detail = detail
+
+
 def create_mock_project(
     path: Path, fixture_name: str, profile_name: str = "gstack"
 ) -> dict[str, Any]:
@@ -236,7 +246,6 @@ _POLL_CANCELLATION_TIMEOUT = 65.0
 # Maximum characters in error messages captured by the harness
 _ERROR_MESSAGE_MAX = 500
 
-_OFFLINE_TERMINAL_PHASE_KEY = "phase_8_finish_branch"
 _OFFLINE_TERMINAL_PROMPT = """\
 Run the harness local terminal workflow.
 
@@ -600,14 +609,50 @@ def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
     )
 
 
-def _with_offline_terminal_workflow(phases: list[Phase]) -> list[Phase]:
+def _offline_terminal_phase_key(
+    phases: list[Phase], profile_name: str = "<selected>"
+) -> str:
+    """Return the executable phase that must be made safe for an offline run."""
+    terminal_indexes = [index for index, phase in enumerate(phases) if phase.terminal]
+    if len(terminal_indexes) != 1:
+        raise HarnessProfileError(
+            "invalid_terminal_topology",
+            profile_name,
+            "expected exactly one terminal phase",
+        )
+    terminal_index = terminal_indexes[0]
+    terminal = phases[terminal_index]
+    if not terminal.gate:
+        return terminal.phase_key
+    for phase in reversed(phases[:terminal_index]):
+        if not phase.gate:
+            return phase.phase_key
+    raise HarnessProfileError(
+        "invalid_terminal_topology",
+        profile_name,
+        "terminal gate has no executable predecessor",
+    )
+
+
+def _with_offline_terminal_workflow(
+    phases: list[Phase], terminal_phase_key: str
+) -> list[Phase]:
     """Replace the network-only final phase for the no-remote harness fixture."""
     return [
         replace(phase, prompt=_OFFLINE_TERMINAL_PROMPT)
-        if phase.phase_key == _OFFLINE_TERMINAL_PHASE_KEY
+        if phase.phase_key == terminal_phase_key
         else phase
         for phase in phases
     ]
+
+
+def _build_harness_profile_data(
+    profile_data: dict[str, Any], phases: list[Phase]
+) -> dict[str, Any]:
+    """Preserve profile metadata while replacing phases for the harness run."""
+    harness_profile_data = dict(profile_data)
+    harness_profile_data["phases"] = [asdict(phase) for phase in phases]
+    return harness_profile_data
 
 
 @contextmanager
@@ -788,7 +833,9 @@ def run_harness(
         phases = all_phases
         if phase_only:
             phases = filter_phases(all_phases, phase_only)
-        phases = _with_offline_terminal_workflow(phases)
+        phases = _with_offline_terminal_workflow(
+            phases, _offline_terminal_phase_key(all_phases)
+        )
 
         tick_id = new_tick_id()
 

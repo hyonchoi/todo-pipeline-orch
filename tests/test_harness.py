@@ -17,10 +17,14 @@ from hermes_pipeline.harness import (
     ConvergenceDetector,
     ConvergenceHaltError,
     HarnessMonitor,
+    HarnessProfileError,
     HarnessResult,
+    _build_harness_profile_data,
     _classify_error_class,
     _ConvergenceMonitor,
+    _offline_terminal_phase_key,
     _prune_retained_state,
+    _with_offline_terminal_workflow,
     create_mock_project,
     filter_phases,
     isolate_config,
@@ -277,6 +281,57 @@ class TestFilterPhases:
         filtered = filter_phases(all_phases, "phase_9_ship")
         assert len(filtered) == 1
         assert filtered[0].gate is True
+
+
+class TestHarnessProfileTopology:
+    def test_offline_terminal_uses_executable_terminal(self):
+        phases = [
+            Phase(phase_key="develop", name="Develop"),
+            Phase(phase_key="finish", name="Finish", terminal=True),
+        ]
+
+        target = _offline_terminal_phase_key(phases, "direct-terminal")
+        rewritten = _with_offline_terminal_workflow(phases, target)
+
+        assert target == "finish"
+        assert "local terminal workflow" in rewritten[-1].prompt.lower()
+
+    def test_offline_terminal_uses_predecessor_of_terminal_gate(self):
+        phases = [
+            Phase(phase_key="develop", name="Develop"),
+            Phase(phase_key="ship", name="Ship"),
+            Phase(phase_key="review", name="Review", gate=True, terminal=True),
+        ]
+
+        assert _offline_terminal_phase_key(phases, "gate-terminal") == "ship"
+
+    @pytest.mark.parametrize(
+        "phases",
+        (
+            [Phase(phase_key="develop", name="Develop")],
+            [
+                Phase(phase_key="one", name="One", terminal=True),
+                Phase(phase_key="two", name="Two", terminal=True),
+            ],
+            [Phase(phase_key="gate", name="Gate", gate=True, terminal=True)],
+        ),
+    )
+    def test_invalid_terminal_topology_fails_closed(self, phases):
+        with pytest.raises(HarnessProfileError, match="invalid_terminal_topology"):
+            _offline_terminal_phase_key(phases, "broken")
+
+    def test_harness_profile_data_preserves_top_level_metadata(self):
+        source = {"requires_plan": True, "custom": {"owner": "test"}, "phases": []}
+
+        result = _build_harness_profile_data(
+            source,
+            [Phase(phase_key="develop", name="Develop", terminal=True)],
+        )
+
+        assert result["requires_plan"] is True
+        assert result["custom"] == {"owner": "test"}
+        assert result["phases"][0]["phase_key"] == "develop"
+        assert source["phases"] == []
 
 
 class TestIsolateConfig:
