@@ -48,7 +48,7 @@ def _skip_preflight(monkeypatch):
 
 @pytest.mark.parametrize("profile_name", _supported_bundled_profiles())
 def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
-    tmp_path, monkeypatch, mocker, profile_name
+    tmp_path, monkeypatch, mocker, capsys, profile_name
 ):
     """The no-remote fixture has a successful local terminal phase contract."""
     workspace = tmp_path / "harness-run"
@@ -117,6 +117,7 @@ def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
     assert all(phase["status"] == "completed" for phase in report["phases"])
     assert "passed" in result.summary
     assert f"profile={profile_name}" in result.summary
+    assert f"profile={profile_name}" in capsys.readouterr().out
 
 
 @pytest.mark.skip(reason="phases.run deleted in Task 4; restored when Task 5 rewrites harness dispatch")

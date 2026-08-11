@@ -1052,6 +1052,7 @@ def run_harness(
         status_map = get_todo_kanban_status(fixture["project_slug"], tick_id)
         print(
             f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
+            f"profile={profile_name} "
             f"phases={status_map} "
             f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
         )
