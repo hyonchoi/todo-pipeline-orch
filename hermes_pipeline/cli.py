@@ -372,6 +372,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Fixture name to use (e.g., happy-path)",
     )
     test_parser.add_argument(
+        "--profile",
+        default="gstack",
+        help="Bundled phase profile to test (default: gstack)",
+    )
+    test_parser.add_argument(
         "--loop",
         action="store_true",
         help=(
@@ -2314,6 +2319,7 @@ def _cmd_test(args, config: Config) -> int:
             timeout=args.timeout,
             convergence_threshold=args.convergence_threshold,
             config=config,
+            profile_name=args.profile,
         )
         if result.exit_code != 0:
             return result.exit_code
