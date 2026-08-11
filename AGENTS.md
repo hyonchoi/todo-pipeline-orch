@@ -47,6 +47,15 @@ Start with these sources when relevant:
 
 ## Change discipline
 
+- Implement every approved plan in a dedicated linked Git worktree under
+  `.worktrees/<task-slug>`. Create or select that worktree before running the
+  first TDD red test or making any implementation change.
+- Resolve the repository and existing worktrees with `git worktree list`. Do
+  not implement an approved plan in the primary checkout.
+- If the active checkout is already the correct linked worktree under
+  `.worktrees/`, continue there; do not create a nested worktree.
+- Preserve unrelated changes and do not remove the implementation worktree
+  unless the user explicitly requests cleanup.
 - Inspect the active branch, worktree, and dirty state before editing. Preserve
   unrelated tracked and untracked changes.
 - Trace the current call path before changing behavior. Treat historical plans
