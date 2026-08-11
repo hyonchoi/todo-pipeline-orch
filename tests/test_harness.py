@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import subprocess
+import tomllib
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -69,6 +70,29 @@ class TestCreateMockProject:
         assert result["project_slug"] == "mock-project"
         assert result["todo_id"] == 1
         assert result["fixture_name"] == "happy-path"
+
+    @pytest.mark.parametrize("profile_name", ["gstack", "agent-skills"])
+    def test_create_mock_project_writes_selected_profile_and_plan(
+        self, tmp_path: Path, profile_name: str
+    ):
+        result = create_mock_project(tmp_path, "happy-path", profile_name)
+
+        contract = tomllib.loads((tmp_path / ".hermes" / "pipeline.toml").read_text())
+        todos = (tmp_path / "TODOS.md").read_text()
+        plan_path = tmp_path / "docs" / "harness" / "TODO-1-plan.md"
+        assert result["profile"] == profile_name
+        assert contract["profile"] == profile_name
+        assert set(contract["capabilities"]) == {"Read", "Write", "Edit", "Bash"}
+        assert "**Plan:** docs/harness/TODO-1-plan.md" in todos
+        assert plan_path.is_file()
+        assert "confirm they fail" in plan_path.read_text().lower()
+        assert subprocess.run(
+            ["git", "status", "--short"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout == ""
 
     def test_create_mock_project_omits_harness_owned_and_legacy_state(
         self, tmp_path: Path

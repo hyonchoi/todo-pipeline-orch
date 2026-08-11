@@ -34,10 +34,36 @@ _MOCK_PROJECT_GITIGNORE = """\
 __pycache__/
 *.py[cod]
 """
+_HARNESS_ASSIGNEE = "pipeline"
+_HARNESS_PLAN_PATH = "docs/harness/TODO-1-plan.md"
+_HARNESS_PLAN = """\
+# TODO-1 Mock Name Normalization Plan
+
+1. Add focused tests for `normalize_names` covering whitespace trimming, empty
+   values, lowercasing, input order, and an empty input list. Run the focused
+   tests and confirm they fail because the implementation does not exist.
+2. Create `mock_transform.py` and implement
+   `normalize_names(names: list[str]) -> list[str]` using only the Python
+   standard library.
+3. Run `uv run pytest`, inspect the diff, and commit the tested fixture change.
+
+Acceptance requires `normalize_names([" Alice ", "", "BOB"])` to return
+`["alice", "bob"]`, `normalize_names([])` to return `[]`, and the generated
+fixture worktree to be clean after its implementation phases complete.
+"""
 
 
-def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
+def create_mock_project(
+    path: Path, fixture_name: str, profile_name: str = "gstack"
+) -> dict[str, Any]:
     """Create a mock project in *path* for integration testing."""
+    from .contract import required_capabilities
+    from .phases import load_phases, resolve_profile_phases_path
+
+    profile_path = resolve_profile_phases_path(profile_name)
+    profile_phases = load_phases(profile_path)
+    capabilities = sorted(required_capabilities(profile_phases))
+
     path.mkdir(parents=True, exist_ok=True)
 
     _env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
@@ -50,17 +76,22 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
     (path / "TODOS.md").write_text(todos_content)
     (path / "README.md").write_text(f"# Mock Project — {fixture_name}\n")
     (path / ".gitignore").write_text(_MOCK_PROJECT_GITIGNORE)
+    plan_path = path / _HARNESS_PLAN_PATH
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(_HARNESS_PLAN)
 
     hermes_dir = path / ".hermes"
     hermes_dir.mkdir()
 
     # Create pipeline.toml contract for assignee configuration
+    capabilities_toml = ", ".join(f'"{item}"' for item in capabilities)
     pipeline_toml = (
         "# Pipeline execution contract — read at tick start.\n"
         "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         "schema_version = 2\n"
-        'assignee = "pipeline"\n'
-        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        f'assignee = "{_HARNESS_ASSIGNEE}"\n'
+        f"capabilities = [{capabilities_toml}]\n"
+        f'profile = "{profile_name}"\n'
     )
     (path / ".hermes" / "pipeline.toml").write_text(pipeline_toml)
 
@@ -73,6 +104,7 @@ def create_mock_project(path: Path, fixture_name: str) -> dict[str, Any]:
         "todo_id": todo_id,
         "branch": f"feat/mock-{fixture_name}",
         "fixture_name": fixture_name,
+        "profile": profile_name,
     }
 
 
@@ -93,6 +125,7 @@ def _get_todos_for_fixture(fixture_name: str) -> str:
             "  - **What:** Create `mock_transform.py` with `normalize_names(names: list[str]) -> list[str]`. For each input string, strip surrounding whitespace, discard empty strings after stripping, lowercase the remaining value, and preserve input order. Return an empty list for empty input.\n"
             "  - **Why:** Provide a small, executable feature that exercises the complete harness pipeline without external services.\n"
             "  - **Decisions:** Priority `P1`, Effort `S`, Phase `4 (Development)`, Branch `feat/mock-happy-path`, Language `Python 3.12+`, Dependencies `standard library only`, Test Coverage `required`, Security Review `not-required`\n"
+            f"  - **Plan:** {_HARNESS_PLAN_PATH}\n"
             "  - **Acceptance criteria:** `normalize_names([\" Alice \", \"\", \"BOB\"])` returns `[\"alice\", \"bob\"]`; `normalize_names([])` returns `[]`; tests run with `uv run pytest`.\n"
         )
     else:
