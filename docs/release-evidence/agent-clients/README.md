@@ -21,6 +21,13 @@ For example, the release-final `gstack` / `codex` artifact for release `0.7.0`
 would be
 `docs/release-evidence/agent-clients/0.7.0/gstack-codex.md`.
 
+`scripts/release_changesets.py` owns the explicit mapping from every advertised
+`Conditional` profile/client pair to its canonical evidence artifact. Multiple
+pairs may share one artifact only when they use the same qualified external
+contract. The `native-sdd` pairs map to the corresponding gstack artifacts
+solely for their shared Hermes `ai-coding-agents` dispatcher evidence; gstack
+and superpowers discovery sections do not become native-SDD prerequisites.
+
 Do not create a passing artifact without running and capturing the live
 qualification commands. See the
 [qualification protocol](../../release-qualification-agent-clients.md#conditional-pairs)

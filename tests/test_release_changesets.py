@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from scripts.release_changesets import (
+    CONDITIONAL_PAIR_EVIDENCE,
     ReleaseError,
     add_changeset,
     apply_release,
@@ -17,6 +18,15 @@ from scripts.release_changesets import (
     parse_changeset,
     project_version,
 )
+
+
+def test_native_sdd_reuses_matching_dispatcher_evidence():
+    assert CONDITIONAL_PAIR_EVIDENCE[("native-sdd", "claude")] == (
+        CONDITIONAL_PAIR_EVIDENCE[("gstack", "claude")]
+    )
+    assert CONDITIONAL_PAIR_EVIDENCE[("native-sdd", "codex")] == (
+        CONDITIONAL_PAIR_EVIDENCE[("gstack", "codex")]
+    )
 
 
 def _write_release_files(root: Path, *, version: str = "1.2.3") -> None:

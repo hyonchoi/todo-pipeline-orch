@@ -17,7 +17,16 @@ PACKAGE_NAME = "hermes-pipeline"
 SEMVER_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 ENTRY_RE = re.compile(r'^"hermes-pipeline": (patch|minor|major)$')
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
-EVIDENCE_FILES = ("gstack-claude.md", "gstack-codex.md")
+CONDITIONAL_PAIR_EVIDENCE = {
+    ("gstack", "claude"): "gstack-claude.md",
+    ("gstack", "codex"): "gstack-codex.md",
+    # native-sdd has the same sole external contract: Hermes dispatches the
+    # selected client through ai-coding-agents. It does not use the gstack or
+    # superpowers portions of these canonical artifacts.
+    ("native-sdd", "claude"): "gstack-claude.md",
+    ("native-sdd", "codex"): "gstack-codex.md",
+}
+EVIDENCE_FILES = tuple(dict.fromkeys(CONDITIONAL_PAIR_EVIDENCE.values()))
 
 
 class ReleaseError(ValueError):

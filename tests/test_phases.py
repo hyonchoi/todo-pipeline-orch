@@ -16,6 +16,7 @@ from hermes_pipeline.phases import (
     load_profile_prerequisites,
     resolve_profile_phases_path,
 )
+from scripts.release_changesets import CONDITIONAL_PAIR_EVIDENCE
 
 FIXTURE = """
 phases:
@@ -228,15 +229,14 @@ def test_candidate_evidence_inventory_matches_conditional_pairs():
     )
     conditional_pairs = {
         (profile, client)
-        for profile in ("gstack", "agent-skills")
+        for profile in ("gstack", "agent-skills", "native-sdd")
         for item in load_profile_prerequisites(profile).skills
         if item.support == "Conditional"
         for client in ("claude", "codex")
     }
 
-    expected_names = {
-        f"{profile}-{client}.md" for profile, client in conditional_pairs
-    }
+    assert set(CONDITIONAL_PAIR_EVIDENCE) == conditional_pairs
+    expected_names = set(CONDITIONAL_PAIR_EVIDENCE.values())
     assert {path.name for path in evidence_root.glob("*.md")} == expected_names
 
 
