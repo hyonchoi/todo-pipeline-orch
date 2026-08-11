@@ -17,6 +17,7 @@ class TestGenerateReport:
     def test_generate_report_from_jsonl(self, tmp_path: Path):
         jsonl_path = tmp_path / "events.jsonl"
         jsonl_path.write_text(
+            '{"event_type": "run_started", "fixture_name": "happy-path", "profile": "gstack", "prompt_client": "codex", "tick_id": "01TEST", "timestamp": "2026-07-14T00:00:00Z"}\n'
             '{"event_type": "phase_started", "phase_key": "phase_2_autoplan", "timestamp": "2026-07-14T00:00:00Z", "todo_id": 1}\n'
             '{"duration_ms": 5000, "event_type": "phase_completed", "phase_key": "phase_2_autoplan", "timestamp": "2026-07-14T00:00:05Z", "todo_id": 1}\n'
             '{"event_type": "phase_started", "phase_key": "phase_3_writing_plan", "timestamp": "2026-07-14T00:00:05Z", "todo_id": 1}\n'
@@ -30,6 +31,10 @@ class TestGenerateReport:
         assert report_json.exists()
 
         data = json.loads(report_json.read_text())
+        assert data["profile"] == "gstack"
+        assert data["fixture_name"] == "happy-path"
+        assert data["tick_id"] == "01TEST"
+        assert data["prompt_client"] == "codex"
         assert "phases" in data
         assert len(data["phases"]) == 2
         assert data["phases"][0]["phase_key"] == "phase_2_autoplan"
@@ -39,6 +44,7 @@ class TestGenerateReport:
         report_md = output_dir / "report.md"
         assert report_md.exists()
         md_content = report_md.read_text()
+        assert "**Profile:** gstack" in md_content
         assert "phase_2_autoplan" in md_content
         assert "phase_3_writing_plan" in md_content
 
@@ -49,6 +55,7 @@ class TestGenerateReport:
         output_dir = tmp_path / "reports"
         report = generate_report(jsonl_path, output_dir)
 
+        assert report["profile"] is None
         assert report["total_phases"] == 0
         assert report["passed_phases"] == 0
 
