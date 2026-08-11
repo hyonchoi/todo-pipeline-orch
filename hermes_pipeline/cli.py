@@ -33,6 +33,13 @@ from .logging_setup import configure as configure_logging
 from .logging_setup import new_tick_id as _new_tick_id
 from .outcomes import CURRENT_TICK_ID_FILE, OUTCOME_PICKED_NONE
 from .phases import load_phases
+from .profile_prerequisites import (
+    HERMES_SKILL_REGISTRY_ROOT as _HERMES_SKILL_REGISTRY_ROOT,
+)
+from .profile_prerequisites import (
+    unverified_prerequisite_ids as _unverified_prerequisite_ids,
+)
+from .profile_prerequisites import verify_hermes_skill_registry_prerequisite
 from .tick import TickLock, TickLockHeld
 
 log = logging.getLogger(__name__)
@@ -42,9 +49,6 @@ vlog = logging.getLogger("pipeline.verbose")
 # (kanban registration, outcome observation) so the selection call is bounded
 # strictly below the per-project lock's stale-reclaim window.
 _SELECTION_TIMEOUT_RESERVE_S = 30
-_HERMES_SKILL_REGISTRY_ROOT = "Hermes skill registry"
-
-
 def _resolve_project_dir(config: Config, slug: str) -> Path | None:
     """Validate *slug* and resolve it to an existing project directory.
 
@@ -64,45 +68,14 @@ def _resolve_project_dir(config: Config, slug: str) -> Path | None:
     return project_dir
 
 
-def _unverified_prerequisite_ids(prerequisites, prompt_client: str) -> list[str]:
-    """Return profile prerequisites unsupported for the selected prompt client."""
-    unverified: list[str] = []
-    for prerequisite in prerequisites.skills:
-        if prerequisite.support == "Unverified":
-            # Validate the client row is present for the selected client, even
-            # though Unverified rows intentionally carry no invocation metadata.
-            prerequisite.clients[prompt_client]
-            unverified.append(prerequisite.skill_id)
-    return unverified
-
-
 def _verify_hermes_skill_registry_prerequisite(
     *, assignee: str, skill_id: str
 ) -> tuple[bool, str]:
-    cmd = ["hermes"]
-    if assignee != "default":
-        cmd.extend(["-p", assignee])
-    cmd.extend(["skills", "list", "--enabled-only"])
-    try:
-        result = _cli_sp.run(cmd, text=True, capture_output=True, timeout=10, check=False)
-    except FileNotFoundError:
-        return False, "Hermes is not installed or not on PATH."
-    except _cli_sp.TimeoutExpired:
-        return False, f"`{' '.join(cmd)}` timed out."
-
-    if result.returncode != 0:
-        return False, f"`{' '.join(cmd)}` failed (rc={result.returncode})."
-    enabled_skill_names: set[str] = set()
-    for line in (result.stdout or "").splitlines():
-        columns = line.split()
-        if len(columns) == 1 or (columns and columns[-1] == "enabled"):
-            enabled_skill_names.add(columns[0])
-    if skill_id not in enabled_skill_names:
-        return (
-            False,
-            f"skill '{skill_id}' is not enabled in Hermes profile '{assignee}'.",
-        )
-    return True, ""
+    return verify_hermes_skill_registry_prerequisite(
+        assignee=assignee,
+        skill_id=skill_id,
+        runner=_cli_sp.run,
+    )
 
 
 def _hermes_run_kill(job_id: str) -> int:
