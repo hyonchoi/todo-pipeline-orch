@@ -2281,7 +2281,7 @@ def _atomic_write_config(path: Path, text: str) -> None:
 
 def _cmd_test(args, config: Config) -> int:
     """Handle 'test' subcommand — mock integration test harness."""
-    from .harness import run_harness
+    from .harness import HarnessProfileError, run_harness
 
     try:
         result = run_harness(
@@ -2297,6 +2297,13 @@ def _cmd_test(args, config: Config) -> int:
         if result.exit_code != 0:
             return result.exit_code
         return 0
+    except HarnessProfileError as e:
+        log.error(
+            "test harness profile setup failed: code=%s profile=%s",
+            e.code,
+            e.profile_name,
+        )
+        return 2
     except Exception as e:
         log.error("test harness failed: error_type=%s", type(e).__name__)
         return 2
