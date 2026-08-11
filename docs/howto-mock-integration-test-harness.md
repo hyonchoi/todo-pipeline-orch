@@ -26,10 +26,28 @@ This creates a temporary project with a single TODO entry, registers all pipelin
 phases on the kanban board, and polls until completion. Expect ~30 seconds with
 `claude-haiku-4-5` pinned in the fixture config.
 
+The default profile is `gstack`. Select another bundled, supported profile with:
+
+```bash
+uv run tpo test --fixture happy-path --profile <profile-name> --timeout 120
+```
+
+The harness writes the selected profile and its computed capabilities into the
+fixture contract. It rejects unknown profiles, `Unverified` profile/client pairs,
+and missing locally verifiable Conditional Hermes skills before creating the
+workspace or registering kanban tasks.
+
 The fixture intentionally has no Git remote. Its explicit harness phase profile
-keeps every production phase key but replaces `phase_8_finish_branch` with a
-local terminal workflow: test, commit, record the branch, and verify a clean
-worktree without invoking `/ship`, pushing, or opening a PR.
+keeps every selected production phase key and all top-level profile metadata,
+but replaces the profile's executable terminal handoff with a local workflow:
+test, commit, record the branch, and verify a clean worktree without invoking a
+ship workflow, pushing, or opening a PR. If the terminal gate is a synchronization
+node, the nearest preceding executable phase is replaced and the gate remains
+intact.
+
+The generated TODO includes a committed, repository-relative implementation
+Plan so profiles that require an execution-authority attachment can run the same
+fixture safely.
 
 Output:
 ```
@@ -40,7 +58,7 @@ INFO phase phase_1 kickoff: running -> done
 INFO phase phase_2_autoplan: blocked -> running
 INFO phase phase_2_autoplan: running -> done
 ...
-[kanban] tenant=mock-project tick_id=01ARZ3... phases={...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
+[kanban] tenant=mock-project tick_id=01ARZ3... profile=gstack phases={...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
 ```
 
 Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the run timed out. Exit code 2 = preflight or setup error (missing dependency, `mock-project` tenant unreachable).
@@ -51,8 +69,10 @@ Exit code 0 = all phases passed. Exit code 1 = one or more phases failed or the 
 uv run tpo test --fixture happy-path --phase phase_2_autoplan
 ```
 
-Runs only the named phase in isolation. Useful for debugging a phase dispatch or
-checking that a specific step works with a real Hermes subprocess call.
+Runs only the named executable phase from the selected profile. Gate-only
+selection exits 2 instead of registering a synchronization node that cannot run
+independently. This is useful for debugging a phase dispatch or checking that a
+specific step works with a real Hermes subprocess call.
 
 ### 3. Run with a custom convergence threshold
 
@@ -90,6 +110,9 @@ harness-xxxxxxxx/
       report.json        # Structured findings report
       report.md          # Human-readable findings report
 ```
+
+Both reports identify the selected profile, fixture, tick, and prompt client;
+numbered loop snapshots retain the same profile attribution.
 
 ### 5. Run in loop mode to retain a numbered snapshot
 
