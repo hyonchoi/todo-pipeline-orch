@@ -21,7 +21,12 @@ from .outcomes import (
     OUTCOME_PHASE_COMPLETE,
     OUTCOME_PICKED_NONE,
 )
-from .phases import CLIENT_VOCABULARY, _render_phase_prompt, load_phases
+from .phases import (
+    CLIENT_VOCABULARY,
+    _render_phase_prompt,
+    load_phase_profile,
+    load_phases,
+)
 from .state import _atomic_write_text
 
 # Sentinel written after successful registration to record expected phases.
@@ -659,9 +664,25 @@ def prepare_todo_phases(
     phases_path: str | Path | None = None,
     prompt_client: PromptClient = "claude",
     plan_path: str | None = None,
+    project_dir: str | Path | None = None,
 ) -> list[PreparedPhaseTask]:
     if not re.fullmatch(r"TODO-\d+", todo_id):
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
+    profile = load_phase_profile(phases_path)
+    if profile.requires_plan:
+        if project_dir is not None:
+            from .todos_md import resolve_todo_plan
+
+            project_path = Path(project_dir)
+            plan_path = resolve_todo_plan(
+                project_path,
+                project_path / "TODOS.md",
+                todo_id,
+            )
+        elif not plan_path:
+            from .todos_md import TodoPlanValidationError
+
+            raise TodoPlanValidationError("missing")
     phases = load_phases(phases_path)
     prepared: list[PreparedPhaseTask] = []
     for phase in phases:
@@ -1084,6 +1105,7 @@ def register_todo_phases(
         board_slug=board_slug,
         phases_path=phases_path,
         prompt_client=prompt_client,
+        project_dir=project_dir,
     )
     return create_prepared_todo_phases(
         prepared=prepared,
