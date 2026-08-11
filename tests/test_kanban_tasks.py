@@ -258,7 +258,8 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
         ("codex", "codex exec --sandbox workspace-write", "claude -p"),
         (
             "claude",
-            "claude -p --permission-mode dontAsk --allowedTools Read,Bash",
+            'claude -p "<external-agent prompt>" '
+            "--permission-mode dontAsk --allowedTools Read,Bash",
             "codex exec",
         ),
     ],

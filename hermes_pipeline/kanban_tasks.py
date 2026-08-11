@@ -134,7 +134,7 @@ def _external_client_delegation_block(
         if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", tool) for tool in tool_names):
             raise ValueError("Claude allowed tool names must be simple identifiers")
         allowed_tools = ",".join(tool_names)
-        command = "claude -p --permission-mode dontAsk"
+        command = 'claude -p "<external-agent prompt>" --permission-mode dontAsk'
         if allowed_tools:
             command += f" --allowedTools {allowed_tools}"
     else:
