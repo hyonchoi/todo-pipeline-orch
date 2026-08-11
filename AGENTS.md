@@ -57,14 +57,25 @@ Start with these sources when relevant:
   breaking change.
 - Do not add dependencies unless the standard library and existing dependencies
   cannot reasonably solve the problem.
-- When implementation work is organized into explicit TDD tasks, treat each
-  completed task as a commit boundary. Finish its red-green-refactor cycle, run
-  the task-focused checks, and create one atomic commit before starting the next
-  task. Stage only the files or hunks that belong to that task, and do not commit
-  an incomplete task or known failing tests unless the user explicitly requests
-  a checkpoint commit.
-- Outside that TDD workflow, do not stage or commit unless the user requests it.
-  Do not push, merge, delete worktrees, or open/update a pull request unless the
+- Use test-driven development for every implementation request, including direct
+  implementation requests and implementation following Plan mode or a reviewed
+  plan. Divide the work into atomic TDD tasks. For each task, first add or change
+  an automated test that expresses the required behavior and run it to establish
+  the expected failure (red); make the smallest production change that passes
+  the test (green); then refactor without changing behavior and rerun the
+  task-focused checks. Do not write production code before its failing test.
+- Treat each completed red-green-refactor task as an authorized commit boundary.
+  Stage only the files or hunks belonging to that task and create one atomic
+  commit before starting the next task; no additional commit request is needed.
+  Do not commit an incomplete task or known failing tests unless the user
+  explicitly requests a checkpoint commit. An explicit user instruction not to
+  commit overrides this automatic authorization.
+- For documentation, metadata, or other changes that cannot meaningfully execute
+  in a unit test, first add or identify the narrowest automated validation that
+  can fail on the intended contract, then follow the same red-green-refactor and
+  commit cycle. If no automated red test is technically possible, stop and ask
+  the user before implementing that task.
+- Do not push, merge, delete worktrees, or open/update a pull request unless the
   user requests that action.
 
 ## `TODOS.md` management
