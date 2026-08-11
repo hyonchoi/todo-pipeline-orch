@@ -24,6 +24,7 @@ from hermes_pipeline.harness import (
     _ConvergenceMonitor,
     _offline_terminal_phase_key,
     _prune_retained_state,
+    _validate_profile_prerequisites,
     _with_offline_terminal_workflow,
     create_mock_project,
     filter_phases,
@@ -332,6 +333,67 @@ class TestHarnessProfileTopology:
         assert result["custom"] == {"owner": "test"}
         assert result["phases"][0]["phase_key"] == "develop"
         assert source["phases"] == []
+
+    def test_unverified_profile_fails_before_preflight_or_workspace(self, mocker):
+        preflight = mocker.patch("hermes_pipeline.harness.preflight_check")
+        mkdtemp = mocker.patch("hermes_pipeline.harness.tempfile.mkdtemp")
+
+        with pytest.raises(HarnessProfileError, match="unverified_prerequisites"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only=None,
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+                profile_name="agent-skills",
+            )
+
+        preflight.assert_not_called()
+        mkdtemp.assert_not_called()
+
+    def test_gate_only_phase_fails_before_preflight_or_workspace(self, mocker):
+        from hermes_pipeline.phases import load_profile_prerequisites
+
+        mocker.patch(
+            "hermes_pipeline.phases.load_profile_prerequisites",
+            return_value=load_profile_prerequisites("gstack"),
+        )
+        preflight = mocker.patch("hermes_pipeline.harness.preflight_check")
+        mkdtemp = mocker.patch("hermes_pipeline.harness.tempfile.mkdtemp")
+
+        with pytest.raises(HarnessProfileError, match="gate_phase_not_executable"):
+            run_harness(
+                fixture_name="happy-path",
+                loop=False,
+                phase_only="phase_8_ship",
+                keep_dir=False,
+                timeout=60,
+                convergence_threshold=3,
+                config=None,
+                profile_name="agent-skills",
+            )
+
+        preflight.assert_not_called()
+        mkdtemp.assert_not_called()
+
+    def test_missing_conditional_skill_fails_profile_preflight(self, mocker):
+        from hermes_pipeline.phases import load_profile_prerequisites
+
+        mocker.patch(
+            "hermes_pipeline.harness.verify_hermes_skill_registry_prerequisite",
+            return_value=(False, "missing"),
+        )
+
+        with pytest.raises(
+            HarnessProfileError, match="missing_conditional_prerequisite"
+        ):
+            _validate_profile_prerequisites(
+                profile_name="gstack",
+                prompt_client="claude",
+                prerequisites=load_profile_prerequisites("gstack"),
+            )
 
 
 class TestIsolateConfig:

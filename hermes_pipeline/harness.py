@@ -16,7 +16,14 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .config import PromptClient
+from .profile_prerequisites import (
+    HERMES_SKILL_REGISTRY_ROOT,
+    unverified_prerequisite_ids,
+    verify_hermes_skill_registry_prerequisite,
+)
 
 log = logging.getLogger(__name__)
 
@@ -146,7 +153,12 @@ def _get_todo_id_for_fixture(fixture_name: str) -> int:
     return 1
 
 
-def preflight_check(*, prompt_client: PromptClient = "claude") -> None:
+def preflight_check(
+    *,
+    prompt_client: PromptClient = "claude",
+    profile_name: str | None = None,
+    prerequisites=None,
+) -> None:
     """Verify required CLI tools are available."""
     from .hermes_adapter import AgentClientDependencyError, HermesDependencyError
 
@@ -167,6 +179,12 @@ def preflight_check(*, prompt_client: PromptClient = "claude") -> None:
         raise AgentClientDependencyError(
             f"{prompt_client} CLI for the selected prompt client "
             f"({selected_product}) is not installed or not on PATH."
+        )
+    if profile_name is not None and prerequisites is not None:
+        _validate_profile_prerequisites(
+            profile_name=profile_name,
+            prompt_client=prompt_client,
+            prerequisites=prerequisites,
         )
 
 
@@ -655,6 +673,35 @@ def _build_harness_profile_data(
     return harness_profile_data
 
 
+def _validate_profile_prerequisites(
+    *, profile_name: str, prompt_client: PromptClient, prerequisites
+) -> None:
+    unverified = unverified_prerequisite_ids(prerequisites, prompt_client)
+    if unverified:
+        raise HarnessProfileError(
+            "unverified_prerequisites",
+            profile_name,
+            ", ".join(unverified),
+        )
+    for prerequisite in prerequisites.skills:
+        client = prerequisite.clients[prompt_client]
+        if (
+            prerequisite.support == "Conditional"
+            and client.discovery_root == HERMES_SKILL_REGISTRY_ROOT
+        ):
+            verified, _detail = verify_hermes_skill_registry_prerequisite(
+                assignee=_HARNESS_ASSIGNEE,
+                skill_id=prerequisite.skill_id,
+                runner=subprocess.run,
+            )
+            if not verified:
+                raise HarnessProfileError(
+                    "missing_conditional_prerequisite",
+                    profile_name,
+                    prerequisite.skill_id,
+                )
+
+
 @contextmanager
 def isolate_config(*, state_dir: Path):
     """Context manager that points tpo at an isolated config file.
@@ -790,11 +837,17 @@ def run_harness(
     timeout: int,
     convergence_threshold: int,
     config: Any = None,
+    profile_name: str = "gstack",
 ) -> HarnessResult:
     """Main orchestration: bootstrap fixture, run pipeline, generate report."""
+    from .contract import PROFILE_NAME_RE
     from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .logging_setup import new_tick_id
-    from .phases import load_phases
+    from .phases import (
+        load_phases,
+        load_profile_prerequisites,
+        resolve_profile_phases_path,
+    )
     from .test_report import (
         diff_reports,
         generate_report,
@@ -804,7 +857,36 @@ def run_harness(
 
     prompt_client = getattr(config, "prompt_client", "claude")
 
-    preflight_check(prompt_client=prompt_client)
+    if not isinstance(profile_name, str) or not PROFILE_NAME_RE.fullmatch(profile_name):
+        raise HarnessProfileError("invalid_profile_name", "<invalid>")
+    profile_path = resolve_profile_phases_path(profile_name)
+    profile_data = yaml.safe_load(profile_path.read_text())
+    if not isinstance(profile_data, dict):
+        raise HarnessProfileError("invalid_profile_data", profile_name)
+    all_phases = load_phases(profile_path)
+    prerequisites = load_profile_prerequisites(profile_name)
+    unverified = unverified_prerequisite_ids(prerequisites, prompt_client)
+    if unverified:
+        raise HarnessProfileError(
+            "unverified_prerequisites",
+            profile_name,
+            ", ".join(unverified),
+        )
+    offline_terminal_phase_key = _offline_terminal_phase_key(all_phases, profile_name)
+    phases = all_phases
+    if phase_only:
+        phases = filter_phases(all_phases, phase_only)
+        if phases[0].gate:
+            raise HarnessProfileError(
+                "gate_phase_not_executable", profile_name, phases[0].phase_key
+            )
+    phases = _with_offline_terminal_workflow(phases, offline_terminal_phase_key)
+
+    preflight_check(
+        prompt_client=prompt_client,
+        profile_name=profile_name,
+        prerequisites=prerequisites,
+    )
 
     # Allocate under ~/.hermes/tmp rather than the OS default temp root: on
     # macOS, tempfile.mkdtemp() resolves under /var/folders/..., which is a
@@ -819,7 +901,7 @@ def run_harness(
     artifacts_dir.mkdir(parents=True)
     workspace_quiescent = True
     try:
-        fixture = create_mock_project(project_dir, fixture_name)
+        fixture = create_mock_project(project_dir, fixture_name, profile_name)
 
         state_dir = project_dir / ".hermes"
 
@@ -829,14 +911,6 @@ def run_harness(
         error_holder: dict[str, Any] = {}
         monitor = _ConvergenceMonitor(base_monitor, detector, error_holder)
 
-        all_phases = load_phases()
-        phases = all_phases
-        if phase_only:
-            phases = filter_phases(all_phases, phase_only)
-        phases = _with_offline_terminal_workflow(
-            phases, _offline_terminal_phase_key(all_phases)
-        )
-
         tick_id = new_tick_id()
 
         _kanban_preflight(tenant=fixture["project_slug"])
@@ -844,11 +918,9 @@ def run_harness(
         # Always register an explicit harness profile. The full profile keeps
         # every production phase key while substituting the offline terminal
         # workflow for the no-remote fixture.
-        import yaml as _yaml
-
         _phases_path_override = artifacts_dir / "harness-phases.yaml"
         _phases_path_override.write_text(
-            _yaml.dump({"phases": [asdict(p) for p in phases]})
+            yaml.safe_dump(_build_harness_profile_data(profile_data, phases))
         )
 
         checkpoint_dir = state_dir / "pipeline_checkpoints"
