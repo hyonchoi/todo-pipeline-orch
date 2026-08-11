@@ -1355,7 +1355,10 @@ class TestKanbanModeHermes:
         )
 
         assert result.exit_code == 0
-        preflight.assert_called_once_with(prompt_client=expected)
+        preflight.assert_called_once()
+        assert preflight.call_args.kwargs["prompt_client"] == expected
+        assert preflight.call_args.kwargs["profile_name"] == "gstack"
+        assert preflight.call_args.kwargs["prerequisites"].profile == "gstack"
         assert poll.call_args.kwargs["prompt_client"] == expected
 
     def test_run_harness_separates_project_from_artifacts(
