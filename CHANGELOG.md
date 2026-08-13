@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.8.0
+
+### Minor Changes
+
+- Add a native SDD/TDD pipeline profile without client workflow skills
+
+- Allow the mock integration harness to select and safely test supported bundled phase profiles with profile-attributed reports.
+
+### Patch Changes
+
+- Fix Hermes skill prerequisite detection for table-formatted CLI output.
+
+- Fix Claude phase delegation by placing the prompt before variadic allowed-tool arguments.
+
 ## 0.7.4
 
 ### Patch Changes
