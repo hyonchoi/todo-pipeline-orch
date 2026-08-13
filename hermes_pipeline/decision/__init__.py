@@ -9,16 +9,13 @@ from importlib.resources import as_file as _as_file
 from importlib.resources import files as _resource_files
 from pathlib import Path as _P
 
+from hermes_pipeline.todos_md import todo_entry_ids
+
 from . import store as _store
 from .agent import PromptShaMismatch, call_agent, compute_prompt_sha
 from .schema import HermesSelectionDecision, Outcome, SelectionContext
 
 _TODO_ID_RE = _re.compile(r"^TODO-\d+$")
-# Pulls every `TODO-N` token out of TODOS.md. Header lines, body references,
-# checkbox lists — anything formatted as the canonical id. The agent's
-# `candidates_considered` and `picked` fields are checked against THIS set,
-# not the model's self-reported set (which is also LLM output).
-_TODOS_ID_RE = _re.compile(r"\bTODO-\d+\b")
 
 __all__ = [
     "HermesSelectionDecision",
@@ -129,14 +126,13 @@ def run_selection(
     # LLM-output trust boundary. Three failure modes to gate against:
     #   1. `picked` doesn't match the TODO-N shape (model returned a string,
     #      a dict, a hallucinated value).
-    #   2. `picked` is shaped correctly but doesn't appear in TODOS.md at
-    #      all — a hallucinated TODO id the model invented.
-    #   3. `picked` is in TODOS.md but was filtered out (e.g., it's already
+    #   2. `picked` is shaped correctly but isn't a declared TODOS.md entry.
+    #   3. `picked` is a declared entry but was filtered out (e.g., it's already
     #      in_flight from a prior tick).
     # Validate against the server-parsed TODO ids in `ctx.todos_md`, NOT
     # against the LLM-supplied `candidates_considered` (which is itself
     # untrusted output and can be made to agree with `picked` by injection).
-    real_ids = set(_TODOS_ID_RE.findall(ctx.todos_md))
+    real_ids = todo_entry_ids(ctx.todos_md)
     in_flight_set = set(ctx.in_flight)
     picked = parsed.get("picked")
     if picked is not None:

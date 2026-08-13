@@ -39,7 +39,10 @@ def _prompt(tmp_path: Path) -> Path:
     p.write_text("PROMPT")
     return p
 
-def _ctx(todos_md: str = "- TODO-1\n- TODO-2", in_flight: list[str] | None = None) -> SelectionContext:
+def _ctx(
+    todos_md: str = "- [ ] **TODO-1: First**\n- [ ] **TODO-2: Second**",
+    in_flight: list[str] | None = None,
+) -> SelectionContext:
     return SelectionContext(todos_md, in_flight or [], [], {}, "demo")
 
 def test_happy_path_persists_decision(tmp_path):
@@ -105,6 +108,37 @@ def test_picked_not_in_todos_md_is_rejected(tmp_path):
         d = run_selection(tick_id="01JC", ctx=_ctx(), cfg=_cfg(state, p))
     assert d.picked is None
     assert "pick_not_in_todos_md" in d.rationale
+
+
+def test_picked_id_mentioned_only_outside_entry_header_is_rejected(tmp_path):
+    state = tmp_path / "state"; state.mkdir()
+    p = _prompt(tmp_path)
+    fake = AgentResult(
+        parsed={
+            "candidates_considered": ["TODO-999"],
+            "picked": "TODO-999",
+            "rationale": "mentioned in the entry",
+            "blocked_reasons": {},
+            "in_flight": [],
+        },
+        prompt_sha="sha", raw_response="{}",
+    )
+    todos_md = """\
+- [ ] **TODO-1: Real entry**
+  - **What:** Mentions TODO-999 in its body.
+  - **Reference:** docs/TODO-999-notes.md
+  - **Plan:** docs/TODO-999-plan.md
+"""
+
+    with patch("hermes_pipeline.decision.call_agent", return_value=fake):
+        d = run_selection(
+            tick_id="01JHEADER",
+            ctx=_ctx(todos_md=todos_md),
+            cfg=_cfg(state, p),
+        )
+
+    assert d.picked is None
+    assert d.rationale.startswith("pick_not_in_todos_md")
 
 def test_picked_already_in_flight_is_rejected(tmp_path):
     state = tmp_path / "state"; state.mkdir()
