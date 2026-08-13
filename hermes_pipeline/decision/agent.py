@@ -10,8 +10,6 @@ from pathlib import Path
 from .schema import SelectionContext
 
 log = logging.getLogger(__name__)
-MAX_TRACE_CHARS = 2000  # Truncate agent payloads to this length in logs
-
 class PromptShaMismatch(Exception):
     """Raised when expected_prompt_sha != actual prompt SHA. NOT a no-progress event."""
     def __init__(self, expected: str, actual: str):
@@ -23,7 +21,6 @@ class PromptShaMismatch(Exception):
 class AgentResult:
     parsed: dict
     prompt_sha: str
-    raw_response: str
 
 def compute_prompt_sha(prompt_path: Path) -> str:
     return hashlib.sha256(Path(prompt_path).read_bytes()).hexdigest()
@@ -131,19 +128,17 @@ def _parse(raw: str) -> dict:
             if isinstance(d, dict) and body[idx + end :].strip() == "":
                 return _format_result(d)
 
-    error = None
     try:
         d = json.loads(body)
         if isinstance(d, dict):
             return _format_result(d)
-        error = "response is not a JSON object"
-    except (json.JSONDecodeError, TypeError, ValueError, IndexError) as exc:
-        error = str(exc)
+    except (json.JSONDecodeError, TypeError, ValueError, IndexError):
+        pass
 
     return {
         "candidates_considered": [],
         "picked": None,
-        "rationale": f"parse error: {error}; raw response (truncated): {raw[:300]}",
+        "rationale": "parse_error: invalid_response",
         "blocked_reasons": {},
         "in_flight": [],
     }
@@ -185,15 +180,13 @@ def call_agent(
             max(max_tokens // TOKENS_PER_SECOND, MIN_TIMEOUT_SECONDS)).
 
     Returns:
-        AgentResult with parsed response, prompt SHA, and raw output.
+        AgentResult with parsed response and prompt SHA.
     """
     actual_sha = compute_prompt_sha(prompt_path)
     if expected_sha is not None and expected_sha != actual_sha:
         raise PromptShaMismatch(expected_sha, actual_sha)
     rendered = build_prompt(prompt_path, ctx)
-    # DEBUG-level so --debug surfaces raw agent prompts/responses to stderr
-    # and the file handler. Truncated to MAX_TRACE_CHARS to avoid bloating logs.
-    log.debug("agent prompt (truncated to %d chars): %s", MAX_TRACE_CHARS, rendered[:MAX_TRACE_CHARS])
+    log.debug("agent request: prompt_sha=%s prompt_chars=%d", actual_sha, len(rendered))
     raw = _api_call(model=model, max_tokens=max_tokens, prompt=rendered, backend=backend, timeout=timeout)
-    log.debug("agent raw response (truncated to %d chars): %s", MAX_TRACE_CHARS, raw[:MAX_TRACE_CHARS])
-    return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha, raw_response=raw)
+    log.debug("agent response: prompt_sha=%s response_chars=%d", actual_sha, len(raw))
+    return AgentResult(parsed=_parse(raw), prompt_sha=actual_sha)

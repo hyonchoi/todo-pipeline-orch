@@ -34,18 +34,17 @@ try:
     )
     print(response)
 except HermesCallError as e:
-    # e.returncode, e.stderr available for debugging
-    print(f"hermes failed: rc={e.returncode}, stderr={e.stderr}")
+    print(f"hermes failed: rc={e.returncode}")
 ```
 
 The function runs `hermes chat -q -Q --source tool` and passes the prompt
-via stdin. It returns stripped stdout on success, or raises `HermesCallError`
+as the `-q` argument. It returns stripped stdout on success, or raises `HermesCallError`
 on non-zero exit.
 
 **Key behavior:**
 - `model="auto"` (default) lets Hermes resolve from its config.
 - `model="claude-sonnet-4-6"` adds `-m claude-sonnet-4-6` to the command.
-- Prompt is sent via stdin — it never appears in process arguments.
+- Prompt and response bodies are not retained in the raised error or debug logs.
 - Timeout defaults to 120 seconds.
 
 ### Use `hermes_agent_call()` for agent-style phases
@@ -95,13 +94,11 @@ try:
     hermes_call(prompt="...")
 except HermesCallError as e:
     print(f"Exit code: {e.returncode}")
-    print(f"Stderr: {e.stderr}")
-    # The error message also includes stdout for debugging partial results.
 ```
 
-`HermesCallError` carries the exit code, stderr, and a message that includes
-both stdout and stderr (truncated to 300 chars each) so you can debug partial
-results.
+`HermesCallError` carries only the exit code. Its message identifies the client
+and return code without including stdout or stderr. Run Hermes directly in a
+controlled terminal when provider-level diagnostics are required.
 
 ### Handle timeouts from `hermes_agent_call()`
 
@@ -130,7 +127,7 @@ authentication: `hermes login`.
 
 ## Troubleshooting
 
-**`HermesCallError: hermes chat failed: rc=1 stderr=E100: gateway unreachable`.**
+**`HermesCallError: hermes call failed with return code 1`.**
 Hermes cannot reach the LLM provider. Run `hermes chat -q "hello"` manually to
 verify connectivity.
 

@@ -9,6 +9,12 @@ from importlib.resources import as_file as _as_file
 from importlib.resources import files as _resource_files
 from pathlib import Path as _P
 
+from hermes_pipeline.hermes_adapter import (
+    AgentClientDependencyError,
+    ClaudeCallError,
+    HermesCallError,
+    HermesDependencyError,
+)
 from hermes_pipeline.todos_md import todo_entry_ids
 
 from . import store as _store
@@ -48,6 +54,20 @@ def _selection_prompt_path(prompt_path: str | None):
     return _as_file(
         _resource_files("hermes_pipeline.data").joinpath("prompts", "selection.md")
     )
+
+
+def _api_error_code(exc: Exception) -> str:
+    if isinstance(exc, HermesCallError):
+        return "hermes_error"
+    if isinstance(exc, ClaudeCallError):
+        return "claude_error"
+    if isinstance(exc, (HermesDependencyError, AgentClientDependencyError, FileNotFoundError)):
+        return "dependency_error"
+    if isinstance(exc, (subprocess.TimeoutExpired, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, OSError):
+        return "transport_error"
+    return "unexpected_error"
 
 def run_selection(
     *,
@@ -93,14 +113,14 @@ def run_selection(
                 "in_flight": ctx.in_flight,
             }
             prompt_sha = e.actual
-        except KeyError as e:
+        except KeyError:
             # Config fault — missing required setting. Persist a
             # decision so the next tick's `recent_decisions` carries the cause,
             # but do not crash the cron entrypoint.
             parsed = {
                 "candidates_considered": [],
                 "picked": None,
-                "rationale": f"config_error: missing setting {e.args[0]!r}",
+                "rationale": "config_error: missing_setting",
                 "blocked_reasons": {},
                 "in_flight": ctx.in_flight,
             }
@@ -110,7 +130,7 @@ def run_selection(
             # plus any other transport error. The plan's edge-case contract:
             # produce picked=None with a distinct rationale; the circuit breaker
             # treats it as no-progress (caller responsibility).
-            rationale = f"api_error: {type(e).__name__}: {str(e)[:200]}"
+            rationale = f"api_error: {_api_error_code(e)}"
             try:
                 prompt_sha = compute_prompt_sha(prompt_path)
             except OSError:

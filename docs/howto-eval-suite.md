@@ -121,10 +121,11 @@ on the runner for the agent calls to succeed.
 re-run. Note: the orchestrator now routes through Hermes — make sure Hermes is
 also installed and authenticated (`hermes login`).
 
-**`HermesCallError: hermes chat failed: rc=...` thrown from `hermes_adapter.py`.**
+**`HermesCallError: hermes call failed with return code N` thrown from `hermes_adapter.py`.**
 Hermes returned a non-zero exit code. Check `hermes login` to verify auth,
 `hermes model` to verify model, and `hermes chat -q "hello"` to confirm the
-CLI is working. As of v0.3, the orchestrator no longer calls Anthropic directly —
+CLI is working. Raw provider stdout and stderr are intentionally omitted from
+the exception. As of v0.3, the orchestrator no longer calls Anthropic directly —
 all LLM traffic goes through `hermes chat -q`.
 
 **`KeyError: 'ANTHROPIC_API_KEY'` thrown from the eval suite.**
@@ -132,11 +133,12 @@ The eval suite still checks for `ANTHROPIC_API_KEY` (for backwards compatibility
 with the skip gate). The orchestrator itself no longer reads this env var directly —
 Hermes resolves auth internally.
 
-**Parse error: `picked=None, rationale='parse error: ...'`.**
+**Parse error: `picked=None, rationale='parse_error: invalid_response'`.**
 The model returned non-JSON or unfenced text. `agent.py:_parse` strips ` ```json `
-fences. If the model is returning prose, the prompt likely lost its structured-
-output instructions — diff against `hermes_pipeline/data/prompts/selection.md`
-HEAD.
+fences. Raw response content and decoder details are intentionally omitted from
+the rationale. If the model is returning prose, the prompt likely lost its
+structured-output instructions — diff against
+`hermes_pipeline/data/prompts/selection.md` HEAD.
 
 **A fixture that used to pass now fails.**
 Either the prompt drifted (run `sha256sum` on

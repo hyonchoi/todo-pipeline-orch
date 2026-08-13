@@ -158,7 +158,7 @@ def test_happy_path_e2e_phase_failure_recorded_and_run_continues(tmp_path):
 
     def _side_effect(*, phase_key, **kwargs):
         if phase_key == failing_phase:
-            raise HermesCallError("boom", returncode=1, stderr="boom")
+            raise HermesCallError(returncode=1)
         return {"status": "success"}
 
     with patch("hermes_pipeline.phases.run", side_effect=_side_effect) as mock_run:
