@@ -1,9 +1,7 @@
 # Agent Instructions
 
-Project-specific instructions for coding agents working in this repository.
-Keep changes narrow, preserve unrelated worktree changes, and follow existing
-architecture and style. Ask only when ambiguity would materially change the
-result; otherwise state a reasonable assumption and continue.
+Project-specific architecture, tooling, workflow, and reporting instructions
+for coding agents working in this repository.
 
 ## Project
 
@@ -25,8 +23,6 @@ Start with these sources when relevant:
 
 - Use `uv sync`, `uv run`, and `uv add`; do not use bare `pip` for project
   dependency management.
-- Run focused tests while iterating, then the full relevant gates before
-  finishing.
 - The standard full gates are:
 
   ```bash
@@ -47,45 +43,12 @@ Start with these sources when relevant:
 
 ## Change discipline
 
-- Implement every approved plan in a dedicated linked Git worktree under
-  `.worktrees/<task-slug>`. Create or select that worktree before running the
-  first TDD red test or making any implementation change.
-- Resolve the repository and existing worktrees with `git worktree list`. Do
-  not implement an approved plan in the primary checkout.
-- If the active checkout is already the correct linked worktree under
-  `.worktrees/`, continue there; do not create a nested worktree.
-- Preserve unrelated changes and do not remove the implementation worktree
-  unless the user explicitly requests cleanup.
-- Inspect the active branch, worktree, and dirty state before editing. Preserve
-  unrelated tracked and untracked changes.
 - Trace the current call path before changing behavior. Treat historical plans
   and generated review documents as context, not proof of current behavior.
-- Prefer the smallest complete change. Do not reformat, rename, reorganize, or
-  refactor unrelated code.
 - Preserve backward compatibility unless the task explicitly requires a
   breaking change.
 - Do not add dependencies unless the standard library and existing dependencies
   cannot reasonably solve the problem.
-- Use test-driven development for every implementation request, including direct
-  implementation requests and implementation following Plan mode or a reviewed
-  plan. Divide the work into atomic TDD tasks. For each task, first add or change
-  an automated test that expresses the required behavior and run it to establish
-  the expected failure (red); make the smallest production change that passes
-  the test (green); then refactor without changing behavior and rerun the
-  task-focused checks. Do not write production code before its failing test.
-- Treat each completed red-green-refactor task as an authorized commit boundary.
-  Stage only the files or hunks belonging to that task and create one atomic
-  commit before starting the next task; no additional commit request is needed.
-  Do not commit an incomplete task or known failing tests unless the user
-  explicitly requests a checkpoint commit. An explicit user instruction not to
-  commit overrides this automatic authorization.
-- For documentation, metadata, or other changes that cannot meaningfully execute
-  in a unit test, first add or identify the narrowest automated validation that
-  can fail on the intended contract, then follow the same red-green-refactor and
-  commit cycle. If no automated red test is technically possible, stop and ask
-  the user before implementing that task.
-- Do not push, merge, delete worktrees, or open/update a pull request unless the
-  user requests that action.
 
 ## `TODOS.md` management
 
@@ -126,10 +89,8 @@ uv run python scripts/release_changesets.py check
 
 ## Documentation and generated plans
 
-- Update user-facing documentation only when the requested change warrants it.
-  Put release notes in the pull request's changeset fragment; do not edit the
-  generated `CHANGELOG.md` directly. Avoid documentation churn for
-  internal-only edits.
+- Put release notes in the pull request's changeset fragment; do not edit the
+  generated `CHANGELOG.md` directly.
 - `docs/gstack/` is the canonical gstack project-document directory. If
   `~/.gstack/projects/todo-pipeline-orchestrator` is needed and absent, point it
   to `docs/gstack` with a symlink.
@@ -161,5 +122,4 @@ Finish with a concise report containing:
 - Remaining risks or unverified live gates, if any
 - Suggested Conventional Commit message
 
-Do not claim checks that were not run. If a standard gate is skipped or blocked,
-say why.
+If a standard gate is skipped or blocked, say why.
