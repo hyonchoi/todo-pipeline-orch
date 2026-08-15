@@ -33,6 +33,11 @@ class TodoPlanValidationError(ValueError):
         self.code = code
 
 
+def todo_entry_ids(text: str) -> set[str]:
+    """Return TODO ids declared by supported entry headers in ``text``."""
+    return {match.group(1) for match in _ENTRY_HEADER_RE.finditer(text)}
+
+
 def find_todo_fields(todos_md_path: Path, todo_id: str) -> dict:
     """Locate the TODO-<n> entry in todos_md_path and extract Spec:/Reference:.
 

@@ -466,8 +466,8 @@ class TestClassifyErrorClass:
     def test_call_errors(self):
         from hermes_pipeline.hermes_adapter import ClaudeCallError, HermesCallError
 
-        assert _classify_error_class(HermesCallError("x", 1, "")) == "hermes_error"
-        assert _classify_error_class(ClaudeCallError("x", 1, "")) == "claude_error"
+        assert _classify_error_class(HermesCallError(1)) == "hermes_error"
+        assert _classify_error_class(ClaudeCallError(1)) == "claude_error"
 
     def test_timeout(self):
         assert _classify_error_class(TimeoutError("x")) == "timeout"

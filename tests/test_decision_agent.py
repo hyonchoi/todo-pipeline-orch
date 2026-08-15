@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -84,11 +85,32 @@ def test_parse_failure_returns_picked_none(tmp_path, monkeypatch):
     p = _write_prompt(tmp_path)
     monkeypatch.setattr(
         "hermes_pipeline.decision.agent._api_call",
-        lambda *a, **kw: "this is not json",
+        lambda *a, **kw: "this is not json SECRET_PARSE_CANARY",
     )
     r = call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
     assert r.parsed["picked"] is None
-    assert "parse" in r.parsed["rationale"].lower()
+    assert r.parsed["rationale"] == "parse_error: invalid_response"
+    assert "SECRET_PARSE_CANARY" not in r.parsed["rationale"]
+
+
+def test_debug_logs_contain_only_agent_metadata(tmp_path, monkeypatch, caplog):
+    p = _write_prompt(tmp_path, "prompt SECRET_PROMPT_CANARY")
+    monkeypatch.setattr(
+        "hermes_pipeline.decision.agent._api_call",
+        lambda *a, **kw: "SECRET_RESPONSE_CANARY",
+    )
+
+    with caplog.at_level(logging.DEBUG, logger="hermes_pipeline.decision.agent"):
+        result = call_agent(
+            ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None
+        )
+
+    assert not hasattr(result, "raw_response")
+    assert "SECRET_PROMPT_CANARY" not in caplog.text
+    assert "SECRET_RESPONSE_CANARY" not in caplog.text
+    assert "prompt_sha=" in caplog.text
+    assert "prompt_chars=" in caplog.text
+    assert "response_chars=" in caplog.text
 
 
 def test_fenced_json_with_leading_warning_line_parses(tmp_path, monkeypatch):
@@ -211,10 +233,10 @@ def test_api_call_propagates_hermes_call_error(tmp_path, monkeypatch):
     monkeypatch.setattr(
         "hermes_pipeline.decision.agent._api_call",
         lambda *a, **kw: (_ for _ in ()).throw(
-            HermesCallError("hermes failed", returncode=1, stderr="E100"),
+            HermesCallError(returncode=1),
         ),
     )
-    with pytest.raises(HermesCallError, match="hermes failed"):
+    with pytest.raises(HermesCallError, match="hermes call failed with return code 1"):
         call_agent(ctx=_ctx(), prompt_path=p, model="m", max_tokens=100, expected_sha=None)
 
 

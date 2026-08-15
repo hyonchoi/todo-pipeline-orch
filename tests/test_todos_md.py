@@ -9,6 +9,7 @@ from hermes_pipeline.todos_md import (
     TodoPlanValidationError,
     find_todo_fields,
     resolve_todo_plan,
+    todo_entry_ids,
 )
 
 
@@ -16,6 +17,24 @@ def _write(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "TODOS.md"
     p.write_text(content)
     return p
+
+
+@pytest.mark.parametrize("status", [" ", "x", "→", "~"])
+def test_todo_entry_ids_accepts_supported_entry_statuses(status):
+    text = f"- [{status}] **TODO-25: Do the thing** — summary\n"
+
+    assert todo_entry_ids(text) == {"TODO-25"}
+
+
+def test_todo_entry_ids_ignores_ids_outside_entry_headers():
+    text = """\
+- [ ] **TODO-25: Do the thing** — summary
+  - **What:** Follow up on TODO-26
+  - **Reference:** docs/TODO-27-notes.md
+  - **Plan:** docs/TODO-28-plan.md
+"""
+
+    assert todo_entry_ids(text) == {"TODO-25"}
 
 
 def test_entry_with_both_fields(tmp_path):
