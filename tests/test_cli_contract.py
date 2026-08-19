@@ -16,6 +16,7 @@ from hermes_pipeline.cli import (
 )
 from hermes_pipeline.config import Config
 from hermes_pipeline.contract import (
+    CONTRACT_SCHEMA_VERSION,
     PipelineContract,
     _render_contract_toml,
     bundled_profile_dir,
@@ -297,7 +298,7 @@ class TestCmdInit:
 
         assert result == 0
         assert 'assignee = "custom"' not in contract.read_text()
-        assert "schema_version = 2" in contract.read_text()
+        assert f"schema_version = {CONTRACT_SCHEMA_VERSION}" in contract.read_text()
 
 
 class TestInitAssignee:
