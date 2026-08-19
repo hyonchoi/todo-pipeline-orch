@@ -33,12 +33,19 @@ def _read_outcomes(project_state):
     ]
 
 
-def _run_project_tick(*, project_dir, config, tick_id, mocker):
+def _run_project_tick(
+    *, project_dir, config, tick_id, mocker, registration_side_effect=None
+):
     cb = mocker.Mock()
     mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=cb)
     selection = mocker.patch(
         "hermes_pipeline.cli.run_selection",
         return_value=_make_decision("TODO-10"),
+    )
+    registration = mocker.patch(
+        "hermes_pipeline.run_registration.register_pinned_run",
+        return_value=SimpleNamespace(worktree=project_dir / ".worktrees" / "todo-10"),
+        side_effect=registration_side_effect,
     )
     _tick_project(
         project_dir=project_dir,
@@ -49,6 +56,7 @@ def _run_project_tick(*, project_dir, config, tick_id, mocker):
         tick_id=tick_id,
         project_toml={},
     )
+    selection.registration = registration
     return selection
 
 
@@ -612,6 +620,55 @@ class TestTickPlanRequirement:
         )
 
         assert prepare.call_args.kwargs["plan_path"] == "docs/plan.md"
+
+    def test_registration_precedes_kanban_and_uses_pinned_worktree(
+        self, tmp_path, mocker
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        plan = project_dir / "docs" / "plan.md"
+        plan.parent.mkdir()
+        plan.write_text("# Plan\n")
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "- [ ] **TODO-10: Test**\n"
+            "  - **Plan:** docs/plan.md\n"
+            "  - **Branch:** feat/todo-10\n"
+        )
+        prepared = [SimpleNamespace(phase_key="task-1")]
+        events = []
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            return_value=prepared,
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            side_effect=lambda **kwargs: events.append("kanban") or ["task-1"],
+        )
+
+        def register(**kwargs):
+            events.append("registration")
+            return SimpleNamespace(worktree=project_dir / ".worktrees" / "todo-10")
+
+        selection = _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id="01REGISTER",
+            mocker=mocker,
+            registration_side_effect=register,
+        )
+
+        registration = selection.registration
+        registration.assert_called_once()
+        assert registration.call_args.kwargs["selected_entry"].todo_id == "TODO-10"
+        assert registration.call_args.kwargs["step_keys"]
+        assert list(registration.call_args.kwargs["step_keys"]) == ["task-1"]
+        assert create.call_args.kwargs["project_dir"] == (
+            project_dir / ".worktrees" / "todo-10"
+        )
+        assert events == ["registration", "kanban"]
 
     def test_requires_plan_passes_only_compiled_candidates_to_selection(
         self, tmp_path, mocker

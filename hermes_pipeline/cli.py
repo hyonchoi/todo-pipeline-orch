@@ -1422,6 +1422,44 @@ def _tick_project(
         )
         return
 
+    registration = None
+    if phase_profile.requires_plan:
+        from .run_registration import RunRegistrationError, register_pinned_run
+
+        selected = next(
+            candidate.entry
+            for candidate in eligibility.candidates
+            if candidate.entry.todo_id == picked
+        )
+        try:
+            registration = register_pinned_run(
+                project_dir=project_dir,
+                state_dir=project_state,
+                tick_id=tick_id,
+                selected_entry=selected,
+                plan_path=plan_path,
+                profile=contract.profile,
+                prompt_client=config.prompt_client,
+                assignee=contract.assignee,
+                review_assignee=getattr(contract, "review_assignee", None),
+                step_keys=(phase.phase_key for phase in prepared),
+            )
+        except RunRegistrationError as exc:
+            _record_failed_to_spawn(
+                project_state,
+                tick_id,
+                picked,
+                exc,
+                reason="run_registration_failed",
+            )
+            cb.observe(picked=None, counts_as_no_progress=True)
+            log.error(
+                "project %s: pinned run registration failed: code=%s",
+                project_slug,
+                exc.code,
+            )
+            return
+
     # Step 5: Persist immediately before the first Hermes mutation. The
     # tick_started sentinel preserves the existing registration-crash recovery.
     _persist_tick_id(project_state, tick_id)
@@ -1432,7 +1470,7 @@ def _tick_project(
             prepared=prepared,
             tick_id=tick_id,
             board_slug=project_slug,
-            project_dir=project_dir,
+            project_dir=registration.worktree if registration else project_dir,
             assignee=contract.assignee,
         )
         log.info(

@@ -25,6 +25,7 @@ _ENTRY_HEADER_RE = re.compile(
 _SPEC_RE = re.compile(r"^\s*-\s*\*\*Spec:\*\*[ \t]*(.+?)[ \t]*$", re.MULTILINE)
 _REFERENCE_RE = re.compile(r"^\s*-\s*\*\*Reference:\*\*[ \t]*(.+?)[ \t]*$", re.MULTILINE)
 _PLAN_RE = re.compile(r"^\s*-\s*\*\*Plan:\*\*[ \t]*(.*?)[ \t]*$", re.MULTILINE)
+_BRANCH_RE = re.compile(r"^\s*-\s*\*\*Branch:\*\*[ \t]*(.*?)[ \t]*$", re.MULTILINE)
 _DEPENDS_RE = re.compile(
     r"^\s*-\s*\*\*Depends on:\*\*[ \t]*(.*?)[ \t]*$", re.MULTILINE
 )
@@ -59,6 +60,7 @@ class TodoEntry:
     references: tuple[str, ...]
     dependencies: tuple[str, ...] | None
     plan_values: tuple[str, ...]
+    branch_values: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -147,6 +149,9 @@ def parse_todo_entries(text: str) -> tuple[TodoEntry, ...]:
                 references=references,
                 dependencies=dependencies,
                 plan_values=tuple(value.strip() for value in _PLAN_RE.findall(body)),
+                branch_values=tuple(
+                    value.strip() for value in _BRANCH_RE.findall(body)
+                ),
             )
         )
     return tuple(entries)
