@@ -322,6 +322,23 @@ def build_parser() -> argparse.ArgumentParser:
     doctor_parser.add_argument("project", help="Project name")
     doctor_parser.set_defaults(func=_cmd_doctor)
 
+    # plan validate: validate the selected TODO's attached Plan manifest
+    plan_parser = subparsers.add_parser("plan", help="Inspect and validate TODO Plans")
+    plan_subparsers = plan_parser.add_subparsers(dest="plan_command", required=True)
+    plan_validate_parser = plan_subparsers.add_parser(
+        "validate", help="Validate a TODO's attached Plan manifest"
+    )
+    plan_validate_parser.add_argument("project", help="Project name")
+    plan_validate_parser.add_argument(
+        "--todo", required=True, type=_parse_todo_id_flag, help="TODO to validate"
+    )
+    plan_validate_parser.add_argument(
+        "--require-manifest",
+        action="store_true",
+        help="Reject a valid legacy Plan that has no tpo-plan block",
+    )
+    plan_validate_parser.set_defaults(func=_cmd_plan_validate)
+
     # install-profile: Install the bundled pipeline Hermes profile
     install_profile_parser = subparsers.add_parser(
         "install-profile",
@@ -1513,6 +1530,40 @@ def _cmd_init(args, config: Config) -> int:
         print(
             f"Pipeline execution contract already exists: {path} (use --force to regenerate)"
         )
+    return 0
+
+
+def _cmd_plan_validate(args, config: Config) -> int:
+    """Validate the Plan attachment and optional manifest for one TODO."""
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+    todo_id = f"TODO-{args.todo}"
+    from .plan_manifest import PlanManifestValidationError, parse_plan_manifest
+    from .todos_md import TodoPlanValidationError, resolve_todo_plan
+
+    try:
+        relative_plan = resolve_todo_plan(project_dir, project_dir / "TODOS.md", todo_id)
+        document = (project_dir / relative_plan).read_text()
+        manifest = parse_plan_manifest(document, expected_todo_id=todo_id)
+    except TodoPlanValidationError as exc:
+        print(f"Plan validation failed for {todo_id}: attachment_{exc.code}")
+        return 1
+    except (OSError, UnicodeError):
+        print(f"Plan validation failed for {todo_id}: unreadable")
+        return 1
+    except PlanManifestValidationError as exc:
+        print(f"Plan validation failed for {todo_id}: {exc.code}")
+        return 1
+
+    if manifest is None:
+        if args.require_manifest:
+            print(f"Plan validation failed for {todo_id}: --require-manifest requires a tpo-plan block")
+            return 1
+        print(f"Plan is valid legacy Markdown for {todo_id}; warning: no tpo-plan manifest")
+        return 0
+    suffix = "task" if len(manifest.tasks) == 1 else "tasks"
+    print(f"Plan has a valid manifest for {todo_id}: {len(manifest.tasks)} {suffix}")
     return 0
 
 

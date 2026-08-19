@@ -10,6 +10,7 @@ from hermes_pipeline.cli import (
     _cmd_doctor,
     _cmd_init,
     _cmd_install_profile,
+    _cmd_plan_validate,
     _verify_hermes_skill_registry_prerequisite,
     build_parser,
 )
@@ -20,6 +21,74 @@ from hermes_pipeline.contract import (
     bundled_profile_dir,
 )
 from hermes_pipeline.phases import Phase
+
+
+class TestPlanValidate:
+    def test_parser_contract(self):
+        args = build_parser().parse_args(
+            ["plan", "validate", "demo", "--todo", "TODO-42", "--require-manifest"]
+        )
+        assert args.project == "demo"
+        assert args.todo == 42
+        assert args.require_manifest is True
+
+    def test_valid_manifest_reports_task_count(self, tmp_path, capsys):
+        project = _create_project(tmp_path, "demo")
+        (project / "TODOS.md").write_text(
+            "- [ ] **TODO-42: Example**\n  - **Plan:** docs/plan.md\n"
+        )
+        (project / "docs").mkdir()
+        (project / "docs" / "plan.md").write_text(
+            '```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-42","tasks":'
+            '[{"id":"task-1","title":"Build","instructions":"Do it",'
+            '"acceptance_criteria":["It works"],"verification":["uv run pytest"],'
+            '"commit_message":"feat: build"}]}\n```\n'
+        )
+
+        result = _cmd_plan_validate(
+            FakeArgs(project="demo", todo=42, require_manifest=False),
+            Config(projects_dir=tmp_path),
+        )
+
+        assert result == 0
+        output = capsys.readouterr().out
+        assert "valid manifest" in output
+        assert "1 task" in output
+
+    def test_legacy_plan_warns_unless_manifest_is_required(self, tmp_path, capsys):
+        project = _create_project(tmp_path, "demo")
+        (project / "TODOS.md").write_text(
+            "- [ ] **TODO-42: Example**\n  - **Plan:** docs/plan.md\n"
+        )
+        (project / "docs").mkdir()
+        (project / "docs" / "plan.md").write_text("# Legacy plan\n")
+        config = Config(projects_dir=tmp_path)
+
+        assert _cmd_plan_validate(
+            FakeArgs(project="demo", todo=42, require_manifest=False), config
+        ) == 0
+        assert "legacy" in capsys.readouterr().out.lower()
+        assert _cmd_plan_validate(
+            FakeArgs(project="demo", todo=42, require_manifest=True), config
+        ) == 1
+        assert "requires" in capsys.readouterr().out.lower()
+
+    def test_invalid_manifest_fails_without_raw_document(self, tmp_path, capsys):
+        project = _create_project(tmp_path, "demo")
+        (project / "TODOS.md").write_text(
+            "- [ ] **TODO-42: Example**\n  - **Plan:** plan.md\n"
+        )
+        (project / "plan.md").write_text("```json tpo-plan\n{secret}\n```\n")
+
+        result = _cmd_plan_validate(
+            FakeArgs(project="demo", todo=42, require_manifest=False),
+            Config(projects_dir=tmp_path),
+        )
+
+        assert result == 1
+        output = capsys.readouterr().out
+        assert "invalid_json" in output
+        assert "secret" not in output
 
 
 class FakeArgs:
