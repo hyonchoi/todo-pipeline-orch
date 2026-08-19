@@ -14,6 +14,7 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 from .config import PromptClient
 from .outcomes import (
@@ -90,6 +91,16 @@ class PreparedPhaseTask:
     turns: int
     gate: bool
     timeout: int = 1800
+    kind: Literal["worker", "controller_gate", "human_gate"] | None = None
+
+    def __post_init__(self) -> None:
+        inferred = "controller_gate" if self.gate else "worker"
+        kind = self.kind or inferred
+        if kind not in {"worker", "controller_gate", "human_gate"}:
+            raise ValueError(f"invalid prepared task kind: {kind!r}")
+        if self.gate != (kind != "worker"):
+            raise ValueError("prepared task gate and kind disagree")
+        object.__setattr__(self, "kind", kind)
 
 
 @dataclass(frozen=True)
@@ -669,8 +680,10 @@ def prepare_todo_phases(
     if not re.fullmatch(r"TODO-\d+", todo_id):
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
     profile = load_phase_profile(phases_path)
+    manifest = None
     if profile.requires_plan:
         if project_dir is not None:
+            from .plan_manifest import validate_plan_candidate
             from .todos_md import resolve_todo_plan
 
             project_path = Path(project_dir)
@@ -679,6 +692,11 @@ def prepare_todo_phases(
                 project_path / "TODOS.md",
                 todo_id,
             )
+            manifest = validate_plan_candidate(
+                project_path,
+                plan_path,
+                expected_todo_id=todo_id,
+            )
         elif not plan_path:
             from .todos_md import TodoPlanValidationError
 
@@ -686,6 +704,86 @@ def prepare_todo_phases(
     phases = load_phases(phases_path)
     prepared: list[PreparedPhaseTask] = []
     for phase in phases:
+        compile_plan_tasks = getattr(phase, "compile_plan_tasks", False)
+        if compile_plan_tasks and manifest is not None:
+            for plan_task in manifest.tasks:
+                worker_key = f"plan:{plan_task.id}"
+                worker_prompt = (
+                    f"Implement Plan task {plan_task.id}: {plan_task.title}\n\n"
+                    f"Instructions:\n{plan_task.instructions}\n\n"
+                    "Acceptance criteria:\n"
+                    + "\n".join(f"- {item}" for item in plan_task.acceptance_criteria)
+                    + "\n\nVerification:\n"
+                    + "\n".join(f"- {item}" for item in plan_task.verification)
+                    + f"\n\nRequired commit message: {plan_task.commit_message}\n"
+                    "Complete only this task using red-green-refactor TDD. "
+                    "Report the required structured result metadata when closing."
+                )
+                rendered_worker = _render_phase_prompt(
+                    "",
+                    todo_id=todo_id,
+                    tick_id=tick_id,
+                    project_slug=board_slug,
+                    plan_path=plan_path,
+                    prompt_client=prompt_client,
+                    template_source=f"manifest:{worker_key}",
+                ) + worker_prompt
+                prepared.append(
+                    PreparedPhaseTask(
+                        phase_key=worker_key,
+                        name=f"Plan task {plan_task.id}: {plan_task.title}",
+                        body=(
+                            _build_json_header(
+                                tick_id=tick_id,
+                                phase_key=worker_key,
+                                todo_id=todo_id,
+                                project_slug=board_slug,
+                            )
+                            + "\n"
+                            + _external_client_delegation_block(
+                                prompt_client,
+                                timeout=phase.timeout,
+                                tools=phase.tools,
+                            )
+                            + _external_agent_prompt_block(rendered_worker)
+                        ),
+                        turns=phase.turns,
+                        gate=False,
+                        timeout=phase.timeout,
+                        kind="worker",
+                    )
+                )
+                validation_key = f"validate:{plan_task.id}"
+                validation_body = (
+                    _build_json_header(
+                        tick_id=tick_id,
+                        phase_key=validation_key,
+                        todo_id=todo_id,
+                        project_slug=board_slug,
+                    )
+                    + "\nController validation gate for Plan task "
+                    + plan_task.id
+                    + ". TPO completes this gate only after validating the worker "
+                    "result metadata and Git evidence.\nAcceptance criteria:\n"
+                    + "\n".join(f"- {item}" for item in plan_task.acceptance_criteria)
+                )
+                prepared.append(
+                    PreparedPhaseTask(
+                        phase_key=validation_key,
+                        name=f"Validate Plan task {plan_task.id}",
+                        body=validation_body,
+                        turns=0,
+                        gate=True,
+                        kind="controller_gate",
+                    )
+                )
+            continue
+        if compile_plan_tasks and manifest is None:
+            log.warning(
+                "%s uses a legacy Plan without a tpo-plan manifest; "
+                "dispatching one legacy single development card",
+                todo_id,
+            )
         rendered_prompt = _render_phase_prompt(
             phase.prompt,
             todo_id=todo_id,
@@ -726,6 +824,7 @@ def prepare_todo_phases(
                 turns=phase.turns,
                 gate=phase.gate,
                 timeout=phase.timeout,
+                kind=getattr(phase, "kind", None),
             )
         )
     return prepared
@@ -954,7 +1053,7 @@ def create_prepared_todo_phases(
     created_task_ids.append(barrier_id)
 
     for phase in prepared:
-        is_gate = phase.gate
+        is_gate = phase.kind != "worker"
         cmd = [
             "hermes",
             "kanban",

@@ -96,6 +96,8 @@ class Phase:
     timeout: int = 1800
     terminal: bool = False
     gate: bool = False
+    kind: Literal["worker", "controller_gate", "human_gate"] | None = None
+    compile_plan_tasks: bool = False
 
 
 @dataclass(frozen=True)

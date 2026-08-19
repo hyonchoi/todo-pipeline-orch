@@ -574,6 +574,171 @@ def test_register_todo_phases_rejects_missing_plan_before_task_creation(
     create.assert_not_called()
 
 
+def test_prepare_todo_phases_compiles_manifest_workers_and_controller_gates(
+    tmp_path, caplog, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        create_prepared_todo_phases,
+        prepare_todo_phases,
+    )
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: development\n"
+        "    name: Development\n"
+        "    prompt: implement legacy plan\n"
+        "    tools: Read,Write,Edit,Bash\n"
+        "    turns: 20\n"
+        "    compile_plan_tasks: true\n"
+        "  - phase_key: review\n"
+        "    name: Review\n"
+        "    prompt: review result\n"
+        "    tools: Read,Bash\n"
+        "    turns: 10\n"
+        "  - phase_key: finish\n"
+        "    name: Finish\n"
+        "    prompt: finish branch\n"
+        "    tools: Read,Bash\n"
+        "    turns: 10\n"
+        "  - phase_key: human\n"
+        "    name: Human\n"
+        "    kind: human_gate\n"
+        "    gate: true\n"
+    )
+    (tmp_path / "TODOS.md").write_text(
+        "- [ ] **TODO-41: Example** — work\n  - **Plan:** docs/plan.md\n"
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "plan.md").write_text(
+        "```json tpo-plan\n"
+        '{"schema_version":1,"todo_id":"TODO-41","tasks":['
+        '{"id":"task-1","title":"First","instructions":"Exact first instruction.",'
+        '"acceptance_criteria":["First exact criterion."],'
+        '"verification":["uv run pytest tests/test_first.py"],'
+        '"commit_message":"feat: first"},'
+        '{"id":"task-2","title":"Second","instructions":"Exact second instruction.",'
+        '"acceptance_criteria":["Second exact criterion."],'
+        '"verification":["uv run pytest tests/test_second.py"],'
+        '"commit_message":"feat: second"}]}'
+        "\n```\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01TICK",
+        board_slug="demo",
+        phases_path=phases_path,
+        prompt_client="codex",
+        project_dir=tmp_path,
+    )
+
+    assert [task.phase_key for task in prepared] == [
+        "plan:task-1",
+        "validate:task-1",
+        "plan:task-2",
+        "validate:task-2",
+        "review",
+        "finish",
+        "human",
+    ]
+    assert [task.kind for task in prepared[:4]] == [
+        "worker",
+        "controller_gate",
+        "worker",
+        "controller_gate",
+    ]
+    assert prepared[-1].kind == "human_gate"
+    assert "Exact first instruction." in prepared[0].body
+    assert "First exact criterion." in prepared[0].body
+    assert "uv run pytest tests/test_first.py" in prepared[0].body
+    assert "feat: first" in prepared[0].body
+    assert "Exact second instruction." in prepared[2].body
+    assert "Second exact criterion." in prepared[2].body
+    assert "legacy" not in caplog.text.lower()
+
+    created: list[list[str]] = []
+
+    def run(cmd, **_kwargs):
+        if cmd[:3] == ["hermes", "kanban", "create"]:
+            created.append(cmd)
+            return mocker.Mock(
+                returncode=0,
+                stdout=json.dumps({"id": f"t_{len(created):08x}"}),
+                stderr="",
+            )
+        return mocker.Mock(returncode=0, stdout="", stderr="")
+
+    mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run", side_effect=run)
+    create_prepared_todo_phases(
+        prepared=prepared,
+        tick_id="01TICK",
+        board_slug="demo",
+        project_dir=tmp_path,
+        assignee="implementer",
+    )
+
+    cards = created[1:]
+    keys = [card[card.index("--idempotency-key") + 1] for card in cards]
+    assert keys[:4] == [
+        "01TICK:plan:task-1",
+        "01TICK:validate:task-1",
+        "01TICK:plan:task-2",
+        "01TICK:validate:task-2",
+    ]
+    assert cards[0][cards[0].index("--parent") + 1] == "t_00000001"
+    assert cards[1][cards[1].index("--parent") + 1] == "t_00000002"
+    assert cards[2][cards[2].index("--parent") + 1] == "t_00000003"
+    assert cards[4][cards[4].index("--parent") + 1] == "t_00000005"
+    assert cards[5][cards[5].index("--parent") + 1] == "t_00000006"
+    assert all(
+        card[card.index("--workspace") + 1] == f"dir:{tmp_path}"
+        for card in cards
+    )
+    assert cards[0][cards[0].index("--assignee") + 1] == "implementer"
+    assert cards[1][cards[1].index("--assignee") + 1] == "-"
+    assert "--goal" in cards[0]
+    assert "--goal" not in cards[1]
+
+
+def test_prepare_todo_phases_keeps_legacy_single_development_card_with_warning(
+    tmp_path, caplog
+):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: development\n"
+        "    name: Development\n"
+        "    prompt: implement from {plan_path}\n"
+        "    tools: Read,Bash\n"
+        "    turns: 20\n"
+        "    compile_plan_tasks: true\n"
+    )
+    (tmp_path / "TODOS.md").write_text(
+        "- [ ] **TODO-41: Example** — work\n  - **Plan:** docs/plan.md\n"
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "plan.md").write_text("# Legacy plan\n")
+
+    with caplog.at_level("WARNING"):
+        prepared = prepare_todo_phases(
+            todo_id="TODO-41",
+            tick_id="01TICK",
+            board_slug="demo",
+            phases_path=phases_path,
+            project_dir=tmp_path,
+        )
+
+    assert [task.phase_key for task in prepared] == ["development"]
+    assert prepared[0].kind == "worker"
+    assert "legacy" in caplog.text.lower()
+    assert "single development card" in caplog.text.lower()
+
+
 def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import (
         PreparedPhaseTask,

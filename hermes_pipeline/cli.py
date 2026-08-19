@@ -1405,6 +1405,7 @@ def _tick_project(
             phases_path=phases_path,
             prompt_client=config.prompt_client,
             plan_path=plan_path,
+            project_dir=project_dir,
         )
     except PhasePromptRenderError as exc:
         _record_failed_to_spawn(
