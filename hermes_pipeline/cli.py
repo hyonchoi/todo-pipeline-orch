@@ -1249,6 +1249,17 @@ def _tick_project(
         project_slug=project_slug,
         max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
     )
+    eligibility = None
+    if phase_profile.requires_plan:
+        from .todos_md import compile_eligible_todos
+
+        eligibility = compile_eligible_todos(
+            project_dir,
+            todos_path,
+            in_flight=set(ctx.in_flight),
+            requires_plan=True,
+        )
+        ctx = replace(ctx, todos_md=eligibility.selection_markdown)
 
     # Build full config for selection
     from .config import FullConfig, SelectionConfig
@@ -1287,12 +1298,27 @@ def _tick_project(
         min(MAX_TIMEOUT_SECONDS, budget_s - _SELECTION_TIMEOUT_RESERVE_S),
     )
 
-    decision = run_selection(
-        tick_id=tick_id,
-        ctx=ctx,
-        cfg=full_cfg,
-        timeout=selection_timeout_s,
-    )
+    if eligibility is not None and not eligibility.candidates:
+        from .decision import record_no_candidates
+
+        decision = record_no_candidates(
+            tick_id=tick_id,
+            ctx=ctx,
+            cfg=full_cfg,
+            blocked_reasons=eligibility.blocked_reasons,
+        )
+    else:
+        decision = run_selection(
+            tick_id=tick_id,
+            ctx=ctx,
+            cfg=full_cfg,
+            timeout=selection_timeout_s,
+            **(
+                {"eligible_todo_ids": eligibility.todo_ids}
+                if eligibility is not None
+                else {}
+            ),
+        )
     picked = decision.picked
 
     vlog.info(

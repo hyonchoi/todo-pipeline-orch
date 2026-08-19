@@ -36,7 +36,7 @@ def _read_outcomes(project_state):
 def _run_project_tick(*, project_dir, config, tick_id, mocker):
     cb = mocker.Mock()
     mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=cb)
-    mocker.patch(
+    selection = mocker.patch(
         "hermes_pipeline.cli.run_selection",
         return_value=_make_decision("TODO-10"),
     )
@@ -49,6 +49,7 @@ def _run_project_tick(*, project_dir, config, tick_id, mocker):
         tick_id=tick_id,
         project_toml={},
     )
+    return selection
 
 
 class FakeArgs:
@@ -549,7 +550,7 @@ class TestTickPlanRequirement:
             'profile = "native-sdd"\n'
         )
 
-    def test_missing_plan_fails_before_tick_persistence_or_kanban(
+    def test_missing_plan_is_filtered_before_selection_or_kanban(
         self, tmp_path, mocker
     ):
         tick_id = "01PLANFAIL"
@@ -557,28 +558,29 @@ class TestTickPlanRequirement:
         project_state = project_dir / ".hermes"
         project_state.mkdir()
         self._configure_profile(project_dir, tmp_path, mocker)
-        persist = mocker.patch("hermes_pipeline.cli._persist_tick_id")
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n- [ ] **TODO-10: Test**\n"
+        )
         prepare = mocker.patch("hermes_pipeline.kanban_tasks.prepare_todo_phases")
         create = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
         )
 
-        _run_project_tick(
+        selection = _run_project_tick(
             project_dir=project_dir,
             config=Config(prompt_client="codex"),
             tick_id=tick_id,
             mocker=mocker,
         )
 
-        persist.assert_not_called()
+        selection.assert_not_called()
         prepare.assert_not_called()
         create.assert_not_called()
-        outcomes = _read_outcomes(project_state)
-        assert outcomes[-1].detail == {
-            "todo_id": "TODO-10",
-            "reason": "plan_validation_failed",
-            "error_type": "TodoPlanValidationError",
-        }
+        decision = json.loads(
+            (project_state / "decisions" / f"{tick_id}.json").read_text()
+        )
+        assert decision["picked"] is None
+        assert decision["blocked_reasons"] == {"TODO-10": "plan_invalid:missing"}
 
     def test_valid_plan_is_passed_to_prompt_preparation(self, tmp_path, mocker):
         project_dir = _create_project(tmp_path, "demo")
@@ -610,3 +612,66 @@ class TestTickPlanRequirement:
         )
 
         assert prepare.call_args.kwargs["plan_path"] == "docs/plan.md"
+
+    def test_requires_plan_passes_only_compiled_candidates_to_selection(
+        self, tmp_path, mocker
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        docs = project_dir / "docs"
+        docs.mkdir()
+        (docs / "plan.md").write_text("# Legacy plan\n")
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "- [ ] **TODO-10: Eligible**\n  - **Plan:** docs/plan.md\n"
+            "- [ ] **TODO-11: Missing plan**\n"
+            "- [x] **TODO-12: Complete**\n  - **Plan:** docs/plan.md\n"
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            return_value=["prepared"],
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["task-1"],
+        )
+
+        selection = _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id="01FILTERED",
+            mocker=mocker,
+        )
+
+        context = selection.call_args.kwargs["ctx"]
+        assert "TODO-10" in context.todos_md
+        assert "TODO-11" not in context.todos_md
+        assert "TODO-12" not in context.todos_md
+        assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset({"TODO-10"})
+
+    def test_requires_plan_with_zero_candidates_skips_selection_call(
+        self, tmp_path, mocker
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n- [ ] **TODO-10: Missing plan**\n"
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
+        )
+
+        selection = _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id="01NONEELIGIBLE",
+            mocker=mocker,
+        )
+
+        selection.assert_not_called()
+        create.assert_not_called()
+        assert (project_state / "outcomes" / "01NONEELIGIBLE-phases.json").exists()
