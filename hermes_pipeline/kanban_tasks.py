@@ -704,6 +704,15 @@ def prepare_todo_phases(
     phases = load_phases(phases_path)
     prepared: list[PreparedPhaseTask] = []
     for phase in phases:
+        if manifest is not None and phase.phase_key in {
+            "phase_5_review",
+            "phase_8_finish_branch",
+            "phase_9_human_review",
+        }:
+            # Native manifest runs add these cards only after their controller
+            # prerequisites have been reconciled. Static registration would let
+            # delivery bypass the persistent clean-review acceptance gate.
+            continue
         compile_plan_tasks = getattr(phase, "compile_plan_tasks", False)
         if compile_plan_tasks and manifest is not None:
             for plan_task in manifest.tasks:

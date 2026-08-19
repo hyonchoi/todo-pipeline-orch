@@ -38,6 +38,7 @@ list, archive, revise, validate, or use TODO-like examples in that section.
 - Archiving completed TODOs to TODOS-archive.md (`--archive`)
 - Revising an existing TODO entry with AI-pre-filled suggestions (`--revise`)
 - Listing active TODO entries (`--list`)
+- Completing one TODO after a TPO-verified pull-request handoff (`--complete`)
 
 ### Prerequisite state
 
@@ -86,7 +87,23 @@ When the user invokes `todos-manager --init` on a project with no TODOS.md:
 
 ## Workflow
 
-The skill supports seven subcommands. Each has its own workflow below.
+The skill supports eight subcommands. Each has its own workflow below.
+
+### `--complete`: Deterministic pipeline closeout
+
+This mode is noninteractive and is used only by a TPO closeout card after TPO
+has validated the finish result and pull request identity. Invoke the packaged
+backend instead of editing or reparsing the entry in the prompt:
+
+```bash
+uv run tpo todos complete --project-root . --todo TODO-N --pr N --date YYYY-MM-DD
+```
+
+The backend uses the canonical entry parser, changes exactly one `[ ]` or `[→]`
+entry to `[x]`, and appends `Completed: PR #N, YYYY-MM-DD`. It is idempotent
+only when that exact completion already exists and rejects conflicting state.
+The closeout worker then commits only `TODOS.md` in its own commit and pushes;
+it never merges, deletes a branch, resets a worktree, or repairs remote drift.
 
 ### `--add`: Add new entry with schema enforcement
 

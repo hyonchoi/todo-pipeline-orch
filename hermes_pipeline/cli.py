@@ -282,6 +282,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tick_parser.set_defaults(func=_cmd_tick)
 
+    todos_parser = subparsers.add_parser(
+        "todos", help="Deterministic TODOS.md mutation backends for todos-manager"
+    )
+    todos_subparsers = todos_parser.add_subparsers(dest="todos_command", required=True)
+    complete_parser = todos_subparsers.add_parser(
+        "complete", help="Mark one canonical TODO complete after verified PR handoff"
+    )
+    complete_parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    complete_parser.add_argument("--todo", required=True)
+    complete_parser.add_argument("--pr", required=True, type=int)
+    complete_parser.add_argument("--date", required=True)
+    complete_parser.set_defaults(func=_cmd_todos_complete)
+
     # recover-counter: Scan TODOS.md and initialize counter file
     rc_parser = subparsers.add_parser(
         "recover-counter",
@@ -1215,6 +1228,21 @@ def _tick_project(
                 )
                 return
 
+            from .todos_completion import reconcile_todo_completion
+
+            if not reconcile_todo_completion(
+                project_dir=project_dir,
+                state_dir=project_state,
+                tenant=project_slug,
+                tick_id=prior_tick_id,
+            ):
+                log.info(
+                    "project %s: prior tick %s delivery reconciliation is blocked, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
+                return
+
         if not pr_handoff_resolved and not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
         ):
@@ -1529,6 +1557,22 @@ def _tick_project(
 
     # Observe circuit breaker
     cb.observe(picked=picked, counts_as_no_progress=False)
+
+
+def _cmd_todos_complete(args, config: Config | None = None) -> int:
+    """Machine backend used by the bundled todos-manager completion workflow."""
+    from .todos_md import TodoCompletionError, complete_todo_file
+
+    path = args.project_root.resolve() / "TODOS.md"
+    try:
+        changed = complete_todo_file(
+            path, args.todo.upper(), pr_number=args.pr, date=args.date
+        )
+    except (OSError, UnicodeError, TodoCompletionError) as exc:
+        print(f"Error: {path}: {exc}", file=sys.stderr)
+        return 1
+    print("completed" if changed else "already complete")
+    return 0
 
 
 def _cmd_recover_counter(args, config: Config) -> int:
@@ -2513,7 +2557,7 @@ def main(argv: list[str] | None = None) -> int:
     # Bootstrap subcommands (file-copy only) don't need pipeline runtime
     # config (state dir, projects dir) — skip Config.from_env()
     # so they work even when that env isn't configured yet.
-    if getattr(args, "command", None) in ("skills", "config"):
+    if getattr(args, "command", None) in ("skills", "config", "todos"):
         if hasattr(args, "func"):
             return args.func(args, None)
         parser.parse_args([*remaining, "--help"])

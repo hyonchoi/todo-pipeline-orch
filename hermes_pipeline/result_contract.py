@@ -70,12 +70,21 @@ class WorkerResult:
     green: CommandResult
     refactor: CommandResult
     review: ReviewEvidence | None = None
+    delivery: DeliveryEvidence | None = None
 
 
 @dataclass(frozen=True)
 class ReviewEvidence:
     verdict: str
     findings: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class DeliveryEvidence:
+    pr_url: str
+    branch: str
+    head_sha: str
+    checks: tuple[CommandResult, ...]
 
 
 @dataclass(frozen=True)
@@ -267,11 +276,12 @@ def parse_worker_result(
             verdict=str(review_raw["verdict"]),
             findings=tuple(dict(item) for item in findings if isinstance(item, dict)),
         )
+    delivery_evidence = None
     if "delivery" in raw:
-        _validate_delivery(raw["delivery"])
+        delivery_evidence = _validate_delivery(raw["delivery"])
     return WorkerResult(
         tick_id, todo_id, step_key, session, git_result, red, green, refactor,
-        review_evidence,
+        review_evidence, delivery_evidence,
     )
 
 
@@ -332,7 +342,7 @@ def _validate_review(value: object) -> None:
         )
 
 
-def _validate_delivery(value: object) -> None:
+def _validate_delivery(value: object) -> DeliveryEvidence:
     delivery = _mapping(value, code="invalid_delivery")
     _exact_keys(delivery, {"pr_url", "branch", "head_sha", "checks"}, code="invalid_delivery")
     pr_url = _bounded_string(delivery["pr_url"], maximum=1000, code="invalid_delivery")
@@ -346,8 +356,10 @@ def _validate_delivery(value: object) -> None:
     checks = delivery["checks"]
     if not isinstance(checks, list) or not checks or len(checks) > 50:
         raise ResultContractError("invalid_delivery")
-    for check in checks:
-        _command(check, name="delivery check")
+    parsed_checks = tuple(_command(check, name="delivery check") for check in checks)
+    if any(check.exit_code != 0 for check in parsed_checks):
+        raise ResultContractError("invalid_delivery", "failed check")
+    return DeliveryEvidence(pr_url, str(delivery["branch"]), str(delivery["head_sha"]), parsed_checks)
 
 
 _REGISTRATION_KEYS = {

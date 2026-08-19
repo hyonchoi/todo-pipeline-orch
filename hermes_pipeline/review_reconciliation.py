@@ -28,9 +28,25 @@ from .result_contract import (
     verify_worker_git_result,
     verify_worker_git_topology,
 )
+from .state import _atomic_write_text
 
 MAX_REVIEW_ROUNDS = 5
 REVIEW_ACCEPTANCE_KEY = "review-acceptance"
+
+
+def _persist_accepted_head(state_dir: Path, tick_id: str, head_sha: str) -> None:
+    _atomic_write_text(
+        state_dir / "runs" / tick_id / "accepted-review-head",
+        head_sha + "\n",
+    )
+
+
+def _accept_review(*, state_dir: Path, tick_id: str, head_sha: str,
+                   tenant: str, acceptance) -> bool:
+    _persist_accepted_head(state_dir, tick_id, head_sha)
+    return acceptance.status == "done" or complete_todo_kanban_task(
+        tenant, acceptance.task_id
+    )
 
 
 def _head(worktree: Path) -> str:
@@ -228,8 +244,9 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
         )
         assert evidence.review is not None
         if evidence.review.verdict == "clean":
-            return acceptance.status == "done" or complete_todo_kanban_task(
-                tenant, acceptance.task_id
+            return _accept_review(
+                state_dir=state_dir, tick_id=tick_id, head_sha=expected_parent,
+                tenant=tenant, acceptance=acceptance,
             )
         findings = evidence.review.findings
         parent = review.task_id
@@ -285,8 +302,9 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
             )
             assert evidence.review is not None
             if evidence.review.verdict == "clean":
-                return acceptance.status == "done" or complete_todo_kanban_task(
-                    tenant, acceptance.task_id
+                return _accept_review(
+                    state_dir=state_dir, tick_id=tick_id, head_sha=expected_parent,
+                    tenant=tenant, acceptance=acceptance,
                 )
             findings = evidence.review.findings
             parent = rereview.task_id

@@ -9,8 +9,12 @@ fields.
 """
 from __future__ import annotations
 
+import datetime as dt
+import fcntl
 import logging
+import os
 import re
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -160,6 +164,69 @@ def parse_todo_entries(text: str) -> tuple[TodoEntry, ...]:
 def todo_entry_ids(text: str) -> frozenset[str]:
     """Return only IDs from canonical entry headers."""
     return frozenset(entry.todo_id for entry in parse_todo_entries(text))
+
+
+class TodoCompletionError(ValueError):
+    """The requested deterministic TODO completion is not safe."""
+
+
+def complete_todo_text(text: str, todo_id: str, *, pr_number: int, date: str) -> str:
+    """Return canonical TODOS.md text with one entry atomically marked complete."""
+    if not re.fullmatch(r"TODO-\d+", todo_id) or pr_number < 1:
+        raise TodoCompletionError("invalid completion identity")
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+        raise TodoCompletionError("invalid completion date")
+    try:
+        dt.date.fromisoformat(date)
+    except ValueError as exc:
+        raise TodoCompletionError("invalid completion date") from exc
+    entries = parse_todo_entries(text)
+    matches = [entry for entry in entries if entry.todo_id == todo_id]
+    if len(matches) != 1:
+        raise TodoCompletionError("TODO entry not found or duplicated")
+    entry = matches[0]
+    expected = f"  - **Completed:** PR #{pr_number}, {date}\n"
+    existing = re.findall(r"(?m)^  - \*\*Completed:\*\*.*(?:\n|$)", entry.raw)
+    if entry.status == "x" and existing == [expected]:
+        return text
+    if entry.status not in {" ", "→"} or existing:
+        raise TodoCompletionError("TODO completion state conflicts")
+    completed = re.sub(r"^- \[[ →]\]", "- [x]", entry.raw, count=1)
+    completed = completed.rstrip("\r\n") + "\n" + expected
+    start = text.find(entry.raw)
+    if start < 0:
+        raise TodoCompletionError("TODO entry bytes not found")
+    return text[:start] + completed + text[start + len(entry.raw):]
+
+
+def complete_todo_file(path: Path, todo_id: str, *, pr_number: int, date: str) -> bool:
+    """Replace TODOS.md durably; return False when already exactly complete."""
+    lock_path = path.parent / ".hermes" / "todos.write.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        original = path.read_text(encoding="utf-8")
+        updated = complete_todo_text(original, todo_id, pr_number=pr_number, date=date)
+        if updated == original:
+            return False
+        mode = path.stat().st_mode & 0o777
+        fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+        try:
+            os.fchmod(fd, mode)
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                stream.write(updated)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+        return True
+    finally:
+        os.close(lock_fd)
 
 
 def compile_eligible_todos(
