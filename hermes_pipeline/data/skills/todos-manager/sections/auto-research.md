@@ -80,6 +80,7 @@ Pros:            <derived>
 Cons:            <derived>
 Context:         <path to design doc, or "(none found)">
 Plan:            <none detected, suggested path and reason, or numbered unresolved choices>
+Plan readiness:  <manifest, legacy, or invalid; shown after Plan selection>
 Priority:        <derived or answered>          [Confidence: high/medium/low]
 Effort:          <derived or answered>          [Confidence: high/medium/low]
 Phase:           <derived>                      [Confidence: high/medium/low]
@@ -98,6 +99,9 @@ These are pre-fills — confirm or edit each in the next step.
 The attachment rows use the `suggested`, `unresolved`, `none detected`, or
 `preserved` states from `sections/document-attachments.md`. They participate in
 the same synthesis confirmation and the subsequent full-entry preview.
+The readiness row is added only after Plan selection and uses the packaged
+validator contract from that shared section. Do not replace AI research with
+deterministic defaults or use readiness validation to derive any TODO field.
 
 ## Plan selection during `--add`
 

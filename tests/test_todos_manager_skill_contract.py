@@ -87,6 +87,31 @@ def test_attachment_discovery_precedes_general_research():
     assert "derive field drafts only after attachment discovery" in skill
 
 
+def test_plan_readiness_runs_after_ai_research_and_uses_packaged_cli_contract():
+    skill = skill_text("SKILL.md")
+    policy = skill_text("sections/document-attachments.md")
+    auto_research = skill_text("sections/auto-research.md")
+
+    assert "AI research remains authoritative for TODO field synthesis" in skill
+    assert "after AI research and Plan selection" in policy
+    assert (
+        "`tpo plan validate <project> --todo TODO-N --plan <normalized-path>`"
+        in policy
+    )
+    assert "validates before the candidate is persisted" in policy
+    assert "Do not replace AI research" in auto_research
+
+
+def test_plan_readiness_states_flow_through_synthesis_and_preview():
+    auto_research = skill_text("sections/auto-research.md")
+    policy = skill_text("sections/document-attachments.md")
+
+    for state in ("manifest", "legacy", "invalid"):
+        assert f"`{state}`" in policy
+    assert "Plan readiness:" in auto_research
+    assert "full-entry preview" in policy
+
+
 def test_attachment_search_roots_are_validated_before_traversal():
     policy = skill_text("sections/document-attachments.md")
     assert "Before reading, listing, or searching any discovery root" in policy

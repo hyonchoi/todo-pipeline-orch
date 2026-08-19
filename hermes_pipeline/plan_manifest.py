@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
 
 MAX_PLAN_TASKS = 50
 MAX_MANIFEST_BYTES = 64 * 1024
@@ -151,3 +152,17 @@ def parse_plan_manifest(document: str, *, expected_todo_id: str) -> PlanManifest
     if len(ids) != len(set(ids)):
         raise PlanManifestValidationError("duplicate_task_id")
     return PlanManifest(schema_version=1, todo_id=todo_id, tasks=tasks)
+
+
+def validate_plan_candidate(
+    project_dir: Path,
+    plan_path: str,
+    *,
+    expected_todo_id: str,
+) -> PlanManifest | None:
+    """Validate a repository-contained Plan and its optional manifest."""
+    from .todos_md import validate_plan_path
+
+    relative_plan = validate_plan_path(project_dir, plan_path)
+    document = (project_dir / relative_plan).read_text(encoding="utf-8")
+    return parse_plan_manifest(document, expected_todo_id=expected_todo_id)

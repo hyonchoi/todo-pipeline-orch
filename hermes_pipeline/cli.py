@@ -333,6 +333,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--todo", required=True, type=_parse_todo_id_flag, help="TODO to validate"
     )
     plan_validate_parser.add_argument(
+        "--plan",
+        help="Validate this repository-relative Plan candidate before TODO persistence",
+    )
+    plan_validate_parser.add_argument(
         "--require-manifest",
         action="store_true",
         help="Reject a valid legacy Plan that has no tpo-plan block",
@@ -1539,13 +1543,22 @@ def _cmd_plan_validate(args, config: Config) -> int:
     if project_dir is None:
         return 2
     todo_id = f"TODO-{args.todo}"
-    from .plan_manifest import PlanManifestValidationError, parse_plan_manifest
+    from .plan_manifest import PlanManifestValidationError, validate_plan_candidate
     from .todos_md import TodoPlanValidationError, resolve_todo_plan
 
     try:
-        relative_plan = resolve_todo_plan(project_dir, project_dir / "TODOS.md", todo_id)
-        document = (project_dir / relative_plan).read_text()
-        manifest = parse_plan_manifest(document, expected_todo_id=todo_id)
+        relative_plan = getattr(args, "plan", None)
+        if relative_plan is None:
+            relative_plan = resolve_todo_plan(
+                project_dir,
+                project_dir / "TODOS.md",
+                todo_id,
+            )
+        manifest = validate_plan_candidate(
+            project_dir,
+            relative_plan,
+            expected_todo_id=todo_id,
+        )
     except TodoPlanValidationError as exc:
         print(f"Plan validation failed for {todo_id}: attachment_{exc.code}")
         return 1

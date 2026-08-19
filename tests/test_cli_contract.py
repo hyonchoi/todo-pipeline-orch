@@ -26,11 +26,57 @@ from hermes_pipeline.phases import Phase
 class TestPlanValidate:
     def test_parser_contract(self):
         args = build_parser().parse_args(
-            ["plan", "validate", "demo", "--todo", "TODO-42", "--require-manifest"]
+            [
+                "plan",
+                "validate",
+                "demo",
+                "--todo",
+                "TODO-42",
+                "--plan",
+                "docs/candidate.md",
+                "--require-manifest",
+            ]
         )
         assert args.project == "demo"
         assert args.todo == 42
         assert args.require_manifest is True
+        assert args.plan == "docs/candidate.md"
+
+    def test_candidate_plan_validates_before_todo_is_persisted(self, tmp_path, capsys):
+        project = _create_project(tmp_path, "demo")
+        (project / "docs").mkdir()
+        (project / "docs" / "candidate.md").write_text("# Legacy plan\n")
+
+        result = _cmd_plan_validate(
+            FakeArgs(
+                project="demo",
+                todo=42,
+                plan="docs/candidate.md",
+                require_manifest=False,
+            ),
+            Config(projects_dir=tmp_path),
+        )
+
+        assert result == 0
+        assert "legacy" in capsys.readouterr().out.lower()
+        assert "TODO-42" not in (project / "TODOS.md").read_text()
+
+    def test_candidate_plan_preserves_repository_path_safety(self, tmp_path, capsys):
+        _create_project(tmp_path, "demo")
+        (tmp_path / "outside.md").write_text("# Outside\n")
+
+        result = _cmd_plan_validate(
+            FakeArgs(
+                project="demo",
+                todo=42,
+                plan="../outside.md",
+                require_manifest=False,
+            ),
+            Config(projects_dir=tmp_path),
+        )
+
+        assert result == 1
+        assert "attachment_outside_repository" in capsys.readouterr().out
 
     def test_valid_manifest_reports_task_count(self, tmp_path, capsys):
         project = _create_project(tmp_path, "demo")

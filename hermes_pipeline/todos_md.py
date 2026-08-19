@@ -104,7 +104,12 @@ def resolve_todo_plan(project_dir: Path, todos_md_path: Path, todo_id: str) -> s
     if not matches or not matches[0]:
         raise TodoPlanValidationError("missing")
 
-    raw_path = Path(matches[0])
+    return validate_plan_path(project_dir, matches[0])
+
+
+def validate_plan_path(project_dir: Path, plan_path: str) -> str:
+    """Validate one candidate Plan path without requiring a persisted TODO."""
+    raw_path = Path(plan_path)
     if raw_path.is_absolute():
         raise TodoPlanValidationError("absolute")
 

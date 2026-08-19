@@ -98,6 +98,9 @@ The skill supports seven subcommands. Each has its own workflow below.
 4. **Prompt for summary:** "One-line summary after the em dash (required):"
    - Validation: Non-empty, 10–100 characters.
 5. **Attachment discovery and auto-research (step 4.5):** Read `sections/document-attachments.md` and `sections/auto-research.md`. Validate explicit attachment paths, reserve their reads, and complete attachment discovery before general research. Then collect the remaining research signals under the shared counters and derive field drafts only after attachment discovery. Ask gap questions one at a time and show the combined synthesis block.
+   AI research remains authoritative for TODO field synthesis; deterministic
+   Plan validation reports execution readiness but never supplies or replaces
+   researched fields.
 6. **Confirm or edit fields** (pre-filled from auto-research):
    - Present all fields from the synthesis block in a single message, in the same
      order shown there, with their `Confidence:` tags. Instruction: "Reply
@@ -126,6 +129,12 @@ The skill supports seven subcommands. Each has its own workflow below.
    - If the reply contains an invalid edit (e.g. bad Depends-on ID, out-of-range
      Decisions value), report just that field's error and re-prompt for that
      field only — do not discard the other confirmed edits.
+   - After a Plan is selected or supplied and AI research is complete, follow
+     the Plan-readiness validation in `sections/document-attachments.md`.
+     Display its `manifest`, `legacy`, or `invalid` state in both the combined
+     synthesis and the full-entry preview. An invalid Plan blocks preview until
+     the user selects, supplies, or generates a valid Plan (or explicitly
+     resolves Plan as `none`).
 7. **Assemble entry in memory** — format per `sections/schema.md`. Do **not** write to disk yet.
 8. **Preview gate:**
    ```
