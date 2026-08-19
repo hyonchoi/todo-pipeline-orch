@@ -1401,6 +1401,7 @@ def reconcile_plan_task_results(
         parse_worker_result,
         sanitize_result_text,
         verify_worker_git_result,
+        verify_worker_git_topology,
     )
 
     if not (state_dir / "runs" / tick_id / "registration.json").exists():
@@ -1446,11 +1447,18 @@ def reconcile_plan_task_results(
                 step_key=worker_key,
                 acceptance_criteria=plan_task.acceptance_criteria,
             )
-            verify_worker_git_result(
-                registration.worktree,
-                result.git,
-                expected_parent_sha=expected_parent,
-            )
+            if gate.status == "done":
+                verify_worker_git_topology(
+                    registration.worktree,
+                    result.git,
+                    expected_parent_sha=expected_parent,
+                )
+            else:
+                verify_worker_git_result(
+                    registration.worktree,
+                    result.git,
+                    expected_parent_sha=expected_parent,
+                )
         except ResultContractError as exc:
             diagnostic = sanitize_result_text(
                 f"TPO result validation failed: {exc.code}", maximum=1000
