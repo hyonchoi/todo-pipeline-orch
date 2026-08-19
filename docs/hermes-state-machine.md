@@ -1,27 +1,30 @@
 # Pipeline State Machine
 
-Each row is a single transition. Columns: trigger / pre-state / post-state /
-file writes / file deletes.
+Kanban closing-run state is authoritative. Local state records immutable
+registration and crash-recovery evidence, never a second mutable workflow.
 
-| Trigger | Pre-state | Post-state | Writes | Deletes |
-|---|---|---|---|---|
-| `pipeline-tick` starts | — | tick lock held | `.hermes/tick.lock/holder.json` | — |
-| prior tick has running/ready kanban tasks | tick lock held | tick lock released | — | `.hermes/tick.lock/` |
-| prior tick complete, recorded PR branch not merged | tick lock held | tick lock released | observed outcomes in `.hermes/outcomes/<tick>-phases.json` | `.hermes/tick.lock/` |
-| prior tick complete, recorded PR branch merged | tick lock held | selection allowed | observed outcomes in `.hermes/outcomes/<tick>-phases.json` | — |
-| `run_selection` returns picked=None | tick lock held | tick lock released | `.hermes/decisions/<tick>.json`, `.hermes/outcomes/<tick>-phases.json` (`picked_none`) | `.hermes/tick.lock/` |
-| `run_selection` returns picked=TODO-N | tick lock held | kanban phases registered | `.hermes/decisions/<tick>.json`, `.hermes/current_tick_id.txt`, `.hermes/outcomes/<tick>-phases.json` (`tick_started`) | `.hermes/tick.lock/` |
-| kanban phase reaches `done` | kanban task active | next task unblocked by kanban | `.hermes/outcomes/<tick>-phases.json` (`phase_complete`) | — |
-| kanban phase reaches `failed` or `archived` | kanban task active | tick failed | `.hermes/outcomes/<tick>-phases.json` (`failed_at_phase_*`) | — |
-| default Phase 8 completes PR handoff | final kanban task active | waiting for PR merge | `.hermes/pipeline_branch.txt`, `.hermes/outcomes/<tick>-phases.json` (`all_phases_complete`) | — |
-| legacy `phase_9_ship` gate is blocked and pre-gate work is done | prior tick in-flight | waiting for `tpo approve` | `.hermes/outcomes/<tick>-ship.json` | — |
-| legacy `tpo approve` succeeds | ship sidecar pending | merged | version files on PR branch, kanban gate task completed | `.hermes/outcomes/<tick>-ship.json` |
-| Prompt SHA mismatch | tick lock held | tick lock released | `.hermes/decisions/<tick>.json` (rationale=prompt_sha_mismatch), Slack alert | `.hermes/tick.lock/` |
+| Trigger | Guard | Transition |
+|---|---|---|
+| Hermes cron or manual `tpo tick` | no active project run | compile eligible TODOs |
+| TODO selected | TODO and Plan tracked at base SHA | write `.hermes/runs/<tick-id>/registration.json`; create/reuse exact linked worktree |
+| manifest compiled | <=50 ordered tasks | register `worker -> controller gate` pairs with stable keys |
+| legacy Plan compiled | valid Markdown, no manifest | register one development worker and warn |
+| worker closes | valid sanitized result metadata and Git facts | complete its controller gate |
+| worker evidence invalid | immutable mismatch or unsafe Git state | controller gate becomes `needs_input` |
+| initial review finds issues | unchanged head and clean worktree | create one `review-fix -> fix-validation -> re-review` round |
+| fifth re-review still finds issues | every round card terminal | review gate remains human `needs_input`; create no cards |
+| review is clean | review evidence validates | allow finish and closeout |
+| finish and closeout validate | PR branch/head/checks match | human merge gate remains `needs_input` |
+| GitHub reports merge | PR identity still matches | complete terminal gate; later selection allowed |
 
-**Immutability invariant:** `.hermes/decisions/<tick>.json` is written exactly
-once. Outcomes attach via the sidecar; never edit the decision file.
+Exactly one run may be active per project; a multi-project cron scan reconciles
+projects independently. Stable idempotency keys make retries converge on the
+same cards.
 
-**No-progress definition:** a decision with `picked=None` writes a
-`picked_none` outcome and leaves the pipeline idle rather than stalled. A
-`tick_started` outcome without later terminal phase outcomes is treated as a
-stall so the circuit breaker can alert.
+## Recovery boundary
+
+Authority-hash drift, a mismatched or dirty worktree, unexpected PR closure,
+branch deletion, force-push, or remote-head drift is never repaired
+automatically. TPO never resets, cleans, deletes, force-pushes, merges, or
+abandons those resources. It reports expected and observed state and preserves
+the run behind `needs_input` for an operator.

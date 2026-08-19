@@ -255,6 +255,8 @@ def reconcile_todo_completion(
     if not registration_path.exists():
         return True
     registration = load_validated_registration(project_dir, state_dir, tick_id)
+    if getattr(registration, "manifest", object()) is None:
+        return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
     acceptance = tasks.get(REVIEW_ACCEPTANCE_KEY)
     if acceptance is None or acceptance.status != "done":

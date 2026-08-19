@@ -398,3 +398,70 @@ def test_reconcile_invalid_result_marks_gate_needs_input(tmp_path, mocker):
     )
     blocked.assert_called_once()
     complete.assert_not_called()
+
+
+def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import reconcile_plan_task_results
+    from hermes_pipeline.review_reconciliation import reconcile_reviews
+    from hermes_pipeline.run_registration import register_pinned_run
+    from hermes_pipeline.todos_completion import reconcile_todo_completion
+    from hermes_pipeline.todos_md import parse_todo_entries
+
+    repo = tmp_path / "legacy"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    todos = (
+        "## Entries\n\n- [ ] **TODO-7: Legacy work**\n"
+        "  - **Plan:** plan.md\n  - **Branch:** todo-7\n"
+    )
+    (repo / "TODOS.md").write_text(todos)
+    (repo / "plan.md").write_text("# Legacy Plan\n\nImplement it.\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    state = repo / ".hermes"
+    registration = register_pinned_run(
+        project_dir=repo,
+        state_dir=state,
+        tick_id="LEGACY-TICK",
+        selected_entry=parse_todo_entries(todos)[0],
+        plan_path="plan.md",
+        profile="native-sdd",
+        prompt_client="claude",
+        assignee="pipeline",
+        review_assignee=None,
+        step_keys=(
+            "phase_4_development",
+            "phase_5_review",
+            "phase_8_finish_branch",
+            "phase_9_human_review",
+        ),
+    )
+
+    authority = load_validated_registration(repo, state, "LEGACY-TICK")
+    assert authority.manifest is None
+    kanban = mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_tasks")
+    review = mocker.patch("hermes_pipeline.review_reconciliation.get_todo_kanban_tasks")
+    delivery = mocker.patch("hermes_pipeline.todos_completion.get_todo_kanban_tasks")
+
+    assert reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="legacy", tick_id="LEGACY-TICK"
+    )
+    assert reconcile_reviews(
+        project_dir=repo, state_dir=state, tenant="legacy", tick_id="LEGACY-TICK"
+    )
+    assert reconcile_todo_completion(
+        project_dir=repo, state_dir=state, tenant="legacy", tick_id="LEGACY-TICK"
+    )
+    kanban.assert_not_called()
+    review.assert_not_called()
+    delivery.assert_not_called()
+    assert registration.worktree.is_dir()
+
+    registration_path = state / "runs" / "LEGACY-TICK" / "registration.json"
+    drifted = json.loads(registration_path.read_text())
+    drifted["plan_hash"] = "0" * 64
+    registration_path.write_text(json.dumps(drifted))
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "LEGACY-TICK")

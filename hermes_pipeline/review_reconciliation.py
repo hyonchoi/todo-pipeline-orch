@@ -224,6 +224,8 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
     if not (state_dir / "runs" / tick_id / "registration.json").exists():
         return True
     registration = load_validated_registration(project_dir, state_dir, tick_id)
+    if getattr(registration, "manifest", object()) is None:
+        return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
     _ensure_initial_review(
         tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id

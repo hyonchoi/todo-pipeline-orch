@@ -112,6 +112,14 @@ def test_plan_readiness_states_flow_through_synthesis_and_preview():
     assert "full-entry preview" in policy
 
 
+def test_plan_readiness_distinguishes_intake_from_runtime_qualification():
+    policy = skill_text("sections/document-attachments.md")
+    assert "Hermes >= 0.19.0" in policy
+    assert "installed project-skill parity" in policy
+    assert "tracked at the pinned base commit" in policy
+    assert "must not claim" in policy
+
+
 def test_attachment_search_roots_are_validated_before_traversal():
     policy = skill_text("sections/document-attachments.md")
     assert "Before reading, listing, or searching any discovery root" in policy

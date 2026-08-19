@@ -96,7 +96,7 @@ class ValidatedRegistration:
     branch: str
     worktree: Path
     step_keys: tuple[str, ...]
-    manifest: PlanManifest
+    manifest: PlanManifest | None
     assignee: str
     review_assignee: str | None
     prompt_client: str
@@ -473,13 +473,14 @@ def load_validated_registration(
         or selected.branch_values != (registration["branch"],)
     ):
         raise ResultContractError("registration_invalid")
-    if manifest is None:
-        raise ResultContractError("registration_invalid")
-    required_steps = {
-        key for task in manifest.tasks for key in (f"plan:{task.id}", f"validate:{task.id}")
-    }
-    if not required_steps <= set(steps):
-        raise ResultContractError("registration_invalid")
+    if manifest is not None:
+        required_steps = {
+            key
+            for task in manifest.tasks
+            for key in (f"plan:{task.id}", f"validate:{task.id}")
+        }
+        if not required_steps <= set(steps):
+            raise ResultContractError("registration_invalid")
     return ValidatedRegistration(
         registration["todo_id"],
         repository,

@@ -238,6 +238,13 @@ omit the readiness row and retain the existing non-actionable TODO behavior.
 Readiness validation never selects a candidate, derives ordinary TODO fields,
 or changes the user's confirmation authority.
 
+This intake readiness is not runtime qualification. Before execution, run
+`tpo doctor <project>` to verify Hermes >= 0.19.0, installed project-skill parity,
+and the current manifest/legacy/invalid readiness counts. TPO later requires
+the selected TODO and Plan bytes to be tracked at the pinned base commit; the
+skill must not claim that a successful candidate check proves that
+Git authority or live Kanban state.
+
 ## Existing-value preservation
 
 Existing `Plan` and `Spec` values are retained unless the user explicitly

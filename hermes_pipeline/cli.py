@@ -9,9 +9,11 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess as _cli_sp
@@ -49,6 +51,181 @@ vlog = logging.getLogger("pipeline.verbose")
 # (kanban registration, outcome observation) so the selection call is bounded
 # strictly below the per-project lock's stale-reclaim window.
 _SELECTION_TIMEOUT_RESERVE_S = 30
+_MINIMUM_HERMES_VERSION = (0, 19, 0)
+
+
+def _doctor_hermes_version() -> tuple[bool, str]:
+    """Return whether the locally executable Hermes satisfies TPO's API floor."""
+    try:
+        result = _cli_sp.run(
+            ["hermes", "--version"], text=True, capture_output=True
+        )
+    except FileNotFoundError:
+        return False, "Hermes is not installed or not on PATH"
+    if result.returncode != 0:
+        return False, "Hermes --version failed"
+    output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)\b", output)
+    if match is None:
+        return False, "Hermes version output was not recognized"
+    version = tuple(int(part) for part in match.groups())
+    rendered = ".".join(str(part) for part in version)
+    if version < _MINIMUM_HERMES_VERSION:
+        return False, f"Hermes {rendered} is older than required 0.19.0"
+    return True, rendered
+
+
+def _directory_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+        digest.update(item.relative_to(path).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(item.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _doctor_skill_parity(project_dir: Path, prompt_client: str) -> tuple[bool, str | None]:
+    """Compare an installed project skill when present; absence remains optional."""
+    from .contract import _resolve_bundled_dir
+
+    dirname = _SKILLS_INSTALL_TARGET_DIRNAMES[prompt_client]
+    installed = project_dir / dirname / "todos-manager"
+    if not installed.exists():
+        return True, None
+    bundled = _resolve_bundled_dir("skills", "todos-manager")
+    try:
+        matches = installed.is_dir() and _directory_digest(installed) == _directory_digest(bundled)
+    except OSError as exc:
+        return False, f"could not read installed skill at {installed}: {exc}"
+    if matches:
+        return True, f"installed todos-manager matches bundled source at {installed}"
+    return False, f"installed todos-manager differs from bundled source at {installed}"
+
+
+def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
+    """Verify immutable base authority and report mutable lifecycle separately."""
+    tick_path = state_dir / CURRENT_TICK_ID_FILE
+    if not tick_path.is_file():
+        return True
+    try:
+        tick_id = tick_path.read_text(encoding="utf-8").strip()
+        registration = json.loads(
+            (state_dir / "runs" / tick_id / "registration.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        worktree = Path(registration["worktree"])
+        actual: dict[str, str] = {"worktree": str(worktree.resolve())}
+        branch = _cli_sp.run(
+            ["git", "branch", "--show-current"],
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+        )
+        actual["branch"] = (
+            branch.stdout.strip() if branch.returncode == 0 else "<unavailable>"
+        )
+        common = _cli_sp.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+        )
+        actual["repository"] = (
+            str(Path(common.stdout.strip()).resolve().parent)
+            if common.returncode == 0
+            else "<unavailable>"
+        )
+        base = _cli_sp.run(
+            ["git", "rev-parse", f"{registration['base_sha']}^{{commit}}"],
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+        )
+        actual["base_sha"] = (
+            base.stdout.strip() if base.returncode == 0 else "<unavailable>"
+        )
+        plan_at_base = _cli_sp.run(
+            ["git", "show", f"{registration['base_sha']}:{registration['plan_path']}"],
+            cwd=worktree,
+            capture_output=True,
+        )
+        plan_bytes = plan_at_base.stdout
+        if isinstance(plan_bytes, str):
+            plan_bytes = plan_bytes.encode()
+        actual["plan_hash"] = (
+            hashlib.sha256(plan_bytes).hexdigest()
+            if plan_at_base.returncode == 0
+            else "<missing>"
+        )
+        from .todos_md import parse_todo_entries
+
+        todos_at_base = _cli_sp.run(
+            ["git", "show", f"{registration['base_sha']}:TODOS.md"],
+            cwd=worktree,
+            capture_output=True,
+        )
+        todos_bytes = todos_at_base.stdout
+        if isinstance(todos_bytes, bytes):
+            todos_text = todos_bytes.decode("utf-8")
+        else:
+            todos_text = todos_bytes
+        entries = parse_todo_entries(todos_text if todos_at_base.returncode == 0 else "")
+        selected = next(
+            (entry for entry in entries if entry.todo_id == registration["todo_id"]),
+            None,
+        )
+        actual["selected_entry_hash"] = (
+            hashlib.sha256(selected.raw.encode()).hexdigest()
+            if selected is not None
+            else "<missing>"
+        )
+    except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
+        print("REGISTRATION DRIFT: active registration could not be inspected")
+        return False
+
+    expected = {
+        "repository": str(Path(registration["repository"]).resolve()),
+        "worktree": str(Path(registration["worktree"]).resolve()),
+        "branch": registration["branch"],
+        "base_sha": registration["base_sha"],
+        "plan_hash": registration["plan_hash"],
+        "selected_entry_hash": registration["selected_entry_hash"],
+    }
+    print(
+        "Registered authority: "
+        + " ".join(
+            f"{field} expected={expected[field]} actual={actual[field]}"
+            for field in expected
+        )
+    )
+    head = _cli_sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+    )
+    status = _cli_sp.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+    )
+    lifecycle_head = head.stdout.strip() if head.returncode == 0 else "<unavailable>"
+    lifecycle_state = (
+        "dirty" if status.returncode != 0 or status.stdout else "clean"
+    )
+    print(f"Current lifecycle: head_sha={lifecycle_head} worktree={lifecycle_state}")
+    mismatches = [field for field in expected if expected[field] != actual[field]]
+    for field in mismatches:
+        print(
+            f"REGISTRATION DRIFT: {field} expected={expected[field]} "
+            f"actual={actual[field]}"
+        )
+    return not mismatches
+
+
 def _resolve_project_dir(config: Config, slug: str) -> Path | None:
     """Validate *slug* and resolve it to an existing project directory.
 
@@ -1752,10 +1929,15 @@ def _cmd_doctor(args, config: Config) -> int:
         return 2
 
     # Load phases and prerequisite metadata from the selected profile.
-    from .phases import load_profile_prerequisites, resolve_profile_phases_path
+    from .phases import (
+        load_phase_profile,
+        load_profile_prerequisites,
+        resolve_profile_phases_path,
+    )
 
     try:
         profile_path = resolve_profile_phases_path(contract.profile)
+        phase_profile = load_phase_profile(profile_path)
         phases = load_phases(profile_path)
         prerequisites = load_profile_prerequisites(contract.profile)
     except ContractSchemaError as e:
@@ -1864,6 +2046,56 @@ def _cmd_doctor(args, config: Config) -> int:
             f"{', '.join(unverified)}"
         )
         return 2
+
+    version_ok, version_detail = _doctor_hermes_version()
+    if not version_ok:
+        print(f"UNSUPPORTED: {version_detail}")
+        print("Fix: install Hermes >= 0.19.0 and rerun `tpo doctor`.")
+        return 2
+    print(f"Hermes version: {version_detail} (minimum 0.19.0)")
+
+    parity_ok, parity_detail = _doctor_skill_parity(project_dir, config.prompt_client)
+    if not parity_ok:
+        print(f"SKILL DRIFT: {parity_detail}")
+        print(
+            f"Fix: run `tpo skills install --scope project --target "
+            f"{config.prompt_client} --reinstall` after reviewing local changes."
+        )
+        return 1
+    if parity_detail is not None:
+        print(f"Skill parity: {parity_detail}")
+
+    if phase_profile.requires_plan:
+        from .todos_md import compile_eligible_todos, parse_todo_entries
+
+        todos_path = project_dir / "TODOS.md"
+        try:
+            entries = parse_todo_entries(todos_path.read_text(encoding="utf-8"))
+            readiness = compile_eligible_todos(
+                project_dir, todos_path, in_flight=frozenset(), requires_plan=True
+            )
+        except (OSError, UnicodeError) as exc:
+            print(f"INVALID: cannot inspect Plan readiness: {exc}")
+            return 2
+        manifest = sum(candidate.plan_kind == "manifest" for candidate in readiness.candidates)
+        legacy = sum(candidate.plan_kind == "legacy" for candidate in readiness.candidates)
+        plan_invalid = sum(
+            reason.startswith("plan_invalid:")
+            for reason in readiness.blocked_reasons.values()
+        )
+        print(
+            f"Plan readiness: manifest={manifest} legacy={legacy} "
+            f"invalid={plan_invalid} entries={len(entries)}"
+        )
+        if legacy:
+            print(
+                "WARNING: legacy Plan Markdown remains executable as one development "
+                "card; add a tpo-plan manifest for visible task compilation."
+            )
+
+    if not _doctor_active_registration(project_dir, project_state):
+        print("Fix: preserve the run and resolve registration drift manually.")
+        return 1
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "

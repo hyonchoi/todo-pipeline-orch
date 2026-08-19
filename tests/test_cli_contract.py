@@ -11,6 +11,7 @@ from hermes_pipeline.cli import (
     _cmd_init,
     _cmd_install_profile,
     _cmd_plan_validate,
+    _doctor_active_registration,
     _verify_hermes_skill_registry_prerequisite,
     build_parser,
 )
@@ -164,9 +165,183 @@ def _create_valid_doctor_project(projects_dir, profile="gstack"):
 
 def _allow_hermes_registry_skill_check(*args, **kwargs):
     cmd = args[0] if args else kwargs.get("args", [])
+    if cmd == ["hermes", "--version"]:
+        return MagicMock(returncode=0, stderr="", stdout="Hermes Agent v0.19.0\n")
     if cmd == ["hermes", "skills", "list", "--enabled-only"]:
         return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
     pytest.fail("doctor must not inspect a remote worker for external skills")
+
+
+def test_doctor_rejects_hermes_older_than_minimum(tmp_path, mocker, capsys):
+    args = _create_valid_doctor_project(tmp_path)
+    def run(cmd, **_kwargs):
+        output = (
+            "ai-coding-agents\n"
+            if cmd == ["hermes", "skills", "list", "--enabled-only"]
+            else "Hermes Agent v0.18.9\n"
+        )
+        return MagicMock(returncode=0, stderr="", stdout=output)
+
+    mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 2
+    output = capsys.readouterr().out
+    assert "0.19.0" in output
+    assert "0.18.9" in output
+
+
+def test_doctor_reports_native_sdd_manifest_and_legacy_readiness(
+    tmp_path, mocker, capsys
+):
+    args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+    project = tmp_path / "demo"
+    (project / "docs").mkdir()
+    (project / "docs" / "manifest.md").write_text(
+        '```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-1","tasks":'
+        '[{"id":"task-1","title":"Build","instructions":"Implement it",'
+        '"acceptance_criteria":["Works"],"verification":["uv run pytest"],'
+        '"commit_message":"feat: build"}]}\n```\n'
+    )
+    (project / "docs" / "legacy.md").write_text("# Legacy plan\n")
+    (project / "TODOS.md").write_text(
+        "# TODOS\n\n## Entries\n\n"
+        "- [ ] **TODO-1: Manifest**\n  - **Plan:** docs/manifest.md\n\n"
+        "- [ ] **TODO-2: Legacy**\n  - **Plan:** docs/legacy.md\n\n"
+        "- [ ] **TODO-3: Missing**\n"
+    )
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    assert "manifest=1" in output
+    assert "legacy=1" in output
+    assert "invalid=1" in output
+    assert "WARNING: legacy Plan" in output
+
+
+def test_doctor_reports_installed_skill_drift(tmp_path, mocker, capsys):
+    args = _create_valid_doctor_project(tmp_path)
+    installed = tmp_path / "demo" / ".agents" / "skills" / "todos-manager"
+    installed.mkdir(parents=True)
+    (installed / "SKILL.md").write_text("stale skill\n")
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(
+        args, Config(projects_dir=tmp_path, prompt_client="codex")
+    ) == 1
+    output = capsys.readouterr().out
+    assert "SKILL DRIFT" in output
+    assert "tpo skills install" in output
+
+
+def test_doctor_active_registration_reports_expected_and_actual_hashes(
+    tmp_path, mocker, capsys
+):
+    project = tmp_path / "repo"
+    worktree = project / ".worktrees" / "todo-1-example"
+    state = project / ".hermes"
+    worktree.mkdir(parents=True)
+    (worktree / "plan.md").write_text("drifted\n")
+    (worktree / "TODOS.md").write_text(
+        "- [ ] **TODO-1: Example**\n  - **Plan:** plan.md\n"
+    )
+    (state / "runs" / "tick-1").mkdir(parents=True)
+    (state / "current_tick_id.txt").write_text("tick-1\n")
+    (state / "runs" / "tick-1" / "registration.json").write_text(
+        __import__("json").dumps(
+            {
+                "todo_id": "TODO-1",
+                "repository": str(project),
+                "worktree": str(worktree),
+                "branch": "feat/example",
+                "base_sha": "a" * 40,
+                "plan_path": "plan.md",
+                "plan_hash": "0" * 64,
+                "selected_entry_hash": "0" * 64,
+            }
+        )
+    )
+
+    def run(cmd, **_kwargs):
+        if "--git-common-dir" in cmd:
+            output = str(project / ".git") + "\n"
+        elif cmd[1:3] == ["branch", "--show-current"]:
+            output = "feat/example\n"
+        elif cmd[1:3] == ["show", "a" * 40 + ":plan.md"]:
+            output = "drifted\n"
+        elif cmd[1:3] == ["show", "a" * 40 + ":TODOS.md"]:
+            output = "- [ ] **TODO-1: Example**\n  - **Plan:** plan.md\n"
+        elif cmd[1:3] == ["status", "--porcelain=v1"]:
+            output = ""
+        else:
+            output = "a" * 40 + "\n"
+        return MagicMock(returncode=0, stdout=output, stderr="")
+
+    mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+
+    assert _doctor_active_registration(project, state) is False
+    output = capsys.readouterr().out
+    assert "plan_hash expected=" in output
+    assert "actual=" in output
+    assert "selected_entry_hash expected=" in output
+
+
+def test_doctor_active_registration_accepts_post_closeout_todo_state(tmp_path, capsys):
+    from hermes_pipeline.run_registration import register_pinned_run
+    from hermes_pipeline.todos_md import parse_todo_entries
+
+    project = tmp_path / "repo"
+    project.mkdir()
+    for command in (
+        ("init", "-q"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        _test_sp.run(["git", *command], cwd=project, check=True)
+    todos = (
+        "## Entries\n\n- [ ] **TODO-1: Example**\n"
+        "  - **Plan:** plan.md\n  - **Branch:** feat/example\n"
+    )
+    (project / "TODOS.md").write_text(todos)
+    (project / "plan.md").write_text("# Legacy plan\n")
+    _test_sp.run(["git", "add", "."], cwd=project, check=True)
+    _test_sp.run(["git", "commit", "-qm", "base"], cwd=project, check=True)
+    state = project / ".hermes"
+    registration = register_pinned_run(
+        project_dir=project,
+        state_dir=state,
+        tick_id="tick-1",
+        selected_entry=parse_todo_entries(todos)[0],
+        plan_path="plan.md",
+        profile="native-sdd",
+        prompt_client="codex",
+        assignee="pipeline",
+        review_assignee=None,
+        step_keys=("phase_4_development",),
+    )
+    (state / "current_tick_id.txt").write_text("tick-1\n")
+    (registration.worktree / "TODOS.md").write_text(
+        todos.replace("- [ ]", "- [x]")
+        + "  - **Completed:** PR #12, 2026-08-19\n"
+    )
+    _test_sp.run(["git", "add", "TODOS.md"], cwd=registration.worktree, check=True)
+    _test_sp.run(
+        ["git", "commit", "-qm", "close todo"],
+        cwd=registration.worktree,
+        check=True,
+    )
+
+    assert _doctor_active_registration(project, state) is True
+    output = capsys.readouterr().out
+    assert "base_sha expected=" in output
+    assert "Current lifecycle: head_sha=" in output
+    assert "REGISTRATION DRIFT" not in output
 
 
 def test_hermes_registry_prerequisite_requires_exact_enabled_skill_name(mocker):
@@ -719,6 +894,8 @@ class TestDoctorMissingProfile:
                 return MagicMock(returncode=1, stderr="profile not found", stdout="")
             if cmd == ["hermes", "skills", "list", "--enabled-only"]:
                 return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
+            if cmd == ["hermes", "--version"]:
+                return MagicMock(returncode=0, stderr="", stdout="Hermes Agent v0.19.0\n")
             return original_run(*a, **kw)
         mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=tracking_run)
         mocker.patch(
@@ -730,7 +907,7 @@ class TestDoctorMissingProfile:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 0
-        assert call_count["n"] == 1
+        assert call_count["n"] == 2
 
     def test_doctor_profile_check_success_returns_0(self, tmp_path, mocker, capsys):
         """Non-default assignee whose profile IS installed should pass clean."""
@@ -745,10 +922,16 @@ class TestDoctorMissingProfile:
             "hermes_pipeline.cli.load_phases",
             return_value=[Phase(phase_key="p1", name="P1", tools="Read,Write,Bash")],
         )
-        mocker.patch(
-            "hermes_pipeline.cli._cli_sp.run",
-            return_value=MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n"),
-        )
+        def run(cmd, **_kwargs):
+            if cmd == ["hermes", "profile", "show", "pipeline"]:
+                return MagicMock(returncode=0, stderr="", stdout="")
+            if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
+                return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
+            if cmd == ["hermes", "--version"]:
+                return MagicMock(returncode=0, stderr="", stdout="Hermes Agent v0.19.0\n")
+            raise AssertionError(f"unexpected command: {cmd}")
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
         config = Config(projects_dir=projects_dir)
 
         result = _cmd_doctor(FakeArgs(project="demo"), config)
@@ -773,6 +956,8 @@ class TestDoctorMissingProfile:
                 return MagicMock(returncode=0, stderr="", stdout="")
             if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
                 return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
+            if cmd == ["hermes", "--version"]:
+                return MagicMock(returncode=0, stderr="", stdout="Hermes Agent v0.19.0\n")
             raise AssertionError(f"unexpected command: {cmd}")
 
         mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)

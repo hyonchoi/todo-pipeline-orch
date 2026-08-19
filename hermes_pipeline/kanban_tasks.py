@@ -1422,6 +1422,8 @@ def reconcile_plan_task_results(
             sanitize_result_text(type(exc).__name__, maximum=1000),
         )
         return False
+    if getattr(registration, "manifest", object()) is None:
+        return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
     expected_parent = registration.base_sha
     for plan_task in registration.manifest.tasks:
