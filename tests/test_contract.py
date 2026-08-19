@@ -33,7 +33,8 @@ def test_write_default_contract_creates_file(tmp_path):
     assert written is True
     path = contract_path(project_state)
     assert path.is_file()
-    assert "schema_version = 2" in path.read_text()
+    assert "schema_version = 3" in path.read_text()
+    assert 'review_assignee = "default"' in path.read_text()
     assert 'profile = "gstack"' in path.read_text()
 
 
@@ -68,6 +69,20 @@ def test_load_contract_valid(tmp_path):
     assert contract.assignee == "reviewer-bot"
     assert contract.capabilities == ("Read", "Bash")
     assert contract.profile == "agent-skills"
+    assert contract.review_assignee is None
+
+
+def test_load_contract_current_schema_requires_and_loads_review_assignee(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 3\nassignee = "implementer"\n'
+        'review_assignee = "reviewer"\ncapabilities = ["Read"]\nprofile = "native-sdd"\n'
+    )
+
+    contract = load_contract(project_state)
+
+    assert contract.review_assignee == "reviewer"
 
 
 def test_load_contract_profile_defaults_to_gstack_when_missing(tmp_path):

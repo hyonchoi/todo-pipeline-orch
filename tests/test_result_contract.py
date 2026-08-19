@@ -13,6 +13,7 @@ from hermes_pipeline.result_contract import (
     parse_worker_result,
     sanitize_result_text,
     verify_worker_git_result,
+    verify_worker_git_topology,
 )
 
 PLAN = '''# Plan
@@ -214,6 +215,39 @@ def test_verify_git_requires_exactly_one_commit_and_matching_changed_files(tmp_p
     (repo / "untracked.txt").write_text("keep")
     with pytest.raises(ResultContractError, match="worktree_dirty"):
         verify_worker_git_result(repo, parsed.git, expected_parent_sha=parent)
+
+
+def test_historical_git_topology_remains_valid_after_later_fix_commit(tmp_path):
+    repo = tmp_path / "repo-history"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "base.txt").write_text("base")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    parent = _git(repo, "rev-parse", "HEAD")
+    (repo / "first.txt").write_text("first")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "first")
+    first = _git(repo, "rev-parse", "HEAD")
+    (repo / "later.txt").write_text("later")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "later")
+
+    from hermes_pipeline.result_contract import GitResult
+
+    verify_worker_git_topology(
+        repo,
+        GitResult(parent, first, first, ("first.txt",)),
+        expected_parent_sha=parent,
+    )
+    with pytest.raises(ResultContractError, match="head_mismatch"):
+        verify_worker_git_result(
+            repo,
+            GitResult(parent, first, first, ("first.txt",)),
+            expected_parent_sha=parent,
+        )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="byte filenames require POSIX")

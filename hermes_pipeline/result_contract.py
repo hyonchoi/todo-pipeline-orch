@@ -69,6 +69,13 @@ class WorkerResult:
     red: CommandResult
     green: CommandResult
     refactor: CommandResult
+    review: ReviewEvidence | None = None
+
+
+@dataclass(frozen=True)
+class ReviewEvidence:
+    verdict: str
+    findings: tuple[dict[str, str], ...]
 
 
 @dataclass(frozen=True)
@@ -81,6 +88,9 @@ class ValidatedRegistration:
     worktree: Path
     step_keys: tuple[str, ...]
     manifest: PlanManifest
+    assignee: str
+    review_assignee: str | None
+    prompt_client: str
 
 
 def sanitize_result_text(value: object, *, maximum: int) -> str:
@@ -164,6 +174,7 @@ def parse_worker_result(
     todo_id: str,
     step_key: str,
     acceptance_criteria: tuple[str, ...],
+    allow_no_changes: bool = False,
 ) -> WorkerResult:
     """Parse ``metadata.tpo_result`` from the final successful Hermes run."""
     envelope = _mapping(payload, code="malformed_payload")
@@ -211,7 +222,11 @@ def parse_worker_result(
     if shas[1] != shas[2]:
         raise ResultContractError("invalid_git", "head and task commit differ")
     files = git["changed_files"]
-    if not isinstance(files, list) or not files or len(files) != len(set(files)):
+    if (
+        not isinstance(files, list)
+        or (not files and not allow_no_changes)
+        or len(files) != len(set(files))
+    ):
         raise ResultContractError("invalid_git", "changed_files")
     for filename in files:
         if not isinstance(filename, str) or not filename or len(filename) > 500:
@@ -241,11 +256,53 @@ def parse_worker_result(
         observed.append(entry["criterion"])
     if tuple(observed) != acceptance_criteria:
         raise ResultContractError("invalid_acceptance", "criteria mismatch")
+    review_evidence = None
     if "review" in raw:
         _validate_review(raw["review"])
+        review_raw = raw["review"]
+        assert isinstance(review_raw, dict)
+        findings = review_raw["findings"]
+        assert isinstance(findings, list)
+        review_evidence = ReviewEvidence(
+            verdict=str(review_raw["verdict"]),
+            findings=tuple(dict(item) for item in findings if isinstance(item, dict)),
+        )
     if "delivery" in raw:
         _validate_delivery(raw["delivery"])
-    return WorkerResult(tick_id, todo_id, step_key, session, git_result, red, green, refactor)
+    return WorkerResult(
+        tick_id, todo_id, step_key, session, git_result, red, green, refactor,
+        review_evidence,
+    )
+
+
+def verify_read_only_review(
+    worktree: Path,
+    result: WorkerResult,
+    *,
+    head_sha: str,
+    require_current: bool = True,
+) -> None:
+    """Verify a review used an unchanged, clean pinned worktree."""
+    if result.review is None:
+        raise ResultContractError("invalid_review", "missing review evidence")
+    if (
+        result.git.expected_parent_sha != head_sha
+        or result.git.resulting_head_sha != head_sha
+        or result.git.task_commit_sha != head_sha
+        or result.git.changed_files
+    ):
+        raise ResultContractError("review_changed_head")
+    if not require_current:
+        return
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=worktree,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if status.returncode != 0 or status.stdout:
+        raise ResultContractError("review_dirty_worktree")
 
 
 def _validate_review(value: object) -> None:
@@ -420,6 +477,9 @@ def load_validated_registration(
         worktree,
         tuple(steps),
         manifest,
+        registration["assignee"],
+        registration["review_assignee"],
+        registration["prompt_client"],
     )
 
 
@@ -451,8 +511,7 @@ def verify_worker_git_result(
     worktree: Path, git: GitResult, *, expected_parent_sha: str
 ) -> None:
     """Verify immutable commit topology and changed paths in the pinned worktree."""
-    if git.expected_parent_sha != expected_parent_sha:
-        raise ResultContractError("parent_mismatch")
+    verify_worker_git_topology(worktree, git, expected_parent_sha=expected_parent_sha)
     status = _git_bytes(
         worktree, "status", "--porcelain=v1", "--untracked-files=all", "-z"
     )
@@ -460,6 +519,16 @@ def verify_worker_git_result(
         raise ResultContractError("worktree_dirty")
     actual_head = _git(worktree, "rev-parse", "HEAD")
     if actual_head != git.resulting_head_sha:
+        raise ResultContractError("head_mismatch")
+
+
+def verify_worker_git_topology(
+    worktree: Path, git: GitResult, *, expected_parent_sha: str
+) -> None:
+    """Verify immutable commit topology without requiring it to be current HEAD."""
+    if git.expected_parent_sha != expected_parent_sha:
+        raise ResultContractError("parent_mismatch")
+    if git.resulting_head_sha != git.task_commit_sha:
         raise ResultContractError("head_mismatch")
     parent = _git(worktree, "rev-parse", f"{git.task_commit_sha}^")
     if parent != expected_parent_sha:

@@ -2854,3 +2854,14 @@ class TestCancelTodoKanbanTasks:
             call.args[0][:3] == ["hermes", "kanban", "archive"]
             for call in run.call_args_list
         )
+def test_mark_gate_needs_input_uses_installed_hermes_positional_contract(mocker):
+    from hermes_pipeline.kanban_tasks import _mark_gate_needs_input
+
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    run.return_value = mocker.Mock(returncode=0)
+
+    assert _mark_gate_needs_input("t_0000000a", "bounded reason")
+    assert run.call_args.args[0] == [
+        "hermes", "kanban", "block", "--kind", "needs_input",
+        "t_0000000a", "bounded reason",
+    ]

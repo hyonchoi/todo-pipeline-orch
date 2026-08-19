@@ -1200,6 +1200,21 @@ def _tick_project(
                 )
                 return
 
+            from .review_reconciliation import reconcile_reviews
+
+            if not reconcile_reviews(
+                project_dir=project_dir,
+                state_dir=project_state,
+                tenant=project_slug,
+                tick_id=prior_tick_id,
+            ):
+                log.info(
+                    "project %s: prior tick %s review reconciliation is blocked, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
+                return
+
         if not pr_handoff_resolved and not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
         ):
