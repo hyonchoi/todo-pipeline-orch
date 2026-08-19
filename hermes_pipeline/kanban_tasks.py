@@ -1351,6 +1351,111 @@ def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:
         return False
 
 
+def _mark_gate_needs_input(task_id: str, reason: str) -> bool:
+    """Persist a bounded diagnostic on a controller gate without leaking evidence."""
+    from .result_contract import sanitize_result_text
+
+    diagnostic = sanitize_result_text(reason, maximum=1000)
+    try:
+        result = subprocess.run(
+            [
+                "hermes",
+                "kanban",
+                "block",
+                "--kind",
+                "needs_input",
+                "--reason",
+                diagnostic,
+                task_id,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=HERMES_COMMAND_TIMEOUT,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return result.returncode == 0
+
+
+def reconcile_plan_task_results(
+    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str
+) -> bool:
+    """Validate completed manifest workers and advance their controller gates.
+
+    Hermes remains authoritative for runs and task state. The local registration
+    supplies only immutable authority and the pinned worktree used for Git checks.
+    Reported TDD commands are schema-validated evidence, not independently rerun.
+    """
+    from .result_contract import (
+        ResultContractError,
+        load_validated_registration,
+        parse_worker_result,
+        sanitize_result_text,
+        verify_worker_git_result,
+    )
+
+    if not (state_dir / "runs" / tick_id / "registration.json").exists():
+        return True  # Legacy and pre-registration runs have nothing to reconcile.
+    try:
+        registration = load_validated_registration(project_dir, state_dir, tick_id)
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+        ResultContractError,
+    ) as exc:
+        log.warning(
+            "cannot reconcile plan results for tick %s: %s",
+            tick_id,
+            sanitize_result_text(type(exc).__name__, maximum=1000),
+        )
+        return False
+    tasks = get_todo_kanban_tasks(tenant, tick_id)
+    expected_parent = registration.base_sha
+    for plan_task in registration.manifest.tasks:
+        worker_key = f"plan:{plan_task.id}"
+        gate_key = f"validate:{plan_task.id}"
+        if worker_key not in registration.step_keys or gate_key not in registration.step_keys:
+            return False
+        worker = tasks.get(worker_key)
+        gate = tasks.get(gate_key)
+        if worker is None or gate is None:
+            return False
+        if worker.status != "done":
+            return True
+        payload = _show_task_payload(worker.task_id)
+        try:
+            result = parse_worker_result(
+                payload,
+                tick_id=tick_id,
+                todo_id=registration.todo_id,
+                step_key=worker_key,
+                acceptance_criteria=plan_task.acceptance_criteria,
+            )
+            verify_worker_git_result(
+                registration.worktree,
+                result.git,
+                expected_parent_sha=expected_parent,
+            )
+        except ResultContractError as exc:
+            diagnostic = sanitize_result_text(
+                f"TPO result validation failed: {exc.code}", maximum=1000
+            )
+            _mark_gate_needs_input(gate.task_id, diagnostic)
+            log.warning("tick %s step %s: %s", tick_id, worker_key, diagnostic)
+            return False
+        expected_parent = result.git.resulting_head_sha
+        if gate.status != "done" and not complete_todo_kanban_task(
+            tenant, gate.task_id
+        ):
+            return False
+    return True
+
+
 def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:
     """Query kanban for all tasks of a tick, return {phase_key: status}.
 
