@@ -301,8 +301,6 @@ def compile_eligible_todos(
         else:
             candidates.append(EligibleTodo(entry, plan_path, plan_kind))
     return EligibilityResult(tuple(candidates), blocked)
-
-
 def find_todo_fields(todos_md_path: Path, todo_id: str) -> dict:
     """Locate the TODO-<n> entry in todos_md_path and extract Spec:/Reference:.
 

@@ -43,8 +43,8 @@ uv run tpo --debug tick my-project
 
 | Source | Message |
 |--------|---------|
-| Agent call | `agent prompt (truncated to 2000 chars): ...` |
-| Agent call | `agent raw response (truncated to 2000 chars): ...` |
+| Agent call | `agent request: prompt_sha=... prompt_chars=...` |
+| Agent call | `agent response: prompt_sha=... response_chars=...` |
 | Lock acquisition | `tick lock acquired: lock_file=<path> holder_pid=<pid>` |
 | Selection | `selection decision: picked=TODO-N candidates=... rationale=...` |
 | Circuit breaker | `circuit breaker observe: picked=... counts_as_no_progress=... state=...` |
@@ -53,7 +53,9 @@ uv run tpo --debug tick my-project
 | Circuit breaker | `circuit breaker: resuming from backoff (was backed_off=True)` |
 | Kanban | `kanban registration payload (raw JSON, truncated): ...` |
 
-**Important:** Debug output truncates at 2000 characters for agent prompts and responses, and at 500 characters for kanban payloads. This prevents a single tick from flooding the log.
+**Important:** Selection-agent prompt and response bodies are never logged.
+Debug output reports only the prompt SHA and character counts. Kanban payloads
+remain truncated at 500 characters.
 
 **Common use:** Troubleshoot why a specific TODO was or wasn't selected, or why the circuit breaker tripped.
 

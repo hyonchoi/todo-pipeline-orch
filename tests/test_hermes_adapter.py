@@ -8,6 +8,8 @@ import pytest
 
 from hermes_pipeline.hermes_adapter import (
     HERMES_RETRY_ATTEMPTS,
+    ClaudeCallError,
+    ClaudeDependencyError,
     HermesAgentResult,
     HermesCallError,
     HermesDependencyError,
@@ -29,29 +31,20 @@ def test_hermes_call_returns_stdout_on_success():
     assert result == "plan output here"
 
 
-def test_hermes_call_raises_on_nonzero_exit():
+def test_hermes_call_raises_sanitized_error_on_nonzero_exit():
     fake_result = MagicMock()
     fake_result.returncode = 1
-    fake_result.stdout = ""
-    fake_result.stderr = "E100: gateway unreachable"
-
-    with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
-        with pytest.raises(HermesCallError, match="gateway unreachable"):
-            hermes_call(prompt="hello", model="claude-sonnet-4-6")
-
-
-def test_hermes_call_includes_error_details():
-    fake_result = MagicMock()
-    fake_result.returncode = 1
-    fake_result.stdout = ""
-    fake_result.stderr = "detailed error message"
+    fake_result.stdout = "SECRET_STDOUT_CANARY"
+    fake_result.stderr = "SECRET_STDERR_CANARY"
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
         with pytest.raises(HermesCallError) as exc_info:
             hermes_call(prompt="hello", model="claude-sonnet-4-6")
-
     assert exc_info.value.returncode == 1
-    assert exc_info.value.stderr == "detailed error message"
+    assert not hasattr(exc_info.value, "stderr")
+    assert str(exc_info.value) == "hermes call failed with return code 1"
+    assert "SECRET_STDOUT_CANARY" not in str(exc_info.value)
+    assert "SECRET_STDERR_CANARY" not in str(exc_info.value)
 
 
 def test_hermes_call_passes_correct_args():
@@ -238,16 +231,17 @@ def test_hermes_agent_call_keyboard_interrupt_not_masked():
             )
 
 
-def test_hermes_call_error_includes_stdout():
-    """HermesCallError message should include stdout for debugging."""
+def test_hermes_call_error_excludes_stdout_and_stderr():
     fake_result = MagicMock()
     fake_result.returncode = 1
     fake_result.stdout = "partial result"
     fake_result.stderr = "E100: error"
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
-        with pytest.raises(HermesCallError, match="partial result"):
+        with pytest.raises(HermesCallError) as exc_info:
             hermes_call(prompt="hello")
+    assert "partial result" not in str(exc_info.value)
+    assert "E100: error" not in str(exc_info.value)
 
 
 # === GAP-FILLING TESTS ===
@@ -482,7 +476,7 @@ def test_check_hermes_raises_on_timeout():
             check_hermes()
 
 
-def test_check_hermes_raises_on_nonzero_exit():
+def test_check_hermes_raises_sanitized_error_on_nonzero_exit():
     """check_hermes raises HermesDependencyError when hermes --version fails."""
     fake_result = MagicMock()
     fake_result.returncode = 1
@@ -490,8 +484,10 @@ def test_check_hermes_raises_on_nonzero_exit():
     fake_result.stderr = "hermes: config error"
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
-        with pytest.raises(HermesDependencyError, match="config error"):
+        with pytest.raises(HermesDependencyError) as exc_info:
             check_hermes()
+    assert "config error" not in str(exc_info.value)
+    assert str(exc_info.value) == "hermes --version failed (rc=1)"
 
 
 # === HERMES_AGENT_CALL: PROCESS GROUP KILL ON TIMEOUT ===
@@ -659,11 +655,9 @@ def test_hermes_call_permission_error_raises():
             hermes_call(prompt="test")
 
 
-def test_hermes_call_error_output_truncated():
-    """HermesCallError message should truncate stdout/stderr to MAX_ERROR_OUTPUT chars."""
-    from hermes_pipeline.hermes_adapter import MAX_ERROR_OUTPUT
-
-    long_output = "x" * (MAX_ERROR_OUTPUT + 100)
+def test_hermes_call_error_excludes_all_process_output():
+    """HermesCallError must not retain or display subprocess output."""
+    long_output = "SECRET" * 100
     fake_result = MagicMock()
     fake_result.returncode = 1
     fake_result.stdout = long_output
@@ -673,12 +667,11 @@ def test_hermes_call_error_output_truncated():
         with pytest.raises(HermesCallError) as exc_info:
             hermes_call(prompt="test")
 
-    # The message truncates stdout and stderr to MAX_ERROR_OUTPUT
     msg = str(exc_info.value)
-    # stdout portion in the message should be at most MAX_ERROR_OUTPUT
-    assert "stdout=" in msg
-    # The stderr attribute carries the full stderr (untruncated)
-    assert exc_info.value.stderr == "stderr " + long_output, "stderr attribute should carry full stderr"
+    assert long_output not in msg
+    assert "stdout=" not in msg
+    assert "stderr=" not in msg
+    assert not hasattr(exc_info.value, "stderr")
 
 
 def test_hermes_agent_call_popen_permission_error_raises():
@@ -720,16 +713,20 @@ def test_claude_call_returns_stdout_on_success():
 
 def test_claude_call_raises_on_nonzero_exit():
     """claude_call raises ClaudeCallError on non-zero exit code."""
-    from hermes_pipeline.hermes_adapter import ClaudeCallError
     fake_result = MagicMock()
     fake_result.returncode = 1
-    fake_result.stdout = ""
-    fake_result.stderr = "auth failed"
+    fake_result.stdout = "SECRET_CLAUDE_STDOUT"
+    fake_result.stderr = "SECRET_CLAUDE_STDERR"
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
         from hermes_pipeline.hermes_adapter import claude_call
-        with pytest.raises(ClaudeCallError):
+        with pytest.raises(ClaudeCallError) as exc_info:
             claude_call(prompt="test")
+    assert exc_info.value.returncode == 1
+    assert not hasattr(exc_info.value, "stderr")
+    assert str(exc_info.value) == "claude call failed with return code 1"
+    assert "SECRET_CLAUDE_STDOUT" not in str(exc_info.value)
+    assert "SECRET_CLAUDE_STDERR" not in str(exc_info.value)
 
 
 def test_claude_call_passes_model_flag():
@@ -805,7 +802,6 @@ def test_check_claude_returns_version():
 
 def test_check_claude_raises_when_not_found():
     """check_claude raises ClaudeDependencyError when claude binary is not found."""
-    from hermes_pipeline.hermes_adapter import ClaudeDependencyError
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=FileNotFoundError()):
         from hermes_pipeline.hermes_adapter import check_claude
@@ -815,13 +811,14 @@ def test_check_claude_raises_when_not_found():
 
 def test_check_claude_raises_on_version_failure():
     """check_claude raises ClaudeDependencyError when claude --version fails."""
-    from hermes_pipeline.hermes_adapter import ClaudeDependencyError
     fake_result = MagicMock()
     fake_result.returncode = 1
     fake_result.stdout = ""
-    fake_result.stderr = "some error"
+    fake_result.stderr = "SECRET_CLAUDE_VERSION_ERROR"
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", return_value=fake_result):
         from hermes_pipeline.hermes_adapter import check_claude
-        with pytest.raises(ClaudeDependencyError, match="failed"):
+        with pytest.raises(ClaudeDependencyError) as exc_info:
             check_claude()
+    assert str(exc_info.value) == "claude --version failed (rc=1)"
+    assert "SECRET_CLAUDE_VERSION_ERROR" not in str(exc_info.value)

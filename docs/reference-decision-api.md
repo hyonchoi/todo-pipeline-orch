@@ -32,9 +32,10 @@ Build prompt → call agent → persist immutable decision → return.
 
 **Error handling:**
 - `PromptShaMismatch` → returns `picked=None`, fires Slack alert. Rationale prefixed with `prompt_sha_mismatch:`
-- Config error (missing required setting) → returns `picked=None`, rationale prefixed with `config_error:`
-- API error (401/429/5xx/timeout) → returns `picked=None`, rationale prefixed with `api_error:`
+- Config error (missing required setting) → returns `picked=None`, rationale `config_error: missing_setting`
+- API error → returns `picked=None` with a stable sanitized rationale code: `hermes_error`, `claude_error`, `dependency_error`, `timeout`, `transport_error`, or `unexpected_error`
 - All error paths persist a decision record so the next tick's `recent_decisions` carries the cause.
+- Raw prompts, responses, subprocess output, and exception text are never persisted in error rationales. Malformed responses use `parse_error: invalid_response`.
 
 **Trust boundary:** Validates `picked` against server-parsed TODO IDs in `ctx.todos_md`, not the LLM-supplied `candidates_considered`. Rejects picks that are: wrong shape, not in TODOS.md, or already in-flight.
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from hermes_pipeline.config import (
     CircuitBreakerConfig,
@@ -15,6 +18,20 @@ from hermes_pipeline.decision import (
     run_selection,
 )
 from hermes_pipeline.decision.agent import AgentResult, PromptShaMismatch
+from hermes_pipeline.hermes_adapter import (
+    ClaudeCallError,
+    ClaudeDependencyError,
+    HermesCallError,
+    HermesDependencyError,
+)
+
+
+def _synthetic_error(error_type, message="SECRET", returncode=None):
+    error = error_type.__new__(error_type)
+    Exception.__init__(error, message)
+    if returncode is not None:
+        error.returncode = returncode
+    return error
 
 
 def _cfg(state_dir: Path, prompt_path: Path, expected_sha=None) -> FullConfig:
@@ -58,7 +75,6 @@ def test_happy_path_persists_decision(tmp_path):
             "in_flight": [],
         },
         prompt_sha="sha",
-        raw_response="{}",
     )
     with patch("hermes_pipeline.decision.call_agent", return_value=fake):
         d = run_selection(tick_id="01JA", ctx=_ctx(), cfg=_cfg(state, p))
@@ -78,7 +94,6 @@ def test_default_prompt_is_bundled_package_data(tmp_path):
             "in_flight": [],
         },
         prompt_sha="sha",
-        raw_response="{}",
     )
     with patch("hermes_pipeline.decision.call_agent", return_value=fake) as call:
         d = run_selection(tick_id="01JDEFAULT", ctx=_ctx(), cfg=_default_cfg(state))
@@ -102,12 +117,43 @@ def test_picked_not_in_todos_md_is_rejected(tmp_path):
             "blocked_reasons": {},
             "in_flight": [],
         },
-        prompt_sha="sha", raw_response="{}",
+        prompt_sha="sha",
     )
     with patch("hermes_pipeline.decision.call_agent", return_value=fake):
         d = run_selection(tick_id="01JC", ctx=_ctx(), cfg=_cfg(state, p))
     assert d.picked is None
     assert "pick_not_in_todos_md" in d.rationale
+
+
+def test_picked_id_mentioned_only_outside_entry_header_is_rejected(tmp_path):
+    state = tmp_path / "state"; state.mkdir()
+    p = _prompt(tmp_path)
+    fake = AgentResult(
+        parsed={
+            "candidates_considered": ["TODO-999"],
+            "picked": "TODO-999",
+            "rationale": "mentioned in the entry",
+            "blocked_reasons": {},
+            "in_flight": [],
+        },
+        prompt_sha="sha",
+    )
+    todos_md = """\
+- [ ] **TODO-1: Real entry**
+  - **What:** Mentions TODO-999 in its body.
+  - **Reference:** docs/TODO-999-notes.md
+  - **Plan:** docs/TODO-999-plan.md
+"""
+
+    with patch("hermes_pipeline.decision.call_agent", return_value=fake):
+        d = run_selection(
+            tick_id="01JHEADER",
+            ctx=_ctx(todos_md=todos_md),
+            cfg=_cfg(state, p),
+        )
+
+    assert d.picked is None
+    assert d.rationale.startswith("pick_not_in_todos_md")
 
 def test_picked_already_in_flight_is_rejected(tmp_path):
     state = tmp_path / "state"; state.mkdir()
@@ -120,7 +166,7 @@ def test_picked_already_in_flight_is_rejected(tmp_path):
             "blocked_reasons": {},
             "in_flight": ["TODO-1"],
         },
-        prompt_sha="sha", raw_response="{}",
+        prompt_sha="sha",
     )
     with patch("hermes_pipeline.decision.call_agent", return_value=fake):
         d = run_selection(
@@ -145,7 +191,6 @@ def test_picked_must_belong_to_exact_compiled_eligible_set(tmp_path):
             "in_flight": [],
         },
         prompt_sha="sha",
-        raw_response="{}",
     )
     with patch("hermes_pipeline.decision.call_agent", return_value=fake):
         decision = run_selection(
@@ -178,7 +223,6 @@ def test_compiled_identity_overwrites_model_candidate_claims_and_filters_blocked
             "in_flight": [],
         },
         prompt_sha="sha",
-        raw_response="{}",
     )
     context = _ctx(
         "- [ ] **TODO-1: One**\n- [→] **TODO-3: Three**\n- [ ] **TODO-2: Two**"
@@ -205,13 +249,37 @@ def test_api_error_persists_decision_with_picked_none(tmp_path):
         pass
     with patch(
         "hermes_pipeline.decision.call_agent",
-        side_effect=FakeAPIError("429 rate limited"),
+        side_effect=FakeAPIError("SECRET_EXCEPTION_CANARY"),
     ):
         d = run_selection(tick_id="01JF", ctx=_ctx(), cfg=_cfg(state, p))
     assert d.picked is None
-    assert "api_error" in d.rationale
-    assert "FakeAPIError" in d.rationale
+    assert d.rationale == "api_error: unexpected_error"
+    assert "SECRET_EXCEPTION_CANARY" not in d.rationale
+    assert "SECRET_EXCEPTION_CANARY" not in (
+        state / "decisions" / "01JF.json"
+    ).read_text()
     assert (state / "decisions" / "01JF.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (_synthetic_error(HermesCallError, returncode=1), "api_error: hermes_error"),
+        (_synthetic_error(ClaudeCallError, returncode=2), "api_error: claude_error"),
+        (HermesDependencyError("SECRET"), "api_error: dependency_error"),
+        (ClaudeDependencyError("SECRET"), "api_error: dependency_error"),
+        (subprocess.TimeoutExpired("SECRET", 1), "api_error: timeout"),
+        (ConnectionError("SECRET"), "api_error: transport_error"),
+    ],
+)
+def test_api_errors_use_stable_sanitized_codes(tmp_path, error, expected):
+    state = tmp_path / "state"; state.mkdir()
+    p = _prompt(tmp_path)
+    with patch("hermes_pipeline.decision.call_agent", side_effect=error):
+        decision = run_selection(tick_id="01JCODE", ctx=_ctx(), cfg=_cfg(state, p))
+
+    assert decision.rationale == expected
+    assert "SECRET" not in (state / "decisions" / "01JCODE.json").read_text()
 
 def test_missing_api_key_persists_config_error(tmp_path):
     state = tmp_path / "state"; state.mkdir()
@@ -222,8 +290,8 @@ def test_missing_api_key_persists_config_error(tmp_path):
     ):
         d = run_selection(tick_id="01JG", ctx=_ctx(), cfg=_cfg(state, p))
     assert d.picked is None
-    assert "config_error" in d.rationale
-    assert "ANTHROPIC_API_KEY" in d.rationale
+    assert d.rationale == "config_error: missing_setting"
+    assert "ANTHROPIC_API_KEY" not in d.rationale
 
 def test_picked_with_invalid_shape_is_rejected(tmp_path):
     """A picked value not matching TODO-N shape is rejected."""
@@ -237,7 +305,7 @@ def test_picked_with_invalid_shape_is_rejected(tmp_path):
             "blocked_reasons": {},
             "in_flight": [],
         },
-        prompt_sha="sha", raw_response="{}",
+        prompt_sha="sha",
     )
     with patch("hermes_pipeline.decision.call_agent", return_value=fake):
         d = run_selection(tick_id="01JD", ctx=_ctx(), cfg=_cfg(state, p))

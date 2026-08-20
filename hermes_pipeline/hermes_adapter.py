@@ -13,7 +13,6 @@ import subprocess
 import time
 from dataclasses import dataclass
 
-MAX_ERROR_OUTPUT = 300  # chars of stdout/stderr to include in error messages
 HERMES_AGENT_DEFAULT_TIMEOUT = 1800  # 30-minute default for agent calls
 HERMES_CALL_DEFAULT_TIMEOUT = 120  # default timeout for simple hermes_call
 HERMES_VERSION_TIMEOUT = 10  # timeout for hermes --version check
@@ -36,18 +35,16 @@ class ClaudeDependencyError(AgentClientDependencyError):
 class ClaudeCallError(Exception):
     """Raised when `claude -p` returns non-zero exit code."""
 
-    def __init__(self, message: str, returncode: int, stderr: str):
-        super().__init__(message)
+    def __init__(self, returncode: int):
+        super().__init__(f"claude call failed with return code {returncode}")
         self.returncode = returncode
-        self.stderr = stderr
 
 class HermesCallError(Exception):
     """Raised when `hermes chat -q` returns non-zero exit code."""
 
-    def __init__(self, message: str, returncode: int, stderr: str):
-        super().__init__(message)
+    def __init__(self, returncode: int):
+        super().__init__(f"hermes call failed with return code {returncode}")
         self.returncode = returncode
-        self.stderr = stderr
 
 
 @dataclass(frozen=True)
@@ -111,15 +108,7 @@ def hermes_call(
         raise last_err
 
     if result.returncode != 0:
-        raise HermesCallError(
-            message=(
-                f"hermes chat failed: rc={result.returncode} "
-                f"stdout={result.stdout[:MAX_ERROR_OUTPUT]} "
-                f"stderr={result.stderr[:MAX_ERROR_OUTPUT]}"
-            ),
-            returncode=result.returncode,
-            stderr=result.stderr,
-        )
+        raise HermesCallError(returncode=result.returncode)
 
     return result.stdout.strip()
 
@@ -153,10 +142,7 @@ def check_hermes() -> str:
         ) from exc
 
     if result.returncode != 0:
-        raise HermesDependencyError(
-            f"hermes --version failed (rc={result.returncode}): "
-            f"{result.stderr[:MAX_ERROR_OUTPUT]}"
-        )
+        raise HermesDependencyError(f"hermes --version failed (rc={result.returncode})")
 
     return result.stdout.strip()
 
@@ -322,15 +308,7 @@ def claude_call(
     )
 
     if result.returncode != 0:
-        raise ClaudeCallError(
-            message=(
-                f"claude -p failed: rc={result.returncode} "
-                f"stdout={result.stdout[:MAX_ERROR_OUTPUT]} "
-                f"stderr={result.stderr[:MAX_ERROR_OUTPUT]}"
-            ),
-            returncode=result.returncode,
-            stderr=result.stderr,
-        )
+        raise ClaudeCallError(returncode=result.returncode)
 
     return result.stdout.strip()
 
@@ -365,9 +343,6 @@ def check_claude() -> str:
         ) from exc
 
     if result.returncode != 0:
-        raise ClaudeDependencyError(
-            f"claude --version failed (rc={result.returncode}): "
-            f"{result.stderr[:MAX_ERROR_OUTPUT]}"
-        )
+        raise ClaudeDependencyError(f"claude --version failed (rc={result.returncode})")
 
     return result.stdout.strip()

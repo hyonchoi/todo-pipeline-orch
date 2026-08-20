@@ -9,6 +9,14 @@ from importlib.resources import as_file as _as_file
 from importlib.resources import files as _resource_files
 from pathlib import Path as _P
 
+from hermes_pipeline.hermes_adapter import (
+    AgentClientDependencyError,
+    ClaudeCallError,
+    HermesCallError,
+    HermesDependencyError,
+)
+from hermes_pipeline.todos_md import parse_todo_entries, todo_entry_ids
+
 from . import store as _store
 from .agent import PromptShaMismatch, call_agent, compute_prompt_sha
 from .schema import HermesSelectionDecision, Outcome, SelectionContext
@@ -70,6 +78,20 @@ def _selection_prompt_path(prompt_path: str | None):
         _resource_files("hermes_pipeline.data").joinpath("prompts", "selection.md")
     )
 
+
+def _api_error_code(exc: Exception) -> str:
+    if isinstance(exc, HermesCallError):
+        return "hermes_error"
+    if isinstance(exc, ClaudeCallError):
+        return "claude_error"
+    if isinstance(exc, (HermesDependencyError, AgentClientDependencyError, FileNotFoundError)):
+        return "dependency_error"
+    if isinstance(exc, (subprocess.TimeoutExpired, TimeoutError)):
+        return "timeout"
+    if isinstance(exc, OSError):
+        return "transport_error"
+    return "unexpected_error"
+
 def run_selection(
     *,
     tick_id: str,
@@ -115,14 +137,14 @@ def run_selection(
                 "in_flight": ctx.in_flight,
             }
             prompt_sha = e.actual
-        except KeyError as e:
+        except KeyError:
             # Config fault — missing required setting. Persist a
             # decision so the next tick's `recent_decisions` carries the cause,
             # but do not crash the cron entrypoint.
             parsed = {
                 "candidates_considered": [],
                 "picked": None,
-                "rationale": f"config_error: missing setting {e.args[0]!r}",
+                "rationale": "config_error: missing_setting",
                 "blocked_reasons": {},
                 "in_flight": ctx.in_flight,
             }
@@ -132,7 +154,7 @@ def run_selection(
             # plus any other transport error. The plan's edge-case contract:
             # produce picked=None with a distinct rationale; the circuit breaker
             # treats it as no-progress (caller responsibility).
-            rationale = f"api_error: {type(e).__name__}: {str(e)[:200]}"
+            rationale = f"api_error: {_api_error_code(e)}"
             try:
                 prompt_sha = compute_prompt_sha(prompt_path)
             except OSError:
@@ -148,17 +170,14 @@ def run_selection(
     # LLM-output trust boundary. Three failure modes to gate against:
     #   1. `picked` doesn't match the TODO-N shape (model returned a string,
     #      a dict, a hallucinated value).
-    #   2. `picked` is shaped correctly but doesn't appear in TODOS.md at
-    #      all — a hallucinated TODO id the model invented.
-    #   3. `picked` is in TODOS.md but was filtered out (e.g., it's already
+    #   2. `picked` is shaped correctly but isn't a declared TODOS.md entry.
+    #   3. `picked` is a declared entry but was filtered out (e.g., it's already
     #      in_flight from a prior tick).
     # Validate against the server-parsed TODO ids in `ctx.todos_md`, NOT
     # against the LLM-supplied `candidates_considered` (which is itself
     # untrusted output and can be made to agree with `picked` by injection).
-    from ..todos_md import parse_todo_entries
-
     ordered_real_ids = [entry.todo_id for entry in parse_todo_entries(ctx.todos_md)]
-    real_ids = set(ordered_real_ids)
+    real_ids = todo_entry_ids(ctx.todos_md)
     allowed_ids = set(eligible_todo_ids) if eligible_todo_ids is not None else real_ids
     in_flight_set = set(ctx.in_flight)
     picked = parsed.get("picked")
