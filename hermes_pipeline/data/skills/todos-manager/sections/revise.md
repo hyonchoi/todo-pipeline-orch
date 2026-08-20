@@ -12,6 +12,9 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
 - One entry at a time — user selects by TODO-ID.
 - Always uses `sections/document-attachments.md`; uses
   `sections/auto-research.md` only when ordinary TODO fields need research.
+- Preserve unchanged Plan attachments byte-for-byte. The user may explicitly
+  create, replace, remove, or convert one Plan. Removing a Plan attachment never
+  deletes or edits its file.
 
 ## Workflow
 
@@ -121,6 +124,12 @@ Closes the audit-to-fix loop: run `--audit` to find entries with missing or weak
      or `Spec: remove`; a bare path must not overwrite an existing value. When
      the singleton is absent, a validated selected candidate or `Plan: <path>`
      / `Spec: <path>` attaches it.
+   - A selected existing `manifest` Plan attaches unchanged. Creating or
+     replacing a Plan, or converting one selected `legacy` Plan, must follow
+     the ordered manifest-authoring state machine in
+     `sections/document-attachments.md`. Declining conversion requires another
+     manifest-ready Plan, `none`, or cancellation. `Plan: remove` removes only
+     the TODO field and never changes the referenced file.
    - Preserve existing `Reference` paths in their current order. `Reference:
      append <path>` validates and appends a new normalized path, then
      deduplicates normalized values without changing the order of the retained

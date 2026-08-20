@@ -83,6 +83,8 @@ When the user invokes `todos-manager --init` on a project with no TODOS.md:
 3. **Initialize `.hermes/todo_id_counter`** to 0 (if `.hermes/` directory exists).
 4. **Print:** "✓ TODOS.md initialized. Use `todos-manager --add` to add entries."
 
+`--init` performs no Plan discovery, validation, authoring, or mutation.
+
 ---
 
 ## Workflow
@@ -102,6 +104,7 @@ uv run tpo todos complete --project-root . --todo TODO-N --pr N --date YYYY-MM-D
 The backend uses the canonical entry parser, changes exactly one `[ ]` or `[→]`
 entry to `[x]`, and appends `Completed: PR #N, YYYY-MM-DD`. It is idempotent
 only when that exact completion already exists and rejects conflicting state.
+It preserves the attached Plan bytes and never edits the Plan file.
 The closeout worker then commits only `TODOS.md` in its own commit and pushes;
 it never merges, deletes a branch, resets a worktree, or repairs remote drift.
 
@@ -149,9 +152,12 @@ it never merges, deletes a branch, resets a worktree, or repairs remote drift.
    - After a Plan is selected or supplied and AI research is complete, follow
      the Plan-readiness validation in `sections/document-attachments.md`.
      Display its `manifest`, `legacy`, or `invalid` state in both the combined
-     synthesis and the full-entry preview. An invalid Plan blocks preview until
-     the user selects, supplies, or generates a valid Plan (or explicitly
-     resolves Plan as `none`).
+     synthesis and the full-entry preview. `none` remains non-actionable. A
+     selected valid manifest: attach it byte-for-byte unchanged. A new or
+     legacy selection follows manifest authoring; if the user declines
+     conversion, require another manifest-ready Plan, `none`, or cancellation.
+     An invalid Plan blocks preview until the user selects, supplies, or
+     generates a valid Plan (or explicitly resolves Plan as `none`).
 7. **Assemble entry in memory** — format per `sections/schema.md`. Do **not** write to disk yet.
 8. **Preview gate:**
    ```
@@ -188,6 +194,9 @@ it never merges, deletes a branch, resets a worktree, or repairs remote drift.
     - Status marker is one of `[ ]`, `[→]`, `[x]`, `[~]`
     - ID matches `TODO-<digits>` pattern
 5a. **Report findings:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`. Do not rewrite entry bodies.
+6a. **Report Plan readiness only:** Classify each attached Plan as `manifest`,
+    `legacy`, `invalid`, or `none`. Conversion may migrate TODO layout but does
+    not edit any Plan or author a manifest.
 
 ---
 
@@ -213,15 +222,23 @@ it never merges, deletes a branch, resets a worktree, or repairs remote drift.
      containment or traversal escape, outside-target symlinks, and empty
      Reference items. Attachments remain optional: `--audit` must
      never require, remove, replace, or repair attachments.
+   - Report each Plan as `manifest`, `legacy`, `invalid`, or `none`; do not edit
+     any Plan while auditing.
 4. **Reconcile tracked state:** Report and repair section-layout issues before entry schema findings. Repair missing, malformed, duplicated, misplaced, stale, or conflicting `NEXT_TODO_ID` metadata by writing exactly one `NEXT_TODO_ID: <n>` line under `## Metadata`.
 5. **Cross-entry checks:**
    - ID sequence contiguous? (gaps OK, just report)
    - Counter cache (`.hermes/todo_id_counter`) is compatibility/cache state only.
 6. **Output report** per `sections/error-messages.md`, including the `NEXT_TODO_ID` reconciliation result.
 
+`--audit` reports each Plan as `manifest`, `legacy`, `invalid`, or `none` and
+does not edit any Plan.
+
 ---
 
 ### `--archive`: Move completed TODOs to archive
+
+Archive entry text verbatim so the operation and any recovery preserve every attached Plan byte-for-byte;
+never inspect, edit, move, or delete the Plan file.
 
 1. **Scan only the `## Entries` section of TODOS.md** for `[x]` entries. Use `sections/entry-boundary.md` for entry boundary detection.
 2. **If no `[x]` entries found:** Print "No completed TODOs to archive." and exit.

@@ -330,6 +330,24 @@ pre-existing order, and the explicit removal leaves only
 - Conflict: if `NEXT_TODO_ID` points to an active TODO, reconciliation scans active plus archive IDs, writes the corrected value, and continues.
 - Misplaced metadata: `NEXT_TODO_ID` under `## Entry Schema`, `## Entries`, or outside canonical sections is invalid and is repaired to exactly one line under `## Metadata`.
 
+### Scenario A7: Manifest authoring preserves user authority
+
+**Setup:** One selected legacy Plan has approved evidence for every proposed
+manifest field, and the selected TODO and Plan preimages are recorded.
+
+**Walkthrough:** The skill obtains explicit source approval, proposes one
+digest-supported manifest, validates a same-directory candidate with
+`--require-manifest`, obtains confirmation of the exact Plan diff, shows the
+final TODO preview, rechecks both preimages, and obtains final TODO approval.
+
+**Expected outcome:** The Plan is atomically installed before the TODO write.
+Cancellation, drift, validation failure, insufficient evidence, or a
+concurrently created target leaves both targets byte-for-byte unchanged and
+removes the candidate. Existing valid manifests and Plans carried by
+`--archive` or `--complete` remain byte-for-byte unchanged.
+
+---
+
 ## TODO-40 specification coverage
 
 The authoritative contract is

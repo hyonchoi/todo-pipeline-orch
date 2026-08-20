@@ -22,6 +22,16 @@ the human-readable rules that follow.
     "minimum_specific_term_overlap": 2,
     "generic_terms": ["acceptance", "change", "changes", "document", "documents", "implementation", "plan", "planning", "review", "scope", "spec", "task", "tasks", "test", "tests", "todo", "update", "updates", "verification", "verify", "work", "with", "from", "that", "this", "into", "using"]
   },
+  "plan_authoring": {
+    "task_limit": 50,
+    "task_id_format": "task-%02d",
+    "evidence_locator_kinds": ["plan_lines", "repository_lines", "git_commit"],
+    "evidence_digest": "sha256",
+    "candidate_mode": "0600",
+    "existing_target_mode": "preserve",
+    "new_target_mode": "0644",
+    "validator": ["tpo", "plan", "validate", "<project>", "--todo", "TODO-N", "--plan", "<candidate>", "--require-manifest"]
+  },
   "errors": {
     "absolute": "is absolute, not repository-relative",
     "outside": "resolves outside the repository",
@@ -146,6 +156,21 @@ empty item, and continue validating each non-empty item as a separate path. Audi
 never infer that two stored items were one literal-comma path. `Plan` and
 `Spec` each contain one normalized path only.
 
+### New Plan target reservation
+
+Existing attachment candidates remain existing regular files only under the
+algorithm above. A user-approved new Plan target is the sole exception, and is
+validated as a new Plan target reservation rather than as an attachment
+candidate. Require its lexical path to be repository-relative and contained
+inside the resolved repository root. Reject an existing target. Require the
+nearest existing parent to be an existing, contained, non-symlink directory;
+if intermediate directories are intended, create them one at a time while
+rechecking that each parent remains contained and is not a symlink. Record that
+the target is absent as its preimage, reserve only that one normalized path,
+and recheck that absence immediately before atomic creation. A concurrently
+created target fails closed without replacement. These rules do not make other
+missing Plan, Spec, or Reference candidates eligible.
+
 Use these exact validation errors and remediation text:
 
 ```text
@@ -206,18 +231,26 @@ including `Plan: none detected` when applicable, and require explicit user
 confirmation. Carry the confirmed attachment rows into the subsequent full-entry preview,
 where the user can edit or cancel them before writing.
 
-## Plan execution readiness
+## Plan execution readiness and manifest authoring
 
 Validate the normalized Plan through the packaged deterministic CLI contract
 after AI research and Plan selection:
 
-For `--add` and any newly selected or replacement Plan, invoke candidate mode
-as `tpo plan validate <project> --todo TODO-N --plan <normalized-path>`. This
-mode validates before the candidate is persisted. For an unchanged Plan on an
-existing TODO, `tpo plan validate <project> --todo TODO-N` remains valid.
+For an unchanged Plan on an existing TODO, invoke
+`tpo plan validate <project> --todo TODO-N`. If it reports `manifest`, preserve
+and attach the Plan byte-for-byte unchanged. Newly selected, created, or
+replacement Plans must finish this section in `manifest` state. A `legacy`
+Plan may be selected only through the authoring sequence below; `invalid`
+requires correction or another selection. An explicit `none` remains
+non-actionable.
+
+The selected-path readiness form is
+`tpo plan validate <project> --todo TODO-N --plan <normalized-path>`; authoring
+replaces the normalized path with the staged candidate and adds the strict flag:
+candidate mode validates before the candidate is persisted.
 
 ```text
-tpo plan validate <project> --todo TODO-N --plan <normalized-path>
+tpo plan validate <project> --todo TODO-N --plan <candidate> --require-manifest
 ```
 
 Use the TODO ID assigned to `--add` or selected by `--revise`, and run the
@@ -230,13 +263,62 @@ Classify its result for display as exactly one of:
 - `invalid`: validation fails for the selected Plan or its manifest.
 
 Show `Plan readiness: <state>` with the validator's bounded diagnostic in the
-combined synthesis and again in the full-entry preview. `manifest` and `legacy`
-may proceed through the existing confirmation gate. `invalid` blocks preview
+combined synthesis and again in the full-entry preview. `invalid` blocks preview
 and requests only a corrected Plan selection or value; it does not rerun
 attachment discovery or AI research. If Plan is explicitly resolved as `none`,
 omit the readiness row and retain the existing non-actionable TODO behavior.
 Readiness validation never selects a candidate, derives ordinary TODO fields,
 or changes the user's confirmation authority.
+
+### Evidence and proposal contract
+
+Author exactly one selected TODO and one selected Plan; never bulk-mutate Plans
+or TODOs. First obtain explicit approval of the human Plan snapshot that will
+be used as the source. Existing valid manifests are a byte-for-byte no-op and
+must not be regenerated.
+
+For a new or legacy Plan, draft a strict `json tpo-plan` block containing one
+to 50 tasks with deterministic ordered IDs `task-01` through `task-50`. Keep an
+out-of-band provenance map; provenance is never embedded in the manifest.
+Every title, instructions, every acceptance criterion, every verification
+command, and commit message must be supported by at least one typed locator to
+approved Plan lines, repository-file lines, or exact Git commits. Each locator
+records its source and SHA-256 digest; line locators also record inclusive line
+bounds, and commit locators record the full commit object ID. Re-read every
+locator and verify its digest before proposal. If any field or list item lacks
+support, or its locator is missing, stale, outside the repository, or not the
+exact commit requested, return `insufficient_evidence` without staging or
+changing either target.
+
+### Ordered authoring state machine
+
+Perform these steps in order:
+
+1. Obtain explicit approval of the human Plan snapshot and record both Plan and
+   TODO preimages.
+2. Draft only evidence-supported manifest fields and the out-of-band provenance
+   map. Do not infer unsupported boundaries, criteria, commands, or messages.
+3. Stage the candidate in the Plan's directory as a same-directory staged candidate
+   with mode `0600`; do not expose it as the selected Plan. Invoke
+   exactly `tpo plan validate <project> --todo TODO-N --plan <candidate>
+   --require-manifest` from the target project through the packaged command
+   boundary.
+4. Show the exact unified Plan diff and obtain explicit diff confirmation.
+5. Show the final TODO preview with the selected Plan path.
+6. Recheck the Plan and TODO preimages, the validated candidate's identity and
+   digest, and that no concurrently created target now occupies a new path.
+7. Obtain final TODO approval. Then atomically replace or create the Plan,
+   preserving its path and content outside the confirmed diff; preserve the
+   existing Plan mode, or use mode `0644` for a new repository document. Only
+   after the Plan succeeds, write the TODO through its existing atomic write
+   contract.
+
+Cancellation, insufficient evidence, validator failure, rejected diff, Plan
+or TODO drift, candidate drift, or a concurrently created target must delete
+the staged candidate and leave both paths byte-for-byte unchanged. Preserve
+the original Plan path and mode. If the separately confirmed Plan installs but
+the TODO write then fails, report that partial outcome explicitly; do not hide
+it by rolling the Plan back.
 
 This intake readiness is not runtime qualification. Before execution, run
 `tpo doctor <project>` to verify Hermes >= 0.19.0, installed project-skill parity,

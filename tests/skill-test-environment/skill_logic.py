@@ -44,6 +44,7 @@ def load_attachment_policy(skill_root: Path | None = None) -> dict:
 
 
 ATTACHMENT_POLICY = load_attachment_policy()
+PLAN_AUTHORING_POLICY = ATTACHMENT_POLICY["plan_authoring"]
 ATTACHMENT_FIELD_LINE_RE = re.compile(
     r"^  -[ \t]+\*\*(?:Plan|Spec|Reference):\*\*(?:[ \t]+.*)?$"
 )
@@ -131,7 +132,9 @@ class PlanAuthoringWorkflow:
             raise ValueError("new Plan authoring requires an approved source snapshot")
         self._plan_preimage = self.target.read_bytes() if self._target_existed else None
         self._plan_mode = (
-            self.target.stat().st_mode & 0o777 if self._target_existed else 0o644
+            self.target.stat().st_mode & 0o777
+            if self._target_existed
+            else int(PLAN_AUTHORING_POLICY["new_target_mode"], 8)
         )
         self._todo_preimage = todos_path.read_bytes() if todos_path is not None else None
         self._runner = command_runner or self._run_packaged_command
@@ -154,6 +157,8 @@ class PlanAuthoringWorkflow:
         self._source_approved = True
 
     def _evidence_bytes(self, locator: EvidenceLocator) -> bytes | None:
+        if locator.kind not in PLAN_AUTHORING_POLICY["evidence_locator_kinds"]:
+            return None
         if locator.kind in {"plan_lines", "repository_lines"}:
             if locator.start_line is None or locator.end_line is None:
                 return None
@@ -206,7 +211,8 @@ class PlanAuthoringWorkflow:
 
     def _supported(self, locator: EvidenceLocator) -> bool:
         content = self._evidence_bytes(locator)
-        return content is not None and hashlib.sha256(content).hexdigest() == locator.digest
+        digest = hashlib.new(PLAN_AUTHORING_POLICY["evidence_digest"], content or b"")
+        return content is not None and digest.hexdigest() == locator.digest
 
     def _field_supported(
         self, value: str | tuple[str, ...], locators: tuple[EvidenceLocator, ...]
@@ -214,7 +220,10 @@ class PlanAuthoringWorkflow:
         contents = [self._evidence_bytes(locator) for locator in locators]
         if not contents or any(
             content is None
-            or hashlib.sha256(content).hexdigest() != locator.digest
+            or hashlib.new(
+                PLAN_AUTHORING_POLICY["evidence_digest"], content
+            ).hexdigest()
+            != locator.digest
             for locator, content in zip(locators, contents, strict=True)
         ):
             return False
@@ -233,9 +242,12 @@ class PlanAuthoringWorkflow:
             return "manifest"
         if not self._source_approved:
             return "source_approval_required"
-        if not 1 <= len(tasks) <= plan_manifest.MAX_PLAN_TASKS:
+        if not 1 <= len(tasks) <= PLAN_AUTHORING_POLICY["task_limit"]:
             return "insufficient_evidence"
-        expected_ids = [f"task-{index:02d}" for index in range(1, len(tasks) + 1)]
+        expected_ids = [
+            PLAN_AUTHORING_POLICY["task_id_format"] % index
+            for index in range(1, len(tasks) + 1)
+        ]
         provenance = provenance or {}
         for task_id, task in zip(expected_ids, tasks, strict=True):
             field_map = provenance.get(task_id, {})
@@ -285,16 +297,19 @@ class PlanAuthoringWorkflow:
         )
         self._candidate = Path(raw_path)
         try:
-            os.fchmod(descriptor, 0o600)
+            os.fchmod(descriptor, int(PLAN_AUTHORING_POLICY["candidate_mode"], 8))
             with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
                 stream.write(self.candidate_text)
                 stream.flush()
                 os.fsync(stream.fileno())
+            replacements = {
+                "<project>": self.project,
+                "TODO-N": self.todo_id,
+                "<candidate>": str(self._candidate.relative_to(self.repository)),
+            }
             command = [
-                "tpo", "plan", "validate", self.project,
-                "--todo", self.todo_id,
-                "--plan", str(self._candidate.relative_to(self.repository)),
-                "--require-manifest",
+                replacements.get(argument, argument)
+                for argument in PLAN_AUTHORING_POLICY["validator"]
             ]
             if self._runner(command) != 0:
                 self.cancel()

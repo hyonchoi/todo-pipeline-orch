@@ -1,3 +1,4 @@
+import json
 import re
 from importlib.resources import files
 from pathlib import Path
@@ -13,6 +14,15 @@ CANONICAL_ATTACHMENT_CONFIRMATION = (
 
 def skill_text(relative: str) -> str:
     return DATA.joinpath(*relative.split("/")).read_text(encoding="utf-8")
+
+
+def attachment_policy() -> dict:
+    text = skill_text("sections/document-attachments.md")
+    match = re.search(
+        r"```json todos-manager-attachment-policy\n(.*?)\n```", text, re.DOTALL
+    )
+    assert match is not None
+    return json.loads(match.group(1))
 
 
 def format_rules_block(text: str) -> str:
@@ -118,6 +128,131 @@ def test_plan_readiness_distinguishes_intake_from_runtime_qualification():
     assert "installed project-skill parity" in policy
     assert "tracked at the pinned base commit" in policy
     assert "must not claim" in policy
+
+
+def test_plan_authoring_policy_is_bounded_and_matches_the_oracle_contract():
+    authoring = attachment_policy()["plan_authoring"]
+
+    assert authoring == {
+        "task_limit": 50,
+        "task_id_format": "task-%02d",
+        "evidence_locator_kinds": [
+            "plan_lines",
+            "repository_lines",
+            "git_commit",
+        ],
+        "evidence_digest": "sha256",
+        "candidate_mode": "0600",
+        "existing_target_mode": "preserve",
+        "new_target_mode": "0644",
+        "validator": [
+            "tpo",
+            "plan",
+            "validate",
+            "<project>",
+            "--todo",
+            "TODO-N",
+            "--plan",
+            "<candidate>",
+            "--require-manifest",
+        ],
+    }
+
+
+def test_plan_authoring_requires_digest_checked_provenance_for_every_task_field():
+    policy = skill_text("sections/document-attachments.md")
+    policy = " ".join(policy.split())
+    for phrase in (
+        "out-of-band provenance map",
+        "approved Plan lines",
+        "repository-file lines",
+        "exact Git commits",
+        "SHA-256",
+        "title, instructions, every acceptance criterion, every verification command, and commit message",
+        "insufficient_evidence",
+        "task-01",
+        "task-50",
+    ):
+        assert phrase in policy
+
+
+def test_plan_authoring_state_machine_orders_validation_and_both_approvals():
+    policy = skill_text("sections/document-attachments.md")
+    policy = policy.split("### Ordered authoring state machine", 1)[1]
+    ordered = [
+        "explicit approval of the human Plan snapshot",
+        "Draft only evidence-supported manifest fields",
+        "Stage the candidate",
+        "--require-manifest",
+        "Show the exact unified Plan diff",
+        "Show the final TODO preview",
+        "Recheck the Plan and TODO preimages",
+        "Obtain final TODO approval",
+        "atomically replace or create the Plan",
+        "write the TODO",
+    ]
+    positions = [policy.index(phrase) for phrase in ordered]
+    assert positions == sorted(positions)
+
+
+def test_plan_authoring_preserves_bytes_paths_modes_and_single_target_scope():
+    policy = skill_text("sections/document-attachments.md")
+    policy = " ".join(policy.split())
+    for phrase in (
+        "one selected TODO and one selected Plan",
+        "byte-for-byte no-op",
+        "same-directory staged candidate",
+        "mode `0600`",
+        "preserve the existing Plan mode",
+        "mode `0644`",
+        "concurrently created target",
+        "leave both paths byte-for-byte unchanged",
+        "delete the staged candidate",
+        "never bulk-mutate Plans or TODOs",
+    ):
+        assert phrase in policy
+
+
+def test_new_plan_target_validation_is_distinct_from_existing_attachments():
+    policy = " ".join(skill_text("sections/document-attachments.md").split())
+    for phrase in (
+        "Existing attachment candidates remain existing regular files only",
+        "new Plan target reservation",
+        "repository-relative and contained inside the resolved repository root",
+        "existing, contained, non-symlink directory",
+        "target is absent",
+        "recheck that absence immediately before atomic creation",
+        "concurrently created target",
+    ):
+        assert phrase in policy
+
+
+def test_all_subcommands_define_manifest_compatibility_outcomes():
+    skill = skill_text("SKILL.md")
+    revise = " ".join(skill_text("sections/revise.md").split()).lower()
+    listing = " ".join(skill_text("sections/list.md").split())
+
+    assert "`--init` performs no Plan discovery, validation, authoring, or mutation" in skill
+    assert "`none` remains non-actionable" in skill
+    assert "attach it byte-for-byte unchanged" in skill
+    assert "another manifest-ready Plan, `none`, or cancellation" in skill
+    assert "reports each Plan as `manifest`, `legacy`, `invalid`, or `none`" in skill
+    assert "does not edit any Plan" in skill
+    assert "preserve every attached Plan byte-for-byte" in skill
+    assert "preserves the attached Plan bytes" in skill
+
+    for phrase in (
+        "explicitly create, replace, remove, or convert one plan",
+        "removing a plan attachment never deletes or edits its file",
+        "preserve unchanged plan attachments byte-for-byte",
+    ):
+        assert phrase in revise
+    assert "manifest`, `legacy`, `invalid`, or `none`" in listing
+    assert "active and archived" in listing
+    assert "| ID | Status | Title | Summary | Plan readiness |" in listing
+    assert "| TODO-1 | Pending | Example title | One-line summary | manifest |" in listing
+    assert "Apply the same columns" in listing
+    assert "Report only — no TODO or Plan files modified" in listing
 
 
 def test_attachment_search_roots_are_validated_before_traversal():
