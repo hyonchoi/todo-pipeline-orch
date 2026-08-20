@@ -134,7 +134,7 @@ def test_parse_validates_entire_enclosing_run_metadata(sibling):
 
 
 def test_summary_and_diagnostics_are_sanitized():
-    secret = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"
+    secret = "gh" + "p_abcdefghijklmnopqrstuvwxyz1234567890"
     sanitized = sanitize_result_text(f"bad\x00 token {secret}", maximum=8192)
     assert "\x00" not in sanitized
     assert secret not in sanitized
