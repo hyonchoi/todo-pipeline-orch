@@ -88,6 +88,14 @@ class ManifestTaskDraft:
     commit_message: str
 
 
+def _after_plan_parent_validation() -> None:
+    """Test hook for a parent-swap race after initial validation."""
+
+
+def _before_new_plan_publish() -> None:
+    """Test hook for a concurrent creator at the no-clobber boundary."""
+
+
 class PlanAuthoringWorkflow:
     """Test oracle for safe, explicitly-approved single-Plan authoring."""
 
@@ -114,13 +122,18 @@ class PlanAuthoringWorkflow:
         self.project = project
         self.todo_id = todo_id
         lexical_plan = Path(plan_path)
+        raw_parts = plan_path.split("/")
         if lexical_plan.is_absolute():
             raise ValueError("Plan path must be repository-relative")
-        resolved_plan = (self.repository / lexical_plan).resolve()
-        if not resolved_plan.is_relative_to(self.repository) or resolved_plan == self.repository:
-            raise ValueError("Plan path must remain inside the repository")
-        self.plan_path = resolved_plan.relative_to(self.repository).as_posix()
+        if (
+            not raw_parts
+            or len(raw_parts) > 50
+            or any(part in {"", ".", ".."} for part in raw_parts)
+        ):
+            raise ValueError("Plan path has unsafe lexical components")
+        self.plan_path = lexical_plan.as_posix()
         self.target = self.repository / self.plan_path
+        self._validate_plan_parent(create=False)
         self.todos_path = todos_path
         self._target_existed = self.target.exists()
         self._source_text = (
@@ -145,9 +158,27 @@ class PlanAuthoringWorkflow:
         self._candidate: Path | None = None
         self._validated_candidate_digest: str | None = None
         self._validated_candidate_identity: tuple[int, int] | None = None
+        self._staged_parent_identity: tuple[int, int] | None = None
         self.candidate_text = self._source_text
         self.diff = ""
         self.provenance: dict[str, dict[str, tuple[EvidenceLocator, ...]]] = {}
+
+    def _validate_plan_parent(self, *, create: bool) -> None:
+        current = self.repository
+        for component in Path(self.plan_path).parts[:-1]:
+            current = current / component
+            if current.is_symlink():
+                raise RuntimeError("Plan parent is a symlink") if create else ValueError(
+                    "Plan parent is a symlink"
+                )
+            if not current.exists():
+                if not create:
+                    return
+                current.mkdir(mode=0o755)
+            if current.is_symlink() or not current.is_dir():
+                raise RuntimeError("Plan parent is not a safe directory")
+            if not current.resolve().is_relative_to(self.repository):
+                raise RuntimeError("Plan parent escapes repository")
 
     @staticmethod
     def _run_packaged_command(args: list[str]) -> int:
@@ -291,7 +322,11 @@ class PlanAuthoringWorkflow:
     def stage_and_validate(self) -> Path:
         if self.candidate_text == self._source_text:
             raise RuntimeError("candidate is not prepared")
-        self.target.parent.mkdir(parents=True, exist_ok=True)
+        self._validate_plan_parent(create=True)
+        _after_plan_parent_validation()
+        self._validate_plan_parent(create=False)
+        parent_stat = self.target.parent.stat()
+        self._staged_parent_identity = (parent_stat.st_dev, parent_stat.st_ino)
         descriptor, raw_path = tempfile.mkstemp(
             dir=self.target.parent, prefix=f".{self.target.name}.tpo-plan-"
         )
@@ -369,6 +404,10 @@ class PlanAuthoringWorkflow:
             raise RuntimeError("final TODO approval is required")
         try:
             self._check_preimages()
+            self._validate_plan_parent(create=False)
+            parent_stat = self.target.parent.stat()
+            if (parent_stat.st_dev, parent_stat.st_ino) != self._staged_parent_identity:
+                raise RuntimeError("Plan parent identity drift")
             candidate_stat = self._candidate.stat()
             if (candidate_stat.st_dev, candidate_stat.st_ino) != self._validated_candidate_identity:
                 raise RuntimeError("validated candidate identity drift")
@@ -379,8 +418,18 @@ class PlanAuthoringWorkflow:
             self.cancel()
             raise
         os.chmod(self._candidate, self._plan_mode)
-        os.replace(self._candidate, self.target)
-        self._candidate = None
+        if self._target_existed:
+            os.replace(self._candidate, self.target)
+            self._candidate = None
+        else:
+            _before_new_plan_publish()
+            try:
+                os.link(self._candidate, self.target)
+            except FileExistsError as exc:
+                self.cancel()
+                raise RuntimeError("concurrent target creation") from exc
+            self._candidate.unlink()
+            self._candidate = None
         if self.todos_path is not None:
             def apply_approved_preview(current: str) -> str:
                 if current.encode("utf-8") != self._todo_preimage:

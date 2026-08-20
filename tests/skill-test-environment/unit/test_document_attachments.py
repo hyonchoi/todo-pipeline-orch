@@ -259,6 +259,48 @@ def test_todo_drift_after_plan_install_fails_without_hidden_plan_rollback(
     assert todos.read_text() == concurrent
 
 
+def test_new_plan_publish_does_not_clobber_concurrent_winner(tmp_path, monkeypatch):
+    source = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    todos = _write(tmp_path, "TODOS.md", "## Entries\n\n- [ ] **TODO-42: Work** — x\n")
+    task, provenance = _authoring_task(source)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", todos_path=todos, source_text=source, command_runner=lambda _args: 0)
+    workflow.approve_source(); workflow.prepare((task,), {"task-01": provenance}); candidate = workflow.stage_and_validate(); workflow.confirm_diff(); workflow.approve_final_todo(workflow.render_final_todo_preview())
+    monkeypatch.setattr(skill_logic, "_before_new_plan_publish", lambda: _write(tmp_path, "docs/plan.md", "concurrent winner\n"))
+    with pytest.raises(RuntimeError, match="concurrent target"):
+        workflow.install()
+    assert (tmp_path / "docs/plan.md").read_text() == "concurrent winner\n"
+    assert not candidate.exists()
+
+
+def test_new_plan_rejects_lexical_parent_symlink(tmp_path):
+    outside = tmp_path / "outside"; outside.mkdir()
+    (tmp_path / "docs").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", source_text="# Plan\n")
+    assert list(outside.iterdir()) == []
+
+
+def test_new_plan_revalidates_parent_after_injected_swap(tmp_path, monkeypatch):
+    source = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    outside = tmp_path / "outside"; outside.mkdir()
+    task, provenance = _authoring_task(source)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", source_text=source, command_runner=lambda _args: 0)
+    workflow.approve_source(); workflow.prepare((task,), {"task-01": provenance})
+    def swap_parent():
+        (tmp_path / "docs").rmdir()
+        (tmp_path / "docs").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(skill_logic, "_after_plan_parent_validation", swap_parent)
+    with pytest.raises(ValueError, match="parent.*symlink"):
+        workflow.stage_and_validate()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("path", ["docs/../plan.md", "./docs/plan.md"])
+def test_new_plan_rejects_noncanonical_lexical_components(tmp_path, path):
+    with pytest.raises(ValueError, match="lexical"):
+        PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path=path, source_text="# Plan\n")
+
+
 @pytest.mark.parametrize("stop", ["source", "diff", "todo", "validator"])
 def test_authoring_cancellation_or_validator_failure_preserves_plan(tmp_path, stop):
     document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
