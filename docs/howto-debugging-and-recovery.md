@@ -124,6 +124,19 @@ After using any of these tools, verify the result:
 
 ## Troubleshooting
 
+### Native-SDD recovery
+
+Run `tpo doctor <project>` first. It reports the Hermes >= 0.19.0 requirement,
+installed project-skill parity, and manifest/legacy/invalid Plan readiness.
+Then inspect `.hermes/runs/<tick-id>/registration.json` and the affected cards
+with `hermes kanban show <task-id> --json`.
+
+If the expected repository, branch, worktree, base SHA, TODO hash, Plan hash,
+PR head, or remote head differs from observed state, preserve both sides and
+resolve the cause manually. TPO never resets, cleans, deletes, force-pushes, or
+repairs a drifted worktree or branch. A fifth unsuccessful review-fix round is
+also a manual `needs_input` boundary; automation does not create round six.
+
 **"verbose output not showing up"**
 
 - Make sure you pass `--verbose` before the subcommand: `uv run tpo --verbose tick my-project`

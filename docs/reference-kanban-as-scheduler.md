@@ -9,6 +9,26 @@ block. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
+For `native-sdd`, the chain is compiled from the tracked `tpo-plan` manifest:
+
+```text
+plan worker -> controller gate -> plan worker -> controller gate
+            -> independent review -> review acceptance gate
+            -> finish -> TODO closeout -> human merge gate
+```
+
+Controller gates are unassigned and are completed only by TPO after validating
+the closing worker's `metadata.tpo_result` and independent Git facts. Stable
+keys use the tick and step identity, including `plan:<task-id>`,
+`validate:<task-id>`, `review:<round>`, `review-fix:<round>`,
+`fix-validation:<round>`, and `re-review:<round>`. A legacy Plan without a
+manifest retains the static single-development/review/finish/human chain for
+compatibility. Retry still validates the registered repository, worktree,
+branch, pinned base TODO, and Plan hashes, but bypasses manifest-only dynamic
+reconcilers.
+
+Hermes >= 0.19.0 is required for the Kanban and closing-result contracts.
+
 For the default `gstack` profile, completion of the terminal Phase 8 task means
 the branch was handed to a PR, not merged. `tpo tick` reads
 `.hermes/pipeline_branch.txt` and skips new selection while that PR is open,

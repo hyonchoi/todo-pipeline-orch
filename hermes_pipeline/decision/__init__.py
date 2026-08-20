@@ -15,7 +15,7 @@ from hermes_pipeline.hermes_adapter import (
     HermesCallError,
     HermesDependencyError,
 )
-from hermes_pipeline.todos_md import todo_entry_ids
+from hermes_pipeline.todos_md import parse_todo_entries, todo_entry_ids
 
 from . import store as _store
 from .agent import PromptShaMismatch, call_agent, compute_prompt_sha
@@ -27,8 +27,31 @@ __all__ = [
     "HermesSelectionDecision",
     "Outcome",
     "SelectionContext",
+    "record_no_candidates",
     "run_selection",
 ]
+
+
+def record_no_candidates(
+    *, tick_id: str, ctx: SelectionContext, cfg, blocked_reasons: dict[str, str]
+) -> HermesSelectionDecision:
+    """Persist a deterministic no-pick without invoking the selection agent."""
+    decision = HermesSelectionDecision(
+        tick_id=tick_id,
+        timestamp=_now_iso(),
+        model=cfg.selection.model,
+        prompt_sha="",
+        candidates_considered=[],
+        picked=None,
+        rationale="no_eligible_candidates",
+        blocked_reasons=blocked_reasons,
+        in_flight=ctx.in_flight,
+    )
+    state_dir = _P(cfg.base.state_dir)
+    _store.persist(state_dir, decision)
+    _store.rotate_if_needed(state_dir, hot_cap=50)
+    return decision
+
 
 def _now_iso() -> str:
     return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -75,6 +98,7 @@ def run_selection(
     ctx: SelectionContext,
     cfg,
     timeout: int | None = None,
+    eligible_todo_ids: frozenset[str] | None = None,
 ) -> HermesSelectionDecision:
     """Build prompt -> call agent -> persist immutable decision -> return.
 
@@ -152,7 +176,9 @@ def run_selection(
     # Validate against the server-parsed TODO ids in `ctx.todos_md`, NOT
     # against the LLM-supplied `candidates_considered` (which is itself
     # untrusted output and can be made to agree with `picked` by injection).
+    ordered_real_ids = [entry.todo_id for entry in parse_todo_entries(ctx.todos_md)]
     real_ids = todo_entry_ids(ctx.todos_md)
+    allowed_ids = set(eligible_todo_ids) if eligible_todo_ids is not None else real_ids
     in_flight_set = set(ctx.in_flight)
     picked = parsed.get("picked")
     if picked is not None:
@@ -161,11 +187,24 @@ def run_selection(
             reason = f"invalid_pick_shape: picked={picked!r}"
         elif picked not in real_ids:
             reason = f"pick_not_in_todos_md: picked={picked!r} known={sorted(real_ids)}"
+        elif picked not in allowed_ids:
+            reason = f"pick_not_eligible: picked={picked!r} eligible={sorted(allowed_ids)}"
         elif picked in in_flight_set:
             reason = f"pick_already_in_flight: picked={picked!r}"
         if reason is not None:
             parsed["picked"] = None
             parsed["rationale"] = f"{reason} | {parsed.get('rationale', '')}".rstrip(" |")
+
+    if eligible_todo_ids is not None:
+        parsed["candidates_considered"] = [
+            todo_id for todo_id in ordered_real_ids if todo_id in allowed_ids
+        ]
+    blocked_reasons = parsed.get("blocked_reasons", {})
+    parsed["blocked_reasons"] = {
+        todo_id: reason
+        for todo_id, reason in blocked_reasons.items()
+        if todo_id in allowed_ids and isinstance(reason, str)
+    }
 
     decision = HermesSelectionDecision(
         tick_id=tick_id,

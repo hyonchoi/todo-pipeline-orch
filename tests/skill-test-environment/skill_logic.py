@@ -16,6 +16,8 @@ from dataclasses import dataclass
 from importlib.resources import files
 from pathlib import Path
 
+from hermes_pipeline import plan_manifest
+
 
 def load_attachment_policy(skill_root: Path | None = None) -> dict:
     """Parse the executable policy embedded in the authoritative skill Markdown."""
@@ -83,6 +85,14 @@ class AttachmentDiscoveryResult:
     exhausted: bool
     skipped_source: str | None
     errors: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanReadiness:
+    """Post-research execution readiness reported for a selected Plan."""
+
+    state: str
+    detail: str
 
 
 def validate_attachment_path(
@@ -887,6 +897,46 @@ class AttachmentWorkflow:
             spec=self._spec,
             references=tuple(self._references),
         )
+
+    def evaluate_plan_readiness(self, *, research_completed: bool) -> PlanReadiness:
+        """Delegate selected-Plan validation to TPO's production parser."""
+        if not research_completed:
+            raise RuntimeError("AI research must complete before Plan readiness")
+        if self._plan is None or self.todo_id is None:
+            return PlanReadiness("invalid", "selected Plan and TODO ID are required")
+        try:
+            manifest = plan_manifest.validate_plan_candidate(
+                self.repository,
+                self._plan,
+                expected_todo_id=self.todo_id,
+            )
+        except (plan_manifest.PlanManifestValidationError, ValueError) as exc:
+            return PlanReadiness("invalid", str(exc))
+        if manifest is None:
+            return PlanReadiness("legacy", "valid Markdown without tpo-plan manifest")
+        return PlanReadiness("manifest", f"{len(manifest.tasks)} task(s)")
+
+    def render_synthesis(
+        self,
+        readiness: PlanReadiness,
+        *,
+        research_synthesis: str = "",
+    ) -> str:
+        """Append readiness without deriving or replacing researched fields."""
+        lines = [research_synthesis] if research_synthesis else []
+        lines.append(f"Plan readiness: {readiness.state} ({readiness.detail})")
+        return "\n".join(lines)
+
+    def render_preview(
+        self,
+        readiness: PlanReadiness,
+        *,
+        entry_preview: str = "",
+    ) -> str:
+        """Append the same readiness state to the confirmed entry preview."""
+        lines = [entry_preview] if entry_preview else []
+        lines.append(f"Plan readiness: {readiness.state} ({readiness.detail})")
+        return "\n".join(lines)
 
     def _role_candidates(self, role: str) -> list[AttachmentCandidate]:
         return [candidate for candidate in self.candidates if role in candidate.roles]

@@ -206,6 +206,45 @@ including `Plan: none detected` when applicable, and require explicit user
 confirmation. Carry the confirmed attachment rows into the subsequent full-entry preview,
 where the user can edit or cancel them before writing.
 
+## Plan execution readiness
+
+Validate the normalized Plan through the packaged deterministic CLI contract
+after AI research and Plan selection:
+
+For `--add` and any newly selected or replacement Plan, invoke candidate mode
+as `tpo plan validate <project> --todo TODO-N --plan <normalized-path>`. This
+mode validates before the candidate is persisted. For an unchanged Plan on an
+existing TODO, `tpo plan validate <project> --todo TODO-N` remains valid.
+
+```text
+tpo plan validate <project> --todo TODO-N --plan <normalized-path>
+```
+
+Use the TODO ID assigned to `--add` or selected by `--revise`, and run the
+command from the target project. Do not parse or reproduce the `tpo-plan`
+schema in skill prose or helper logic. The packaged validator is authoritative.
+Classify its result for display as exactly one of:
+
+- `manifest`: validation succeeds and reports a valid `tpo-plan` manifest;
+- `legacy`: validation succeeds with the no-manifest warning;
+- `invalid`: validation fails for the selected Plan or its manifest.
+
+Show `Plan readiness: <state>` with the validator's bounded diagnostic in the
+combined synthesis and again in the full-entry preview. `manifest` and `legacy`
+may proceed through the existing confirmation gate. `invalid` blocks preview
+and requests only a corrected Plan selection or value; it does not rerun
+attachment discovery or AI research. If Plan is explicitly resolved as `none`,
+omit the readiness row and retain the existing non-actionable TODO behavior.
+Readiness validation never selects a candidate, derives ordinary TODO fields,
+or changes the user's confirmation authority.
+
+This intake readiness is not runtime qualification. Before execution, run
+`tpo doctor <project>` to verify Hermes >= 0.19.0, installed project-skill parity,
+and the current manifest/legacy/invalid readiness counts. TPO later requires
+the selected TODO and Plan bytes to be tracked at the pinned base commit; the
+skill must not claim that a successful candidate check proves that
+Git authority or live Kanban state.
+
 ## Existing-value preservation
 
 Existing `Plan` and `Spec` values are retained unless the user explicitly

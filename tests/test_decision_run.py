@@ -57,7 +57,7 @@ def _prompt(tmp_path: Path) -> Path:
     return p
 
 def _ctx(
-    todos_md: str = "- [ ] **TODO-1: First**\n- [ ] **TODO-2: Second**",
+    todos_md: str = "- [ ] **TODO-1: One**\n- [ ] **TODO-2: Two**",
     in_flight: list[str] | None = None,
 ) -> SelectionContext:
     return SelectionContext(todos_md, in_flight or [], [], {}, "demo")
@@ -176,6 +176,71 @@ def test_picked_already_in_flight_is_rejected(tmp_path):
         )
     assert d.picked is None
     assert "pick_already_in_flight" in d.rationale
+
+
+def test_picked_must_belong_to_exact_compiled_eligible_set(tmp_path):
+    state = tmp_path / "state"
+    state.mkdir()
+    p = _prompt(tmp_path)
+    fake = AgentResult(
+        parsed={
+            "candidates_considered": ["TODO-1", "TODO-2"],
+            "picked": "TODO-2",
+            "rationale": "prefer two",
+            "blocked_reasons": {},
+            "in_flight": [],
+        },
+        prompt_sha="sha",
+    )
+    with patch("hermes_pipeline.decision.call_agent", return_value=fake):
+        decision = run_selection(
+            tick_id="01JELIGIBLE",
+            ctx=_ctx(),
+            cfg=_cfg(state, p),
+            eligible_todo_ids=frozenset({"TODO-1"}),
+        )
+
+    assert decision.picked is None
+    assert "pick_not_eligible" in decision.rationale
+
+
+def test_compiled_identity_overwrites_model_candidate_claims_and_filters_blocked_ids(
+    tmp_path,
+):
+    state = tmp_path / "state"
+    state.mkdir()
+    p = _prompt(tmp_path)
+    fake = AgentResult(
+        parsed={
+            "candidates_considered": ["TODO-999", "TODO-2"],
+            "picked": "TODO-1",
+            "rationale": "one is ready",
+            "blocked_reasons": {
+                "TODO-1": "not actually blocked",
+                "TODO-2": "excluded by compiler",
+                "TODO-999": "hallucinated",
+            },
+            "in_flight": [],
+        },
+        prompt_sha="sha",
+    )
+    context = _ctx(
+        "- [ ] **TODO-1: One**\n- [→] **TODO-3: Three**\n- [ ] **TODO-2: Two**"
+    )
+
+    with patch("hermes_pipeline.decision.call_agent", return_value=fake):
+        decision = run_selection(
+            tick_id="01JIDENTITY",
+            ctx=context,
+            cfg=_cfg(state, p),
+            eligible_todo_ids=frozenset({"TODO-1", "TODO-3"}),
+        )
+
+    assert decision.candidates_considered == ["TODO-1", "TODO-3"]
+    assert decision.blocked_reasons == {"TODO-1": "not actually blocked"}
+    persisted = (state / "decisions" / "01JIDENTITY.json").read_text()
+    assert "TODO-999" not in persisted
+    assert "TODO-2" not in persisted
 
 def test_api_error_persists_decision_with_picked_none(tmp_path):
     state = tmp_path / "state"; state.mkdir()

@@ -16,7 +16,7 @@ from pathlib import Path
 
 from .phases import Phase, load_phases
 
-CONTRACT_SCHEMA_VERSION = 2
+CONTRACT_SCHEMA_VERSION = 3
 CONTRACT_FILENAME = "pipeline.toml"
 DEFAULT_CAPABILITIES: tuple[str, ...] = ("Read", "Write", "Edit", "Bash")
 PROFILE_NAME_RE = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$")
@@ -51,6 +51,7 @@ class PipelineContract:
     # (e.g. "gstack", "agent-skills") — distinct from bundled_profile_dir()'s
     # unrelated "Hermes profile" (SOUL.md agent-identity) concept below.
     profile: str = "gstack"
+    review_assignee: str | None = None
 
 
 def contract_path(project_state: Path) -> Path:
@@ -79,6 +80,7 @@ def _render_default_contract_toml(profile: str = "gstack") -> str:
         "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         f"schema_version = {CONTRACT_SCHEMA_VERSION}\n"
         'assignee = "default"\n'
+        'review_assignee = "default"\n'
         f"capabilities = [{caps_toml}]\n"
         f'profile = "{profile}"\n'
     )
@@ -92,11 +94,13 @@ def _render_contract_toml(contract: PipelineContract) -> str:
     of hand-rolling string templates.
     """
     caps_toml = ", ".join(f'"{c}"' for c in contract.capabilities)
+    review_assignee = contract.review_assignee or contract.assignee
     return (
         "# Pipeline execution contract — read at tick start.\n"
         "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
         f"schema_version = {contract.schema_version}\n"
         f'assignee = "{contract.assignee}"\n'
+        f'review_assignee = "{review_assignee}"\n'
         f"capabilities = [{caps_toml}]\n"
         f'profile = "{contract.profile}"\n'
     )
@@ -141,7 +145,7 @@ def load_contract(project_state: Path) -> PipelineContract:
     schema_version = data["schema_version"]
     if not isinstance(schema_version, int):
         raise ContractSchemaError(f"{path}: 'schema_version' must be an integer")
-    if schema_version != CONTRACT_SCHEMA_VERSION:
+    if schema_version not in {2, CONTRACT_SCHEMA_VERSION}:
         raise ContractVersionMismatchError(
             f"{path} has schema_version={schema_version}, expected {CONTRACT_SCHEMA_VERSION} — "
             f"run `tpo init <project> --force` to regenerate, or edit it by hand"
@@ -150,6 +154,13 @@ def load_contract(project_state: Path) -> PipelineContract:
     assignee = data.get("assignee", "default")
     if not isinstance(assignee, str) or not assignee:
         raise ContractSchemaError(f"{path}: 'assignee' must be a non-empty string")
+    review_assignee = data.get("review_assignee")
+    if schema_version == 2:
+        review_assignee = None
+    elif not isinstance(review_assignee, str) or not review_assignee:
+        raise ContractSchemaError(
+            f"{path}: 'review_assignee' must be a non-empty string"
+        )
 
     capabilities = data.get("capabilities", list(DEFAULT_CAPABILITIES))
     if not isinstance(capabilities, list) or not all(isinstance(c, str) for c in capabilities):
@@ -167,6 +178,7 @@ def load_contract(project_state: Path) -> PipelineContract:
         assignee=assignee,
         capabilities=tuple(capabilities),
         profile=profile,
+        review_assignee=review_assignee,
     )
 
 

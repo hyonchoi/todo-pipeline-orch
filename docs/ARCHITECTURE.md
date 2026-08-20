@@ -14,16 +14,13 @@ Tick Loop (Hermes cron or manual)
 [Kanban Registration] -- Build a complete chain behind a registration barrier
     |
     v
-Phase 2: Autoplan --> Phase 3: Writing Plan --> Phase 4: Development
+[Compile tracked Plan] --> worker --> controller gate --> next worker
     |
     v
-Phase 5: Code Review (gstack /review in Claude Code or $review in Codex)
+[Independent review] --> review-fix --> validation --> re-review (bounded)
     |
     v
-Phase 6.1: CSO Security Review --> Phase 6.2: QA
-    |
-    v
-Phase 7: Document Release --> Phase 8: Finish Branch
+[Finish + TODO closeout] --> human merge gate
 ```
 
 ## Lane Structure
@@ -61,7 +58,9 @@ and releases it only after every task and the expected-phase sentinel are
 durable. Kanban status queries drive the tick loop.
 
 ### Lane D: Runner & Phases
-`phases.py`, `tick.py` — Phase execution via Hermes subprocess. Atomic-mkdir tick lock prevents duplicate ticks. Phase 5 (code review) is a plain kanban-dispatched phase like any other — the code-owned pre/post review lifecycle (`review_phase.py`) was removed in v0.5.6 as dead code; the rendered prompt instructs `/review` in Claude Code or `$review` in Codex, with no code-side snapshot/restore machinery.
+`phases.py`, `tick.py` — profile loading and one-active-run locking. TPO never
+invokes Claude or Codex directly: Hermes dispatches every assigned worker card.
+Review is reconciled from structured Kanban result metadata and Git facts.
 
 ### Lane E: Finish Branch
 Phase 8 runs `/ship` in Claude Code or `$ship` in Codex, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the default gstack phase profile.
@@ -135,16 +134,20 @@ selected entry's single `Plan:` path, verifies that it stays inside the project
 after symlink resolution, and requires a readable regular file. Failure records
 `failed_to_spawn` with `plan_validation_failed` and creates no kanban tasks.
 
-The `native-sdd` profile uses that gate and contains four phases: native
-subagent-driven TDD with one atomic commit per Plan task, independent code
-review, verified PR creation, and an unassigned terminal human-review gate.
+The `native-sdd` profile uses that gate. A manifest Plan compiles to ordered
+worker cards separated by unassigned controller gates. A manifest-free legacy
+Plan remains one development card and emits a warning. Independent review uses
+a distinct session; findings compile into at most five `review-fix` /
+fix-validation / re-review rounds. A clean result enables verified PR creation,
+deterministic TODO closeout, and an unassigned terminal human-review gate.
 Only the Hermes `ai-coding-agents` dispatcher skill is required; client-side
 gstack, superpowers, and agent-skills workflows are not part of this profile.
 
-Phase 5 (code review) is not special-cased in code — its prompt instructs the agent to run
-`/review` in Claude Code or `$review` in Codex, and the review lifecycle
-(pass/fail/revert) is entirely the agent's responsibility,
-not tracked via code-owned pre/post snapshots (that machinery was removed in v0.5.6; see Lane D).
+Kanban is authoritative for live state and `metadata.tpo_result`. Local files
+under `.hermes/runs/<tick-id>/` contain immutable registration and crash-recovery
+evidence only. TPO validates identity, commit topology, changed files, TDD
+records, acceptance statuses, and review findings before opening a controller
+gate.
 
 ## Data Flow
 
@@ -155,6 +158,7 @@ All pipeline state lives under `<project>/.hermes/`:
 <project>/.hermes/
 ├── decisions/                 # Immutable selection decisions (write-once)
 ├── outcomes/                  # Phase completion/failure sidecars
+├── runs/<tick-id>/registration.json # Pinned base, authority hashes, branch/worktree
 ├── ready_for_review/          # Legacy ship-gate sidecars
 ├── pipeline_branch.txt        # Branch currently waiting at PR handoff
 ├── phase_started/             # In-flight phase markers
@@ -192,7 +196,9 @@ All pipeline state lives under `<project>/.hermes/`:
    `gstack` profile ends at Phase 8 PR handoff. `native-sdd` keeps the same
    merge-aware Phase 8 handoff key and follows it with a terminal human gate.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
-3. **Code-owned review lifecycle removed (v0.5.6)** — Phase 5 was briefly code-owned (pre/post pytest, deterministic commit/restore) in v0.4+, but that machinery (`review_phase.py`) was dead code by v0.5.6 and was deleted. Phase 5 today is a plain kanban-dispatched phase: the prompt instructs `/review` in Claude Code or `$review` in Codex, and the agent owns the review lifecycle end-to-end.
+3. **Review reconciliation is metadata-driven** — TPO validates the independent
+   review card's bounded result and Git facts; it does not run a local
+   snapshot/restore review lifecycle.
 4. **Hermes as sole LLM surface** — All LLM traffic routes through `hermes chat -q`, not direct SDK calls.
 5. **Multi-project scan** — Each project has its own lock, so a slow or
    overlapping tick skips only that project while the scan continues.

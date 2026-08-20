@@ -112,7 +112,9 @@ Capabilities are computed from `phases.yaml` at write time, not hardcoded.
 
 ### `doctor`
 
-Verify a project's pipeline execution contract against `phases.yaml`.
+Verify a project's pipeline execution contract against `phases.yaml`, require
+Hermes >= 0.19.0, compare an installed project-scoped `todos-manager` skill to
+the bundled source, and report Plan readiness for Plan-required profiles.
 
 ```bash
 tpo doctor myproject
@@ -121,11 +123,30 @@ tpo doctor myproject
 **Exit codes:**
 | Code | Meaning |
 |------|---------|
-| 0 | Clean: schema version, assignee, capabilities all match |
-| 1 | Drift: contract missing capabilities required by phases.yaml |
-| 2 | Missing/invalid contract, unknown project/profile, or an `Unverified` profile/client prerequisite |
+| 0 | Clean; legacy Plan warnings may still be present |
+| 1 | Contract capability or installed-skill drift |
+| 2 | Missing/invalid contract, unsupported Hermes version, unknown project/profile, or an `Unverified` prerequisite |
 
 If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes profile exists.
+
+For `native-sdd`, readiness output counts `manifest`, `legacy`, and `invalid`
+Plan entries. A legacy entry is executable as one card but receives a warning.
+For an active registration, `doctor` compares the registered values with the
+actual repository, worktree, branch, base commit, and TODO/Plan bytes read from
+that immutable base. It reports the current head and clean/dirty lifecycle
+state separately, so a valid later implementation or TODO-closeout commit is
+not misreported as authority drift.
+
+### `plan validate`
+
+Validate a TODO's tracked Plan attachment and optional manifest:
+
+```bash
+tpo plan validate myproject --todo TODO-42
+tpo plan validate myproject --todo TODO-42 --require-manifest
+```
+
+See the [Plan template](templates/tpo-plan.md).
 
 ---
 

@@ -7,7 +7,9 @@ import pytest
 
 from hermes_pipeline.todos_md import (
     TodoPlanValidationError,
+    compile_eligible_todos,
     find_todo_fields,
+    parse_todo_entries,
     resolve_todo_plan,
     todo_entry_ids,
 )
@@ -17,6 +19,145 @@ def _write(tmp_path: Path, content: str) -> Path:
     p = tmp_path / "TODOS.md"
     p.write_text(content)
     return p
+
+
+def test_parse_todo_entries_uses_canonical_boundaries_and_shares_fields():
+    text = """\
+# TODOS
+
+- [ ] **TODO-1: First** — summary mentioning TODO-999
+  - **Spec:** docs/spec.md
+  - **Reference:** docs/a.md, docs/b.md
+  - **Depends on:** `TODO-2` (foundation complete)
+  - nested fake: - [ ] **TODO-98: Not an entry**
+- [x] **TODO-2: Finished**
+- [→] **TODO-3: Active candidate**
+"""
+
+    entries = parse_todo_entries(text)
+
+    assert [(entry.todo_id, entry.status, entry.title) for entry in entries] == [
+        ("TODO-1", " ", "First"),
+        ("TODO-2", "x", "Finished"),
+        ("TODO-3", "→", "Active candidate"),
+    ]
+    assert entries[0].dependencies == ("TODO-2",)
+    assert entries[0].spec == "docs/spec.md"
+    assert entries[0].references == ("docs/a.md", "docs/b.md")
+
+
+def test_parse_todo_entries_limits_canonical_document_to_entries_section():
+    entries = parse_todo_entries(
+        "# TODOS\n\n## Entries\n\n"
+        "- [ ] **TODO-1: Real**\n  - **What:** work\n\n"
+        "## Entry Schema\n\n- [ ] **TODO-999: Example only**\n"
+    )
+
+    assert [entry.todo_id for entry in entries] == ["TODO-1"]
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("`TODO-2`, `TODO-3`", ("TODO-2", "TODO-3")),
+        ("`TODO-40` (design review finalized)", ("TODO-40",)),
+        ("(none)", ()),
+    ],
+)
+def test_parse_todo_entries_accepts_canonical_dependency_syntax(value, expected):
+    [entry] = parse_todo_entries(
+        f"- [ ] **TODO-1: Work**\n  - **Depends on:** {value}\n"
+    )
+
+    assert entry.dependencies == expected
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "TODO-2",
+        "`TODO-2` trailing garbage",
+        "`TODO-2`, nope",
+        "(none), `TODO-2`",
+        "`TODO-2` (unterminated",
+    ],
+)
+def test_parse_todo_entries_rejects_malformed_dependency_values(value):
+    [entry] = parse_todo_entries(
+        f"- [ ] **TODO-1: Work**\n  - **Depends on:** {value}\n"
+    )
+
+    assert entry.dependencies is None
+
+
+def test_compile_eligible_todos_filters_status_dependencies_flight_and_plans(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "manifest.md").write_text(
+        '# Plan\n\n```json tpo-plan\n'
+        '{"schema_version":1,"todo_id":"TODO-1","tasks":[{"id":"task-1",'
+        '"title":"Do","instructions":"Do it","acceptance_criteria":["Works"],'
+        '"verification":["uv run pytest"],"commit_message":"feat: do"}]}\n```\n'
+    )
+    (docs / "legacy.md").write_text("# Legacy plan\n")
+    (docs / "wrong.md").write_text(
+        '```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-999","tasks":[]}\n```\n'
+    )
+    todos = _write(
+        tmp_path,
+        "# TODOS\n\n"
+        "- [ ] **TODO-1: Manifest**\n  - **Plan:** docs/manifest.md\n  - **Depends on:** `TODO-8`, `TODO-9`\n"
+        "- [→] **TODO-2: Legacy**\n  - **Plan:** docs/legacy.md\n"
+        "- [ ] **TODO-3: In flight**\n  - **Plan:** docs/legacy.md\n"
+        "- [x] **TODO-4: Complete**\n  - **Plan:** docs/legacy.md\n"
+        "- [~] **TODO-5: On hold**\n  - **Plan:** docs/legacy.md\n"
+        "- [ ] **TODO-6: Missing dependency**\n  - **Plan:** docs/legacy.md\n  - **Depends on:** `TODO-404`\n"
+        "- [ ] **TODO-7: Invalid dependency**\n  - **Plan:** docs/legacy.md\n  - **Depends on:** not-a-todo\n"
+        "- [x] **TODO-8: Completed dependency**\n"
+        "- [ ] **TODO-10: Unsafe plan**\n  - **Plan:** ../outside.md\n"
+        "- [ ] **TODO-11: Invalid manifest**\n  - **Plan:** docs/wrong.md\n",
+    )
+    (tmp_path / "TODOS-archive.md").write_text(
+        "# Archive\n\n- [~] **TODO-9: Archived dependency**\n"
+    )
+
+    result = compile_eligible_todos(
+        tmp_path, todos, in_flight={"TODO-3"}, requires_plan=True
+    )
+
+    assert [candidate.entry.todo_id for candidate in result.candidates] == [
+        "TODO-1",
+        "TODO-2",
+    ]
+    assert [candidate.plan_kind for candidate in result.candidates] == [
+        "manifest",
+        "legacy",
+    ]
+    assert result.blocked_reasons == {
+        "TODO-3": "in_flight",
+        "TODO-4": "status_complete",
+        "TODO-5": "status_on_hold",
+        "TODO-6": "dependency_missing:TODO-404",
+        "TODO-7": "dependency_invalid",
+        "TODO-8": "status_complete",
+        "TODO-10": "plan_invalid:outside_repository",
+        "TODO-11": "plan_invalid:todo_id_mismatch",
+    }
+
+
+def test_compile_eligible_todos_rejects_non_utf8_plan(tmp_path):
+    (tmp_path / "plan.md").write_bytes(b"\xff\xfe")
+    todos = _write(
+        tmp_path,
+        "# TODOS\n\n- [ ] **TODO-1: Binary plan**\n  - **Plan:** plan.md\n",
+    )
+
+    result = compile_eligible_todos(
+        tmp_path, todos, in_flight=set(), requires_plan=True
+    )
+
+    assert result.candidates == ()
+    assert result.blocked_reasons == {"TODO-1": "plan_invalid:unreadable"}
 
 
 @pytest.mark.parametrize("status", [" ", "x", "→", "~"])

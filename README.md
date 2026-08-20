@@ -34,7 +34,11 @@ uv run tpo --version
 
 ## Prerequisite setup
 
-For pipeline phase execution, make sure the Hermes CLI is installed, on `PATH`, and has an agent runtime/profile available. Provider authentication is model-specific and is not a baseline `tpo` prerequisite.
+For pipeline execution, install **Hermes >= 0.19.0** on `PATH` and configure an
+agent runtime/profile. Provider authentication is model-specific and is not a
+baseline `tpo` prerequisite. `tpo doctor <project>` verifies the version floor,
+profile prerequisites, project-scoped `todos-manager` parity when installed,
+and Plan readiness for Plan-required profiles.
 
 Install the bundled pipeline profile when you want unattended pipeline phase execution:
 
@@ -100,10 +104,13 @@ local skill registry; remote worker prerequisites remain operator-provisioned.
 See [agent client release qualification](docs/release-qualification-agent-clients.md)
 for the evidence required to advertise a `Conditional` pair.
 
-Use `tpo init <project> --profile native-sdd` for an implementation-only
-workflow that requires the selected TODO's `Plan:` file, runs one native
-subagent-driven TDD task per commit, performs an independent review, opens a
-pull request, and stops at a human gate. It does not require gstack,
+Use `tpo init <project> --profile native-sdd` for the compiled workflow:
+Hermes cron invokes TPO, TPO selects an eligible TODO and pins its tracked Plan
+in a linked worktree, then Hermes Kanban dispatches workers. A `tpo-plan`
+manifest produces one visible worker card and controller gate per ordered task;
+a legacy Markdown Plan remains compatible as one development card with a
+doctor warning. Independent review, bounded review-fix rounds, PR closeout, and
+the human merge gate remain visible on the board. It does not require gstack,
 superpowers, or client-side workflow skills. See the
 [native SDD profile guide](docs/howto-native-sdd-profile.md).
 

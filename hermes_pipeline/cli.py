@@ -9,9 +9,11 @@ from __future__ import annotations
 import argparse
 import errno
 import fcntl
+import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import subprocess as _cli_sp
@@ -49,6 +51,181 @@ vlog = logging.getLogger("pipeline.verbose")
 # (kanban registration, outcome observation) so the selection call is bounded
 # strictly below the per-project lock's stale-reclaim window.
 _SELECTION_TIMEOUT_RESERVE_S = 30
+_MINIMUM_HERMES_VERSION = (0, 19, 0)
+
+
+def _doctor_hermes_version() -> tuple[bool, str]:
+    """Return whether the locally executable Hermes satisfies TPO's API floor."""
+    try:
+        result = _cli_sp.run(
+            ["hermes", "--version"], text=True, capture_output=True
+        )
+    except FileNotFoundError:
+        return False, "Hermes is not installed or not on PATH"
+    if result.returncode != 0:
+        return False, "Hermes --version failed"
+    output = f"{result.stdout}\n{result.stderr}"
+    match = re.search(r"\bv?(\d+)\.(\d+)\.(\d+)\b", output)
+    if match is None:
+        return False, "Hermes version output was not recognized"
+    version = tuple(int(part) for part in match.groups())
+    rendered = ".".join(str(part) for part in version)
+    if version < _MINIMUM_HERMES_VERSION:
+        return False, f"Hermes {rendered} is older than required 0.19.0"
+    return True, rendered
+
+
+def _directory_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
+        digest.update(item.relative_to(path).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(item.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def _doctor_skill_parity(project_dir: Path, prompt_client: str) -> tuple[bool, str | None]:
+    """Compare an installed project skill when present; absence remains optional."""
+    from .contract import _resolve_bundled_dir
+
+    dirname = _SKILLS_INSTALL_TARGET_DIRNAMES[prompt_client]
+    installed = project_dir / dirname / "todos-manager"
+    if not installed.exists():
+        return True, None
+    bundled = _resolve_bundled_dir("skills", "todos-manager")
+    try:
+        matches = installed.is_dir() and _directory_digest(installed) == _directory_digest(bundled)
+    except OSError as exc:
+        return False, f"could not read installed skill at {installed}: {exc}"
+    if matches:
+        return True, f"installed todos-manager matches bundled source at {installed}"
+    return False, f"installed todos-manager differs from bundled source at {installed}"
+
+
+def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
+    """Verify immutable base authority and report mutable lifecycle separately."""
+    tick_path = state_dir / CURRENT_TICK_ID_FILE
+    if not tick_path.is_file():
+        return True
+    try:
+        tick_id = tick_path.read_text(encoding="utf-8").strip()
+        registration = json.loads(
+            (state_dir / "runs" / tick_id / "registration.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        worktree = Path(registration["worktree"])
+        actual: dict[str, str] = {"worktree": str(worktree.resolve())}
+        branch = _cli_sp.run(
+            ["git", "branch", "--show-current"],
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+        )
+        actual["branch"] = (
+            branch.stdout.strip() if branch.returncode == 0 else "<unavailable>"
+        )
+        common = _cli_sp.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+        )
+        actual["repository"] = (
+            str(Path(common.stdout.strip()).resolve().parent)
+            if common.returncode == 0
+            else "<unavailable>"
+        )
+        base = _cli_sp.run(
+            ["git", "rev-parse", f"{registration['base_sha']}^{{commit}}"],
+            cwd=worktree,
+            text=True,
+            capture_output=True,
+        )
+        actual["base_sha"] = (
+            base.stdout.strip() if base.returncode == 0 else "<unavailable>"
+        )
+        plan_at_base = _cli_sp.run(
+            ["git", "show", f"{registration['base_sha']}:{registration['plan_path']}"],
+            cwd=worktree,
+            capture_output=True,
+        )
+        plan_bytes = plan_at_base.stdout
+        if isinstance(plan_bytes, str):
+            plan_bytes = plan_bytes.encode()
+        actual["plan_hash"] = (
+            hashlib.sha256(plan_bytes).hexdigest()
+            if plan_at_base.returncode == 0
+            else "<missing>"
+        )
+        from .todos_md import parse_todo_entries
+
+        todos_at_base = _cli_sp.run(
+            ["git", "show", f"{registration['base_sha']}:TODOS.md"],
+            cwd=worktree,
+            capture_output=True,
+        )
+        todos_bytes = todos_at_base.stdout
+        if isinstance(todos_bytes, bytes):
+            todos_text = todos_bytes.decode("utf-8")
+        else:
+            todos_text = todos_bytes
+        entries = parse_todo_entries(todos_text if todos_at_base.returncode == 0 else "")
+        selected = next(
+            (entry for entry in entries if entry.todo_id == registration["todo_id"]),
+            None,
+        )
+        actual["selected_entry_hash"] = (
+            hashlib.sha256(selected.raw.encode()).hexdigest()
+            if selected is not None
+            else "<missing>"
+        )
+    except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
+        print("REGISTRATION DRIFT: active registration could not be inspected")
+        return False
+
+    expected = {
+        "repository": str(Path(registration["repository"]).resolve()),
+        "worktree": str(Path(registration["worktree"]).resolve()),
+        "branch": registration["branch"],
+        "base_sha": registration["base_sha"],
+        "plan_hash": registration["plan_hash"],
+        "selected_entry_hash": registration["selected_entry_hash"],
+    }
+    print(
+        "Registered authority: "
+        + " ".join(
+            f"{field} expected={expected[field]} actual={actual[field]}"
+            for field in expected
+        )
+    )
+    head = _cli_sp.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+    )
+    status = _cli_sp.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=worktree,
+        text=True,
+        capture_output=True,
+    )
+    lifecycle_head = head.stdout.strip() if head.returncode == 0 else "<unavailable>"
+    lifecycle_state = (
+        "dirty" if status.returncode != 0 or status.stdout else "clean"
+    )
+    print(f"Current lifecycle: head_sha={lifecycle_head} worktree={lifecycle_state}")
+    mismatches = [field for field in expected if expected[field] != actual[field]]
+    for field in mismatches:
+        print(
+            f"REGISTRATION DRIFT: {field} expected={expected[field]} "
+            f"actual={actual[field]}"
+        )
+    return not mismatches
+
+
 def _resolve_project_dir(config: Config, slug: str) -> Path | None:
     """Validate *slug* and resolve it to an existing project directory.
 
@@ -282,6 +459,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tick_parser.set_defaults(func=_cmd_tick)
 
+    todos_parser = subparsers.add_parser(
+        "todos", help="Deterministic TODOS.md mutation backends for todos-manager"
+    )
+    todos_subparsers = todos_parser.add_subparsers(dest="todos_command", required=True)
+    complete_parser = todos_subparsers.add_parser(
+        "complete", help="Mark one canonical TODO complete after verified PR handoff"
+    )
+    complete_parser.add_argument("--project-root", type=Path, default=Path.cwd())
+    complete_parser.add_argument("--todo", required=True)
+    complete_parser.add_argument("--pr", required=True, type=int)
+    complete_parser.add_argument("--date", required=True)
+    complete_parser.set_defaults(func=_cmd_todos_complete)
+
     # recover-counter: Scan TODOS.md and initialize counter file
     rc_parser = subparsers.add_parser(
         "recover-counter",
@@ -321,6 +511,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor_parser.add_argument("project", help="Project name")
     doctor_parser.set_defaults(func=_cmd_doctor)
+
+    # plan validate: validate the selected TODO's attached Plan manifest
+    plan_parser = subparsers.add_parser("plan", help="Inspect and validate TODO Plans")
+    plan_subparsers = plan_parser.add_subparsers(dest="plan_command", required=True)
+    plan_validate_parser = plan_subparsers.add_parser(
+        "validate", help="Validate a TODO's attached Plan manifest"
+    )
+    plan_validate_parser.add_argument("project", help="Project name")
+    plan_validate_parser.add_argument(
+        "--todo", required=True, type=_parse_todo_id_flag, help="TODO to validate"
+    )
+    plan_validate_parser.add_argument(
+        "--plan",
+        help="Validate this repository-relative Plan candidate before TODO persistence",
+    )
+    plan_validate_parser.add_argument(
+        "--require-manifest",
+        action="store_true",
+        help="Reject a valid legacy Plan that has no tpo-plan block",
+    )
+    plan_validate_parser.set_defaults(func=_cmd_plan_validate)
 
     # install-profile: Install the bundled pipeline Hermes profile
     install_profile_parser = subparsers.add_parser(
@@ -1163,6 +1374,52 @@ def _tick_project(
                 return
             pr_handoff_resolved = True
 
+        if not pr_handoff_resolved:
+            from .kanban_tasks import reconcile_plan_task_results
+
+            if not reconcile_plan_task_results(
+                project_dir=project_dir,
+                state_dir=project_state,
+                tenant=project_slug,
+                tick_id=prior_tick_id,
+            ):
+                log.info(
+                    "project %s: prior tick %s result reconciliation is blocked, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
+                return
+
+            from .review_reconciliation import reconcile_reviews
+
+            if not reconcile_reviews(
+                project_dir=project_dir,
+                state_dir=project_state,
+                tenant=project_slug,
+                tick_id=prior_tick_id,
+            ):
+                log.info(
+                    "project %s: prior tick %s review reconciliation is blocked, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
+                return
+
+            from .todos_completion import reconcile_todo_completion
+
+            if not reconcile_todo_completion(
+                project_dir=project_dir,
+                state_dir=project_state,
+                tenant=project_slug,
+                tick_id=prior_tick_id,
+            ):
+                log.info(
+                    "project %s: prior tick %s delivery reconciliation is blocked, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
+                return
+
         if not pr_handoff_resolved and not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
         ):
@@ -1228,6 +1485,17 @@ def _tick_project(
         project_slug=project_slug,
         max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
     )
+    eligibility = None
+    if phase_profile.requires_plan:
+        from .todos_md import compile_eligible_todos
+
+        eligibility = compile_eligible_todos(
+            project_dir,
+            todos_path,
+            in_flight=set(ctx.in_flight),
+            requires_plan=True,
+        )
+        ctx = replace(ctx, todos_md=eligibility.selection_markdown)
 
     # Build full config for selection
     from .config import FullConfig, SelectionConfig
@@ -1266,12 +1534,27 @@ def _tick_project(
         min(MAX_TIMEOUT_SECONDS, budget_s - _SELECTION_TIMEOUT_RESERVE_S),
     )
 
-    decision = run_selection(
-        tick_id=tick_id,
-        ctx=ctx,
-        cfg=full_cfg,
-        timeout=selection_timeout_s,
-    )
+    if eligibility is not None and not eligibility.candidates:
+        from .decision import record_no_candidates
+
+        decision = record_no_candidates(
+            tick_id=tick_id,
+            ctx=ctx,
+            cfg=full_cfg,
+            blocked_reasons=eligibility.blocked_reasons,
+        )
+    else:
+        decision = run_selection(
+            tick_id=tick_id,
+            ctx=ctx,
+            cfg=full_cfg,
+            timeout=selection_timeout_s,
+            **(
+                {"eligible_todo_ids": eligibility.todo_ids}
+                if eligibility is not None
+                else {}
+            ),
+        )
     picked = decision.picked
 
     vlog.info(
@@ -1358,6 +1641,7 @@ def _tick_project(
             phases_path=phases_path,
             prompt_client=config.prompt_client,
             plan_path=plan_path,
+            project_dir=project_dir,
         )
     except PhasePromptRenderError as exc:
         _record_failed_to_spawn(
@@ -1375,6 +1659,44 @@ def _tick_project(
         )
         return
 
+    registration = None
+    if phase_profile.requires_plan:
+        from .run_registration import RunRegistrationError, register_pinned_run
+
+        selected = next(
+            candidate.entry
+            for candidate in eligibility.candidates
+            if candidate.entry.todo_id == picked
+        )
+        try:
+            registration = register_pinned_run(
+                project_dir=project_dir,
+                state_dir=project_state,
+                tick_id=tick_id,
+                selected_entry=selected,
+                plan_path=plan_path,
+                profile=contract.profile,
+                prompt_client=config.prompt_client,
+                assignee=contract.assignee,
+                review_assignee=getattr(contract, "review_assignee", None),
+                step_keys=(phase.phase_key for phase in prepared),
+            )
+        except RunRegistrationError as exc:
+            _record_failed_to_spawn(
+                project_state,
+                tick_id,
+                picked,
+                exc,
+                reason="run_registration_failed",
+            )
+            cb.observe(picked=None, counts_as_no_progress=True)
+            log.error(
+                "project %s: pinned run registration failed: code=%s",
+                project_slug,
+                exc.code,
+            )
+            return
+
     # Step 5: Persist immediately before the first Hermes mutation. The
     # tick_started sentinel preserves the existing registration-crash recovery.
     _persist_tick_id(project_state, tick_id)
@@ -1385,7 +1707,7 @@ def _tick_project(
             prepared=prepared,
             tick_id=tick_id,
             board_slug=project_slug,
-            project_dir=project_dir,
+            project_dir=registration.worktree if registration else project_dir,
             assignee=contract.assignee,
         )
         log.info(
@@ -1412,6 +1734,22 @@ def _tick_project(
 
     # Observe circuit breaker
     cb.observe(picked=picked, counts_as_no_progress=False)
+
+
+def _cmd_todos_complete(args, config: Config | None = None) -> int:
+    """Machine backend used by the bundled todos-manager completion workflow."""
+    from .todos_md import TodoCompletionError, complete_todo_file
+
+    path = args.project_root.resolve() / "TODOS.md"
+    try:
+        changed = complete_todo_file(
+            path, args.todo.upper(), pr_number=args.pr, date=args.date
+        )
+    except (OSError, UnicodeError, TodoCompletionError) as exc:
+        print(f"Error: {path}: {exc}", file=sys.stderr)
+        return 1
+    print("completed" if changed else "already complete")
+    return 0
 
 
 def _cmd_recover_counter(args, config: Config) -> int:
@@ -1516,6 +1854,49 @@ def _cmd_init(args, config: Config) -> int:
     return 0
 
 
+def _cmd_plan_validate(args, config: Config) -> int:
+    """Validate the Plan attachment and optional manifest for one TODO."""
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+    todo_id = f"TODO-{args.todo}"
+    from .plan_manifest import PlanManifestValidationError, validate_plan_candidate
+    from .todos_md import TodoPlanValidationError, resolve_todo_plan
+
+    try:
+        relative_plan = getattr(args, "plan", None)
+        if relative_plan is None:
+            relative_plan = resolve_todo_plan(
+                project_dir,
+                project_dir / "TODOS.md",
+                todo_id,
+            )
+        manifest = validate_plan_candidate(
+            project_dir,
+            relative_plan,
+            expected_todo_id=todo_id,
+        )
+    except TodoPlanValidationError as exc:
+        print(f"Plan validation failed for {todo_id}: attachment_{exc.code}")
+        return 1
+    except (OSError, UnicodeError):
+        print(f"Plan validation failed for {todo_id}: unreadable")
+        return 1
+    except PlanManifestValidationError as exc:
+        print(f"Plan validation failed for {todo_id}: {exc.code}")
+        return 1
+
+    if manifest is None:
+        if args.require_manifest:
+            print(f"Plan validation failed for {todo_id}: --require-manifest requires a tpo-plan block")
+            return 1
+        print(f"Plan is valid legacy Markdown for {todo_id}; warning: no tpo-plan manifest")
+        return 0
+    suffix = "task" if len(manifest.tasks) == 1 else "tasks"
+    print(f"Plan has a valid manifest for {todo_id}: {len(manifest.tasks)} {suffix}")
+    return 0
+
+
 def _cmd_doctor(args, config: Config) -> int:
     """Handle 'doctor' subcommand — verify the pipeline execution contract.
 
@@ -1548,10 +1929,15 @@ def _cmd_doctor(args, config: Config) -> int:
         return 2
 
     # Load phases and prerequisite metadata from the selected profile.
-    from .phases import load_profile_prerequisites, resolve_profile_phases_path
+    from .phases import (
+        load_phase_profile,
+        load_profile_prerequisites,
+        resolve_profile_phases_path,
+    )
 
     try:
         profile_path = resolve_profile_phases_path(contract.profile)
+        phase_profile = load_phase_profile(profile_path)
         phases = load_phases(profile_path)
         prerequisites = load_profile_prerequisites(contract.profile)
     except ContractSchemaError as e:
@@ -1660,6 +2046,56 @@ def _cmd_doctor(args, config: Config) -> int:
             f"{', '.join(unverified)}"
         )
         return 2
+
+    version_ok, version_detail = _doctor_hermes_version()
+    if not version_ok:
+        print(f"UNSUPPORTED: {version_detail}")
+        print("Fix: install Hermes >= 0.19.0 and rerun `tpo doctor`.")
+        return 2
+    print(f"Hermes version: {version_detail} (minimum 0.19.0)")
+
+    parity_ok, parity_detail = _doctor_skill_parity(project_dir, config.prompt_client)
+    if not parity_ok:
+        print(f"SKILL DRIFT: {parity_detail}")
+        print(
+            f"Fix: run `tpo skills install --scope project --target "
+            f"{config.prompt_client} --reinstall` after reviewing local changes."
+        )
+        return 1
+    if parity_detail is not None:
+        print(f"Skill parity: {parity_detail}")
+
+    if phase_profile.requires_plan:
+        from .todos_md import compile_eligible_todos, parse_todo_entries
+
+        todos_path = project_dir / "TODOS.md"
+        try:
+            entries = parse_todo_entries(todos_path.read_text(encoding="utf-8"))
+            readiness = compile_eligible_todos(
+                project_dir, todos_path, in_flight=frozenset(), requires_plan=True
+            )
+        except (OSError, UnicodeError) as exc:
+            print(f"INVALID: cannot inspect Plan readiness: {exc}")
+            return 2
+        manifest = sum(candidate.plan_kind == "manifest" for candidate in readiness.candidates)
+        legacy = sum(candidate.plan_kind == "legacy" for candidate in readiness.candidates)
+        plan_invalid = sum(
+            reason.startswith("plan_invalid:")
+            for reason in readiness.blocked_reasons.values()
+        )
+        print(
+            f"Plan readiness: manifest={manifest} legacy={legacy} "
+            f"invalid={plan_invalid} entries={len(entries)}"
+        )
+        if legacy:
+            print(
+                "WARNING: legacy Plan Markdown remains executable as one development "
+                "card; add a tpo-plan manifest for visible task compilation."
+            )
+
+    if not _doctor_active_registration(project_dir, project_state):
+        print("Fix: preserve the run and resolve registration drift manually.")
+        return 1
 
     print(
         f"OK: schema_version={contract.schema_version} assignee={contract.assignee} "
@@ -2353,7 +2789,7 @@ def main(argv: list[str] | None = None) -> int:
     # Bootstrap subcommands (file-copy only) don't need pipeline runtime
     # config (state dir, projects dir) — skip Config.from_env()
     # so they work even when that env isn't configured yet.
-    if getattr(args, "command", None) in ("skills", "config"):
+    if getattr(args, "command", None) in ("skills", "config", "todos"):
         if hasattr(args, "func"):
             return args.func(args, None)
         parser.parse_args([*remaining, "--help"])

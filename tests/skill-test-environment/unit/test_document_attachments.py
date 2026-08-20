@@ -10,6 +10,7 @@ from tests.skill_test_environment.skill_logic import (
     AttachmentSelection,
     AttachmentValidationError,
     AttachmentWorkflow,
+    PlanReadiness,
     apply_attachment_selection_to_todo,
     audit_attachment_fields,
     audit_todo_markdown,
@@ -50,6 +51,57 @@ def test_packaged_markdown_policy_drives_the_harness():
     }
     assert policy["sources"] == ["explicit", "git changed or untracked", "bounded search"]
     assert policy["relevance"] == ["explicit", "todo-id", "close-scope", "concrete-target-overlap"]
+
+
+@pytest.mark.parametrize(
+    ("document", "state"),
+    [
+        (
+            "# Plan\n```json tpo-plan\n"
+            '{"schema_version":1,"todo_id":"TODO-42","tasks":['
+            '{"id":"task-1","title":"Work","instructions":"Do work",'
+            '"acceptance_criteria":["It works"],'
+            '"verification":["uv run pytest"],'
+            '"commit_message":"feat: work"}]}\n```\n',
+            "manifest",
+        ),
+        ("# Human-authored execution plan\n\n1. Do the work.\n", "legacy"),
+        (
+            "```json tpo-plan\n"
+            '{"schema_version":1,"todo_id":"TODO-99","tasks":[]}\n```\n',
+            "invalid",
+        ),
+    ],
+)
+def test_selected_plan_readiness_uses_production_validator(
+    tmp_path, document, state
+):
+    _write(tmp_path, "docs/plan.md", document)
+    workflow = AttachmentWorkflow(tmp_path, command="add", todo_id="TODO-42")
+    workflow.select_manual("Plan", "docs/plan.md")
+
+    readiness = workflow.evaluate_plan_readiness(research_completed=True)
+
+    assert isinstance(readiness, PlanReadiness)
+    assert readiness.state == state
+    assert f"Plan readiness: {state}" in workflow.render_synthesis(readiness)
+    assert f"Plan readiness: {state}" in workflow.render_preview(readiness)
+
+
+def test_plan_readiness_cannot_replace_or_precede_ai_research(tmp_path):
+    _write(tmp_path, "docs/plan.md", "# Legacy plan\n")
+    workflow = AttachmentWorkflow(tmp_path, command="add", todo_id="TODO-42")
+    workflow.select_manual("Plan", "docs/plan.md")
+
+    with pytest.raises(RuntimeError, match="AI research"):
+        workflow.evaluate_plan_readiness(research_completed=False)
+
+    assert workflow.selection.plan == "docs/plan.md"
+    readiness = workflow.evaluate_plan_readiness(research_completed=True)
+    synthesis = "Why: researched rationale\nWhat: researched scope"
+    assert workflow.render_synthesis(
+        readiness, research_synthesis=synthesis
+    ).startswith(synthesis)
 
 
 @pytest.mark.parametrize(
