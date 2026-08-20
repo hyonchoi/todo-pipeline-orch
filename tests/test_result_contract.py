@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,7 @@ from hermes_pipeline.result_contract import (
     load_validated_registration,
     parse_worker_result,
     sanitize_result_text,
+    verify_read_only_review,
     verify_worker_git_result,
     verify_worker_git_topology,
 )
@@ -169,6 +171,142 @@ def test_parse_rejects_secrets_and_controls_at_any_metadata_depth(path):
             step_key="plan:task-1",
             acceptance_criteria=("Observable criterion",),
         )
+
+
+def _parse_review(review):
+    result = _result(
+        step_key="review:initial",
+        git={
+            "expected_parent_sha": "a" * 40,
+            "resulting_head_sha": "a" * 40,
+            "task_commit_sha": "a" * 40,
+            "changed_files": [],
+        },
+        acceptance=[],
+        review=review,
+    )
+    return parse_worker_result(
+        {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]},
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="review:initial",
+        acceptance_criteria=(),
+        allow_no_changes=True,
+    )
+
+
+def test_review_evidence_preserves_bounded_structured_findings():
+    finding = {
+        "priority": "P2",
+        "location": "src/example.py:12",
+        "failure_scenario": "The invalid input reaches the unsafe branch.",
+        "recommendation": "Validate the input before dispatch.",
+    }
+    parsed = _parse_review({"verdict": "findings", "findings": [finding]})
+    assert parsed.review.verdict == "findings"
+    assert parsed.review.findings == (finding,)
+
+
+@pytest.mark.parametrize(
+    "review",
+    [
+        pytest.param([], id="not-object"),
+        pytest.param({"verdict": "clean", "findings": [], "extra": True}, id="unknown-key"),
+        pytest.param({"verdict": "maybe", "findings": []}, id="bad-verdict"),
+        pytest.param({"verdict": "clean", "findings": [{}]}, id="clean-with-finding"),
+        pytest.param({"verdict": "findings", "findings": []}, id="findings-empty"),
+        pytest.param(
+            {
+                "verdict": "findings",
+                "findings": [
+                    {
+                        "priority": "P4",
+                        "location": "file.py:1",
+                        "failure_scenario": "failure",
+                        "recommendation": "fix",
+                    }
+                ],
+            },
+            id="bad-priority",
+        ),
+    ],
+)
+def test_review_evidence_rejects_ambiguous_or_unbounded_shapes(review):
+    with pytest.raises(ResultContractError, match="invalid_review"):
+        _parse_review(review)
+
+
+def test_read_only_review_requires_evidence_pinned_head_and_clean_worktree(
+    tmp_path, mocker
+):
+    clean = _parse_review({"verdict": "clean", "findings": []})
+    mocker.patch(
+        "hermes_pipeline.result_contract.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout=""),
+    )
+    verify_read_only_review(tmp_path, clean, head_sha="a" * 40)
+
+    dirty = mocker.patch("hermes_pipeline.result_contract.subprocess.run")
+    dirty.return_value = SimpleNamespace(returncode=0, stdout="?? untracked.txt\n")
+    with pytest.raises(ResultContractError, match="review_dirty_worktree"):
+        verify_read_only_review(tmp_path, clean, head_sha="a" * 40)
+
+    changed = SimpleNamespace(
+        review=clean.review,
+        git=SimpleNamespace(
+            expected_parent_sha="a" * 40,
+            resulting_head_sha="a" * 40,
+            task_commit_sha="a" * 40,
+            changed_files=("src/example.py",),
+        ),
+    )
+    with pytest.raises(ResultContractError, match="review_changed_head"):
+        verify_read_only_review(tmp_path, changed, head_sha="a" * 40)
+
+
+def test_delivery_evidence_accepts_only_successful_checks_and_exact_pr_identity():
+    delivery = {
+        "pr_url": "https://github.com/acme/repo/pull/7",
+        "branch": "feat/native",
+        "head_sha": "b" * 40,
+        "checks": [{"command": "uv run pytest", "exit_code": 0}],
+    }
+    result = _result(delivery=delivery)
+    parsed = parse_worker_result(
+        {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]},
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+    assert parsed.delivery.pr_url.endswith("/pull/7")
+    assert parsed.delivery.checks[0].exit_code == 0
+
+    for mutation in (
+        lambda value: value.update(pr_url="https://github.com/acme/repo/issues/7"),
+        lambda value: value.update(head_sha="short"),
+        lambda value: value.update(checks=[]),
+        lambda value: value.update(
+            checks=[{"command": "uv run pytest", "exit_code": 1}]
+        ),
+    ):
+        invalid = dict(delivery)
+        mutation(invalid)
+        with pytest.raises(ResultContractError, match="invalid_delivery"):
+            parse_worker_result(
+                {
+                    "runs": [
+                        {
+                            "status": "succeeded",
+                            "metadata": {"tpo_result": _result(delivery=invalid)},
+                        }
+                    ]
+                },
+                tick_id="01TICK",
+                todo_id="TODO-42",
+                step_key="plan:task-1",
+                acceptance_criteria=("Observable criterion",),
+            )
 
 
 def _git(cwd: Path, *args: str) -> str:
