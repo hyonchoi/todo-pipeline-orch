@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.9.0
+
+### Minor Changes
+
+- Compile tracked Plan manifests into visible Kanban tasks with validated review, delivery, and recovery gates.
+
+### Patch Changes
+
+- Prevent nonexistent TODO selection and keep agent/provider payloads out of logs and persisted error records.
+
+- Make todos-manager author validated manifests for actionable Plans.
+
 ## 0.8.0
 
 ### Minor Changes
