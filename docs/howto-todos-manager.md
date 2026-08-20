@@ -1,14 +1,15 @@
 # How to manage TODOS.md with the todos-manager skill
 
-This guide covers the seven subcommands of the `todos-manager` skill for adding, converting, auditing, listing, archiving, and revising TODOS.md entries. Each section shows real commands and expected output.
+This guide covers the eight subcommands of the `todos-manager` skill for adding, converting, auditing, listing, archiving, completing, and revising TODOS.md entries. Each section shows real commands and expected output.
 
-- **`--init`** — create sectioned TODOS.md and TODOS-archive.md
-- **`--add`** — add a new entry with field prompts and a preview gate
-- **`--convert`** — migrate an existing TODOS.md to the canonical sections
-- **`--audit`** — check format compliance and reconcile invalid tracked ID metadata
-- **`--archive`** — move completed `[x]` entries to TODOS-archive.md
-- **`--list`** — display active TODO entries as a table (`--all` also shows archived)
-- **`--revise`** — fill missing or weak fields in an existing entry with AI-pre-filled suggestions
+- **`--init`** — performs no Plan operation; it only creates the TODO documents
+- **`--add`** — authors a validated manifest when a new or legacy actionable Plan is selected
+- **`--convert`** — reports Plan readiness and migration needs while migrating TODO layout
+- **`--audit`** — reports `manifest`, `legacy`, `invalid`, or `none` and reconciles tracked ID metadata
+- **`--archive`** — preserves attached Plan bytes while moving completed entries
+- **`--complete`** — preserves attached Plan bytes during TPO-verified closeout
+- **`--list`** — reports Plan readiness for active and archived entries without mutation
+- **`--revise`** — create, replace, remove, or convert one Plan for one active TODO
 
 ## Prerequisites
 
@@ -31,6 +32,7 @@ todos-manager --init
 - Initializes `.hermes/todo_id_counter` to `0` (if `.hermes/` exists)
 
 If TODOS.md already exists, the skill prints a note and skips creation.
+It performs no Plan discovery, validation, authoring, or mutation.
 
 **Output:**
 ```
@@ -84,6 +86,21 @@ These are pre-fills — confirm or edit each in the next step.
 6. You confirm the synthesis or edit individual fields
 7. Shows a preview of the assembled entry (see below)
 
+If the selected actionable Plan already contains a valid `json tpo-plan`
+manifest, `--add` attaches it byte-for-byte unchanged. For a new Plan or a
+legacy Markdown Plan, the skill proposes a manifest using only digest-checked
+evidence, stages it beside the target, and runs:
+
+```bash
+tpo plan validate <project> --todo TODO-N --plan <candidate> --require-manifest
+```
+
+You approve the Plan source, the exact Plan diff, and the final TODO preview
+separately. Cancellation, validation failure, insufficient evidence, or Plan or
+TODO drift leaves both files unchanged. Declining legacy migration requires
+selecting another manifest-ready Plan, choosing `none` (non-actionable), or
+cancelling.
+
 **Preview gate — before writing, you see the full entry:**
 ```
 ======== PREVIEW ========
@@ -133,6 +150,10 @@ todos-manager --convert
 
 **What it does NOT do:** Auto-fill missing fields. Canonical entries keep their bodies unchanged; header-based legacy entries are converted into the canonical entry shape.
 
+Conversion does not edit Plan files. It reports each attachment's readiness as
+`manifest`, `legacy`, `invalid`, or `none`, so legacy Plan migration can be
+handled later with `--add` or `--revise`.
+
 **Example output:**
 ```
 ## TODOS.md Audit Report
@@ -167,6 +188,8 @@ todos-manager --audit
 - `NEXT_TODO_ID` is present exactly once under `## Metadata`, valid, and consistent with active and archived IDs; the counter cache (`.hermes/todo_id_counter`) is compatibility state only
 
 The skill outputs a structured report and reconciles missing, malformed, stale, duplicated, or conflicting tracked metadata before reporting.
+It also reports each Plan as `manifest`, `legacy`, `invalid`, or `none` without
+editing any Plan.
 
 ## Archive completed TODOs
 
@@ -188,11 +211,24 @@ todos-manager --archive
 ```
 
 **Important:** Archived entries are still considered during reconciliation. After archiving TODO-1 through TODO-3, `NEXT_TODO_ID` should still point at `TODO-4` — not `TODO-1`.
+Any attached Plan path and file bytes are preserved.
 
 **If no entries are marked `[x]`:**
 ```
 No completed TODOs to archive.
 ```
+
+## Complete a TPO-verified TODO
+
+After TPO has verified the pull-request handoff, complete exactly one TODO:
+
+```bash
+todos-manager --complete
+```
+
+The deterministic closeout records the verified outcome and moves the entry to
+the archive. It preserves the attached Plan path and Plan bytes; it does not
+rewrite the manifest.
 
 ## List active TODOs
 
@@ -205,15 +241,16 @@ todos-manager --list
 **What it does:**
 1. Scans only `## Entries` in TODOS.md for entry header lines (`- [ ]`, `- [→]`, `- [x]`, `- [~]`)
 2. Extracts status, ID, title, and summary for each entry
-3. Displays a markdown table sorted by ID ascending
+3. Reports Plan readiness as `manifest`, `legacy`, `invalid`, or `none`
+4. Displays a markdown table sorted by ID ascending
 
 **Example output:**
 ```
 ### Active TODOs
 
-| ID | Status | Title | Summary |
-|----|--------|-------|---------|
-| TODO-1 | Pending | Example title | One-line summary |
+| ID | Status | Title | Summary | Plan readiness |
+|----|--------|-------|---------|----------------|
+| TODO-1 | Pending | Example title | One-line summary | manifest |
 
 Showing 1 active entries.
 ```
@@ -247,6 +284,13 @@ todos-manager --revise
 5. **Synthesis block** — shows all fields with `(unchanged)` for good fields and `[Confidence: high/medium/low]` for derived values
 6. **Confirm or edit** — reply `confirm` to accept all as-is, or edit individual fields with `field: new value`
 7. **Preview gate** — shows before/after diff of the full entry. Type `y` to confirm, `edit` to re-edit (no re-research), or `cancel` to abort
+
+Unchanged attachments are preserved byte-for-byte. An explicit attachment
+change may create, replace, remove, or convert one Plan for the selected TODO.
+Removing the attachment edits only TODOS.md; it never deletes or edits the Plan
+file. New or legacy actionable Plans follow the same staged
+`tpo plan validate ... --require-manifest`, diff-confirmation, drift-check, and
+final-approval sequence used by `--add`.
 
 **Example synthesis block:**
 ```
@@ -290,6 +334,7 @@ After any subcommand, verify the result:
 - **`--convert`:** TODOS.md has the canonical sections; canonical entry bodies are unchanged, while header-based legacy entries are converted to the canonical format
 - **`--audit`:** A structured report with zero or more issues
 - **`--archive`:** TODOS.md has fewer entries; TODOS-archive.md has the moved entries
+- **`--complete`:** The verified entry is archived and its attached Plan remains byte-for-byte unchanged
 - **`--list`:** A markdown table matching the current entries in TODOS.md (and TODOS-archive.md if `--all`)
 - **`--revise`:** The targeted entry in TODOS.md has updated fields; entry order and other entries unchanged
 

@@ -255,6 +255,36 @@ def test_all_subcommands_define_manifest_compatibility_outcomes():
     assert "Report only — no TODO or Plan files modified" in listing
 
 
+def test_public_howto_documents_plan_outcome_for_all_eight_subcommands():
+    howto = Path("docs/howto-todos-manager.md").read_text(encoding="utf-8")
+    outcomes = {
+        "--init": "performs no Plan operation",
+        "--add": "authors a validated manifest",
+        "--convert": "reports Plan readiness and migration needs",
+        "--audit": "reports `manifest`, `legacy`, `invalid`, or `none`",
+        "--archive": "preserves attached Plan bytes",
+        "--complete": "preserves attached Plan bytes",
+        "--list": "reports Plan readiness for active and archived entries",
+        "--revise": "create, replace, remove, or convert one Plan",
+    }
+
+    for subcommand, outcome in outcomes.items():
+        assert f"**`{subcommand}`** — {outcome}" in howto
+
+
+def test_public_docs_explain_manifest_authoring_and_legacy_migration_boundary():
+    documents = {
+        "how-to": Path("docs/howto-todos-manager.md").read_text(encoding="utf-8"),
+        "architecture": Path("docs/ARCHITECTURE.md").read_text(encoding="utf-8"),
+    }
+
+    for name, text in documents.items():
+        assert "`json tpo-plan`" in text, name
+        assert "--require-manifest" in text, name
+        assert "legacy" in text, name
+        assert "migration" in text, name
+
+
 def test_attachment_search_roots_are_validated_before_traversal():
     policy = skill_text("sections/document-attachments.md")
     assert "Before reading, listing, or searching any discovery root" in policy

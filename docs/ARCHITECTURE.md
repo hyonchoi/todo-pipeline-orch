@@ -205,20 +205,31 @@ All pipeline state lives under `<project>/.hermes/`:
 
 ### TODOS Manager Skill (v2.1)
 
-The `todos-manager` skill enforces the canonical TODOS.md schema and provides seven subcommands:
+The `todos-manager` skill enforces the canonical TODOS.md schema and provides eight subcommands:
 - `--init`: Initialize TODOS.md with `## Metadata`, `## Entry Schema`, and `## Entries`, then create TODOS-archive.md
-- `--add`: Add new entry with schema enforcement and preview gate
-- `--convert`: Convert existing TODOS.md to the canonical sectioned format and validate entries
-- `--audit`: Audit TODOS.md for format compliance and reconcile invalid tracked ID metadata
-- `--archive`: Move completed `[x]` entries to TODOS-archive.md
-- `--list`: List active TODO entries (optional `--all` flag shows archived entries)
-- `--revise`: Revise an existing entry — fill missing or weak fields with AI-pre-filled suggestions
+- `--add`: Add a new entry and author a validated manifest for a selected new or legacy actionable Plan
+- `--convert`: Convert existing TODOS.md layout and report Plan readiness and migration needs
+- `--audit`: Audit format, reconcile invalid tracked ID metadata, and report Plan readiness without editing Plans
+- `--archive`: Move completed `[x]` entries while preserving attached Plan bytes
+- `--complete`: Complete one TODO after a TPO-verified pull-request handoff while preserving attached Plan bytes
+- `--list`: List active TODO entries and Plan readiness (optional `--all` also shows archived entries)
+- `--revise`: Revise one entry and explicitly create, replace, remove, or convert one Plan
 
 The skill source lives at `hermes_pipeline/data/skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `tpo skills install --target all`. The skill enforces:
 - Required fields: **What:**, **Why:**, **Decisions:**
 - Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
 - Stable TODO-<n> IDs: assigned `TODO-<n>` IDs are immutable once committed; `NEXT_TODO_ID` under `## Metadata` is the common-path source and advances after each successful add, while active and archived IDs are scanned only for reconciliation
 - `TODOS.md` stores tracked ID state under `## Metadata` as `NEXT_TODO_ID: <n>`. The `## Entry Schema` section documents the format and is never parsed as active TODO content. Active entries live under `## Entries`.
+
+`Plan:` is the execution-authority attachment. A valid existing `json tpo-plan`
+manifest is preserved byte-for-byte. When `--add` or `--revise` selects a new
+or legacy actionable Plan, the skill drafts only evidence-supported manifest
+fields, stages a same-directory candidate, and validates it with
+`tpo plan validate <project> --todo TODO-N --plan <candidate> --require-manifest`.
+Separate approval gates cover the Plan source, exact Plan
+diff, and final TODO preview; preimage checks prevent installation after Plan or
+TODO drift. `--convert`, `--audit`, and `--list` report `manifest`, `legacy`,
+`invalid`, or `none`, making migration needs visible without editing Plans.
 
 The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. This Phase 1 harness provides pure-Python implementations of skill rules that serve as the test oracle, enabling instant feedback without API tokens. See:
 - [Reference: Skill Test Harness API](reference-skill-test-harness.md) — Complete function signatures, assertion types, fixtures
