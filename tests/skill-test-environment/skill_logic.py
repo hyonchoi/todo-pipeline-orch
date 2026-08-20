@@ -3,11 +3,14 @@
 Serves as both test oracle and golden-file generator.
 """
 
+import difflib
 import fcntl
+import hashlib
 import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import uuid
 from collections.abc import Callable, Iterator
@@ -41,6 +44,7 @@ def load_attachment_policy(skill_root: Path | None = None) -> dict:
 
 
 ATTACHMENT_POLICY = load_attachment_policy()
+PLAN_AUTHORING_POLICY = ATTACHMENT_POLICY["plan_authoring"]
 ATTACHMENT_FIELD_LINE_RE = re.compile(
     r"^  -[ \t]+\*\*(?:Plan|Spec|Reference):\*\*(?:[ \t]+.*)?$"
 )
@@ -61,6 +65,393 @@ class AttachmentSelection:
     plan: str | None = None
     spec: str | None = None
     references: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class EvidenceLocator:
+    """Digest-bound, out-of-band support for one authored manifest field."""
+
+    kind: str
+    source: str
+    start_line: int | None = None
+    end_line: int | None = None
+    digest: str = ""
+    commit: str | None = None
+
+
+@dataclass(frozen=True)
+class ManifestTaskDraft:
+    title: str
+    instructions: str
+    acceptance_criteria: tuple[str, ...]
+    verification: tuple[str, ...]
+    commit_message: str
+
+
+def _after_plan_parent_validation() -> None:
+    """Test hook for a parent-swap race after initial validation."""
+
+
+def _before_new_plan_publish() -> None:
+    """Test hook for a concurrent creator at the no-clobber boundary."""
+
+
+class PlanAuthoringWorkflow:
+    """Test oracle for safe, explicitly-approved single-Plan authoring."""
+
+    _FIELDS = (
+        "title",
+        "instructions",
+        "acceptance_criteria",
+        "verification",
+        "commit_message",
+    )
+
+    def __init__(
+        self,
+        repository: Path,
+        *,
+        project: str,
+        todo_id: str,
+        plan_path: str,
+        todos_path: Path | None = None,
+        source_text: str | None = None,
+        command_runner: Callable[[list[str]], int] | None = None,
+    ):
+        self.repository = repository.resolve()
+        self.project = project
+        self.todo_id = todo_id
+        lexical_plan = Path(plan_path)
+        raw_parts = plan_path.split("/")
+        if lexical_plan.is_absolute():
+            raise ValueError("Plan path must be repository-relative")
+        if (
+            not raw_parts
+            or len(raw_parts) > 50
+            or any(part in {"", ".", ".."} for part in raw_parts)
+        ):
+            raise ValueError("Plan path has unsafe lexical components")
+        self.plan_path = lexical_plan.as_posix()
+        self.target = self.repository / self.plan_path
+        self._validate_plan_parent(create=False)
+        self.todos_path = todos_path
+        self._target_existed = self.target.exists()
+        self._source_text = (
+            self.target.read_text(encoding="utf-8")
+            if self._target_existed
+            else source_text
+        )
+        if self._source_text is None:
+            raise ValueError("new Plan authoring requires an approved source snapshot")
+        self._plan_preimage = self.target.read_bytes() if self._target_existed else None
+        self._plan_mode = (
+            self.target.stat().st_mode & 0o777
+            if self._target_existed
+            else int(PLAN_AUTHORING_POLICY["new_target_mode"], 8)
+        )
+        self._todo_preimage = todos_path.read_bytes() if todos_path is not None else None
+        self._runner = command_runner or self._run_packaged_command
+        self._source_approved = False
+        self._diff_confirmed = False
+        self._todo_approved = False
+        self._approved_todo_preview: str | None = None
+        self._candidate: Path | None = None
+        self._validated_candidate_digest: str | None = None
+        self._validated_candidate_identity: tuple[int, int] | None = None
+        self._staged_parent_identity: tuple[int, int] | None = None
+        self.candidate_text = self._source_text
+        self.diff = ""
+        self.provenance: dict[str, dict[str, tuple[EvidenceLocator, ...]]] = {}
+
+    def _validate_plan_parent(self, *, create: bool) -> None:
+        current = self.repository
+        for component in Path(self.plan_path).parts[:-1]:
+            current = current / component
+            if current.is_symlink():
+                raise RuntimeError("Plan parent is a symlink") if create else ValueError(
+                    "Plan parent is a symlink"
+                )
+            if not current.exists():
+                if not create:
+                    return
+                current.mkdir(mode=0o755)
+            if current.is_symlink() or not current.is_dir():
+                raise RuntimeError("Plan parent is not a safe directory")
+            if not current.resolve().is_relative_to(self.repository):
+                raise RuntimeError("Plan parent escapes repository")
+
+    @staticmethod
+    def _run_packaged_command(args: list[str]) -> int:
+        return subprocess.run(args, check=False).returncode
+
+    def approve_source(self) -> None:
+        self._source_approved = True
+
+    def _evidence_bytes(self, locator: EvidenceLocator) -> bytes | None:
+        if locator.kind not in PLAN_AUTHORING_POLICY["evidence_locator_kinds"]:
+            return None
+        if locator.kind in {"plan_lines", "repository_lines"}:
+            if locator.start_line is None or locator.end_line is None:
+                return None
+            if locator.kind == "plan_lines" and locator.source != self.plan_path:
+                return None
+            source = self._source_text if locator.kind == "plan_lines" else None
+            if locator.kind == "repository_lines":
+                try:
+                    relative = validate_attachment_path(self.repository, locator.source)
+                    source = (self.repository / relative).read_text(encoding="utf-8")
+                except (AttachmentValidationError, UnicodeError):
+                    return None
+            lines = source.splitlines(keepends=True) if source is not None else []
+            if not (1 <= locator.start_line <= locator.end_line <= len(lines)):
+                return None
+            return "".join(lines[locator.start_line - 1 : locator.end_line]).encode()
+        if locator.kind == "git_commit" and locator.commit:
+            object_format = subprocess.run(
+                ["git", "rev-parse", "--show-object-format"],
+                cwd=self.repository,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            lengths = {"sha1": 40, "sha256": 64}
+            oid_length = lengths.get(object_format.stdout.strip())
+            if (
+                object_format.returncode != 0
+                or oid_length is None
+                or re.fullmatch(rf"[0-9a-f]{{{oid_length}}}", locator.commit) is None
+            ):
+                return None
+            object_type = subprocess.run(
+                ["git", "cat-file", "-t", locator.commit],
+                cwd=self.repository,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            if object_type.returncode != 0 or object_type.stdout.strip() != "commit":
+                return None
+            result = subprocess.run(
+                ["git", "show", f"{locator.commit}:{locator.source}"],
+                cwd=self.repository,
+                check=False,
+                capture_output=True,
+            )
+            return result.stdout if result.returncode == 0 else None
+        return None
+
+    def _supported(self, locator: EvidenceLocator) -> bool:
+        content = self._evidence_bytes(locator)
+        digest = hashlib.new(PLAN_AUTHORING_POLICY["evidence_digest"], content or b"")
+        return content is not None and digest.hexdigest() == locator.digest
+
+    def _field_supported(
+        self, value: str | tuple[str, ...], locators: tuple[EvidenceLocator, ...]
+    ) -> bool:
+        contents = [self._evidence_bytes(locator) for locator in locators]
+        if not contents or any(
+            content is None
+            or hashlib.new(
+                PLAN_AUTHORING_POLICY["evidence_digest"], content
+            ).hexdigest()
+            != locator.digest
+            for locator, content in zip(locators, contents, strict=True)
+        ):
+            return False
+        text = "\n".join(content.decode("utf-8") for content in contents if content)
+        values = (value,) if isinstance(value, str) else value
+        return bool(values) and all(item in text for item in values)
+
+    def prepare(
+        self,
+        tasks: tuple[ManifestTaskDraft, ...] = (),
+        provenance: dict[str, dict[str, tuple[EvidenceLocator, ...]]] | None = None,
+    ) -> str:
+        if plan_manifest.parse_plan_manifest(
+            self._source_text, expected_todo_id=self.todo_id
+        ) is not None:
+            return "manifest"
+        if not self._source_approved:
+            return "source_approval_required"
+        if not 1 <= len(tasks) <= PLAN_AUTHORING_POLICY["task_limit"]:
+            return "insufficient_evidence"
+        expected_ids = [
+            PLAN_AUTHORING_POLICY["task_id_format"] % index
+            for index in range(1, len(tasks) + 1)
+        ]
+        provenance = provenance or {}
+        for task_id, task in zip(expected_ids, tasks, strict=True):
+            field_map = provenance.get(task_id, {})
+            if any(
+                not field_map.get(field)
+                or not self._field_supported(getattr(task, field), field_map[field])
+                for field in self._FIELDS
+            ):
+                return "insufficient_evidence"
+        manifest = {
+            "schema_version": 1,
+            "todo_id": self.todo_id,
+            "tasks": [
+                {
+                    "id": task_id,
+                    "title": task.title,
+                    "instructions": task.instructions,
+                    "acceptance_criteria": list(task.acceptance_criteria),
+                    "verification": list(task.verification),
+                    "commit_message": task.commit_message,
+                }
+                for task_id, task in zip(expected_ids, tasks, strict=True)
+            ],
+        }
+        encoded = json.dumps(manifest, separators=(",", ":"))
+        separator = "" if self._source_text.endswith("\n\n") else "\n"
+        self.candidate_text = (
+            self._source_text + separator + "```json tpo-plan\n" + encoded + "\n```\n"
+        )
+        self.provenance = provenance
+        self.diff = "".join(
+            difflib.unified_diff(
+                self._source_text.splitlines(keepends=True) if self._target_existed else [],
+                self.candidate_text.splitlines(keepends=True),
+                fromfile=f"a/{self.plan_path}" if self._target_existed else "/dev/null",
+                tofile=f"b/{self.plan_path}",
+            )
+        )
+        return "candidate"
+
+    def stage_and_validate(self) -> Path:
+        if self.candidate_text == self._source_text:
+            raise RuntimeError("candidate is not prepared")
+        self._validate_plan_parent(create=True)
+        _after_plan_parent_validation()
+        self._validate_plan_parent(create=False)
+        parent_stat = self.target.parent.stat()
+        self._staged_parent_identity = (parent_stat.st_dev, parent_stat.st_ino)
+        descriptor, raw_path = tempfile.mkstemp(
+            dir=self.target.parent, prefix=f".{self.target.name}.tpo-plan-"
+        )
+        self._candidate = Path(raw_path)
+        try:
+            os.fchmod(descriptor, int(PLAN_AUTHORING_POLICY["candidate_mode"], 8))
+            with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as stream:
+                stream.write(self.candidate_text)
+                stream.flush()
+                os.fsync(stream.fileno())
+            replacements = {
+                "<project>": self.project,
+                "TODO-N": self.todo_id,
+                "<candidate>": str(self._candidate.relative_to(self.repository)),
+            }
+            command = [
+                replacements.get(argument, argument)
+                for argument in PLAN_AUTHORING_POLICY["validator"]
+            ]
+            if self._runner(command) != 0:
+                self.cancel()
+                raise RuntimeError("validator failure")
+            self._validated_candidate_digest = hashlib.sha256(
+                self._candidate.read_bytes()
+            ).hexdigest()
+            candidate_stat = self._candidate.stat()
+            self._validated_candidate_identity = (
+                candidate_stat.st_dev,
+                candidate_stat.st_ino,
+            )
+            return self._candidate
+        except BaseException:
+            if self._candidate is not None and self._candidate.exists():
+                self._candidate.unlink()
+            self._candidate = None
+            raise
+
+    def confirm_diff(self) -> None:
+        if self._candidate is None:
+            raise RuntimeError("candidate must be staged and validated first")
+        self._diff_confirmed = True
+
+    def render_final_todo_preview(self) -> str:
+        if self.todos_path is None or self._todo_preimage is None:
+            raise RuntimeError("TODO target is required for final preview")
+        if self.todos_path.read_bytes() != self._todo_preimage:
+            raise RuntimeError("TODO drift")
+        return render_attachment_selection_to_todo(
+            self._todo_preimage.decode("utf-8"),
+            self.todo_id,
+            AttachmentSelection(plan=self.plan_path),
+        )
+
+    def approve_final_todo(self, preview: str | None = None) -> None:
+        if not self._diff_confirmed:
+            raise RuntimeError("exact Plan diff confirmation is required first")
+        if preview != self.render_final_todo_preview():
+            raise RuntimeError("final TODO preview approval is required")
+        self._todo_approved = True
+        self._approved_todo_preview = preview
+
+    def _check_preimages(self) -> None:
+        if self._target_existed:
+            if not self.target.exists() or self.target.read_bytes() != self._plan_preimage:
+                raise RuntimeError("Plan drift")
+        elif self.target.exists():
+            raise RuntimeError("concurrent target creation")
+        if self.todos_path is not None and self.todos_path.read_bytes() != self._todo_preimage:
+            raise RuntimeError("TODO drift")
+        if self.todos_path is not None and self.render_final_todo_preview() != self._approved_todo_preview:
+            raise RuntimeError("approved TODO preview drift")
+
+    def install(self) -> None:
+        if not self._todo_approved or self._candidate is None:
+            raise RuntimeError("final TODO approval is required")
+        try:
+            self._check_preimages()
+            self._validate_plan_parent(create=False)
+            parent_stat = self.target.parent.stat()
+            if (parent_stat.st_dev, parent_stat.st_ino) != self._staged_parent_identity:
+                raise RuntimeError("Plan parent identity drift")
+            candidate_stat = self._candidate.stat()
+            if (candidate_stat.st_dev, candidate_stat.st_ino) != self._validated_candidate_identity:
+                raise RuntimeError("validated candidate identity drift")
+            candidate_digest = hashlib.sha256(self._candidate.read_bytes()).hexdigest()
+            if candidate_digest != self._validated_candidate_digest:
+                raise RuntimeError("validated candidate drift")
+        except BaseException:
+            self.cancel()
+            raise
+        os.chmod(self._candidate, self._plan_mode)
+        if self._target_existed:
+            os.replace(self._candidate, self.target)
+            self._candidate = None
+        else:
+            _before_new_plan_publish()
+            try:
+                os.link(self._candidate, self.target)
+            except FileExistsError as exc:
+                self.cancel()
+                raise RuntimeError("concurrent target creation") from exc
+            self._candidate.unlink()
+            self._candidate = None
+        if self.todos_path is not None:
+            def apply_approved_preview(current: str) -> str:
+                if current.encode("utf-8") != self._todo_preimage:
+                    raise RuntimeError("TODO drift after Plan installation")
+                rendered = render_attachment_selection_to_todo(
+                    current,
+                    self.todo_id,
+                    AttachmentSelection(plan=self.plan_path),
+                )
+                if rendered != self._approved_todo_preview:
+                    raise RuntimeError("approved TODO preview drift")
+                return rendered
+
+            atomic_update_todos(
+                self.todos_path,
+                apply_approved_preview,
+            )
+
+    def cancel(self) -> None:
+        if self._candidate is not None and self._candidate.exists():
+            self._candidate.unlink()
+        self._candidate = None
 
 
 class AttachmentValidationError(ValueError):
@@ -1135,6 +1526,96 @@ class AttachmentWorkflow:
         return True
 
 
+def render_attachment_selection_to_todo(
+    current: str,
+    todo_id: str,
+    selection: AttachmentSelection,
+) -> str:
+    """Purely render attachments into exactly one TODO Markdown entry."""
+    wanted = int(todo_id.removeprefix("TODO-"))
+    document_lines = current.splitlines(keepends=True)
+    entries_spans = [
+        (start, end)
+        for heading, start, end in _section_spans(document_lines)
+        if heading == "## Entries"
+    ]
+    if len(entries_spans) != 1:
+        raise ValueError("TODOS.md must contain exactly one ## Entries section")
+    entries_start, entries_end = entries_spans[0]
+    matching_start = next(
+        (
+            index
+            for index in range(entries_start, entries_end)
+            if (
+                match := ENTRY_HEADER_RE.match(
+                    _line_without_ending(document_lines[index])
+                )
+            )
+            and int(match.group(2)) == wanted
+        ),
+        None,
+    )
+    if matching_start is None:
+        raise ValueError(f"{todo_id} not found")
+    matching_end = next(
+        (
+            index
+            for index in range(matching_start + 1, entries_end)
+            if ENTRY_HEADER_RE.match(_line_without_ending(document_lines[index]))
+            or TOP_LEVEL_SECTION_RE.match(
+                _line_without_ending(document_lines[index])
+            )
+        ),
+        entries_end,
+    )
+
+    entry_lines = document_lines[matching_start:matching_end]
+    trailing_blank_lines: list[str] = []
+    while entry_lines and not _line_without_ending(entry_lines[-1]).strip():
+        trailing_blank_lines.insert(0, entry_lines.pop())
+
+    retained_lines = [
+        line
+        for line in entry_lines
+        if ATTACHMENT_FIELD_LINE_RE.fullmatch(_line_without_ending(line)) is None
+    ]
+    attachment_lines = []
+    if selection.plan:
+        attachment_lines.append(f"  - **Plan:** {selection.plan}")
+    if selection.spec:
+        attachment_lines.append(f"  - **Spec:** {selection.spec}")
+    if selection.references:
+        attachment_lines.append(
+            f"  - **Reference:** {', '.join(selection.references)}"
+        )
+
+    newline = _detect_newline(current)
+    if attachment_lines and retained_lines and not retained_lines[-1].endswith(
+        ("\n", "\r\n")
+    ):
+        retained_lines[-1] += newline
+    needs_terminal_newline = (
+        bool(trailing_blank_lines)
+        or matching_end < entries_end
+        or current.endswith(("\n", "\r\n"))
+    )
+    rendered_attachments = [
+        line
+        + (
+            newline
+            if index < len(attachment_lines) - 1 or needs_terminal_newline
+            else ""
+        )
+        for index, line in enumerate(attachment_lines)
+    ]
+    replacement = retained_lines + rendered_attachments + trailing_blank_lines
+    return "".join(
+        document_lines[:matching_start]
+        + replacement
+        + document_lines[matching_end:]
+    )
+
+
 def apply_attachment_selection_to_todo(
     todos_path: Path,
     todo_id: str,
@@ -1146,91 +1627,10 @@ def apply_attachment_selection_to_todo(
     if not approved:
         return False
 
-    def transform(current: str) -> str:
-        wanted = int(todo_id.removeprefix("TODO-"))
-        document_lines = current.splitlines(keepends=True)
-        entries_spans = [
-            (start, end)
-            for heading, start, end in _section_spans(document_lines)
-            if heading == "## Entries"
-        ]
-        if len(entries_spans) != 1:
-            raise ValueError("TODOS.md must contain exactly one ## Entries section")
-        entries_start, entries_end = entries_spans[0]
-        matching_start = next(
-            (
-                index
-                for index in range(entries_start, entries_end)
-                if (
-                    match := ENTRY_HEADER_RE.match(
-                        _line_without_ending(document_lines[index])
-                    )
-                )
-                and int(match.group(2)) == wanted
-            ),
-            None,
-        )
-        if matching_start is None:
-            raise ValueError(f"{todo_id} not found")
-        matching_end = next(
-            (
-                index
-                for index in range(matching_start + 1, entries_end)
-                if ENTRY_HEADER_RE.match(_line_without_ending(document_lines[index]))
-                or TOP_LEVEL_SECTION_RE.match(
-                    _line_without_ending(document_lines[index])
-                )
-            ),
-            entries_end,
-        )
-
-        entry_lines = document_lines[matching_start:matching_end]
-        trailing_blank_lines: list[str] = []
-        while entry_lines and not _line_without_ending(entry_lines[-1]).strip():
-            trailing_blank_lines.insert(0, entry_lines.pop())
-
-        retained_lines = [
-            line
-            for line in entry_lines
-            if ATTACHMENT_FIELD_LINE_RE.fullmatch(_line_without_ending(line)) is None
-        ]
-        attachment_lines = []
-        if selection.plan:
-            attachment_lines.append(f"  - **Plan:** {selection.plan}")
-        if selection.spec:
-            attachment_lines.append(f"  - **Spec:** {selection.spec}")
-        if selection.references:
-            attachment_lines.append(
-                f"  - **Reference:** {', '.join(selection.references)}"
-            )
-
-        newline = _detect_newline(current)
-        if attachment_lines and retained_lines and not retained_lines[-1].endswith(
-            ("\n", "\r\n")
-        ):
-            retained_lines[-1] += newline
-        needs_terminal_newline = (
-            bool(trailing_blank_lines)
-            or matching_end < entries_end
-            or current.endswith(("\n", "\r\n"))
-        )
-        rendered_attachments = [
-            line
-            + (
-                newline
-                if index < len(attachment_lines) - 1 or needs_terminal_newline
-                else ""
-            )
-            for index, line in enumerate(attachment_lines)
-        ]
-        replacement = retained_lines + rendered_attachments + trailing_blank_lines
-        return "".join(
-            document_lines[:matching_start]
-            + replacement
-            + document_lines[matching_end:]
-        )
-
-    atomic_update_todos(todos_path, transform)
+    atomic_update_todos(
+        todos_path,
+        lambda current: render_attachment_selection_to_todo(current, todo_id, selection),
+    )
     return True
 
 

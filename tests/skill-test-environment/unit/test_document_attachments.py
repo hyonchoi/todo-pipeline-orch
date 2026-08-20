@@ -1,5 +1,6 @@
 """Executable behavior matrix for todos-manager document attachments."""
 
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,9 @@ from tests.skill_test_environment.skill_logic import (
     AttachmentSelection,
     AttachmentValidationError,
     AttachmentWorkflow,
+    EvidenceLocator,
+    ManifestTaskDraft,
+    PlanAuthoringWorkflow,
     PlanReadiness,
     apply_attachment_selection_to_todo,
     audit_attachment_fields,
@@ -20,6 +24,352 @@ from tests.skill_test_environment.skill_logic import (
     parse_stored_references,
     validate_attachment_path,
 )
+
+
+def _digest(value: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _authoring_task(plan_text: str) -> tuple[ManifestTaskDraft, dict[str, tuple[EvidenceLocator, ...]]]:
+    evidence = EvidenceLocator(
+        kind="plan_lines",
+        source="docs/plan.md",
+        start_line=3,
+        end_line=7,
+        digest=_digest("## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"),
+    )
+    task = ManifestTaskDraft(
+        title="Task",
+        instructions="Implement feature.",
+        acceptance_criteria=("works",),
+        verification=("uv run pytest",),
+        commit_message="feat: implement feature",
+    )
+    return task, {field: (evidence,) for field in (
+        "title", "instructions", "acceptance_criteria", "verification", "commit_message"
+    )}
+
+
+def test_manifest_authoring_existing_manifest_is_byte_preserving_noop(tmp_path):
+    document = (
+        "# Plan\r\n```json tpo-plan\r\n"
+        '{"schema_version":1,"todo_id":"TODO-42","tasks":[{"id":"task-01",'
+        '"title":"T","instructions":"I","acceptance_criteria":["A"],'
+        '"verification":["V"],"commit_message":"C"}]}\r\n```\r\n'
+    )
+    plan = _write(tmp_path, "docs/plan.md", document)
+    before = plan.read_bytes()
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+    assert workflow.prepare() == "manifest"
+    assert workflow.diff == ""
+    assert plan.read_bytes() == before
+
+
+def test_legacy_manifest_proposal_has_exact_diff_and_out_of_band_provenance(tmp_path):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    _write(tmp_path, "docs/plan.md", document)
+    task, provenance = _authoring_task(document)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+    workflow.approve_source()
+    assert workflow.prepare((task,), {"task-01": provenance}) == "candidate"
+    expected_manifest = (
+        '{"schema_version":1,"todo_id":"TODO-42","tasks":'
+        '[{"id":"task-01","title":"Task","instructions":"Implement feature.",'
+        '"acceptance_criteria":["works"],"verification":["uv run pytest"],'
+        '"commit_message":"feat: implement feature"}]}\n```\n'
+    )
+    assert workflow.diff == (
+        "--- a/docs/plan.md\n+++ b/docs/plan.md\n@@ -5,3 +5,7 @@\n - Criterion: works\n"
+        " - Verify: uv run pytest\n - Commit: feat: implement feature\n+\n+```json tpo-plan\n+"
+        + expected_manifest.replace("\n```\n", "\n+```\n")
+    )
+    assert workflow.provenance == {"task-01": provenance}
+    assert "provenance" not in workflow.candidate_text
+
+
+def test_new_plan_proposal_and_approval_order_validate_exact_command(tmp_path):
+    plan_text = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    task, provenance = _authoring_task(plan_text)
+    todos = _write(tmp_path, "TODOS.md", "## Entries\n\n- [ ] **TODO-42: Work** — x\n")
+    calls = []
+    workflow = PlanAuthoringWorkflow(
+        tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md",
+        source_text=plan_text, todos_path=todos,
+        command_runner=lambda args: calls.append(args) or 0,
+    )
+    workflow.approve_source()
+    workflow.prepare((task,), {"task-01": provenance})
+    assert workflow.diff == (
+        "--- /dev/null\n+++ b/docs/plan.md\n@@ -0,0 +1,11 @@\n"
+        "+# Plan\n+\n+## Task\n+Implement feature.\n+- Criterion: works\n"
+        "+- Verify: uv run pytest\n+- Commit: feat: implement feature\n+\n"
+        "+```json tpo-plan\n+{\"schema_version\":1,\"todo_id\":\"TODO-42\","
+        "\"tasks\":[{\"id\":\"task-01\",\"title\":\"Task\","
+        "\"instructions\":\"Implement feature.\",\"acceptance_criteria\":[\"works\"],"
+        "\"verification\":[\"uv run pytest\"],\"commit_message\":"
+        "\"feat: implement feature\"}]}\n+```\n"
+    )
+    candidate = workflow.stage_and_validate()
+    assert calls == [["tpo", "plan", "validate", "demo", "--todo", "TODO-42", "--plan", str(candidate.relative_to(tmp_path)), "--require-manifest"]]
+    assert candidate.parent == tmp_path / "docs"
+    assert candidate.stat().st_mode & 0o777 == 0o600
+    workflow.confirm_diff()
+    workflow.approve_final_todo(workflow.render_final_todo_preview())
+    workflow.install()
+    assert (tmp_path / "docs/plan.md").stat().st_mode & 0o777 == 0o644
+    assert not candidate.exists()
+
+
+def test_validated_candidate_drift_fails_closed_and_cleans_up(tmp_path):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    plan = _write(tmp_path, "docs/plan.md", document)
+    todos = _write(tmp_path, "TODOS.md", "## Entries\n\n- [ ] **TODO-42: Work** — x\n")
+    task, provenance = _authoring_task(document)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", todos_path=todos, command_runner=lambda _args: 0)
+    workflow.approve_source(); workflow.prepare((task,), {"task-01": provenance})
+    candidate = workflow.stage_and_validate()
+    workflow.confirm_diff(); workflow.approve_final_todo(workflow.render_final_todo_preview())
+    candidate.write_text(candidate.read_text() + "tampered")
+    with pytest.raises(RuntimeError, match="candidate drift"):
+        workflow.install()
+    assert plan.read_text() == document
+    assert not candidate.exists()
+
+
+@pytest.mark.parametrize("field", ["title", "instructions", "acceptance_criteria", "verification", "commit_message"])
+def test_each_manifest_field_requires_content_specific_support(tmp_path, field):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    _write(tmp_path, "docs/plan.md", document)
+    task, provenance = _authoring_task(document)
+    replacements = {
+        "title": "Invented title", "instructions": "Invented boundary",
+        "acceptance_criteria": ("invented criterion",),
+        "verification": ("invented command",), "commit_message": "feat: invented",
+    }
+    values = task.__dict__ | {field: replacements[field]}
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+    workflow.approve_source()
+    assert workflow.prepare((ManifestTaskDraft(**values),), {"task-01": provenance}) == "insufficient_evidence"
+
+
+def test_plan_line_source_must_match_selected_plan(tmp_path):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    _write(tmp_path, "docs/plan.md", document)
+    task, provenance = _authoring_task(document)
+    provenance["title"] = (EvidenceLocator("plan_lines", "docs/other.md", 3, 7, provenance["title"][0].digest),)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+    workflow.approve_source()
+    assert workflow.prepare((task,), {"task-01": provenance}) == "insufficient_evidence"
+
+
+def test_repository_lines_and_exact_git_commit_evidence(tmp_path):
+    document = "# Plan\n\nTask\n"
+    _write(tmp_path, "docs/plan.md", document)
+    support = _write(tmp_path, "docs/support.txt", "Task\nImplement feature.\nworks\nuv run pytest\nfeat: implement feature\n")
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=T", "-c", "user.email=t@example.com", "commit", "-qm", "support"], cwd=tmp_path, check=True)
+    oid = subprocess.run(["git", "rev-parse", "HEAD"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    task = ManifestTaskDraft("Task", "Implement feature.", ("works",), ("uv run pytest",), "feat: implement feature")
+    repo_locator = EvidenceLocator("repository_lines", "docs/support.txt", 1, 5, _digest(support.read_text()))
+    commit_locator = EvidenceLocator("git_commit", "docs/support.txt", digest=_digest(support.read_text()), commit=oid)
+    for locator in (repo_locator, commit_locator):
+        provenance = {field: (locator,) for field in ("title", "instructions", "acceptance_criteria", "verification", "commit_message")}
+        workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+        workflow.approve_source()
+        assert workflow.prepare((task,), {"task-01": provenance}) == "candidate"
+    symbolic = EvidenceLocator("git_commit", "docs/support.txt", digest=_digest(support.read_text()), commit="HEAD")
+    blob_oid = subprocess.run(["git", "rev-parse", "HEAD:docs/support.txt"], cwd=tmp_path, check=True, capture_output=True, text=True).stdout.strip()
+    blob = EvidenceLocator("git_commit", "docs/support.txt", digest=_digest(support.read_text()), commit=blob_oid)
+    wrong_format_length = EvidenceLocator(
+        "git_commit", "docs/support.txt", digest=_digest(support.read_text()), commit="a" * 64
+    )
+    abbreviated = EvidenceLocator(
+        "git_commit", "docs/support.txt", digest=_digest(support.read_text()), commit=oid[:12]
+    )
+    for rejected in (symbolic, blob, abbreviated, wrong_format_length):
+        bad = {field: (rejected,) for field in ("title", "instructions", "acceptance_criteria", "verification", "commit_message")}
+        workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+        workflow.approve_source()
+        assert workflow.prepare((task,), {"task-01": bad}) == "insufficient_evidence"
+
+
+def test_final_preview_is_exact_and_success_changes_only_selected_todo_and_plan(tmp_path):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    plan = _write(tmp_path, "docs/plan.md", document)
+    other_plan = _write(tmp_path, "docs/other.md", "unchanged")
+    todos = _write(tmp_path, "TODOS.md", "## Entries\n\n- [ ] **TODO-41: Other** — x\n  - **Plan:** docs/other.md\n\n- [ ] **TODO-42: Work** — x\n")
+    task, provenance = _authoring_task(document)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", todos_path=todos, command_runner=lambda _args: 0)
+    workflow.approve_source(); workflow.prepare((task,), {"task-01": provenance}); workflow.stage_and_validate(); workflow.confirm_diff()
+    preview = (
+        "## Entries\n\n"
+        "- [ ] **TODO-41: Other** — x\n"
+        "  - **Plan:** docs/other.md\n\n"
+        "- [ ] **TODO-42: Work** — x\n"
+        "  - **Plan:** docs/plan.md\n"
+    )
+    assert workflow.render_final_todo_preview() == preview
+    with pytest.raises(RuntimeError, match="preview"):
+        workflow.approve_final_todo(preview + "drift")
+    workflow.approve_final_todo(preview); workflow.install()
+    assert other_plan.read_text() == "unchanged"
+    assert todos.read_text().count("docs/plan.md") == 1
+    assert "TODO-41: Other" in todos.read_text() and "docs/other.md" in todos.read_text()
+    assert "```json tpo-plan" in plan.read_text()
+
+
+def test_todo_drift_after_plan_install_fails_without_hidden_plan_rollback(
+    tmp_path, monkeypatch
+):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    plan = _write(tmp_path, "docs/plan.md", document)
+    todos = _write(
+        tmp_path,
+        "TODOS.md",
+        "## Entries\n\n- [ ] **TODO-42: Work** — x\n",
+    )
+    task, provenance = _authoring_task(document)
+    workflow = PlanAuthoringWorkflow(
+        tmp_path,
+        project="demo",
+        todo_id="TODO-42",
+        plan_path="docs/plan.md",
+        todos_path=todos,
+        command_runner=lambda _args: 0,
+    )
+    workflow.approve_source()
+    workflow.prepare((task,), {"task-01": provenance})
+    workflow.stage_and_validate()
+    workflow.confirm_diff()
+    workflow.approve_final_todo(workflow.render_final_todo_preview())
+    concurrent = todos.read_text() + "\n## Concurrent\n\nPreserve me.\n"
+    monkeypatch.setattr(
+        skill_logic,
+        "_before_todo_lock",
+        lambda: todos.write_text(concurrent),
+    )
+
+    with pytest.raises(RuntimeError, match="TODO drift"):
+        workflow.install()
+
+    assert "```json tpo-plan" in plan.read_text()
+    assert todos.read_text() == concurrent
+
+
+def test_new_plan_publish_does_not_clobber_concurrent_winner(tmp_path, monkeypatch):
+    source = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    todos = _write(tmp_path, "TODOS.md", "## Entries\n\n- [ ] **TODO-42: Work** — x\n")
+    task, provenance = _authoring_task(source)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", todos_path=todos, source_text=source, command_runner=lambda _args: 0)
+    workflow.approve_source(); workflow.prepare((task,), {"task-01": provenance}); candidate = workflow.stage_and_validate(); workflow.confirm_diff(); workflow.approve_final_todo(workflow.render_final_todo_preview())
+    monkeypatch.setattr(skill_logic, "_before_new_plan_publish", lambda: _write(tmp_path, "docs/plan.md", "concurrent winner\n"))
+    with pytest.raises(RuntimeError, match="concurrent target"):
+        workflow.install()
+    assert (tmp_path / "docs/plan.md").read_text() == "concurrent winner\n"
+    assert not candidate.exists()
+
+
+def test_new_plan_rejects_lexical_parent_symlink(tmp_path):
+    outside = tmp_path / "outside"; outside.mkdir()
+    (tmp_path / "docs").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", source_text="# Plan\n")
+    assert list(outside.iterdir()) == []
+
+
+def test_new_plan_revalidates_parent_after_injected_swap(tmp_path, monkeypatch):
+    source = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    outside = tmp_path / "outside"; outside.mkdir()
+    task, provenance = _authoring_task(source)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", source_text=source, command_runner=lambda _args: 0)
+    workflow.approve_source(); workflow.prepare((task,), {"task-01": provenance})
+    def swap_parent():
+        (tmp_path / "docs").rmdir()
+        (tmp_path / "docs").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setattr(skill_logic, "_after_plan_parent_validation", swap_parent)
+    with pytest.raises(ValueError, match="parent.*symlink"):
+        workflow.stage_and_validate()
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize("path", ["docs/../plan.md", "./docs/plan.md"])
+def test_new_plan_rejects_noncanonical_lexical_components(tmp_path, path):
+    with pytest.raises(ValueError, match="lexical"):
+        PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path=path, source_text="# Plan\n")
+
+
+@pytest.mark.parametrize("stop", ["source", "diff", "todo", "validator"])
+def test_authoring_cancellation_or_validator_failure_preserves_plan(tmp_path, stop):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    plan = _write(tmp_path, "docs/plan.md", document)
+    task, provenance = _authoring_task(document)
+    runner = (lambda _args: 1) if stop == "validator" else (lambda _args: 0)
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", command_runner=runner)
+    if stop != "source":
+        workflow.approve_source()
+        workflow.prepare((task,), {"task-01": provenance})
+        if stop in {"diff", "todo", "validator"}:
+            try:
+                workflow.stage_and_validate()
+            except RuntimeError:
+                pass
+        if stop == "todo":
+            workflow.confirm_diff()
+    workflow.cancel()
+    assert plan.read_text() == document
+    assert list(plan.parent.glob(".plan.md.tpo-plan-*")) == []
+
+
+def test_unsupported_evidence_is_insufficient_and_creates_nothing(tmp_path):
+    document = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    plan = _write(tmp_path, "docs/plan.md", document)
+    task, provenance = _authoring_task(document)
+    provenance["verification"] = ()
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+    workflow.approve_source()
+    assert workflow.prepare((task,), {"task-01": provenance}) == "insufficient_evidence"
+    assert plan.read_text() == document
+
+
+def test_install_rejects_plan_or_todo_drift_and_concurrent_new_target(tmp_path):
+    plan_text = "# Plan\n\n## Task\nImplement feature.\n- Criterion: works\n- Verify: uv run pytest\n- Commit: feat: implement feature\n"
+    task, provenance = _authoring_task(plan_text)
+    for drift in ("plan", "todo", "target"):
+        repo = tmp_path / drift
+        repo.mkdir()
+        plan_path = None if drift == "target" else _write(repo, "docs/plan.md", plan_text)
+        todos = _write(repo, "TODOS.md", "## Entries\n\n- [ ] **TODO-42: Work** — x\n")
+        workflow = PlanAuthoringWorkflow(repo, project="demo", todo_id="TODO-42", plan_path="docs/plan.md", todos_path=todos, source_text=plan_text if drift == "target" else None, command_runner=lambda _args: 0)
+        workflow.approve_source()
+        workflow.prepare((task,), {"task-01": provenance})
+        workflow.stage_and_validate()
+        workflow.confirm_diff()
+        workflow.approve_final_todo(workflow.render_final_todo_preview())
+        if drift == "plan":
+            plan_path.write_text(plan_text + "drift")
+        elif drift == "todo":
+            todos.write_text(todos.read_text() + "drift")
+        else:
+            _write(repo, "docs/plan.md", "concurrent")
+        with pytest.raises(RuntimeError, match="drift|concurrent"):
+            workflow.install()
+        workflow.cancel()
+        assert (repo / "docs/plan.md").read_text() == (plan_text + "drift" if drift == "plan" else "concurrent" if drift == "target" else plan_text)
+
+
+def test_manifest_task_ids_are_ordered_and_bounded(tmp_path):
+    document = "# Plan\n\nT I A V C\n" + "\n".join(f"Task {i}" for i in range(49)) + "\n"
+    _write(tmp_path, "docs/plan.md", document)
+    locator = EvidenceLocator("plan_lines", "docs/plan.md", 1, 52, _digest(document))
+    tasks = tuple(ManifestTaskDraft("T", "I", ("A",), ("V",), "C") for _ in range(50))
+    provenance = {f"task-{i:02d}": {field: (locator,) for field in ("title", "instructions", "acceptance_criteria", "verification", "commit_message")} for i in range(1, 51)}
+    workflow = PlanAuthoringWorkflow(tmp_path, project="demo", todo_id="TODO-42", plan_path="docs/plan.md")
+    workflow.approve_source()
+    assert workflow.prepare(tasks, provenance) == "candidate"
+    assert [item["id"] for item in __import__("json").loads(workflow.candidate_text.split("```json tpo-plan\n", 1)[1].split("\n```", 1)[0])["tasks"]] == [f"task-{i:02d}" for i in range(1, 51)]
 
 
 def _write(repo: Path, relative: str, text: str = "supporting context") -> Path:

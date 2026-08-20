@@ -13,21 +13,25 @@ under `## Entry Schema` and anywhere outside `## Entries`.
    - ID: `TODO-<n>`
    - Title: text between `TODO-<n>: ` and the closing `**` bold delimiter (strip `**` markup)
    - Summary: text after ` — ` on the header line. If ` — ` is not present, display `[no summary]`.
+   - Plan readiness: classify the attached Plan as `manifest`, `legacy`,
+     `invalid`, or `none` using the packaged validator contract.
    - If any field cannot be extracted from a matching line, display `[not set]` in the corresponding column.
 5. **Display output** as a formatted markdown table (entries sorted by ID ascending):
    ```
    ### Active TODOs
 
-   | ID | Status | Title | Summary |
-   |----|--------|-------|---------|
-   | TODO-1 | Pending | Example title | One-line summary |
+   | ID | Status | Title | Summary | Plan readiness |
+   |----|--------|-------|---------|----------------|
+   | TODO-1 | Pending | Example title | One-line summary | manifest |
    ```
 6. **If `--all` flag is present**, also scan only the `## Entries` section of TODOS-archive.md (if it uses the canonical layout):
    - Apply the same scan and extraction rules as steps 2 and 4 (entry matching and field extraction) to TODOS-archive.md
+   - Apply the same columns, including `Plan readiness`, to archived entries
    - Display as a separate table section labeled "Archived TODOs" below the active table
    - If TODOS-archive.md does not exist or contains no entries, skip the archived section silently
 7. **Print summary line:**
    - Without `--all`: "Showing N active entries."
    - With `--all`: "Showing N active entries. M archived entries."
 
-Report only — no files modified.
+Report readiness for displayed active and archived entries. Report only — no
+TODO or Plan files modified.
