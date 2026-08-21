@@ -104,4 +104,4 @@ NEXT_TODO_ID: 44
   - **Assumptions:** Refactoring will be divided into independently reviewable, behavior-preserving slices; existing provider-free tests remain the primary regression gate, with live Hermes validation identified separately where necessary.
   - **Plan:** docs/superpowers/plans/2026-08-20-todo-43-production-orchestration-hotspots.md
   - **Reference:** docs/ARCHITECTURE.md
-  - **Decisions:** Priority `P2`, Effort `L`, Phase `2 (Design)`, Branch `feature/refactor-production-orchestration-hotspots`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Decisions:** Priority `P2`, Effort `L`, Phase `2 (Design)`, Branch `feature/todo-43-orchestration-hotspots-impl`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
