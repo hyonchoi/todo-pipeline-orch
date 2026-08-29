@@ -43,3 +43,27 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 - **Frontier query**: list the map's open children (`gh issue list --state open`, scoped to the map's sub-issues / task list), drop any with an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue in the `Blocked by` line) or an assignee; first in map order wins.
 - **Claim**: `gh issue edit <n> --add-assignee @me` — the session's first write.
 - **Resolve**: `gh issue comment <n> --body "<answer>"`, then `gh issue close <n>`, then append a context pointer (gist + link) to the map's Decisions-so-far.
+
+## TPO backlog items
+
+Backlog entries selectable by the pipeline are GitHub issues carrying the `tpo:todo` label. The canonical ID is `TODO-<issue-number>`; the number is assigned by GitHub, so file the issue before authoring a Plan manifest that names it.
+
+- **Bootstrap once per repo**: create the label vocabulary before using the form — GitHub silently drops form labels that do not exist on the repo. Run `tpo todos labels sync <project>` (to be added); today: `uv run python -c "from pathlib import Path; from hermes_pipeline.github_issues import ensure_labels; print(ensure_labels(Path('.')))"`.
+- **Create**: the "TPO TODO" web form is canonical (`.github/ISSUE_TEMPLATE/tpo-todo.yml`); from the CLI, `gh issue create --web --template "TPO TODO"` opens it (`--template` takes the form *name*; the terminal flow cannot render YAML forms). Scripted, non-interactive creation must render the body with `render_issue_body` and pass `--body-file <file>` plus explicit `--label` flags, as the migration script does. New issues get `tpo:todo` + `needs-triage`.
+- **Body contract**: one `### <Section>` H3 per field, in `KNOWN_SECTIONS` order (`hermes_pipeline/github_issues.py`). `_No response_` means absent. One parser (`parse_issue_body`) reads both form-created and migrated issues; `Legacy ID` is migration-only and not in the form. `Depends on` is **not** a body field — use native issue dependencies as described under Wayfinding operations. Do not use `###` headings inside field text — the parser treats them as new sections.
+- **Decisions** (Priority, Effort, Phase, Branch, Test Coverage, Security Review, UI Review) live in the body. Labels are mirrors, normalized by `tpo todos audit` (to be added); the body wins on conflict.
+- **Eligibility**: `tpo:todo` and `ready-for-agent` are both required. `tpo:on-hold`, `tpo:in-progress`, and any pending-triage label (`needs-triage`, `needs-info`, `ready-for-human`, `wontfix`) block selection. Non-label gates: the issue must be open (`status_closed`); open native dependencies block (`dependency_incomplete:<n>`; `dependency_unknown` when the summary is unavailable); exactly one `Branch` section (`branch_invalid`); and under a plan-gated profile (`requires_plan`) exactly one valid `Plan` (`plan_invalid:*`). `Plan` is optional when filing but required before a plan-gated profile can select the issue.
+
+| Label | Meaning |
+| --- | --- |
+| `tpo:todo` | Managed TODO entry |
+| `tpo:on-hold` | Paused; must not be selected |
+| `tpo:in-progress` | Claimed by an active pipeline run |
+| `needs-triage` / `needs-info` / `ready-for-agent` / `ready-for-human` / `wontfix` | Triage vocabulary (see `triage-labels.md`) |
+| `priority:P0` … `priority:P3` | Mirror of Priority |
+| `effort:S` / `effort:M` / `effort:L` | Mirror of Effort |
+| `test-coverage:required` / `test-coverage:not-required` | Mirror of Test Coverage |
+| `security-review:required` / `security-review:not-required` | Mirror of Security Review |
+| `ui-review:required` / `ui-review:not-required` | Mirror of UI Review |
+| `phase:<n>-<slug>` | Mirror of Phase, e.g. `4 (Development)` → `phase:4-development` |
+| `legacy-id:TODO-<n>` | Pre-migration TODOS.md ID (migrated issues only) |
