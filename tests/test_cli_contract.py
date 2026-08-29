@@ -1338,3 +1338,224 @@ class TestCmdInstallProfile:
 
         assert result == 2
         assert "not found" in capsys.readouterr().out
+
+
+class TestTodosComplete:
+    """``tpo todos complete <project> --todo N --pr N`` drives the issue-close state machine."""
+
+    @pytest.fixture(autouse=True)
+    def _merged_pr(self, mocker):
+        self.pr_view = mocker.patch(
+            "hermes_pipeline.todos_completion._pr_view",
+            return_value={"state": "MERGED", "url": "https://github.com/acme/repo/pull/7"},
+        )
+
+    def _project(self, tmp_path, fake_gh, *, state="open", labels=("tpo:todo", "tpo:in-progress"),
+                 comments=(), state_reason=None):
+        import json
+
+        from tests.gh_fakes import issue_payload
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        remote = {"state": state, "labels": list(labels), "comments": list(comments), "writes": []}
+        fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+        fake_gh.on(*API, "repos/acme/repo/issues/5", handler=lambda argv: (
+            0, json.dumps(issue_payload(
+                5, state=remote["state"], labels=remote["labels"], state_reason=state_reason,
+            )), ""
+        ))
+        fake_gh.on(*API, "--paginate", "--slurp", "repos/acme/repo/issues/5/comments",
+                   handler=lambda argv: (0, json.dumps([[{"body": b} for b in remote["comments"]]]), ""))
+
+        def comment(argv):
+            with open(argv[argv.index("--body-file") + 1]) as handle:
+                remote["comments"].append(handle.read())
+            remote["writes"].append("comment")
+            return 0, "", ""
+
+        def close(argv):
+            remote.update(state="closed")
+            remote["writes"].append("close")
+            return 0, "", ""
+
+        def edit(argv):
+            remote["labels"].remove("tpo:in-progress")
+            remote["writes"].append("edit")
+            return 0, "", ""
+
+        fake_gh.on("gh", "issue", "comment", handler=comment)
+        fake_gh.on("gh", "issue", "close", handler=close)
+        fake_gh.on("gh", "issue", "edit", handler=edit)
+        return Config(projects_dir=projects_dir), remote
+
+    def test_parser_takes_project_positional_and_todo_id_forms(self):
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "TODO-5", "--pr", "7"])
+        assert (args.project, args.todo, args.pr, args.date) == ("demo", 5, 7, None)
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7",
+                                          "--date", "2026-08-29"])
+        assert (args.todo, args.date) == (5, "2026-08-29")
+
+    def test_parser_rejects_non_calendar_date(self):
+        with pytest.raises(SystemExit) as excinfo:
+            build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7",
+                                       "--date", "2026-02-31"])
+        assert excinfo.value.code == 2
+
+    def test_parser_rejects_legacy_project_root_flag(self):
+        with pytest.raises(SystemExit) as excinfo:
+            build_parser().parse_args(["todos", "complete", "--project-root", ".", "--todo", "5", "--pr", "7"])
+        assert excinfo.value.code == 2
+
+    def test_completes_issue_with_manual_marker(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, remote = self._project(tmp_path, fake_gh)
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7",
+                                          "--date", "2026-08-29"])
+
+        assert _cmd_todos_complete(args, config) == 0
+        assert capsys.readouterr().out.strip() == "completed"
+        self.pr_view.assert_called_once()
+        assert self.pr_view.call_args.args[1] == "https://github.com/acme/repo/pull/7"
+        assert remote["writes"] == ["comment", "close", "edit"]
+        assert remote["comments"] == [
+            "Completed: PR #7 https://github.com/acme/repo/pull/7, 2026-08-29\n"
+            "<!-- tpo-completed tick=manual pr=7 -->"
+        ]
+        assert not (tmp_path / "projects" / "demo" / ".hermes" / "runs").exists()
+
+    def test_rerun_is_idempotent(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, remote = self._project(
+            tmp_path, fake_gh, state="closed", labels=("tpo:todo",),
+            comments=["<!-- tpo-completed tick=manual pr=7 -->"],
+        )
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 0
+        assert capsys.readouterr().out.strip() == "completed"
+        assert remote["writes"] == []
+
+    def test_propagation_lag_exits_3_pending(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, remote = self._project(tmp_path, fake_gh)
+        fake_gh.on("gh", "issue", "close")  # accepted, but the read side still says open
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 3
+        assert capsys.readouterr().out.strip() == "pending"
+        assert remote["state"] == "open"
+
+    @pytest.mark.parametrize("state", ["OPEN", "CLOSED"])
+    def test_unmerged_pr_is_refused_unless_forced(self, tmp_path, fake_gh, capsys, state):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, remote = self._project(tmp_path, fake_gh)
+        self.pr_view.return_value = {"state": state, "url": "https://github.com/acme/repo/pull/7"}
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 2
+        assert "not merged" in capsys.readouterr().err
+        assert remote["writes"] == []
+
+        forced = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7", "--force"])
+        assert _cmd_todos_complete(forced, config) == 0
+        assert remote["state"] == "closed"
+
+    def test_pr_lookup_failure_exits_1(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_complete
+        from hermes_pipeline.result_contract import ResultContractError
+
+        config, remote = self._project(tmp_path, fake_gh)
+        self.pr_view.side_effect = ResultContractError("pr_missing")
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 1
+        assert "pr_missing" in capsys.readouterr().err
+        assert remote["writes"] == []
+
+    def test_active_run_is_refused_unless_forced(self, tmp_path, fake_gh, capsys):
+        import json
+
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, remote = self._project(tmp_path, fake_gh)
+        run_dir = tmp_path / "projects" / "demo" / ".hermes" / "runs" / "01HA6PH2V0ZJ7GK0S39D243TQX"
+        run_dir.mkdir(parents=True)
+        (run_dir / "registration.json").write_text(json.dumps({"schema_version": 2, "issue_number": 5}))
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 2
+        err = capsys.readouterr().err
+        assert "run 01HA6PH2V0ZJ7GK0S39D243TQX is active" in err and "--force" in err
+        assert remote["writes"] == []
+
+        forced = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7", "--force"])
+        assert _cmd_todos_complete(forced, config) == 0
+        assert remote["state"] == "closed"
+        assert not (run_dir / "issue-closed").exists()
+
+    def test_not_planned_issue_exits_1(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, remote = self._project(tmp_path, fake_gh, state="closed", state_reason="not_planned")
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 1
+        assert "issue_not_planned" in capsys.readouterr().err
+        assert remote["writes"] == []
+
+    def test_conflicting_completion_exits_1_unless_forced(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, remote = self._project(tmp_path, fake_gh, comments=["<!-- tpo-completed tick=manual pr=6 -->"])
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 1
+        assert "completion_conflict" in capsys.readouterr().err
+        assert remote["writes"] == []
+
+        forced = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7", "--force"])
+        assert _cmd_todos_complete(forced, config) == 0
+        assert remote["writes"] == ["comment", "close", "edit"]
+
+    def test_gh_failure_exits_1_with_code(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, _remote = self._project(tmp_path, fake_gh)
+        fake_gh.on("gh", "issue", "close", rc=1, stderr="gh auth login required")
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 1
+        assert "gh_auth" in capsys.readouterr().err
+
+    def test_unknown_project_exits_2(self, tmp_path, fake_gh):
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, _remote = self._project(tmp_path, fake_gh)
+        args = build_parser().parse_args(["todos", "complete", "nope", "--todo", "5", "--pr", "7"])
+        assert _cmd_todos_complete(args, config) == 2
+
+    def test_main_routes_todos_through_runtime_config(self, tmp_path, fake_gh, mocker, capsys):
+        from hermes_pipeline import cli
+
+        config, remote = self._project(tmp_path, fake_gh)
+        mocker.patch.object(cli.Config, "from_env", return_value=config)
+        mocker.patch.object(cli, "configure_logging")
+        assert cli.main(["todos", "complete", "demo", "--todo", "5", "--pr", "7"]) == 0
+        assert capsys.readouterr().out.strip() == "completed"
+        assert remote["state"] == "closed"
+
+
+class TestPriorTickId:
+    @pytest.mark.parametrize("value", ["01HA6PH2V0ZJ7GK0S39D243TQX", "20260829120000123456", "01PRIOR"])
+    def test_well_formed_prior_tick_id_is_returned(self, tmp_path, value):
+        from hermes_pipeline.cli import _read_prior_tick_id
+
+        (tmp_path / "current_tick_id.txt").write_text(value + "\n")
+        assert _read_prior_tick_id(tmp_path) == value
+
+    @pytest.mark.parametrize("value", ["../evil", "tick-1", "A" * 27, "", "01hb6"])
+    def test_malformed_prior_tick_id_is_treated_as_cold_start(self, tmp_path, caplog, value):
+        from hermes_pipeline.cli import _read_prior_tick_id
+
+        (tmp_path / "current_tick_id.txt").write_text(value)
+        with caplog.at_level("ERROR", logger="hermes_pipeline.cli"):
+            assert _read_prior_tick_id(tmp_path) is None
+        assert any(r.levelname == "ERROR" and "tick id" in r.getMessage() for r in caplog.records)

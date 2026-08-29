@@ -1470,3 +1470,157 @@ class TestTickFixRound2:
         selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
         record = json.loads((project_state / "decisions" / "01PRIOR-issue-drift.json").read_text())
         assert record["rationale"] == "tracker_error: issue_drift:issue_drift"
+
+
+class TestResumeIssueCloseout:
+    """After the PR merges, the resume tick closes the pinned issue and converges across ticks."""
+
+    PR_URL = f"https://github.com/{REPO}/pull/7"
+
+    def _remote_issue(self, fake_gh, *, lag_close=False, crash_after_close=False, edit_rc=0):
+        from tests.gh_fakes import issue_payload
+
+        remote = {"state": "open", "labels": ["tpo:todo", "tpo:in-progress"], "comments": [], "writes": []}
+        seed_project_issues(fake_gh, [todo_payload(10, title="test")])
+        fake_gh.on(*API_ARGV, f"repos/{REPO}/issues/10", handler=lambda argv: (
+            0, json.dumps(issue_payload(10, title="test", body=ELIGIBLE_BODY, state=remote["state"],
+                                        labels=remote["labels"])), ""
+        ))
+        fake_gh.on(*API_ARGV, "--paginate", "--slurp", f"repos/{REPO}/issues/10/comments",
+                   handler=lambda argv: (0, json.dumps([[{"body": b} for b in remote["comments"]]]), ""))
+
+        def comment(argv):
+            with open(argv[argv.index("--body-file") + 1]) as handle:
+                remote["comments"].append(handle.read())
+            remote["writes"].append("comment")
+            return 0, "", ""
+
+        def close(argv):
+            remote["writes"].append("close")
+            if not remote.get("lag"):
+                remote["state"] = "closed"
+            if remote.get("crash"):
+                remote["crash"] = False
+                raise RuntimeError("crash after close")
+            return 0, "", ""
+
+        def edit(argv):
+            remote["writes"].append("edit")
+            if remote.get("edit_rc"):
+                return remote["edit_rc"], "", "could not remove label"
+            remote["labels"].remove("tpo:in-progress")
+            return 0, "", ""
+
+        remote.update(lag=lag_close, crash=crash_after_close, edit_rc=edit_rc)
+        fake_gh.on("gh", "issue", "comment", handler=comment)
+        fake_gh.on("gh", "issue", "close", handler=close)
+        fake_gh.on("gh", "issue", "edit", handler=edit)
+        return remote
+
+    def _delivery_ready(self, mocker, project_dir, run_dir):
+        (run_dir / "accepted-review-head").write_text("a" * 40)
+        (run_dir / "delivery-authority.json").write_text(
+            f'{{"base_branch":"main","origin_repository":"{REPO}"}}\n'
+        )
+        mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+        mocker.patch("hermes_pipeline.kanban_tasks.reconcile_plan_task_results", return_value=True)
+        mocker.patch("hermes_pipeline.review_reconciliation.reconcile_reviews", return_value=True)
+        mocker.patch("hermes_pipeline.cli.all_phases_complete", return_value=False)
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={"t": "running"})
+        tc = "hermes_pipeline.todos_completion."
+        mocker.patch(tc + "load_validated_registration", return_value=SimpleNamespace(
+            todo_id="TODO-10", worktree=project_dir, branch="feat/todo-10", assignee="default",
+            prompt_client="codex", issue_number=10, issue_url=f"https://github.com/{REPO}/issues/10",
+            manifest=object(),
+        ))
+        mocker.patch(tc + "get_todo_kanban_tasks", return_value={
+            "review-acceptance": SimpleNamespace(task_id="review", status="done"),
+            "finish": SimpleNamespace(task_id="finish-id", status="done"),
+            "human-gate": SimpleNamespace(task_id="human-id", status="blocked"),
+        })
+        mocker.patch(tc + "parse_worker_result", return_value=SimpleNamespace(
+            delivery=SimpleNamespace(pr_url=self.PR_URL, branch="feat/todo-10", head_sha="a" * 40),
+            git=SimpleNamespace(expected_parent_sha="a" * 40, resulting_head_sha="a" * 40,
+                                task_commit_sha="a" * 40, changed_files=()),
+        ))
+        mocker.patch(tc + "_verify_finish")
+        mocker.patch(tc + "_verify_pr_identity")
+        mocker.patch(tc + "_github_identity", return_value=(REPO, "main"))
+        mocker.patch(tc + "_pr_view", return_value={
+            "state": "MERGED", "url": self.PR_URL, "headRefName": "feat/todo-10", "headRefOid": "a" * 40,
+        })
+        mocker.patch(tc + "_check_state", return_value="passed")
+        return {
+            "complete": mocker.patch(tc + "complete_todo_kanban_task", return_value=True),
+            "mark": mocker.patch(tc + "_mark_gate_needs_input"),
+            "flag": mocker.patch(tc + "flag_issue_drift"),
+        }
+
+    def _tick(self, project_dir, mocker, tick_id):
+        return _run_project_tick(
+            project_dir=project_dir, config=Config(prompt_client="codex"), tick_id=tick_id, mocker=mocker,
+        )
+
+    def test_propagation_lag_is_pending_then_the_next_tick_completes_the_gate(
+        self, tmp_path, mocker, fake_gh, caplog
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        run_dir = _write_prior_registration(project_dir)
+        remote = self._remote_issue(fake_gh, lag_close=True)
+        mocks = self._delivery_ready(mocker, project_dir, run_dir)
+
+        self._tick(project_dir, mocker, "01LAG1")
+        mocks["complete"].assert_not_called()
+        assert (run_dir / "issue-close-started").exists()
+        assert not (run_dir / "issue-closed").exists()
+
+        remote["lag"] = False
+        remote["state"] = "closed"  # the earlier close finally propagated
+        with caplog.at_level("INFO", logger="hermes_pipeline.cli"):
+            self._tick(project_dir, mocker, "01LAG2")
+
+        mocks["flag"].assert_not_called()
+        mocks["complete"].assert_called_once_with("demo", "human-id")
+        assert (run_dir / "issue-closed").exists()
+        assert "closeout in progress" in caplog.text
+        assert remote["writes"].count("comment") == 1
+        assert remote["writes"].count("close") == 1
+        assert not any(c[:2] == ["issue", "edit"] and "--add-label" in c for c in fake_gh.gh_calls())
+
+    def test_crash_after_close_converges_on_the_next_tick(self, tmp_path, mocker, fake_gh):
+        project_dir = _create_project(tmp_path, "demo")
+        run_dir = _write_prior_registration(project_dir)
+        remote = self._remote_issue(fake_gh, crash_after_close=True)
+        mocks = self._delivery_ready(mocker, project_dir, run_dir)
+
+        with pytest.raises(RuntimeError):
+            self._tick(project_dir, mocker, "01CRASH1")
+        assert remote["state"] == "closed"
+        assert not (run_dir / "issue-closed").exists()
+
+        self._tick(project_dir, mocker, "01CRASH2")
+
+        mocks["flag"].assert_not_called()
+        mocks["complete"].assert_called_once_with("demo", "human-id")
+        assert remote["writes"] == ["comment", "close", "edit"]
+        assert len(remote["comments"]) == 1
+        assert "tpo:in-progress" not in remote["labels"]
+
+    def test_label_removal_failure_blocks_the_gate_then_recovers(self, tmp_path, mocker, fake_gh):
+        project_dir = _create_project(tmp_path, "demo")
+        run_dir = _write_prior_registration(project_dir)
+        remote = self._remote_issue(fake_gh, edit_rc=1)
+        mocks = self._delivery_ready(mocker, project_dir, run_dir)
+
+        selection = self._tick(project_dir, mocker, "01LABEL1")
+        mocks["complete"].assert_not_called()
+        mocks["mark"].assert_called_once_with("human-id", "TPO delivery blocked: gh_rejected")
+        selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
+
+        remote["edit_rc"] = 0
+        self._tick(project_dir, mocker, "01LABEL2")
+
+        mocks["flag"].assert_not_called()
+        mocks["complete"].assert_called_once_with("demo", "human-id")
+        assert remote["writes"] == ["comment", "close", "edit", "edit"]
+        assert (run_dir / "issue-closed").exists()

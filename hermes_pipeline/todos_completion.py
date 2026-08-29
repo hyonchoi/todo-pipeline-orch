@@ -1,4 +1,4 @@
-"""Verified PR handoff, deterministic TODO closeout, and human merge gate."""
+"""Verified PR handoff, human merge gate, and idempotent GitHub issue closeout."""
 from __future__ import annotations
 
 import datetime as dt
@@ -7,8 +7,10 @@ import logging
 import re
 import subprocess
 from pathlib import Path
+from typing import Literal
 
-from .github_issues import parse_github_remote
+from . import github_issues
+from .github_issues import IN_PROGRESS_LABEL, parse_github_remote
 from .kanban_tasks import (
     _mark_gate_needs_input,
     _show_task_payload,
@@ -20,15 +22,17 @@ from .result_contract import (
     load_validated_registration,
     parse_worker_result,
     sanitize_result_text,
-    verify_worker_git_result,
 )
-from .review_reconciliation import REVIEW_ACCEPTANCE_KEY, _create_task
+from .review_reconciliation import (
+    REVIEW_ACCEPTANCE_KEY,
+    RetryableReviewRegistration,
+    _create_task,
+)
 from .state import _atomic_write_text
 
 log = logging.getLogger(__name__)
 
 FINISH_KEY = "finish"
-CLOSEOUT_KEY = "closeout"
 HUMAN_GATE_KEY = "human-gate"
 
 
@@ -44,23 +48,11 @@ def _git(worktree: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _git_bytes(worktree: Path, *args: str) -> bytes:
-    try:
-        result = subprocess.run(
-            ["git", *args], cwd=worktree, capture_output=True, timeout=60
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise ResultContractError("git_verification_failed", args[0]) from exc
-    if result.returncode != 0:
-        raise ResultContractError("git_verification_failed", args[0])
-    return result.stdout
-
-
 def _pr_view(worktree: Path, pr_url: str) -> dict[str, str]:
     try:
         result = subprocess.run(
             ["gh", "pr", "view", pr_url, "--json",
-             "state,url,headRefName,headRefOid,baseRefName,headRepository"],
+             "state,url,headRefName,headRefOid,baseRefName,headRepository,baseRepository"],
             cwd=worktree, capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
@@ -129,17 +121,21 @@ def _github_identity(worktree: Path) -> tuple[str, str]:
     return repository, symbolic.removeprefix(prefix)
 
 
-def _verify_pr_identity(worktree: Path, view: dict, *, branch: str) -> None:
+def _name_with_owner(value: object) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("nameWithOwner")
+    return value if isinstance(value, str) else None
+
+
+def _verify_pr_identity(worktree: Path, view: dict, *, branch: str, repo: str) -> None:
     repository, base_branch = _github_identity(worktree)
-    head_repository = view.get("headRepository")
-    if isinstance(head_repository, dict):
-        actual_repository = head_repository.get("nameWithOwner")
-    else:
-        actual_repository = head_repository
+    base_repository = _name_with_owner(view.get("baseRepository"))
     if (
         view.get("headRefName") != branch
         or view.get("baseRefName") != base_branch
-        or actual_repository != repository
+        or _name_with_owner(view.get("headRepository")) != repository
+        or base_repository is None
+        or base_repository.lower() != repo.lower()
     ):
         raise ResultContractError("pr_identity_mismatch")
 
@@ -155,10 +151,13 @@ def _accepted_head(state_dir: Path, tick_id: str) -> str:
 
 
 def _delivery_authority(state_dir: Path, tick_id: str, worktree: Path,
-                        *, create: bool = False) -> tuple[str, str]:
+                        *, repo: str, create: bool = False) -> tuple[str, str]:
+    """Pinned origin/base for the run; both must match the project ``repo``."""
     path = state_dir / "runs" / tick_id / "delivery-authority.json"
     if create and not path.exists():
         repository, base_branch = _github_identity(worktree)
+        if repository.lower() != repo.lower():
+            raise ResultContractError("delivery_authority_drift")
         _atomic_write_text(path, json.dumps({
             "origin_repository": repository, "base_branch": base_branch,
         }, sort_keys=True) + "\n")
@@ -170,6 +169,8 @@ def _delivery_authority(state_dir: Path, tick_id: str, worktree: Path,
         isinstance(value, str) and value for value in raw.values()
     ):
         raise ResultContractError("delivery_authority_invalid")
+    if raw["origin_repository"].lower() != repo.lower():
+        raise ResultContractError("delivery_authority_drift")
     return raw["origin_repository"], raw["base_branch"]
 
 
@@ -190,33 +191,10 @@ def _verify_finish(worktree: Path, result, accepted_head: str,
         raise ResultContractError("finish_review_head_mismatch")
 
 
-def _verify_closeout_transition(worktree: Path, result, *, todo_id: str,
-                                pr_number: int, date: str) -> None:
-    from .todos_md import TodoCompletionError, complete_todo_text
-
-    try:
-        parent_text = _git_bytes(
-            worktree, "show", f"{result.git.expected_parent_sha}:TODOS.md"
-        ).decode("utf-8")
-        result_text = _git_bytes(
-            worktree, "show", f"{result.git.resulting_head_sha}:TODOS.md"
-        ).decode("utf-8")
-        expected = complete_todo_text(
-            parent_text, todo_id, pr_number=pr_number, date=date
-        )
-    except (TodoCompletionError, UnicodeError) as exc:
-        raise ResultContractError("closeout_transition_invalid") from exc
-    if result_text != expected:
-        raise ResultContractError("closeout_transition_invalid")
-
-
-def _block(tasks: dict, key: str, code: str) -> bool:
-    task = tasks.get(key)
-    if task is not None:
-        _mark_gate_needs_input(
-            task.task_id,
-            sanitize_result_text(f"TPO delivery blocked: {code}", maximum=1000),
-        )
+def _block(gate_id: str, code: str) -> bool:
+    _mark_gate_needs_input(
+        gate_id, sanitize_result_text(f"TPO delivery blocked: {code}", maximum=1000)
+    )
     return False
 
 
@@ -287,11 +265,18 @@ def flag_issue_drift(
     )
 
 
+def _run_marker(state_dir: Path, tick_id: str, name: str) -> Path:
+    return state_dir / "runs" / tick_id / name
+
+
 def reconcile_todo_completion(
-    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str,
-    repo: str | None = None,
+    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str, repo: str,
 ) -> bool:
-    """Reconcile delivery from Kanban/GitHub facts; never merge or repair drift."""
+    """Reconcile delivery from Kanban/GitHub facts; never merge or repair drift.
+
+    ``repo`` is the project's ``origin`` identity resolved by the caller; every
+    PR and issue fact is bound to it.
+    """
     registration_path = state_dir / "runs" / tick_id / "registration.json"
     if not registration_path.exists():
         return True
@@ -306,7 +291,7 @@ def reconcile_todo_completion(
     finish = tasks.get(FINISH_KEY)
     if finish is None:
         head = _accepted_head(state_dir, tick_id)
-        _delivery_authority(state_dir, tick_id, registration.worktree, create=True)
+        _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo, create=True)
         _create_task(
             tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
             key=FINISH_KEY, title="Verify, push, and open pull request",
@@ -324,6 +309,7 @@ def reconcile_todo_completion(
     if finish.status != "done":
         return True
 
+    finish_verified = _run_marker(state_dir, tick_id, "finish-verified")
     try:
         payload = parse_worker_result(
             _show_task_payload(finish.task_id), tick_id=tick_id,
@@ -335,143 +321,176 @@ def reconcile_todo_completion(
         accepted_head = _accepted_head(state_dir, tick_id)
         _verify_finish(
             registration.worktree, payload, accepted_head,
-            require_current=CLOSEOUT_KEY not in tasks,
+            require_current=not finish_verified.exists(),
         )
+        if not finish_verified.exists():
+            _atomic_write_text(finish_verified, accepted_head + "\n")
         delivery = payload.delivery
         if delivery.head_sha != payload.git.resulting_head_sha:
             raise ResultContractError("delivery_head_mismatch")
-        authority = _delivery_authority(state_dir, tick_id, registration.worktree)
+        authority = _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo)
         if _github_identity(registration.worktree) != authority:
             raise ResultContractError("delivery_authority_drift")
-        if CLOSEOUT_KEY not in tasks:
-            view = _pr_view(registration.worktree, delivery.pr_url)
-            if view.get("url") != delivery.pr_url:
-                raise ResultContractError("pr_identity_mismatch")
-            _verify_pr_identity(
-                registration.worktree, view, branch=registration.branch,
-            )
-            if view.get("state") != "OPEN" or view.get("headRefOid") != delivery.head_sha:
-                raise ResultContractError("pr_head_drift")
-            if _remote_head(registration.worktree, registration.branch) != delivery.head_sha:
-                raise ResultContractError("remote_head_drift")
+        pr_match = re.fullmatch(r"https://github\.com/([^/]+/[^/]+)/pull/(\d+)", delivery.pr_url)
+        if pr_match is None or pr_match.group(1).lower() != repo.lower():
+            raise ResultContractError("pr_identity_mismatch")
+        pr_number = int(pr_match.group(2))
     except ResultContractError as exc:
         return _needs_input(
             tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
             parent=finish.task_id, code=exc.code,
         )
 
-    closeout = tasks.get(CLOSEOUT_KEY)
-    if closeout is None:
-        pr_number = int(re.search(r"/pull/(\d+)$", delivery.pr_url).group(1))
-        date = dt.datetime.now(dt.UTC).date().isoformat()
-        _atomic_write_text(
-            state_dir / "runs" / tick_id / "closeout-date", date + "\n"
-        )
-        _create_task(
-            tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-            key=CLOSEOUT_KEY, title="Close TODO through todos-manager",
-            prompt=(
-                "Invoke the bundled deterministic todos-manager completion backend: "
-                f"uv run tpo todos complete --project-root . --todo {registration.todo_id} "
-                f"--pr {pr_number} --date {date}. Commit only TODOS.md in its own "
-                "atomic commit, push it, and close with structured result metadata. "
-                "Do not merge or repair remote drift."
-            ), worktree=registration.worktree, assignee=registration.assignee,
-            parent=finish.task_id, prompt_client=registration.prompt_client,
-        )
-        return True
-    if closeout.status != "done":
-        return True
-
-    try:
-        closeout_result = parse_worker_result(
-            _show_task_payload(closeout.task_id), tick_id=tick_id,
-            todo_id=registration.todo_id, step_key=CLOSEOUT_KEY,
-            acceptance_criteria=(),
-        )
-        verify_worker_git_result(
-            registration.worktree, closeout_result.git,
-            expected_parent_sha=delivery.head_sha,
-        )
-        if closeout_result.git.changed_files != ("TODOS.md",):
-            raise ResultContractError("closeout_changed_files")
-        pr_number = int(re.search(r"/pull/(\d+)$", delivery.pr_url).group(1))
-        try:
-            closeout_date = (
-                state_dir / "runs" / tick_id / "closeout-date"
-            ).read_text().strip()
-        except (OSError, UnicodeError) as exc:
-            raise ResultContractError("closeout_date_missing") from exc
-        _verify_closeout_transition(
-            registration.worktree, closeout_result,
-            todo_id=registration.todo_id, pr_number=pr_number, date=closeout_date,
-        )
-        view = _pr_view(registration.worktree, delivery.pr_url)
-        _verify_pr_identity(
-            registration.worktree, view, branch=registration.branch,
-        )
-        if view.get("state") == "MERGED":
-            if view.get("headRefOid") != closeout_result.git.resulting_head_sha:
-                raise ResultContractError("pr_head_drift")
-            gate_id = _human_merge_gate(
-                tasks=tasks, registration=registration, tenant=tenant,
-                tick_id=tick_id, parent=closeout.task_id,
-            )
-            checks = _check_state(registration.worktree, delivery.pr_url)
-            if checks == "failed":
-                raise ResultContractError("required_checks_failed")
-            if checks == "pending":
-                return True
-            return complete_todo_kanban_task(tenant, gate_id)
-        remote_head = _remote_head(registration.worktree, registration.branch)
-        if remote_head != closeout_result.git.resulting_head_sha:
-            raise ResultContractError("remote_head_drift")
-        if view.get("headRefOid") != remote_head:
-            raise ResultContractError("pr_head_drift")
-    except ResultContractError as exc:
-        return _needs_input(
-            tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
-            parent=closeout.task_id, code=exc.code,
-        )
-
     gate = tasks.get(HUMAN_GATE_KEY)
     if gate is None:
-        gate_id = _human_merge_gate(
-            tasks=tasks, registration=registration, tenant=tenant,
-            tick_id=tick_id, parent=closeout.task_id,
-        )
-        _mark_gate_needs_input(gate_id, f"Human merge required: {delivery.pr_url}")
-        return True
-
-    try:
-        view = _pr_view(registration.worktree, delivery.pr_url)
-        _verify_pr_identity(
-            registration.worktree, view, branch=registration.branch,
-        )
-    except ResultContractError as exc:
-        return _block(tasks, HUMAN_GATE_KEY, exc.code)
-    if view.get("state") == "MERGED":
-        if view.get("headRefOid") != closeout_result.git.resulting_head_sha:
-            return _block(tasks, HUMAN_GATE_KEY, "pr_head_drift")
         try:
-            checks = _check_state(registration.worktree, delivery.pr_url)
+            view = _pr_view(registration.worktree, delivery.pr_url)
+            if view.get("url") != delivery.pr_url:
+                raise ResultContractError("pr_identity_mismatch")
+            _verify_pr_identity(
+                registration.worktree, view, branch=registration.branch, repo=repo,
+            )
+            if (
+                view.get("state") not in ("OPEN", "MERGED")
+                or view.get("headRefOid") != delivery.head_sha
+            ):
+                raise ResultContractError("pr_head_drift")
+            if view.get("state") == "OPEN" and (
+                _remote_head(registration.worktree, registration.branch) != delivery.head_sha
+            ):
+                raise ResultContractError("remote_head_drift")
         except ResultContractError as exc:
-            return _block(tasks, HUMAN_GATE_KEY, exc.code)
-        if checks == "failed":
-            return _block(tasks, HUMAN_GATE_KEY, "required_checks_failed")
-        if checks == "pending":
+            return _needs_input(
+                tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
+                parent=finish.task_id, code=exc.code,
+            )
+        try:
+            gate_id = _human_merge_gate(
+                tasks=tasks, registration=registration, tenant=tenant,
+                tick_id=tick_id, parent=finish.task_id,
+            )
+        except RetryableReviewRegistration:
+            log.warning("tick %s: human-gate registration remains pending; retrying", tick_id)
+            return False
+        if view.get("state") != "MERGED":
+            _mark_gate_needs_input(
+                gate_id,
+                sanitize_result_text(f"Human merge required: {delivery.pr_url}", maximum=1000),
+            )
             return True
-        return complete_todo_kanban_task(tenant, gate.task_id)
-    if view.get("state") != "OPEN" or view.get("headRefName") != registration.branch:
-        return _block(tasks, HUMAN_GATE_KEY, "pull_request_closed_or_drifted")
-    if view.get("headRefOid") != closeout_result.git.resulting_head_sha:
-        return _block(tasks, HUMAN_GATE_KEY, "pr_head_drift")
+    else:
+        gate_id = gate.task_id
+        try:
+            view = _pr_view(registration.worktree, delivery.pr_url)
+            _verify_pr_identity(
+                registration.worktree, view, branch=registration.branch, repo=repo,
+            )
+        except ResultContractError as exc:
+            return _block(gate_id, exc.code)
+        if view.get("state") != "MERGED" and (
+            view.get("state") != "OPEN" or view.get("headRefName") != registration.branch
+        ):
+            return _block(gate_id, "pull_request_closed_or_drifted")
+        if view.get("headRefOid") != delivery.head_sha:
+            return _block(gate_id, "pr_head_drift")
+
     try:
         checks = _check_state(registration.worktree, delivery.pr_url)
     except ResultContractError as exc:
-        return _block(tasks, HUMAN_GATE_KEY, exc.code)
+        return _block(gate_id, exc.code)
     if checks == "failed":
-        return _block(tasks, HUMAN_GATE_KEY, "required_checks_failed")
-    if checks == "pending":
+        return _block(gate_id, "required_checks_failed")
+    if checks == "pending" or view.get("state") != "MERGED":
         return True
-    return True
+
+    try:
+        outcome = close_issue_for_delivery(
+            project_dir=project_dir, state_dir=state_dir, tick_id=tick_id,
+            issue_number=registration.issue_number, pr_number=pr_number,
+            pr_url=delivery.pr_url, repo=repo,
+        )
+    except github_issues.GitHubIssuesError as exc:
+        return _block(gate_id, exc.code)
+    if outcome == "pending":
+        return True
+    return complete_todo_kanban_task(tenant, gate_id)
+
+
+COMPLETION_MARKER = "<!-- tpo-completed tick={tick_id} pr={pr_number} -->"
+_COMPLETION_MARKER_RE = re.compile(r"<!-- tpo-completed tick=\S+ pr=(\d+) -->")
+# Written next to the immutable registration; ``registration_state`` reads ``issue-closed``.
+CLOSE_STARTED_MARKER = "issue-close-started"
+COMMENTED_MARKER = "issue-commented"
+CLOSED_MARKER = "issue-closed"
+
+
+def close_issue_for_delivery(
+    *, project_dir: Path, state_dir: Path, tick_id: str, issue_number: int,
+    pr_number: int, pr_url: str, repo: str, date: str | None = None,
+    force: bool = False,
+) -> Literal["closed", "pending"]:
+    """Idempotently close the delivered issue; safe to re-enter every tick.
+
+    Refuses (``GitHubIssuesError``) an issue closed as ``not_planned``
+    (``issue_not_planned``) or one already carrying a completion marker for a
+    different PR (``completion_conflict``, overridable with ``force``). Steps,
+    each skipped when GitHub already shows its effect: post one ``Completed:``
+    comment carrying ``COMPLETION_MARKER`` (matched on the exact ``tick``/``pr``
+    pair), ``gh issue close``, remove ``tpo:in-progress``. A re-fetch then
+    decides: closed, marker comment present, label gone → ``"closed"``;
+    otherwise ``"pending"`` (propagation lag; retry next tick). Other
+    ``GitHubIssuesError`` propagate so the caller can block its gate.
+
+    Run markers (written only when ``runs/<tick_id>`` exists — a manual
+    ``tick_id`` has none): ``issue-close-started`` before the first remote
+    mutation, so a later ``issue_closed`` drift verdict is recognised as this
+    closeout in progress; ``issue-commented`` after the comment is accepted, so
+    a lagging comment listing can never cause a second comment (the file then
+    also satisfies the marker postcondition); ``issue-closed`` on success.
+    ``registration_state`` maps ``issue-closed`` to ``delivered`` (this is its
+    only production writer) and an operator-created ``abandoned`` file
+    (``touch runs/<tick>/abandoned``) to ``abandoned``; otherwise the run is
+    ``active`` and keeps its pinned issue out of eligibility.
+    """
+    marker = COMPLETION_MARKER.format(tick_id=tick_id, pr_number=pr_number)
+    run_dir = state_dir / "runs" / tick_id
+    has_run = run_dir.is_dir()
+
+    def marker_present(bodies) -> bool:
+        return (has_run and (run_dir / COMMENTED_MARKER).exists()) or any(
+            marker in body for body in bodies
+        )
+
+    live = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
+    if live.state == "closed" and live.state_reason == "not_planned":
+        raise github_issues.GitHubIssuesError("issue_not_planned", "issue close")
+    comments = github_issues.list_comment_bodies(project_dir, issue_number, repo=repo)
+    if not force:
+        for body in comments:
+            for other in _COMPLETION_MARKER_RE.findall(body):
+                if int(other) != pr_number:
+                    raise github_issues.GitHubIssuesError("completion_conflict", "issue comment")
+    if has_run:
+        _atomic_write_text(run_dir / CLOSE_STARTED_MARKER, f"pr={pr_number}\n")
+    if not marker_present(comments):
+        date = date or dt.datetime.now(dt.UTC).date().isoformat()
+        github_issues.add_comment(
+            project_dir, issue_number,
+            f"Completed: PR #{pr_number} {pr_url}, {date}\n{marker}", repo=repo,
+        )
+        if has_run:
+            _atomic_write_text(run_dir / COMMENTED_MARKER, f"pr={pr_number}\n")
+    if live.state == "open":
+        github_issues.close_issue(project_dir, issue_number, repo=repo)
+    if IN_PROGRESS_LABEL in live.labels:
+        github_issues.remove_label(project_dir, issue_number, IN_PROGRESS_LABEL, repo=repo)
+
+    live = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
+    comment_present = marker_present(
+        github_issues.list_comment_bodies(project_dir, issue_number, repo=repo)
+    )
+    if live.state == "open" or not comment_present or IN_PROGRESS_LABEL in live.labels:
+        return "pending"
+    if has_run:
+        _atomic_write_text(run_dir / CLOSED_MARKER, f"pr={pr_number}\n")
+    return "closed"

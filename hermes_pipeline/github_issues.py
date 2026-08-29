@@ -220,6 +220,7 @@ class IssueTodo:
     branch_values: tuple[str, ...]
     snapshot: str
     entry_hash: str
+    state_reason: str | None = None
 
 
 def first_lines(values: tuple[str, ...]) -> tuple[str, ...]:
@@ -284,6 +285,9 @@ def issue_from_api(payload: Mapping, *, repo: str) -> IssueTodo:
         branch_values=first_lines(sections.get("Branch", ())),
         snapshot=snapshot,
         entry_hash=snapshot_hash(snapshot),
+        state_reason=(
+            str(payload["state_reason"]) if payload.get("state_reason") is not None else None
+        ),
     )
 
 

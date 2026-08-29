@@ -294,6 +294,9 @@ def test_delivery_evidence_accepts_only_successful_checks_and_exact_pr_identity(
 
     for mutation in (
         lambda value: value.update(pr_url="https://github.com/acme/repo/issues/7"),
+        lambda value: value.update(pr_url="https://evil.example/acme/repo/pull/7"),
+        lambda value: value.update(pr_url="https://github.com/acme/repo/pull/7?x=1"),
+        lambda value: value.update(pr_url="https://github.com/acme/repo/extra/pull/7"),
         lambda value: value.update(head_sha="short"),
         lambda value: value.update(checks=[]),
         lambda value: value.update(
@@ -743,7 +746,7 @@ def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, moc
         project_dir=repo, state_dir=state, tenant="legacy", tick_id="LEGACY-TICK"
     )
     assert reconcile_todo_completion(
-        project_dir=repo, state_dir=state, tenant="legacy", tick_id="LEGACY-TICK"
+        project_dir=repo, state_dir=state, tenant="legacy", tick_id="LEGACY-TICK", repo=REPO
     )
     kanban.assert_not_called()
     review.assert_not_called()

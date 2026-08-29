@@ -935,12 +935,11 @@ class TestCliHelpers:
         assert result is None
 
     def test_read_prior_tick_id_invalid_json(self, tmp_path):
-        """Returns None when file has invalid content."""
+        """A malformed id names no run directory: treated as a cold start."""
         from hermes_pipeline.cli import _read_prior_tick_id
 
         (tmp_path / "current_tick_id.txt").write_text("not json {")
-        result = _read_prior_tick_id(tmp_path)
-        assert result == "not json {"
+        assert _read_prior_tick_id(tmp_path) is None
 
     def test_generate_tick_id_format(self):
         """_generate_tick_id returns a non-empty string."""

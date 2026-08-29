@@ -7,6 +7,7 @@ Scheduling is owned by Hermes kanban tasks.
 from __future__ import annotations
 
 import argparse
+import datetime
 import errno
 import fcntl
 import hashlib
@@ -381,6 +382,16 @@ def _parse_todo_id(value: str) -> int:
         )
 
 
+def _parse_iso_date_flag(value: str) -> str:
+    """Parse --date as a calendar date in YYYY-MM-DD form."""
+    try:
+        return datetime.date.fromisoformat(value).isoformat()
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"--date must be YYYY-MM-DD (you provided '{value}')"
+        )
+
+
 def _parse_todo_id_flag(value: str) -> int:
     """Parse --todo argument, accepting 'TODO-N' or plain 'N' formats."""
     cleaned = value.removeprefix("TODO-").removeprefix("todo-")
@@ -461,17 +472,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     tick_parser.set_defaults(func=_cmd_tick)
 
-    todos_parser = subparsers.add_parser(
-        "todos", help="Deterministic TODOS.md mutation backends for todos-manager"
-    )
+    todos_parser = subparsers.add_parser("todos", help="GitHub issue completion")
     todos_subparsers = todos_parser.add_subparsers(dest="todos_command", required=True)
     complete_parser = todos_subparsers.add_parser(
-        "complete", help="Mark one canonical TODO complete after verified PR handoff"
+        "complete", help="Close one delivered TODO issue after its pull request merged"
     )
-    complete_parser.add_argument("--project-root", type=Path, default=Path.cwd())
-    complete_parser.add_argument("--todo", required=True)
-    complete_parser.add_argument("--pr", required=True, type=int)
-    complete_parser.add_argument("--date", required=True)
+    complete_parser.add_argument("project", help="Project name")
+    complete_parser.add_argument(
+        "--todo", required=True, type=_parse_todo_id_flag,
+        help="Issue to close (e.g. TODO-5 or 5)",
+    )
+    complete_parser.add_argument("--pr", required=True, type=int, help="Merged PR number")
+    complete_parser.add_argument(
+        "--date", type=_parse_iso_date_flag, default=None,
+        help="Completion date (YYYY-MM-DD); defaults to today (UTC)",
+    )
+    complete_parser.add_argument(
+        "--force", action="store_true",
+        help="Proceed although the PR is not merged, a run for the issue is still "
+        "active, or the issue already records completion by another PR",
+    )
     complete_parser.set_defaults(func=_cmd_todos_complete)
 
     # recover-counter: Scan TODOS.md and initialize counter file
@@ -716,6 +736,11 @@ def _cmd_approve(args, config: Config) -> int:
         return 2
 
 
+# ULID-ish ids from ``new_tick_id`` (26 Crockford chars) and the 20-digit fallback
+# from ``_generate_tick_id``; the id names a run directory, so nothing else passes.
+_TICK_ID_RE = re.compile(r"[0-9A-Z]{2,26}")
+
+
 def _read_prior_tick_id(state_dir: Path) -> str | None:
     """Read the prior tick_id from current_tick_id.txt.
 
@@ -726,10 +751,14 @@ def _read_prior_tick_id(state_dir: Path) -> str | None:
     if not path.exists():
         return None
     try:
-        return path.read_text().strip()
+        value = path.read_text().strip()
     except OSError as e:
         log.error("can't read %s: %s — aborting tick (prior state unreadable)", path, e)
         raise
+    if not _TICK_ID_RE.fullmatch(value):
+        log.error("%s holds a malformed tick id; treating as cold start", path)
+        return None
+    return value
 
 
 def _generate_tick_id() -> str:
@@ -1425,7 +1454,22 @@ def _tick_project(
             run_dir = project_state / "runs" / prior_tick_id
             registration_path = run_dir / "registration.json"
             repo = None
+            if registration_path.exists():
+                try:
+                    repo = github_issues.repository_identity(project_dir)
+                except GitHubIssuesError as exc:
+                    log.error(
+                        "project %s: prior tick %s origin identity unavailable (%s); "
+                        "delivery cannot be reconciled",
+                        project_slug,
+                        prior_tick_id,
+                        exc.code,
+                    )
+                    cb.observe(picked=None, counts_as_no_progress=True)
+                    return
             if registration_path.exists() and registration_state(run_dir) == "active":
+                from .todos_completion import CLOSE_STARTED_MARKER
+
                 try:
                     pinned = json.loads(registration_path.read_text(encoding="utf-8"))
                 except (OSError, UnicodeError, json.JSONDecodeError):
@@ -1435,7 +1479,6 @@ def _tick_project(
                 number = pinned.get("issue_number")
                 live = None
                 try:
-                    repo = github_issues.repository_identity(project_dir)
                     if type(number) is int and number > 0:
                         # Exactly one live read per resume tick; drift and the
                         # claim label are both evaluated from it.
@@ -1446,7 +1489,16 @@ def _tick_project(
                     drift = github_issues.check_issue_drift(
                         project_dir, pinned, repo=repo, live=live
                     )
-                if drift is None:
+                if drift == "issue_closed" and (run_dir / CLOSE_STARTED_MARKER).exists():
+                    # TPO itself began closing this issue; let the delivery
+                    # reconciler finish (it never re-claims a closed issue).
+                    log.info(
+                        "project %s: prior tick %s closeout in progress; issue already closed",
+                        project_slug,
+                        prior_tick_id,
+                    )
+                    drift = None
+                elif drift is None:
                     # The claim label is best-effort; re-add it only for a run
                     # whose issue is still the pinned, open, un-held issue.
                     ensure_in_progress_label(project_dir, pinned, repo=repo, live=live)
@@ -1876,19 +1928,50 @@ def _tick_project(
     cb.observe(picked=picked, counts_as_no_progress=False)
 
 
-def _cmd_todos_complete(args, config: Config | None = None) -> int:
-    """Machine backend used by the bundled todos-manager completion workflow."""
-    from .todos_md import TodoCompletionError, complete_todo_file
+def _cmd_todos_complete(args, config: Config) -> int:
+    """Manually run the idempotent issue-close state machine for a delivered TODO.
 
-    path = args.project_root.resolve() / "TODOS.md"
+    Exit codes: 0 completed, 1 GitHub failure, 2 usage or refused (PR not merged,
+    run still active; ``--force`` overrides), 3 pending (retry).
+    """
+    from .github_issues import GitHubIssuesError, repository_identity
+    from .project_config import _get_project_state_dir
+    from .result_contract import ResultContractError
+    from .run_registration import active_registration_issue_numbers
+    from .todos_completion import _pr_view, close_issue_for_delivery
+
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+    state_dir = _get_project_state_dir(project_dir)
     try:
-        changed = complete_todo_file(
-            path, args.todo.upper(), pr_number=args.pr, date=args.date
+        repo = repository_identity(project_dir)
+        pr_url = f"https://github.com/{repo}/pull/{args.pr}"
+        view = _pr_view(project_dir, pr_url)
+        if view.get("state") != "MERGED" and not args.force:
+            print(f"Error: {pr_url} is not merged (state {view.get('state')}); "
+                  "use --force to close the issue anyway", file=sys.stderr)
+            return 2
+        if not args.force and args.todo in active_registration_issue_numbers(state_dir):
+            ticks = sorted(
+                path.parent.name for path in (state_dir / "runs").glob("*/registration.json")
+                if f'"issue_number": {args.todo}' in path.read_text(encoding="utf-8")
+            )
+            print(f"Error: run {', '.join(ticks)} is active for TODO-{args.todo}; "
+                  "let the tick finish it or use --force", file=sys.stderr)
+            return 2
+        outcome = close_issue_for_delivery(
+            project_dir=project_dir, state_dir=state_dir, tick_id="manual",
+            issue_number=args.todo, pr_number=args.pr, pr_url=pr_url, repo=repo,
+            date=args.date, force=args.force,
         )
-    except (OSError, UnicodeError, TodoCompletionError) as exc:
-        print(f"Error: {path}: {exc}", file=sys.stderr)
+    except (GitHubIssuesError, ResultContractError) as exc:
+        print(f"Error: {exc.code}", file=sys.stderr)
         return 1
-    print("completed" if changed else "already complete")
+    if outcome == "pending":
+        print("pending")
+        return 3
+    print("completed")
     return 0
 
 
@@ -2929,7 +3012,7 @@ def main(argv: list[str] | None = None) -> int:
     # Bootstrap subcommands (file-copy only) don't need pipeline runtime
     # config (state dir, projects dir) — skip Config.from_env()
     # so they work even when that env isn't configured yet.
-    if getattr(args, "command", None) in ("skills", "config", "todos"):
+    if getattr(args, "command", None) in ("skills", "config"):
         if hasattr(args, "func"):
             return args.func(args, None)
         parser.parse_args([*remaining, "--help"])

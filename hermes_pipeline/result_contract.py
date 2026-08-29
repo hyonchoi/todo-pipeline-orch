@@ -358,7 +358,9 @@ def _validate_delivery(value: object) -> DeliveryEvidence:
     delivery = _mapping(value, code="invalid_delivery")
     _exact_keys(delivery, {"pr_url", "branch", "head_sha", "checks"}, code="invalid_delivery")
     pr_url = _bounded_string(delivery["pr_url"], maximum=1000, code="invalid_delivery")
-    if not re.fullmatch(r"https://[^\s]+/pull/\d+", pr_url):
+    if not re.fullmatch(
+        r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+", pr_url
+    ):
         raise ResultContractError("invalid_delivery")
     _bounded_string(delivery["branch"], maximum=256, code="invalid_delivery")
     if not isinstance(delivery["head_sha"], str) or not _SHA_RE.fullmatch(
