@@ -431,7 +431,7 @@ def test_ensure_labels_creates_only_missing_including_extra(fake_gh, tmp_path):
     assert created == ("effort:L", "phase:4-development", "tpo:on-hold")
     creates = [c for c in fake_gh.gh_calls() if c[:2] == ["label", "create"]]
     assert creates == [
-        ["label", "create", "--repo", "acme/repo", "--color", "fbca04",
+        ["label", "create", "--repo", "acme/repo", "--color", "e4e669",
          "--description", "TODO is paused and must not be selected", "--force", "--", "tpo:on-hold"],
         ["label", "create", "--repo", "acme/repo", "--color", "9ecbff",
          "--description", "Effort: large", "--force", "--", "effort:L"],

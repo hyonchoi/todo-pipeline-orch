@@ -153,3 +153,23 @@ def test_field_ids_are_unique_snake_case(body):
     ids = [item["id"] for item in body]
     assert len(set(ids)) == len(ids)
     assert all(SNAKE_CASE_RE.match(i) for i in ids), ids
+
+
+TRIAGE_DOC = ROOT / "docs" / "agents" / "triage-labels.md"
+TRIAGE_ROW_RE = re.compile(r"^\| `[^`]+` +\| `([^`]+)` +\| (.+?) +\|$")
+
+
+def test_triage_label_descriptions_match_triage_labels_doc():
+    rows = dict(
+        match.groups()
+        for line in TRIAGE_DOC.read_text(encoding="utf-8").splitlines()
+        if (match := TRIAGE_ROW_RE.match(line))
+    )
+    assert set(rows) == {"needs-triage", "needs-info", "ready-for-agent", "ready-for-human", "wontfix"}
+    descriptions = {name: description for name, _color, description in LABEL_VOCABULARY}
+    assert {name: descriptions[name] for name in rows} == rows
+
+
+def test_tpo_labels_have_distinct_colors():
+    colors = [color for name, color, _ in LABEL_VOCABULARY if name.startswith("tpo:")]
+    assert len(colors) == 3 and len(set(colors)) == len(colors)

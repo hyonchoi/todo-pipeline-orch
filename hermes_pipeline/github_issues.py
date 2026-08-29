@@ -66,14 +66,14 @@ KNOWN_SECTIONS: tuple[str, ...] = (
 REQUIRED_SECTIONS = ("What", "Why", "Branch", "Priority", "Effort")
 
 LABEL_VOCABULARY: tuple[tuple[str, str, str], ...] = (
-    (TODO_LABEL, "0e8a16", "Managed TODO entry for todo-pipeline-orchestrator"),
-    (ON_HOLD_LABEL, "fbca04", "TODO is paused and must not be selected"),
-    (IN_PROGRESS_LABEL, "1d76db", "TODO is claimed by an active pipeline run"),
-    ("needs-triage", "ededed", "Awaiting triage"),
-    ("needs-info", "d4c5f9", "Blocked on missing information"),
-    (READY_LABEL, "0052cc", "Ready for an agent to pick up"),
-    ("ready-for-human", "5319e7", "Needs a human to pick up"),
-    ("wontfix", "ffffff", "Will not be worked on"),
+    (TODO_LABEL, "1d76db", "Managed TODO entry for todo-pipeline-orchestrator"),
+    (ON_HOLD_LABEL, "e4e669", "TODO is paused and must not be selected"),
+    (IN_PROGRESS_LABEL, "fbca04", "TODO is claimed by an active pipeline run"),
+    ("needs-triage", "ededed", "Maintainer needs to evaluate this issue"),
+    ("needs-info", "d4c5f9", "Waiting on reporter for more information"),
+    (READY_LABEL, "0e8a16", "Fully specified, ready for an AFK agent"),
+    ("ready-for-human", "5319e7", "Requires human implementation"),
+    ("wontfix", "ffffff", "Will not be actioned"),
     ("priority:P0", "b60205", "Priority P0"),
     ("priority:P1", "d93f0b", "Priority P1"),
     ("priority:P2", "fbca04", "Priority P2"),
