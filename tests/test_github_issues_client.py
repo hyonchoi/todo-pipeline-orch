@@ -217,6 +217,24 @@ def test_repository_identity_rejects_bad_origin(fake_gh, tmp_path, rule):
         repository_identity(tmp_path)
 
 
+@pytest.mark.parametrize(
+    ("rule", "detail"),
+    [
+        ({"stdout": "https://gitlab.com/acme/repo.git\n"}, "origin is not a github.com remote"),
+        ({"rc": 128, "stderr": "fatal: no such remote 'origin' secret"}, "no origin remote or not a git repository"),
+        ({"raises": FileNotFoundError("git")}, "git not found"),
+        ({"raises": subprocess.TimeoutExpired("git", 60)}, "git remote get-url origin failed"),
+    ],
+)
+def test_repository_identity_attaches_fixed_detail(fake_gh, tmp_path, rule, detail):
+    fake_gh.on(*ORIGIN, **rule)
+    with pytest.raises(GitHubIssuesError) as info:
+        repository_identity(tmp_path)
+    assert info.value.detail == detail
+    assert "secret" not in str(info.value) and "secret" not in info.value.detail
+    assert str(info.value) == "origin_identity_invalid: gh git remote"
+
+
 def test_repo_none_resolves_identity_from_origin(fake_gh, tmp_path):
     fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo\n")
     fake_gh.on(*API, stdout=json.dumps(issue_payload(3)))
@@ -312,9 +330,27 @@ def test_check_auth_maps_unknown_failure_to_gh_auth_and_logs_once(fake_gh, tmp_p
             check_auth(tmp_path)
     assert (info.value.code, info.value.verb) == ("gh_auth", "auth status")
     assert len(caplog.records) == 1
-    fake_gh.on("gh", "auth", "status", rc=1, stderr="unrelated failure")
+    fake_gh.on("gh", "auth", "status", rc=1, stderr="")
     with pytest.raises(GitHubIssuesError, match="gh_auth"):
         check_auth(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "unrelated failure",
+        "dial tcp: lookup api.github.com: no such host",
+        "error connecting to api.github.com",
+        "HTTP 502 Bad Gateway",
+        "Post \"https://api.github.com\": unexpected EOF",
+        "context deadline exceeded (Client.Timeout)",
+    ],
+)
+def test_check_auth_passes_through_non_auth_failures(fake_gh, tmp_path, stderr):
+    fake_gh.on("gh", "auth", "status", rc=1, stderr=stderr)
+    with pytest.raises(GitHubIssuesError) as info:
+        check_auth(tmp_path)
+    assert info.value.code == "gh_unavailable"
 
 
 @pytest.mark.parametrize(
@@ -345,7 +381,7 @@ def test_list_labels(fake_gh, tmp_path):
 
 def test_list_labels_rejects_truncated_listing(fake_gh, tmp_path):
     fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(f"l{i}" for i in range(1000)))
-    with pytest.raises(GitHubIssuesError, match="gh_invalid: gh label list"):
+    with pytest.raises(GitHubIssuesError, match="gh_truncated: gh label list"):
         list_labels(tmp_path, repo=REPO)
 
 
@@ -441,15 +477,20 @@ def test_ensure_labels_creates_only_missing_including_extra(fake_gh, tmp_path):
     ]
 
 
-def test_ensure_labels_treats_rejected_create_as_present(fake_gh, tmp_path):
+def test_ensure_labels_propagates_rejected_create_with_progress(fake_gh, tmp_path):
     present = [n for n, _, _ in gi.LABEL_VOCABULARY if n not in {"tpo:on-hold", "effort:L"}]
     fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(present))
     fake_gh.on("gh", "label", "create")
     fake_gh.on("gh", "label", "create", handler=lambda argv: (
         (1, "", "Validation Failed: already_exists (HTTP 422)")
-        if argv[-1] == "tpo:on-hold" else (0, "", "")
+        if argv[-1] == "effort:L" else (0, "", "")
     ))
-    assert ensure_labels(tmp_path, repo=REPO) == ("effort:L",)
+    with pytest.raises(GitHubIssuesError) as info:
+        ensure_labels(tmp_path, repo=REPO)
+    assert info.value.code == "gh_rejected"
+    assert info.value.created == ("tpo:on-hold",)
+    creates = [c for c in fake_gh.gh_calls() if c[:2] == ["label", "create"]]
+    assert all("--force" in c for c in creates)
 
 
 def test_ensure_labels_attaches_partial_progress_on_hard_failure(fake_gh, tmp_path):

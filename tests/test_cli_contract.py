@@ -80,11 +80,9 @@ class TestPlanValidate:
         assert result == 1
         assert "attachment_outside_repository" in capsys.readouterr().out
 
-    def test_valid_manifest_reports_task_count(self, tmp_path, capsys):
+    def test_valid_manifest_reports_task_count(self, tmp_path, capsys, fake_gh):
         project = _create_project(tmp_path, "demo")
-        (project / "TODOS.md").write_text(
-            "- [ ] **TODO-42: Example**\n  - **Plan:** docs/plan.md\n"
-        )
+        _serve_issue_plan(fake_gh, "docs/plan.md")
         (project / "docs").mkdir()
         (project / "docs" / "plan.md").write_text(
             '```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-42","tasks":'
@@ -103,11 +101,9 @@ class TestPlanValidate:
         assert "valid manifest" in output
         assert "1 task" in output
 
-    def test_legacy_plan_warns_unless_manifest_is_required(self, tmp_path, capsys):
+    def test_legacy_plan_warns_unless_manifest_is_required(self, tmp_path, capsys, fake_gh):
         project = _create_project(tmp_path, "demo")
-        (project / "TODOS.md").write_text(
-            "- [ ] **TODO-42: Example**\n  - **Plan:** docs/plan.md\n"
-        )
+        _serve_issue_plan(fake_gh, "docs/plan.md")
         (project / "docs").mkdir()
         (project / "docs" / "plan.md").write_text("# Legacy plan\n")
         config = Config(projects_dir=tmp_path)
@@ -121,11 +117,9 @@ class TestPlanValidate:
         ) == 1
         assert "requires" in capsys.readouterr().out.lower()
 
-    def test_invalid_manifest_fails_without_raw_document(self, tmp_path, capsys):
+    def test_invalid_manifest_fails_without_raw_document(self, tmp_path, capsys, fake_gh):
         project = _create_project(tmp_path, "demo")
-        (project / "TODOS.md").write_text(
-            "- [ ] **TODO-42: Example**\n  - **Plan:** plan.md\n"
-        )
+        _serve_issue_plan(fake_gh, "plan.md")
         (project / "plan.md").write_text("```json tpo-plan\n{secret}\n```\n")
 
         result = _cmd_plan_validate(
@@ -152,6 +146,263 @@ def _create_project(projects_dir, name):
     return project_dir
 
 
+def _serve_issue_plan(fake_gh, plan, *, number=42):
+    """Serve issue ``number`` on ``acme/repo`` whose body attaches ``plan``."""
+    import json
+
+    from tests.gh_fakes import issue_payload
+
+    fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+    fake_gh.on(
+        *API,
+        f"repos/acme/repo/issues/{number}",
+        stdout=json.dumps(issue_payload(number, body=f"### Plan\n\n{plan}\n")),
+    )
+
+
+class TestTodoIdFlag:
+    @pytest.mark.parametrize("value", ["0", "-5", "TODO-0"])
+    def test_rejects_non_positive_ids(self, value):
+        with pytest.raises(SystemExit) as excinfo:
+            build_parser().parse_args(["plan", "validate", "demo", "--todo", value])
+        assert excinfo.value.code == 2
+
+
+class TestPlanValidateFromIssue:
+    """Without ``--plan`` the Plan attachment is read from the GitHub issue."""
+
+    def _serve(self, fake_gh, tmp_path, body):
+        import json
+
+        from tests.gh_fakes import issue_payload
+
+        project = _create_project(tmp_path, "demo")
+        fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+        fake_gh.on(*API, "repos/acme/repo/issues/42", stdout=json.dumps(issue_payload(42, body=body)))
+        return project
+
+    def _args(self, **overrides):
+        values = {"project": "demo", "todo": 42, "plan": None, "require_manifest": False}
+        values.update(overrides)
+        return FakeArgs(**values)
+
+    def test_legacy_plan_from_issue_is_valid(self, tmp_path, capsys, fake_gh):
+        project = self._serve(fake_gh, tmp_path, "### Plan\n\ndocs/plan.md\n")
+        (project / "docs").mkdir()
+        (project / "docs" / "plan.md").write_text("# Legacy plan\n")
+
+        assert _cmd_plan_validate(self._args(), Config(projects_dir=tmp_path)) == 0
+        out = capsys.readouterr().out
+        assert "valid legacy Markdown for TODO-42" in out
+        assert ["api", "-H", "Accept: application/vnd.github+json", "repos/acme/repo/issues/42"] in fake_gh.gh_calls()
+
+    def test_manifest_todo_id_must_match_issue(self, tmp_path, capsys, fake_gh):
+        project = self._serve(fake_gh, tmp_path, "### Plan\n\ndocs/plan.md\n")
+        (project / "docs").mkdir()
+        (project / "docs" / "plan.md").write_text(
+            '```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-7","tasks":'
+            '[{"id":"task-1","title":"Build","instructions":"Implement it",'
+            '"acceptance_criteria":["Works"],"verification":["uv run pytest"],'
+            '"commit_message":"feat: build"}]}\n```\n'
+        )
+
+        assert _cmd_plan_validate(self._args(), Config(projects_dir=tmp_path)) == 1
+        assert "Plan validation failed for TODO-42:" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("body", "code"),
+        [
+            ("### What\n\nno plan\n", "plan_invalid:missing"),
+            ("### Plan\n\na.md\n\n### Plan\n\nb.md\n", "plan_invalid:duplicate"),
+        ],
+    )
+    def test_missing_or_duplicate_plan_sections_fail(self, tmp_path, capsys, fake_gh, body, code):
+        self._serve(fake_gh, tmp_path, body)
+
+        assert _cmd_plan_validate(self._args(), Config(projects_dir=tmp_path)) == 1
+        assert f"Plan validation failed for TODO-42: {code}" in capsys.readouterr().out
+
+    def test_control_character_plan_path_is_unreadable_not_a_traceback(self, tmp_path, capsys):
+        _create_project(tmp_path, "demo")
+
+        result = _cmd_plan_validate(
+            self._args(plan="docs/pl\x00an.md"), Config(projects_dir=tmp_path)
+        )
+
+        assert result == 1
+        assert "Plan validation failed for TODO-42: attachment_unreadable" in capsys.readouterr().out
+
+    def test_closed_issue_appends_warning(self, tmp_path, capsys, fake_gh):
+        import json
+
+        from tests.gh_fakes import issue_payload
+
+        project = _create_project(tmp_path, "demo")
+        (project / "docs").mkdir()
+        (project / "docs" / "plan.md").write_text("# Legacy plan\n")
+        fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+        fake_gh.on(*API, "repos/acme/repo/issues/42", stdout=json.dumps(issue_payload(
+            42, body="### Plan\n\ndocs/plan.md\n", state="closed", state_reason="completed",
+        )))
+
+        assert _cmd_plan_validate(self._args(), Config(projects_dir=tmp_path)) == 0
+        out = capsys.readouterr().out
+        assert "valid legacy Markdown for TODO-42" in out
+        assert "; warning: issue is closed (completed)" in out
+
+    def test_github_failure_is_reported_without_stderr(self, tmp_path, capsys, fake_gh):
+        _create_project(tmp_path, "demo")
+        fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+        fake_gh.on(*API, rc=1, stderr="HTTP 429 rate limit exceeded secret-token")
+
+        assert _cmd_plan_validate(self._args(), Config(projects_dir=tmp_path)) == 1
+        captured = capsys.readouterr()
+        assert "Plan validation failed for TODO-42: gh_rate_limited" in captured.out
+        assert "secret-token" not in captured.out + captured.err
+
+
+class TestRecoverCounterRemoved:
+    def test_recover_counter_is_not_a_subcommand(self):
+        parser = build_parser()
+        assert "recover-counter" not in parser.format_help()
+        with pytest.raises(SystemExit) as excinfo:
+            parser.parse_args(["recover-counter", "x"])
+        assert excinfo.value.code == 2
+
+
+def _todos_help():
+    parser = build_parser()
+    for action in parser._subparsers._group_actions:
+        if hasattr(action, "choices") and "todos" in action.choices:
+            return action.choices["todos"].format_help()
+    raise AssertionError("todos subparser missing")
+
+
+class TestTodosLabelsSync:
+    """``tpo todos labels sync <project>`` creates the missing label vocabulary."""
+
+    def _project(self, tmp_path, fake_gh, *, present):
+        import json
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+        fake_gh.on("gh", "auth", "status")
+        fake_gh.on("gh", "label", "list", stdout=json.dumps([{"name": n} for n in present]))
+        fake_gh.on("gh", "label", "create")
+        return Config(projects_dir=projects_dir)
+
+    def test_parser(self):
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+        assert (args.todos_command, args.labels_command, args.project) == ("labels", "sync", "demo")
+        assert "labels" in _todos_help()
+
+    def test_creates_missing_labels_after_auth_check(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+        from hermes_pipeline.github_issues import LABEL_VOCABULARY
+
+        names = [name for name, _c, _d in LABEL_VOCABULARY]
+        config = self._project(tmp_path, fake_gh, present=names[2:])
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+
+        assert _cmd_todos_labels_sync(args, config) == 0
+        out = capsys.readouterr().out
+        assert f"created: {names[0]}" in out and f"created: {names[1]}" in out
+        calls = fake_gh.gh_calls()
+        assert calls[0] == ["auth", "status", "--hostname", "github.com"]
+        assert calls[1][:2] == ["label", "list"]
+        creates = [c for c in calls if c[:2] == ["label", "create"]]
+        assert [c[-1] for c in creates] == names[:2]
+        assert all("--repo" in c and "acme/repo" in c for c in creates)
+
+    def test_zero_writes_when_all_labels_present(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+        from hermes_pipeline.github_issues import LABEL_VOCABULARY
+
+        config = self._project(tmp_path, fake_gh, present=[n for n, _c, _d in LABEL_VOCABULARY])
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+
+        assert _cmd_todos_labels_sync(args, config) == 0
+        assert (
+            f"labels up to date ({len(LABEL_VOCABULARY)} names present; "
+            "color/description not compared)"
+        ) in capsys.readouterr().out
+        assert not [c for c in fake_gh.gh_calls() if c[:2] == ["label", "create"]]
+
+    def test_auth_failure_reports_code_and_writes_nothing(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+        from hermes_pipeline.github_issues import LABEL_VOCABULARY
+
+        config = self._project(tmp_path, fake_gh, present=[])
+        fake_gh.on("gh", "auth", "status", rc=1, stderr="not logged in; run gh auth login")
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+
+        assert _cmd_todos_labels_sync(args, config) == 1
+        assert capsys.readouterr().err.strip() == f"Error: gh_auth (0 of {len(LABEL_VOCABULARY)} labels created)"
+        assert not [c for c in fake_gh.gh_calls() if c[:2] == ["label", "create"]]
+
+    def test_partial_failure_reports_created_labels_and_progress(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+        from hermes_pipeline.github_issues import LABEL_VOCABULARY
+
+        names = [name for name, _c, _d in LABEL_VOCABULARY]
+        config = self._project(tmp_path, fake_gh, present=names[3:])
+        fake_gh.on("gh", "label", "create", handler=lambda argv: (
+            (1, "", "HTTP 401") if argv[-1] == names[2] else (0, "", "")
+        ))
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+
+        assert _cmd_todos_labels_sync(args, config) == 1
+        captured = capsys.readouterr()
+        assert captured.out.splitlines() == sorted(f"created: {name}" for name in names[:2])
+        assert captured.err.strip() == f"Error: gh_auth (2 of {len(names)} labels created)"
+
+    def test_origin_failure_includes_detail(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+        from hermes_pipeline.github_issues import LABEL_VOCABULARY
+
+        config = self._project(tmp_path, fake_gh, present=[])
+        fake_gh.on(*ORIGIN, stdout="git@gitlab.com:acme/repo.git\n")
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+
+        assert _cmd_todos_labels_sync(args, config) == 1
+        assert capsys.readouterr().err.strip() == (
+            "Error: origin_identity_invalid: origin is not a github.com remote "
+            f"(0 of {len(LABEL_VOCABULARY)} labels created)"
+        )
+
+    def test_rejected_create_is_not_swallowed(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+
+        config = self._project(tmp_path, fake_gh, present=[])
+        fake_gh.on("gh", "label", "create", rc=1, stderr="Validation Failed (HTTP 422)")
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+
+        assert _cmd_todos_labels_sync(args, config) == 1
+        assert capsys.readouterr().err.startswith("Error: gh_rejected (0 of ")
+
+    def test_truncated_label_listing_is_actionable(self, tmp_path, fake_gh, capsys):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+
+        config = self._project(tmp_path, fake_gh, present=[f"l{i}" for i in range(1000)])
+        args = build_parser().parse_args(["todos", "labels", "sync", "demo"])
+
+        assert _cmd_todos_labels_sync(args, config) == 1
+        assert capsys.readouterr().err.strip() == (
+            "Error: gh_truncated (label list capped at 1000; sync manually)"
+        )
+        assert not [c for c in fake_gh.gh_calls() if c[:2] == ["label", "create"]]
+
+    def test_unknown_project_returns_2(self, tmp_path, fake_gh):
+        from hermes_pipeline.cli import _cmd_todos_labels_sync
+
+        config = self._project(tmp_path, fake_gh, present=[])
+        args = build_parser().parse_args(["todos", "labels", "sync", "nope"])
+        assert _cmd_todos_labels_sync(args, config) == 2
+        assert fake_gh.gh_calls() == []
+
+
 def _create_valid_doctor_project(projects_dir, profile="gstack"):
     project_dir = _create_project(projects_dir, "demo")
     (project_dir / ".hermes").mkdir(parents=True)
@@ -172,6 +423,20 @@ def _allow_hermes_registry_skill_check(*args, **kwargs):
     pytest.fail("doctor must not inspect a remote worker for external skills")
 
 
+def _seed_doctor_github(fake_gh, issues=(), *, labels=None, repo="acme/repo"):
+    """Serve a healthy GitHub for doctor: origin, auth, full label vocabulary, issues."""
+    import json
+
+    from hermes_pipeline.github_issues import LABEL_VOCABULARY
+    from tests.gh_fakes import seed_project_issues
+
+    seed_project_issues(fake_gh, list(issues), repo=repo)
+    fake_gh.on("gh", "auth", "status")
+    names = [name for name, _color, _desc in LABEL_VOCABULARY] if labels is None else list(labels)
+    fake_gh.on("gh", "label", "list", stdout=json.dumps([{"name": name} for name in names]))
+    return fake_gh
+
+
 def test_doctor_rejects_hermes_older_than_minimum(tmp_path, mocker, capsys):
     args = _create_valid_doctor_project(tmp_path)
     def run(cmd, **_kwargs):
@@ -190,9 +455,9 @@ def test_doctor_rejects_hermes_older_than_minimum(tmp_path, mocker, capsys):
     assert "0.18.9" in output
 
 
-def test_doctor_reports_native_sdd_manifest_and_legacy_readiness(
-    tmp_path, mocker, capsys
-):
+def test_doctor_reports_plan_readiness_from_github_issues(tmp_path, mocker, capsys, fake_gh):
+    from tests.gh_fakes import issue_payload
+
     args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
     project = tmp_path / "demo"
     (project / "docs").mkdir()
@@ -202,13 +467,11 @@ def test_doctor_reports_native_sdd_manifest_and_legacy_readiness(
         '"acceptance_criteria":["Works"],"verification":["uv run pytest"],'
         '"commit_message":"feat: build"}]}\n```\n'
     )
-    (project / "docs" / "legacy.md").write_text("# Legacy plan\n")
-    (project / "TODOS.md").write_text(
-        "# TODOS\n\n## Entries\n\n"
-        "- [ ] **TODO-1: Manifest**\n  - **Plan:** docs/manifest.md\n\n"
-        "- [ ] **TODO-2: Legacy**\n  - **Plan:** docs/legacy.md\n\n"
-        "- [ ] **TODO-3: Missing**\n"
-    )
+    _seed_doctor_github(fake_gh, [
+        issue_payload(1, body="### Plan\n\ndocs/manifest.md\n\n### Branch\n\nfeat/one\n"),
+        issue_payload(2, body="### Branch\n\nfeat/two\n"),
+        issue_payload(3, body="### Branch\n\nfeat/three\n", labels=("tpo:todo",)),
+    ])
     mocker.patch(
         "hermes_pipeline.cli._cli_sp.run",
         side_effect=_allow_hermes_registry_skill_check,
@@ -216,10 +479,203 @@ def test_doctor_reports_native_sdd_manifest_and_legacy_readiness(
 
     assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
     output = capsys.readouterr().out
-    assert "manifest=1" in output
-    assert "legacy=1" in output
-    assert "invalid=1" in output
-    assert "WARNING: legacy Plan" in output
+    assert "GitHub auth: ok" in output
+    assert "Repository: acme/repo" in output
+    assert "Label vocabulary: ok" in output
+    assert "Plan readiness: eligible=1 blocked=2 (not_ready=1 plan_invalid=1)" in output
+    assert "Runs: active=0 delivered=0 abandoned=0" in output
+    assert "TODOS.md" not in output
+    assert "OK:" in output
+
+
+def test_doctor_github_checks_are_offline_tolerant(tmp_path, mocker, capsys, fake_gh):
+    args = _create_valid_doctor_project(tmp_path)
+    fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+    fake_gh.on("gh", "auth", "status", rc=1, stderr="not logged in")
+    fake_gh.on("gh", "label", "list", rc=1, stderr="HTTP 429 rate limit exceeded")
+    fake_gh.on(*API, rc=1, stderr="HTTP 429 rate limit exceeded")
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 1
+    output = capsys.readouterr().out
+    assert "WARNING: GitHub auth unavailable (gh_auth)" in output
+    assert "Repository: acme/repo" in output
+    assert "WARNING: Label vocabulary unavailable (gh_rate_limited)" in output
+    assert "WARNING: Plan readiness unavailable (gh_rate_limited)" in output
+    assert "Runs: active=0 delivered=0 abandoned=0" in output
+    assert "OK:" not in output
+
+
+@pytest.mark.parametrize(
+    ("rule", "detail"),
+    [
+        ({"stdout": "git@gitlab.com:acme/repo.git\n"}, "origin is not a github.com remote"),
+        ({"raises": FileNotFoundError("git")}, "git not found"),
+        ({"rc": 128, "stderr": "fatal: not a git repository"}, "no origin remote or not a git repository"),
+        ({"raises": _test_sp.TimeoutExpired("git", 60)}, "git remote get-url origin failed"),
+        ({"raises": PermissionError("git")}, "git remote get-url origin failed"),
+    ],
+)
+def test_doctor_reports_repository_identity_detail(tmp_path, mocker, capsys, fake_gh, rule, detail):
+    args = _create_valid_doctor_project(tmp_path)
+    _seed_doctor_github(fake_gh)
+    fake_gh.on(*ORIGIN, **rule)
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 1
+    output = capsys.readouterr().out
+    assert f"INVALID: repository identity: {detail}" in output
+    assert "fatal:" not in output
+    assert "OK:" not in output
+
+
+def test_doctor_reports_missing_labels_with_sync_fix(tmp_path, mocker, capsys, fake_gh):
+    args = _create_valid_doctor_project(tmp_path)
+    _seed_doctor_github(fake_gh, labels=("tpo:todo", "needs-triage"))
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 1
+    output = capsys.readouterr().out
+    assert "INVALID: missing " in output
+    assert "ready-for-agent" in output and "tpo:on-hold" in output
+    assert "Fix: tpo todos labels sync demo" in output
+    assert fake_gh.gh_calls().count(["auth", "status", "--hostname", "github.com"]) == 1
+
+
+def _seed_runs(state, runs):
+    import json
+
+    for tick, payload, marker in runs:
+        run = state / "runs" / tick
+        run.mkdir(parents=True)
+        text = payload if isinstance(payload, str) else json.dumps(payload)
+        (run / "registration.json").write_text(text)
+        if marker:
+            (run / marker).write_text("")
+
+
+_THREE_RUNS = (
+    ("tick-a", {"schema_version": 2, "issue_number": 5}, None),
+    ("tick-b", {"schema_version": 2, "issue_number": 6}, "issue-closed"),
+    ("tick-c", {"schema_version": 2, "issue_number": 7}, "abandoned"),
+)
+
+
+def test_doctor_lists_active_runs_without_current_tick(tmp_path, mocker, capsys, fake_gh):
+    args = _create_valid_doctor_project(tmp_path)
+    _seed_doctor_github(fake_gh)
+    _seed_runs(tmp_path / "demo" / ".hermes", _THREE_RUNS)
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    assert "Runs: active=1 delivered=1 abandoned=1" in output
+    assert "tick tick-a → #5 (active; no current tick)" in output
+    assert "tick tick-b" not in output and "tick tick-c" not in output
+    assert "WARNING" not in output and "Fix" not in output
+    assert "OK:" in output
+
+
+def test_doctor_flags_orphaned_active_run_when_current_tick_differs(
+    tmp_path, mocker, capsys, fake_gh
+):
+    args = _create_valid_doctor_project(tmp_path)
+    _seed_doctor_github(fake_gh)
+    state = tmp_path / "demo" / ".hermes"
+    _seed_runs(state, _THREE_RUNS)
+    (state / "current_tick_id.txt").write_text("tick-z\n")
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 1
+    output = capsys.readouterr().out
+    assert "tick tick-a → #5\n" in output
+    assert "WARNING: run tick-a is active but is not the current tick" in output
+    assert (
+        "Fix (tick tick-a): tpo todos complete demo --todo 5 --pr <pr> if delivered, "
+        f"or touch {state / 'runs' / 'tick-a' / 'abandoned'} to give up"
+    ) in output
+    assert "Current tick tick-z: no registration (no TODO selected)" in output
+    assert "Fix: preserve" not in output
+    assert "OK:" not in output
+
+
+def test_doctor_accepts_active_run_that_is_the_current_tick(tmp_path, mocker, capsys, fake_gh):
+    args = _create_valid_doctor_project(tmp_path)
+    _seed_doctor_github(fake_gh)
+    state = tmp_path / "demo" / ".hermes"
+    _seed_runs(state, _THREE_RUNS)
+    (state / "current_tick_id.txt").write_text("tick-a\n")
+    # The minimal registration fixture has no worktree; the authority check is
+    # covered by its own tests, so isolate the Runs summary here.
+    mocker.patch("hermes_pipeline.cli._doctor_active_registration", return_value=True)
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    assert "tick tick-a → #5\n" in output
+    assert "WARNING" not in output and "Fix" not in output
+    assert "OK:" in output
+
+
+def test_doctor_runs_summary_skips_unsupported_and_forged_registrations(
+    tmp_path, mocker, capsys, fake_gh
+):
+    args = _create_valid_doctor_project(tmp_path)
+    _seed_doctor_github(fake_gh)
+    _seed_runs(tmp_path / "demo" / ".hermes", (
+        ("tick-v1", {"schema_version": 1, "todo_id": "TODO-5"}, None),
+        ("tick-bad", '{"issue_number": 5', None),
+        ("tick-forged", {"schema_version": 2, "issue_number": "5\nOK: forged"}, None),
+    ))
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    assert "Runs: active=0 delivered=0 abandoned=0 unsupported=3" in output
+    for tick in ("tick-v1", "tick-bad", "tick-forged"):
+        assert f"tick {tick}: unsupported or malformed registration" in output
+    assert "forged" not in output.replace("tick-forged", "")
+    assert [line for line in output.splitlines() if line.startswith("OK:")] == [
+        line for line in output.splitlines() if line.startswith("OK: schema_version=")
+    ]
+    assert len([line for line in output.splitlines() if line.startswith("OK:")]) == 1
+
+
+def test_doctor_warns_when_runs_is_not_a_directory(tmp_path, mocker, capsys, fake_gh):
+    args = _create_valid_doctor_project(tmp_path)
+    _seed_doctor_github(fake_gh)
+    state = tmp_path / "demo" / ".hermes"
+    (state / "runs").write_text("not a directory\n")
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 1
+    output = capsys.readouterr().out
+    assert f"WARNING: {state / 'runs'} is not a directory" in output
+    assert "OK:" not in output
 
 
 def test_doctor_reports_installed_skill_drift(tmp_path, mocker, capsys):
@@ -275,6 +731,7 @@ def test_doctor_active_registration_reports_unsupported_schema(tmp_path, capsys)
     output = capsys.readouterr().out
     assert "REGISTRATION UNSUPPORTED: schema_version 1" in output
     assert "finish or abandon this run before upgrading" in output
+    assert "Fix" not in output
     assert "DRIFT" not in output
 
 
@@ -441,6 +898,7 @@ def test_doctor_active_registration_reports_live_issue_drift(
     output = capsys.readouterr().out
     assert f"ISSUE DRIFT: {code}" in output
     assert "REGISTRATION DRIFT" not in output
+    assert "Fix (tick tick-1):" in output
 
 
 def test_doctor_active_registration_warns_when_issue_check_unavailable(
@@ -450,9 +908,62 @@ def test_doctor_active_registration_warns_when_issue_check_unavailable(
     fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
     fake_gh.on(*API, rc=1, stderr="HTTP 429 rate limit exceeded")
 
-    assert _doctor_active_registration(project, state) is True
+    assert _doctor_active_registration(project, state) is False
     output = capsys.readouterr().out
     assert "WARNING: issue check unavailable (gh_rate_limited)" in output
+    assert "Fix (tick tick-1):" in output
+
+
+def test_doctor_active_registration_reports_malformed_pin_as_drift(
+    tmp_path, capsys, fake_gh
+):
+    import json
+
+    project, state, _registration = _closeout_project(tmp_path)
+    fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+    path = state / "runs" / "tick-1" / "registration.json"
+    payload = json.loads(path.read_text())
+    del payload["issue_url"]
+    path.write_text(json.dumps(payload))
+
+    assert _doctor_active_registration(project, state) is False
+    output = capsys.readouterr().out
+    assert "REGISTRATION DRIFT: registration is malformed" in output
+    assert "WARNING" not in output
+    assert "Fix (tick tick-1):" in output
+
+
+@pytest.mark.parametrize("mutation", [("repository", None), ("repository", 123)])
+def test_doctor_active_registration_reports_uninspectable_registration(
+    tmp_path, capsys, fake_gh, mutation
+):
+    import json
+
+    project, state, _registration = _closeout_project(tmp_path)
+    path = state / "runs" / "tick-1" / "registration.json"
+    payload = json.loads(path.read_text())
+    key, value = mutation
+    if value is None:
+        del payload[key]
+    else:
+        payload[key] = value
+    path.write_text(json.dumps(payload))
+
+    assert _doctor_active_registration(project, state) is False
+    output = capsys.readouterr().out
+    assert "REGISTRATION DRIFT: active registration could not be inspected" in output
+    assert "Fix (tick tick-1):" in output
+
+
+def test_doctor_active_registration_accepts_picked_none_tick(tmp_path, capsys):
+    state = tmp_path / ".hermes"
+    state.mkdir()
+    (state / "current_tick_id.txt").write_text("tick-none\n")
+
+    assert _doctor_active_registration(tmp_path, state) is True
+    output = capsys.readouterr().out
+    assert "Current tick tick-none: no registration (no TODO selected)" in output
+    assert "DRIFT" not in output and "Fix" not in output
 
 
 def test_hermes_registry_prerequisite_requires_exact_enabled_skill_name(mocker):
@@ -750,7 +1261,8 @@ class TestCmdDoctor:
         assert result == 2
         assert "INVALID" in capsys.readouterr().out
 
-    def test_doctor_clean_returns_0(self, tmp_path, mocker, capsys):
+    def test_doctor_clean_returns_0(self, tmp_path, mocker, capsys, fake_gh):
+        _seed_doctor_github(fake_gh)
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -771,7 +1283,9 @@ class TestCmdDoctor:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 0
-        assert "OK" in capsys.readouterr().out
+        output = capsys.readouterr().out
+        assert "OK" in output
+        assert "Plan readiness: eligible=0 blocked=0\n" in output
 
     def test_doctor_drift_returns_1(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"
@@ -797,8 +1311,9 @@ class TestCmdDoctor:
 
 class TestDoctorProfileAware:
     def test_doctor_reports_global_prompt_client_scope(
-        self, monkeypatch, tmp_path, capsys
+        self, monkeypatch, tmp_path, capsys, fake_gh
     ):
+        _seed_doctor_github(fake_gh)
         args = _create_valid_doctor_project(tmp_path)
         monkeypatch.setattr(
             "hermes_pipeline.cli._cli_sp.run",
@@ -836,7 +1351,9 @@ class TestDoctorProfileAware:
         prompt_client,
         discovery_root,
         invocation,
+        fake_gh,
     ):
+        _seed_doctor_github(fake_gh)
         args = _create_valid_doctor_project(tmp_path)
         monkeypatch.setattr(
             "hermes_pipeline.cli._cli_sp.run",
@@ -936,7 +1453,8 @@ class TestDoctorProfileAware:
         assert result == 2
         assert "INVALID" in capsys.readouterr().out
 
-    def test_doctor_ok_message_includes_profile(self, tmp_path, mocker, capsys):
+    def test_doctor_ok_message_includes_profile(self, tmp_path, mocker, capsys, fake_gh):
+        _seed_doctor_github(fake_gh)
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -986,8 +1504,10 @@ class TestDoctorMissingProfile:
         assert "pipeline" in out.lower() or "profile" in out.lower()
 
     def test_doctor_skips_profile_show_for_default_assignee(
-        self, tmp_path, mocker, capsys
+        self, tmp_path, mocker, capsys,
+        fake_gh,
     ):
+        _seed_doctor_github(fake_gh)
         """Default assignee skips profile show but still checks the skill registry."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -1020,7 +1540,8 @@ class TestDoctorMissingProfile:
         assert result == 0
         assert call_count["n"] == 2
 
-    def test_doctor_profile_check_success_returns_0(self, tmp_path, mocker, capsys):
+    def test_doctor_profile_check_success_returns_0(self, tmp_path, mocker, capsys, fake_gh):
+        _seed_doctor_github(fake_gh)
         """Non-default assignee whose profile IS installed should pass clean."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -1051,8 +1572,10 @@ class TestDoctorMissingProfile:
         assert "OK" in capsys.readouterr().out
 
     def test_doctor_checks_hermes_skill_registry_prerequisite(
-        self, tmp_path, mocker, capsys
+        self, tmp_path, mocker, capsys,
+        fake_gh,
     ):
+        _seed_doctor_github(fake_gh)
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -1493,6 +2016,29 @@ class TestTodosComplete:
         assert _cmd_todos_complete(forced, config) == 0
         assert remote["state"] == "closed"
         assert not (run_dir / "issue-closed").exists()
+
+    def test_active_run_message_names_only_matching_active_ticks(self, tmp_path, fake_gh, capsys):
+        import json
+
+        from hermes_pipeline.cli import _cmd_todos_complete
+
+        config, _remote = self._project(tmp_path, fake_gh)
+        runs = tmp_path / "projects" / "demo" / ".hermes" / "runs"
+        for tick, number, closed in (("tick-5", 5, False), ("tick-55", 55, False), ("tick-old", 5, True)):
+            run = runs / tick
+            run.mkdir(parents=True)
+            (run / "registration.json").write_text(json.dumps({"schema_version": 2, "issue_number": number}))
+            if closed:
+                (run / "issue-closed").write_text("")
+        broken = runs / "tick-broken"
+        broken.mkdir()
+        (broken / "registration.json").write_text('{"issue_number": 5')
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+
+        assert _cmd_todos_complete(args, config) == 2
+        err = capsys.readouterr().err
+        assert "Error: run tick-5 is active for TODO-5" in err
+        assert "tick-55" not in err and "tick-old" not in err and "tick-broken" not in err
 
     def test_not_planned_issue_exits_1(self, tmp_path, fake_gh, capsys):
         from hermes_pipeline.cli import _cmd_todos_complete

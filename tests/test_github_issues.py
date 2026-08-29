@@ -350,6 +350,8 @@ def _body(plan: str | list[str] | None = "docs/legacy.md", branch: str | list[st
         ({"labels": READY, "body": _body(plan="docs/../docs/legacy.md")}, {}, "plan_invalid:non_canonical"),
         ({"labels": READY, "body": _body(plan="docs//legacy.md")}, {}, "plan_invalid:non_canonical"),
         ({"labels": READY, "body": _body(plan="docs/legacy.md/")}, {}, "plan_invalid:non_canonical"),
+        ({"labels": READY, "body": _body(plan="docs/leg\x00acy.md")}, {}, "plan_invalid:non_canonical"),
+        ({"labels": READY, "body": _body(plan="docs/leg\x1bacy.md")}, {}, "plan_invalid:non_canonical"),
         # An active registration is ownership proof regardless of labels (C5).
         ({"labels": READY}, {"active_registration_ids": {1}}, "in_flight"),
         ({"labels": ("tpo:todo",)}, {"active_registration_ids": {1}}, "in_flight"),
@@ -365,6 +367,23 @@ def test_compile_eligible_issues_blocks_with_precedence(tmp_path, kwargs, compil
 
     assert result.candidates == ()
     assert result.blocked_reasons == {"TODO-1": reason}
+
+
+def test_compile_eligible_issues_maps_value_error_to_unreadable(tmp_path, monkeypatch):
+    from hermes_pipeline import github_issues
+
+    project = _plan_project(tmp_path)
+    monkeypatch.setattr(
+        github_issues, "validate_plan_path",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("embedded null byte")),
+    )
+
+    result = compile_eligible_issues(
+        project, [_issue(1, labels=READY, body=_body(plan="docs/legacy.md"))],
+        in_flight=set(), requires_plan=True,
+    )
+
+    assert result.blocked_reasons == {"TODO-1": "plan_invalid:unreadable"}
 
 
 def test_compile_eligible_issues_orders_candidates_and_classifies_plans(tmp_path):

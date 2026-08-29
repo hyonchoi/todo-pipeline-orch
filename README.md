@@ -260,7 +260,6 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Historical architecture and design plan |
 | [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `tpo tick` uses kanban for phase state and ordering |
-| [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works |
 | [Circuit breaker](docs/explanation-circuit-breaker.md) | Explanation | How no-progress tracking works and why it alerts |
 | [Decision module API](docs/reference-decision-api.md) | Reference | Selection schemas, outcome sidecars, and plan-gate types |
 

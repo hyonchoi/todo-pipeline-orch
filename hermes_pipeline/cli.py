@@ -1,6 +1,7 @@
 """Hermes pipeline orchestrator CLI.
 
-Subcommands: tick, approve, init, doctor, config, skills, recover-counter, test.
+Subcommands: tick, approve, init, doctor, config, skills, plan validate,
+todos complete, todos labels sync, test.
 Scheduling is owned by Hermes kanban tasks.
 """
 
@@ -104,18 +105,164 @@ def _doctor_skill_parity(project_dir: Path, prompt_client: str) -> tuple[bool, s
     return False, f"installed todos-manager differs from bundled source at {installed}"
 
 
+def _doctor_github_checks(
+    project_dir: Path, state_dir: Path, *, project: str, requires_plan: bool
+) -> bool:
+    """Report GitHub auth, repository, label vocabulary, plan readiness and runs.
+
+    Every check is offline-tolerant: a ``GitHubIssuesError`` prints one WARNING
+    line and the remaining checks still run. Returns False when any WARNING or
+    INVALID line was printed.
+    """
+    from collections.abc import Mapping
+
+    from . import github_issues
+    from .github_issues import REGISTRATION_SCHEMA_VERSION, GitHubIssuesError
+    from .run_registration import (
+        _registration_issue_number,
+        active_registration_issue_numbers,
+        registration_state,
+    )
+
+    ok = True
+    try:
+        github_issues.check_auth(project_dir)
+        print("GitHub auth: ok")
+    except GitHubIssuesError as exc:
+        print(f"WARNING: GitHub auth unavailable ({exc.code})")
+        ok = False
+
+    repo: str | None = None
+    try:
+        repo = github_issues.repository_identity(project_dir)
+        print(f"Repository: {repo}")
+    except GitHubIssuesError as exc:
+        if exc.code == "origin_identity_invalid":
+            detail = exc.detail or "origin remote could not be resolved"
+            print(f"INVALID: repository identity: {detail}")
+        else:
+            print(f"WARNING: Repository unavailable ({exc.code})")
+        ok = False
+
+    if repo is not None:
+        try:
+            present = {name.lower() for name in github_issues.list_labels(project_dir, repo=repo)}
+            missing = [
+                name for name, _color, _description in github_issues.LABEL_VOCABULARY
+                if name.lower() not in present
+            ]
+            if missing:
+                print(f"INVALID: missing {', '.join(missing)}; Fix: tpo todos labels sync {project}")
+                ok = False
+            else:
+                print("Label vocabulary: ok")
+        except GitHubIssuesError as exc:
+            print(f"WARNING: Label vocabulary unavailable ({exc.code})")
+            ok = False
+
+        active_ids = active_registration_issue_numbers(state_dir)
+        try:
+            issues = github_issues.list_todo_issues(project_dir, repo=repo)
+            readiness = github_issues.compile_eligible_issues(
+                project_dir,
+                issues,
+                in_flight=(),
+                active_registration_ids=active_ids,
+                kanban_available=False,
+                requires_plan=requires_plan,
+            )
+            summary: dict[str, int] = {}
+            for reason in readiness.blocked_reasons.values():
+                prefix = reason.partition(":")[0]
+                summary[prefix] = summary.get(prefix, 0) + 1
+            line = (
+                f"Plan readiness: eligible={len(readiness.candidates)} "
+                f"blocked={len(readiness.blocked_reasons)}"
+            )
+            if summary:
+                line += " (" + " ".join(f"{key}={summary[key]}" for key in sorted(summary)) + ")"
+            print(line)
+        except GitHubIssuesError as exc:
+            print(f"WARNING: Plan readiness unavailable ({exc.code})")
+            ok = False
+
+    counts = {"active": 0, "delivered": 0, "abandoned": 0}
+    unsupported: list[str] = []
+    active_runs: list[tuple[str, int]] = []
+    runs_dir = state_dir / "runs"
+    if runs_dir.exists() and not runs_dir.is_dir():
+        print(f"WARNING: {runs_dir} is not a directory")
+        ok = False
+    elif runs_dir.is_dir():
+        for path in sorted(runs_dir.glob("*/registration.json")):
+            tick_id = path.parent.name
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                unsupported.append(tick_id)
+                continue
+            number = _registration_issue_number(payload)
+            if (
+                not isinstance(payload, Mapping)
+                or payload.get("schema_version") != REGISTRATION_SCHEMA_VERSION
+                or number is None
+            ):
+                unsupported.append(tick_id)
+                continue
+            state = registration_state(path.parent)
+            counts[state] += 1
+            if state == "active":
+                active_runs.append((tick_id, number))
+    line = (
+        f"Runs: active={counts['active']} delivered={counts['delivered']} "
+        f"abandoned={counts['abandoned']}"
+    )
+    if unsupported:
+        line += f" unsupported={len(unsupported)}"
+    print(line)
+    for tick_id in unsupported:
+        print(f"tick {tick_id}: unsupported or malformed registration")
+    try:
+        current_tick = (state_dir / CURRENT_TICK_ID_FILE).read_text(encoding="utf-8").strip() or None
+    except (OSError, UnicodeError):
+        current_tick = None
+    for tick_id, number in active_runs:
+        if current_tick is None:
+            print(f"tick {tick_id} → #{number} (active; no current tick)")
+            continue
+        print(f"tick {tick_id} → #{number}")
+        if tick_id != current_tick:
+            print(f"WARNING: run {tick_id} is active but is not the current tick")
+            print(
+                f"Fix (tick {tick_id}): tpo todos complete {project} --todo {number} --pr <pr> "
+                f"if delivered, or touch {runs_dir / tick_id / 'abandoned'} to give up"
+            )
+            ok = False
+    return ok
+
+
 def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
-    """Verify immutable base authority and report mutable lifecycle separately."""
+    """Verify immutable base authority and report mutable lifecycle separately.
+
+    Every non-OK verdict prints its own ``Fix (tick <id>):`` line except
+    ``REGISTRATION UNSUPPORTED``, whose message is already the instruction.
+    """
     tick_path = state_dir / CURRENT_TICK_ID_FILE
     if not tick_path.is_file():
         return True
     try:
         tick_id = tick_path.read_text(encoding="utf-8").strip()
-        registration = json.loads(
-            (state_dir / "runs" / tick_id / "registration.json").read_text(
-                encoding="utf-8"
-            )
-        )
+    except (OSError, UnicodeError):
+        print("REGISTRATION DRIFT: current tick id could not be read")
+        print(f"Fix (tick <unknown>): repair {tick_path} manually.")
+        return False
+    registration_path = state_dir / "runs" / tick_id / "registration.json"
+    if not registration_path.is_file():
+        print(f"Current tick {tick_id}: no registration (no TODO selected)")
+        return True
+    fix = f"Fix (tick {tick_id}):"
+    try:
+        registration = json.loads(registration_path.read_text(encoding="utf-8"))
         from .github_issues import REGISTRATION_SCHEMA_VERSION
 
         if registration.get("schema_version") != REGISTRATION_SCHEMA_VERSION:
@@ -174,18 +321,26 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
             if isinstance(snapshot, str)
             else "<missing>"
         )
-    except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
+        expected = {
+            "repository": str(Path(registration["repository"]).resolve()),
+            "worktree": str(Path(registration["worktree"]).resolve()),
+            "branch": registration["branch"],
+            "base_sha": registration["base_sha"],
+            "plan_hash": registration["plan_hash"],
+            "selected_entry_hash": registration["selected_entry_hash"],
+        }
+    except (
+        OSError,
+        UnicodeError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        ValueError,
+    ):
         print("REGISTRATION DRIFT: active registration could not be inspected")
+        print(f"{fix} preserve the run and repair {registration_path} manually.")
         return False
 
-    expected = {
-        "repository": str(Path(registration["repository"]).resolve()),
-        "worktree": str(Path(registration["worktree"]).resolve()),
-        "branch": registration["branch"],
-        "base_sha": registration["base_sha"],
-        "plan_hash": registration["plan_hash"],
-        "selected_entry_hash": registration["selected_entry_hash"],
-    }
     print(
         "Registered authority: "
         + " ".join(
@@ -221,12 +376,25 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
     issue_state = check_issue_drift(project_dir, registration)
     if issue_state is None:
         print("Issue authority: pinned")
+    elif issue_state == "issue_unavailable:registration_invalid":
+        print("REGISTRATION DRIFT: registration is malformed")
+        print(f"{fix} preserve the run and repair {registration_path} manually.")
+        return False
     elif issue_state.startswith("issue_unavailable:"):
         print(f"WARNING: issue check unavailable ({issue_state.partition(':')[2]})")
+        print(f"{fix} rerun `tpo doctor` once GitHub is reachable.")
+        return False
     else:
         print(f"ISSUE DRIFT: {issue_state}")
+        print(
+            f"{fix} finish or abandon this run; the pinned issue changed "
+            f"(touch {state_dir / 'runs' / tick_id / 'abandoned'} to give up)."
+        )
         return False
-    return not mismatches
+    if mismatches:
+        print(f"{fix} preserve the run and resolve registration drift manually.")
+        return False
+    return True
 
 
 def _resolve_project_dir(config: Config, slug: str) -> Path | None:
@@ -396,12 +564,15 @@ def _parse_todo_id_flag(value: str) -> int:
     """Parse --todo argument, accepting 'TODO-N' or plain 'N' formats."""
     cleaned = value.removeprefix("TODO-").removeprefix("todo-")
     try:
-        return int(cleaned)
+        number = int(cleaned)
     except ValueError:
+        number = 0
+    if number <= 0:
         raise argparse.ArgumentTypeError(
-            f"--todo must be a TODO id (you provided '{value}'). "
+            f"--todo must be a positive TODO id (you provided '{value}'). "
             f"Example: --todo TODO-5 or --todo 5"
         )
+    return number
 
 
 def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
@@ -494,13 +665,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     complete_parser.set_defaults(func=_cmd_todos_complete)
 
-    # recover-counter: Scan TODOS.md and initialize counter file
-    rc_parser = subparsers.add_parser(
-        "recover-counter",
-        help="Scan TODOS.md and initialize .hermes/todo_id_counter",
+    labels_parser = todos_subparsers.add_parser(
+        "labels", help="Manage the GitHub label vocabulary used by the pipeline"
     )
-    rc_parser.add_argument("project", help="Project name/slug")
-    rc_parser.set_defaults(func=_cmd_recover_counter)
+    labels_subparsers = labels_parser.add_subparsers(dest="labels_command", required=True)
+    labels_sync_parser = labels_subparsers.add_parser(
+        "sync", help="Create any missing pipeline labels in the project's GitHub repository"
+    )
+    labels_sync_parser.add_argument("project", help="Project name")
+    labels_sync_parser.set_defaults(func=_cmd_todos_labels_sync)
 
     # init: Write the default pipeline execution contract
     init_parser = subparsers.add_parser(
@@ -1937,7 +2110,7 @@ def _cmd_todos_complete(args, config: Config) -> int:
     from .github_issues import GitHubIssuesError, repository_identity
     from .project_config import _get_project_state_dir
     from .result_contract import ResultContractError
-    from .run_registration import active_registration_issue_numbers
+    from .run_registration import active_registration_issue_numbers, registration_state
     from .todos_completion import _pr_view, close_issue_for_delivery
 
     project_dir = _resolve_project_dir(config, args.project)
@@ -1953,10 +2126,16 @@ def _cmd_todos_complete(args, config: Config) -> int:
                   "use --force to close the issue anyway", file=sys.stderr)
             return 2
         if not args.force and args.todo in active_registration_issue_numbers(state_dir):
-            ticks = sorted(
-                path.parent.name for path in (state_dir / "runs").glob("*/registration.json")
-                if f'"issue_number": {args.todo}' in path.read_text(encoding="utf-8")
-            )
+            ticks = []
+            for path in sorted((state_dir / "runs").glob("*/registration.json")):
+                if registration_state(path.parent) != "active":
+                    continue
+                try:
+                    payload = json.loads(path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    continue
+                if isinstance(payload, dict) and payload.get("issue_number") == args.todo:
+                    ticks.append(path.parent.name)
             print(f"Error: run {', '.join(ticks)} is active for TODO-{args.todo}; "
                   "let the tick finish it or use --force", file=sys.stderr)
             return 2
@@ -1975,28 +2154,44 @@ def _cmd_todos_complete(args, config: Config) -> int:
     return 0
 
 
-def _cmd_recover_counter(args, config: Config) -> int:
-    """Handle 'recover-counter' subcommand."""
-    project = args.project
+def _cmd_todos_labels_sync(args, config: Config) -> int:
+    """Create the missing pipeline label vocabulary in the project's repository.
 
-    # Validate slug and resolve the project directory
-    project_dir = _resolve_project_dir(config, project)
+    Exit codes: 0 synced (or already up to date), 1 GitHub failure, 2 unknown project.
+    """
+    from .github_issues import (
+        LABEL_VOCABULARY,
+        GitHubIssuesError,
+        check_auth,
+        ensure_labels,
+        repository_identity,
+    )
+
+    project_dir = _resolve_project_dir(config, args.project)
     if project_dir is None:
         return 2
-
-    from .counter import recover_counter
-
+    total = len(LABEL_VOCABULARY)
     try:
-        result = recover_counter(project_dir)
-    except FileNotFoundError as e:
-        log.error("%s", e)
-        return 2
-    except (ValueError, OSError) as e:
-        log.error("recover-counter failed: %s", e)
-        return 2
-
-    log.info("recover-counter: set counter to %d for project %s", result, project)
-    print(f"Counter set to {result} for project {project}")
+        check_auth(project_dir)
+        created = ensure_labels(project_dir, repo=repository_identity(project_dir))
+    except GitHubIssuesError as exc:
+        partial = tuple(getattr(exc, "created", ()))
+        for name in partial:
+            print(f"created: {name}")
+        if exc.code == "gh_truncated":
+            print("Error: gh_truncated (label list capped at 1000; sync manually)", file=sys.stderr)
+        else:
+            detail = f": {exc.detail}" if exc.detail else ""
+            print(
+                f"Error: {exc.code}{detail} ({len(partial)} of {total} labels created)",
+                file=sys.stderr,
+            )
+        return 1
+    if not created:
+        print(f"labels up to date ({total} names present; color/description not compared)")
+        return 0
+    for name in created:
+        print(f"created: {name}")
     return 0
 
 
@@ -2083,48 +2278,74 @@ def _cmd_plan_validate(args, config: Config) -> int:
     if project_dir is None:
         return 2
     todo_id = f"TODO-{args.todo}"
-    from .plan_manifest import PlanManifestValidationError, validate_plan_candidate
-    from .todos_md import TodoPlanValidationError, resolve_todo_plan
+    from .github_issues import GitHubIssuesError, fetch_issue, repository_identity
+    from .plan_manifest import (
+        PlanManifestValidationError,
+        TodoPlanValidationError,
+        validate_plan_candidate,
+    )
 
+    closed_note = ""
     try:
         relative_plan = getattr(args, "plan", None)
         if relative_plan is None:
-            relative_plan = resolve_todo_plan(
-                project_dir,
-                project_dir / "TODOS.md",
-                todo_id,
+            issue = fetch_issue(
+                project_dir, args.todo, repo=repository_identity(project_dir)
             )
+            todo_id = issue.todo_id
+            if issue.state != "open":
+                closed_note = f"; warning: issue is closed ({issue.state_reason or 'unknown'})"
+            if len(issue.plan_values) != 1:
+                reason = "missing" if len(issue.plan_values) < 2 else "duplicate"
+                print(f"Plan validation failed for {todo_id}: plan_invalid:{reason}{closed_note}")
+                return 1
+            relative_plan = issue.plan_values[0]
         manifest = validate_plan_candidate(
             project_dir,
             relative_plan,
             expected_todo_id=todo_id,
         )
-    except TodoPlanValidationError as exc:
-        print(f"Plan validation failed for {todo_id}: attachment_{exc.code}")
+    except GitHubIssuesError as exc:
+        print(f"Plan validation failed for {todo_id}: {exc.code}")
         return 1
-    except (OSError, UnicodeError):
-        print(f"Plan validation failed for {todo_id}: unreadable")
+    except TodoPlanValidationError as exc:
+        print(f"Plan validation failed for {todo_id}: attachment_{exc.code}{closed_note}")
         return 1
     except PlanManifestValidationError as exc:
-        print(f"Plan validation failed for {todo_id}: {exc.code}")
+        print(f"Plan validation failed for {todo_id}: {exc.code}{closed_note}")
+        return 1
+    except ValueError:
+        # e.g. an embedded NUL in the candidate path (raised by Path.resolve)
+        print(f"Plan validation failed for {todo_id}: attachment_unreadable{closed_note}")
+        return 1
+    except (OSError, UnicodeError):
+        print(f"Plan validation failed for {todo_id}: unreadable{closed_note}")
         return 1
 
     if manifest is None:
         if args.require_manifest:
-            print(f"Plan validation failed for {todo_id}: --require-manifest requires a tpo-plan block")
+            print(
+                f"Plan validation failed for {todo_id}: --require-manifest requires "
+                f"a tpo-plan block{closed_note}"
+            )
             return 1
-        print(f"Plan is valid legacy Markdown for {todo_id}; warning: no tpo-plan manifest")
+        print(
+            f"Plan is valid legacy Markdown for {todo_id}; warning: no tpo-plan manifest"
+            f"{closed_note}"
+        )
         return 0
     suffix = "task" if len(manifest.tasks) == 1 else "tasks"
-    print(f"Plan has a valid manifest for {todo_id}: {len(manifest.tasks)} {suffix}")
+    print(f"Plan has a valid manifest for {todo_id}: {len(manifest.tasks)} {suffix}{closed_note}")
     return 0
 
 
 def _cmd_doctor(args, config: Config) -> int:
     """Handle 'doctor' subcommand — verify the pipeline execution contract.
 
-    Exit codes: 0 clean, 1 drift (capability mismatch), 2 missing/invalid
-    contract, unknown project, or missing profile.
+    Exit codes: 0 clean; 1 drift (capability mismatch, registration or issue
+    drift) or any ``WARNING:``/``INVALID:`` line from the GitHub checks (auth,
+    repository identity, label vocabulary, plan readiness, runs); 2 missing or
+    INVALID contract, unknown project, or missing profile.
     """
     project_dir = _resolve_project_dir(config, args.project)
     if project_dir is None:
@@ -2288,36 +2509,14 @@ def _cmd_doctor(args, config: Config) -> int:
     if parity_detail is not None:
         print(f"Skill parity: {parity_detail}")
 
-    if phase_profile.requires_plan:
-        from .todos_md import compile_eligible_todos, parse_todo_entries
+    github_ok = _doctor_github_checks(
+        project_dir,
+        project_state,
+        project=args.project,
+        requires_plan=phase_profile.requires_plan,
+    )
 
-        todos_path = project_dir / "TODOS.md"
-        try:
-            entries = parse_todo_entries(todos_path.read_text(encoding="utf-8"))
-            readiness = compile_eligible_todos(
-                project_dir, todos_path, in_flight=frozenset(), requires_plan=True
-            )
-        except (OSError, UnicodeError) as exc:
-            print(f"INVALID: cannot inspect Plan readiness: {exc}")
-            return 2
-        manifest = sum(candidate.plan_kind == "manifest" for candidate in readiness.candidates)
-        legacy = sum(candidate.plan_kind == "legacy" for candidate in readiness.candidates)
-        plan_invalid = sum(
-            reason.startswith("plan_invalid:")
-            for reason in readiness.blocked_reasons.values()
-        )
-        print(
-            f"Plan readiness: manifest={manifest} legacy={legacy} "
-            f"invalid={plan_invalid} entries={len(entries)}"
-        )
-        if legacy:
-            print(
-                "WARNING: legacy Plan Markdown remains executable as one development "
-                "card; add a tpo-plan manifest for visible task compilation."
-            )
-
-    if not _doctor_active_registration(project_dir, project_state):
-        print("Fix: preserve the run and resolve registration drift manually.")
+    if not _doctor_active_registration(project_dir, project_state) or not github_ok:
         return 1
 
     print(

@@ -13,7 +13,6 @@ import pytest
 import yaml
 
 from hermes_pipeline import github_issues as gi
-from hermes_pipeline.todos_md import parse_todo_entries
 from scripts.migrate_todos_to_issues import (
     PHASE_OPTION_ALIASES,
     PHASE_OPTIONS,
@@ -22,6 +21,7 @@ from scripts.migrate_todos_to_issues import (
     compute_dependency_edges,
     extract_fields,
     main,
+    parse_todo_entries,
 )
 from tests.gh_fakes import issue_payload
 
@@ -232,6 +232,47 @@ def test_multi_line_what_keeps_relative_indent_and_blank_lines():
     assert sections["Legacy ID"] == ("TODO-50",)
     assert "security-review:required" in fields.labels
     assert "ui-review:not-required" in fields.labels  # default when Decisions omit UI Review
+
+
+def test_parse_todo_entries_scopes_to_entries_section():
+    text = (
+        "## Metadata\n\n- [ ] **TODO-1: Not an entry**\n\n"
+        "## Entries\n\n- [ ] **TODO-2: Real**\n  - **Plan:** docs/a.md\n\n"
+        "## Archive\n\n- [x] **TODO-3: Also not an entry**\n"
+    )
+    entries = parse_todo_entries(text)
+    assert [e.todo_id for e in entries] == ["TODO-2"]
+    assert entries[0].plan_values == ("docs/a.md",)
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        ("(none)", ()),
+        ("`TODO-1`", ("TODO-1",)),
+        ("`TODO-1` (schema), `TODO-2`", ("TODO-1", "TODO-2")),
+        ("TODO-1", None),
+        ("`TODO-1` and `TODO-2`", None),
+        ("`TODO-1`, (missing)", None),
+    ],
+)
+def test_parse_todo_entries_dependency_syntax(value, expected):
+    text = f"- [ ] **TODO-9: Deps**\n  - **Depends on:** {value}\n"
+    (entry,) = parse_todo_entries(text)
+    assert entry.dependencies == expected
+
+
+def test_parse_todo_entries_duplicate_depends_on_is_malformed():
+    text = "- [ ] **TODO-9: Deps**\n  - **Depends on:** `TODO-1`\n  - **Depends on:** `TODO-2`\n"
+    (entry,) = parse_todo_entries(text)
+    assert entry.dependencies is None
+
+
+def test_malformed_depends_on_is_a_data_error():
+    broken = FIXTURE.replace("  - **Depends on:** (none)", "  - **Depends on:** TODO-42 and friends")
+    assert broken != FIXTURE
+    with pytest.raises(MigrationDataError, match=re.escape("TODO-43: malformed Depends on:")):
+        extract_fields(_entry("TODO-43", broken), broken)
 
 
 @pytest.mark.parametrize(

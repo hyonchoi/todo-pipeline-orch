@@ -347,7 +347,9 @@ def _status_reason(
 
 
 def _is_canonical_relative_path(value: str) -> bool:
-    """Reject ``./``, ``//``, trailing ``/`` and ``.``/``..`` segments (must be already normalized)."""
+    """Reject control characters, ``./``, ``//``, trailing ``/`` and ``.``/``..`` segments."""
+    if any(ord(char) < 0x20 or char == "\x7f" for char in value):
+        return False
     if value.startswith("./") or "//" in value or value.endswith("/"):
         return False
     return all(segment not in (".", "..") for segment in value.split("/"))
@@ -391,7 +393,7 @@ def compile_eligible_issues(
                 except (TodoPlanValidationError, PlanManifestValidationError) as exc:
                     plan_path = None
                     reason = f"plan_invalid:{exc.code}"
-                except (OSError, UnicodeError):
+                except (OSError, UnicodeError, ValueError):
                     plan_path = None
                     reason = "plan_invalid:unreadable"
         if reason is None and len(issue.branch_values) != 1:
@@ -465,7 +467,10 @@ class GitHubIssuesError(RuntimeError):
     """A ``gh`` invocation failed. The message never carries stderr or token text.
 
     ``partial_stdout`` holds whatever stdout was captured before a timeout;
-    ``created`` is set by :func:`ensure_labels` to the names created before failing.
+    ``created`` is set by :func:`ensure_labels` to the names created before failing;
+    ``detail`` is a fixed, code-path-chosen human hint (never stderr text) and is
+    deliberately kept out of ``str()``; ``stderr_blank`` records that the failed
+    process wrote nothing to stderr.
     """
 
     def __init__(self, code: str, verb: str) -> None:
@@ -475,6 +480,8 @@ class GitHubIssuesError(RuntimeError):
         self.partial_stdout: str = ""
         self.returncode: int | None = None
         self.created: tuple[str, ...] = ()
+        self.detail: str | None = None
+        self.stderr_blank: bool = False
 
 
 def gh_bin() -> str:
@@ -500,9 +507,12 @@ def _classify_stderr(stderr: str) -> str:
     return "gh_unavailable"
 
 
-def _fail(code: str, verb: str, cause: BaseException | None = None) -> GitHubIssuesError:
+def _fail(
+    code: str, verb: str, cause: BaseException | None = None, *, detail: str | None = None
+) -> GitHubIssuesError:
     log.warning("gh call failed: %s (gh %s)", code, verb)
     error = GitHubIssuesError(code, verb)
+    error.detail = detail
     if cause is not None:
         error.__cause__ = cause
     return error
@@ -540,8 +550,10 @@ def _gh(project_dir: Path, args: Sequence[str], *, timeout: float = 60.0) -> str
     except (OSError, UnicodeError) as exc:
         raise _fail("gh_unavailable", verb, exc) from exc
     if result.returncode != 0:
-        error = _fail(_classify_stderr(result.stderr or ""), verb)
+        stderr = result.stderr or ""
+        error = _fail(_classify_stderr(stderr), verb)
         error.returncode = result.returncode
+        error.stderr_blank = not stderr.strip()
         raise error
     return result.stdout or ""
 
@@ -615,13 +627,21 @@ def repository_identity(project_dir: Path) -> str:
             timeout=60,
             check=False,
         )
+    except FileNotFoundError as exc:
+        raise _fail("origin_identity_invalid", verb, exc, detail="git not found") from exc
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
-        raise _fail("origin_identity_invalid", verb, exc) from exc
+        raise _fail(
+            "origin_identity_invalid", verb, exc, detail="git remote get-url origin failed"
+        ) from exc
     if result.returncode != 0:
-        raise _fail("origin_identity_invalid", verb)
+        raise _fail(
+            "origin_identity_invalid", verb, detail="no origin remote or not a git repository"
+        )
     repo = parse_github_remote(result.stdout or "")
     if repo is None:
-        raise _fail("origin_identity_invalid", verb)
+        raise _fail(
+            "origin_identity_invalid", verb, detail="origin is not a github.com remote"
+        )
     return repo
 
 
@@ -736,18 +756,18 @@ def list_comment_bodies(
 def check_auth(project_dir: Path) -> None:
     """Raise ``gh_auth`` unless ``gh`` is authenticated against github.com.
 
-    Infrastructure failures (``gh_missing``, ``gh_unavailable``, ``gh_rate_limited``)
-    pass through unchanged.
+    A failure is reported as ``gh_auth`` only when stderr matches the auth
+    patterns or the process exited nonzero with empty stderr (``gh auth status``
+    reports the missing login on stdout). Every other classification
+    (``gh_missing``, ``gh_rate_limited``, and ``gh_unavailable`` for timeouts,
+    network or 5xx text, or any other unrecognized stderr) passes through unchanged.
     """
     try:
         _gh(project_dir, ["auth", "status", "--hostname", "github.com"])
     except GitHubIssuesError as exc:
-        infrastructure = exc.code in ("gh_missing", "gh_rate_limited") or (
-            exc.code == "gh_unavailable" and exc.returncode is None
-        )
-        if infrastructure or exc.code == "gh_auth":
-            raise
-        raise GitHubIssuesError("gh_auth", "auth status") from exc
+        if exc.code == "gh_unavailable" and exc.returncode is not None and exc.stderr_blank:
+            raise GitHubIssuesError("gh_auth", "auth status") from exc
+        raise
 
 
 def list_labels(project_dir: Path, *, repo: str | None = None) -> frozenset[str]:
@@ -760,7 +780,7 @@ def list_labels(project_dir: Path, *, repo: str | None = None) -> frozenset[str]
     ):
         raise _fail("gh_invalid", verb)
     if len(data) >= _LABEL_LIST_LIMIT:
-        raise _fail("gh_invalid", verb)  # listing truncated at the limit
+        raise _fail("gh_truncated", verb)  # listing capped at the limit
     return frozenset(item["name"] for item in data)
 
 
@@ -821,9 +841,9 @@ def ensure_labels(
 ) -> tuple[str, ...]:
     """Create any missing labels from ``LABEL_VOCABULARY`` + ``extra``; return names created.
 
-    Existing names are compared case-insensitively (GitHub labels are). A
-    ``gh_rejected`` create (label already exists) is treated as present. Any other
-    failure re-raises with the names created so far attached as ``exc.created``.
+    Existing names are compared case-insensitively (GitHub labels are). Any
+    create failure (including ``gh_rejected``) re-raises with the names created so
+    far attached as ``exc.created``.
     """
     repo = _repo(project_dir, repo)
     existing = {name.lower() for name in list_labels(project_dir, repo=repo)}
@@ -841,9 +861,6 @@ def ensure_labels(
                  "--description", description, "--force", "--", name],
             )
         except GitHubIssuesError as exc:
-            if exc.code == "gh_rejected":
-                existing.add(name.lower())
-                continue
             exc.created = tuple(sorted(created))
             raise
         created.append(name)
