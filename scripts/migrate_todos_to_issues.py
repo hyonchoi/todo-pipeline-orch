@@ -439,10 +439,16 @@ def _select_entries(
     return active, not_imported, done_ids, active_ids
 
 
-def _archived_ids(todos_path: Path) -> frozenset[str]:
-    archive = todos_path.with_name("TODOS-archive.md")
-    if not archive.exists():
+def _archived_ids(todos_path: Path, project_dir: Path) -> frozenset[str]:
+    """Ids in ``TODOS-archive.md``, looked up next to TODOS.md, then under docs/history/."""
+    candidates = (
+        todos_path.with_name("TODOS-archive.md"),
+        project_dir / "docs" / "history" / "TODOS-archive.md",
+    )
+    archive = next((path for path in candidates if path.exists()), None)
+    if archive is None:
         return frozenset()
+    print(f"WARNING: using archive {archive} to classify done dependencies", file=sys.stderr)
     return frozenset(entry.todo_id for entry in parse_todo_entries(archive.read_text(encoding="utf-8")))
 
 
@@ -556,7 +562,7 @@ def main(argv: list[str] | None = None) -> int:
         active, not_imported, done_ids, active_ids = _select_entries(text, only)
         items = [extract_fields(entry, text) for entry in active]
         edges, outside = compute_dependency_edges(
-            items, done_ids=done_ids | _archived_ids(todos_path), active_ids=active_ids
+            items, done_ids=done_ids | _archived_ids(todos_path, project_dir), active_ids=active_ids
         )
         repo = _resolve_repo(args, project_dir)
         if not args.dry_run:

@@ -18,6 +18,7 @@ from scripts.migrate_todos_to_issues import (
     PHASE_OPTION_ALIASES,
     PHASE_OPTIONS,
     MigrationDataError,
+    _archived_ids,
     compute_dependency_edges,
     extract_fields,
     main,
@@ -552,9 +553,7 @@ def test_real_todos_md_parses_seven_active_entries_with_no_edges():
         assert len(fields.body) <= gi.MAX_ISSUE_BODY_CHARS
         assert gi.parse_issue_body(fields.body)["Legacy ID"] == (fields.todo_id,)
     done = frozenset(e.todo_id for e in entries if e.status == "x")
-    archive = REPO_ROOT / "TODOS-archive.md"
-    if archive.exists():
-        done |= frozenset(e.todo_id for e in parse_todo_entries(archive.read_text(encoding="utf-8")))
+    done |= _archived_ids(REPO_ROOT / "TODOS.md", REPO_ROOT)
     edges, outside = compute_dependency_edges(
         extracted, done_ids=done, active_ids=frozenset(e.todo_id for e in active)
     )
@@ -596,3 +595,20 @@ def test_writability_probe_leaves_no_file_when_run_fails_before_writing(fake_gh,
         mod._migrate = original
     assert out.parent.is_dir(), "created parent directories are kept"
     assert not out.exists(), "probe must not leave an empty mapping document"
+
+
+def test_archive_falls_back_to_docs_history_and_warns(fake_gh, tmp_path, capsys):
+    """``TODOS-archive.md`` is looked up next to TODOS.md first, then under docs/history/."""
+    _write_fixture(tmp_path, archive=None)
+    history = tmp_path / "docs" / "history" / "TODOS-archive.md"
+    history.parent.mkdir(parents=True)
+    history.write_text(ARCHIVE, encoding="utf-8")
+    assert main(_base_argv(tmp_path, "--dry-run")) == 0
+    captured = capsys.readouterr()
+    assert "- TODO-50 → TODO-2: done" in captured.out
+    assert f"WARNING: using archive {history}" in captured.err
+
+    (tmp_path / "TODOS-archive.md").write_text(ARCHIVE, encoding="utf-8")
+    assert main(_base_argv(tmp_path, "--dry-run")) == 0
+    assert f"WARNING: using archive {tmp_path / 'TODOS-archive.md'}" in capsys.readouterr().err
+    assert _archived_ids(tmp_path / "nowhere" / "TODOS.md", tmp_path / "nowhere") == frozenset()
