@@ -10,10 +10,19 @@ board, and verified the outcome files.
 
 ## Prerequisites
 
-- The pipeline is installed: `uv sync` (see [Getting Started](tutorial-getting-started.md#installation)).
+- The pipeline is installed: `uv sync` (see [Getting Started](tutorial-getting-started.md#step-1-install-and-verify-tpo)).
 - Hermes is installed and authenticated: `hermes login`.
 - A Hermes kanban board is configured for your project (check with `hermes kanban list`).
-- The project has a `TODOS.md` with at least one TODO in `[→]` (in progress) status.
+- The project has `.hermes/pipeline.toml` (`tpo init <project>`). A scan
+  (`tpo tick` with no argument) skips directories without it with a WARNING;
+  `tpo tick <project>` warns and falls back to the default contract.
+- The project has a github.com `origin` remote (`tpo tick <project>` exits 2
+  otherwise).
+- At least one open issue carries `tpo:todo` + `ready-for-agent`. The backlog
+  itself lives in GitHub Issues (`tpo:todo` label; canonical ID
+  `TODO-<issue-number>`) — see
+  [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
+  [ADR-0003](adr/0003-github-issues-are-the-todo-backlog.md).
 - Every external skill required by the selected profile is provisioned in the
   worker client's discovery root. Check the selected client with
   `tpo config get prompt_client` and its prerequisites with
@@ -35,17 +44,16 @@ tick:
   1. Acquire global TickLock
   2. Discover active projects (scans projects_dir)
   3. For each project:
-     a. Migrate per-project state (one-time)
-     b. Check prior tick (per-project)
-     c. Run selection (per-project)
-     d. Validate the selected TODO's Plan when the profile requires one
-     e. Render every phase body from the selected profile for prompt_client
-     f. Persist current_tick_id.txt and the tick_started outcome
-     g. Create the prepared Hermes kanban tasks
+     a. Check prior tick (per-project)
+     b. Fetch eligible `tpo:todo` issues via `gh` and run selection (per-project)
+     c. Validate the selected TODO's Plan when the profile requires one
+     d. Render every phase body from the selected profile for prompt_client
+     e. Persist current_tick_id.txt and the tick_started outcome
+     f. Create the prepared Hermes kanban tasks
   4. Release lock
 ```
 
-Steps 3d–3g form the production registration boundary. If Plan validation or
+Steps 3c–3f form the production registration boundary. If Plan validation or
 any body render fails, the tick records `failed_to_spawn` without persisting
 the current tick or creating a Hermes task. Persistence occurs only after all
 bodies are valid and immediately before the first task creation.
@@ -145,7 +153,7 @@ Key fields:
 
 The scan loop runs over all active projects. To debug a specific project's
 selection, temporarily set all other projects to `enabled = false` in their
-`.hermes/project.toml`, or temporarily rename their `TODOS.md`.
+`.hermes/project.toml`.
 
 ## State Directory
 
@@ -170,8 +178,12 @@ default 10 min), wait for it to complete. If the process died, the stale
 marker sweep will reclaim the lock on the next tick.
 
 **`picked=None` — no TODO selected.**
-All TODOs are blocked or none are in progress. Check your `TODOS.md` for
-`[→]` status. The selection rationale in `.hermes/decisions/` explains why.
+No open issue carries both `tpo:todo` and `ready-for-agent`, or every candidate
+is blocked (`tpo:on-hold`, `tpo:in-progress`, open dependencies, invalid Plan).
+The selection rationale in `.hermes/decisions/` explains why. A rationale of
+`tracker_error: <code>` (for example `gh_missing`, `gh_auth`,
+`origin_identity_invalid`) means `gh` or the `origin` remote needs fixing, not
+the backlog.
 
 **Kanban task creation fails mid-registration.**
 Registration stays behind a non-spawnable barrier. Known tasks are archived

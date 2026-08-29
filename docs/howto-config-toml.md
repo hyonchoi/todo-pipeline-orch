@@ -101,7 +101,7 @@ If the eval suite fails, revert the pin — that's the whole point of pinning.
 
 ### Loosen the circuit breaker during onboarding
 
-When a fresh repo has thin TODOS.md, `picked=null` is common and the breaker
+When a fresh repo has few `ready-for-agent` issues, `picked=null` is common and the breaker
 trips fast. Temporarily raise `no_progress_threshold` to `10`. Lower it back
 to `3` once the queue is real.
 

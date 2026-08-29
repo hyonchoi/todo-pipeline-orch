@@ -7,7 +7,13 @@ multiple projects for the scan loop.
 ## Prerequisites
 
 - All projects live under a single directory (default: `~/projects`).
-- Each project has a `TODOS.md` file.
+- Each project has a pipeline contract at `.hermes/pipeline.toml` (`tpo init <project>`)
+  and a github.com `origin` remote. The backlog itself lives in GitHub Issues
+  (`tpo:todo` label; canonical ID `TODO-<issue-number>`) — see
+  [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
+  [ADR-0003](adr/0003-github-issues-are-the-todo-backlog.md).
+  Directories with `.hermes/` or a legacy `TODOS.md` but no contract are skipped
+  with a WARNING suggesting `tpo init`.
 - Project directory names are valid slugs (alphanumeric, dot, dash, underscore; no leading dash or dot).
 
 ## Configuration
@@ -42,7 +48,7 @@ EOF
 
 ### Archiving a Project
 
-To pause selection for a project without deleting `TODOS.md`:
+To pause selection for a project without deleting its contract:
 
 ```bash
 mkdir -p ~/projects/myproject/.hermes
@@ -74,16 +80,11 @@ hermes cron set pipeline-tick '*/5 * * * *'
 The old `scripts/install-cron.sh` is deprecated — it still registers `tpo auto`
 (which was removed in v0.2.0). Use Hermes cron instead.
 
-## State Migration
+## Per-Project State
 
-On the first run of `tpo tick` (no project argument), state files
-in `~/.hermes/` (`current_tick_id.txt`, `circuit.json`, `outcomes/`) are
-migrated to `<project>/.hermes/`. This is a one-time operation.
-
-**Important:** Auto-migration only runs when exactly one project is discovered.
-If multiple projects exist, the tick warns and skips migration — you need to
-manually decide which project owned the global state. With multiple projects,
-each project starts with a fresh state directory.
+Each project keeps its own state under `<project>/.hermes/`; `~/.hermes/` holds
+only global configuration. The legacy automatic migration of global state into
+the first project was removed.
 
 ## Debugging
 
@@ -94,12 +95,13 @@ To debug a specific project's selection:
 
 ## Error Isolation
 
-If one project's `TODOS.md` is malformed or an error occurs during selection,
+If one project's issue tracker is unreachable (recorded as a `tracker_error`
+decision) or an error occurs during selection,
 the error is logged and the scan continues to the next project. One project's
 failure does not block the others.
 
 ## Related
 
 - [Multi-project scan tutorial](tutorial-multi-project-scan.md) — step-by-step walkthrough with two projects
-- [How the scan loop works](explanation-multi-project-scan.md) — per-project locking and state migration decisions
-- [How to troubleshoot state migration](howto-troubleshoot-state-migration.md) — fixing migration issues
+- [How the scan loop works](explanation-multi-project-scan.md) — per-project locking and discovery decisions
+- [Issue tracker conventions](agents/issue-tracker.md) — labels and eligibility for `tpo:todo` issues

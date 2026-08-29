@@ -1,6 +1,6 @@
 # Architecture
 
-todo-pipeline-orchestrator is a uv-managed Python package that automates the lifecycle of TODOS.md entries through a multi-phase pipeline driven by Hermes agents, kanban task dependencies, and circuit breaker protections.
+todo-pipeline-orchestrator is a uv-managed Python package that automates the lifecycle of TODO backlog items — GitHub issues labelled `tpo:todo` — through a multi-phase pipeline driven by Hermes agents, kanban task dependencies, and circuit breaker protections.
 
 ## Overview
 
@@ -8,7 +8,7 @@ todo-pipeline-orchestrator is a uv-managed Python package that automates the lif
 Tick Loop (Hermes cron or manual)
     |
     v
-[Selection] -- Hermes agent picks a TODO from TODOS.md
+[Selection] -- Hermes agent picks one of the eligible `tpo:todo` issues
     |
     v
 [Kanban Registration] -- Build a complete chain behind a registration barrier
@@ -70,8 +70,8 @@ terminal kanban task completes, the next `tpo tick` checks that branch's PR and
 keeps the project in handoff until GitHub reports the PR as merged. This prevents
 cron ticks from stacking the next TODO on top of an open PR branch.
 
-### Lane F: CLI, Multi-Project, State Migration
-`cli.py`, `project_config.py`, `state_migration.py` — User-facing commands, multi-project scanning, per-project state migration. (`watcher.py` and `status.py` were removed in v0.5.6 — the `__main__.py` event loop and `cli.py` subcommands cover their roles.)
+### Lane F: CLI, Multi-Project, Backlog
+`cli.py`, `project_config.py`, `github_issues.py`, `run_registration.py` — User-facing commands, multi-project scanning (discovery keys on `.hermes/pipeline.toml`), and the GitHub Issues backlog adapter. The legacy global-to-per-project state migration was removed as a hard cutover. (`watcher.py` and `status.py` were removed in v0.5.6 — the `__main__.py` event loop and `cli.py` subcommands cover their roles.)
 
 ### Lane G: Hermes Adapter
 `hermes_adapter.py` — Wraps `hermes chat -q` for all LLM calls. Replaces direct Anthropic SDK usage.
@@ -158,12 +158,13 @@ All pipeline state lives under `<project>/.hermes/`:
 <project>/.hermes/
 ├── decisions/                 # Immutable selection decisions (write-once)
 ├── outcomes/                  # Phase completion/failure sidecars
-├── runs/<tick-id>/registration.json # Pinned base, authority hashes, branch/worktree
+├── runs/<tick-id>/registration.json # Schema v2: pinned base, issue snapshot, branch/worktree
+├── runs/<tick-id>/issue-closed    # Marker: run delivered, issue closed at closeout
+├── runs/<tick-id>/abandoned       # Marker: operator abandoned the run (`touch`)
 ├── ready_for_review/          # Legacy ship-gate sidecars
 ├── pipeline_branch.txt        # Branch currently waiting at PR handoff
 ├── phase_started/             # In-flight phase markers
 ├── tick.lock/                 # Per-project tick lock (atomic mkdir)
-├── todo_id_counter            # Compatibility cache for tracked TODO IDs
 ├── config.toml                # Per-project config overlay
 ├── project.toml               # Project marker (enabled/slack_channel)
 ├── pipeline.toml              # Pipeline execution contract (assignee, capabilities)
@@ -203,42 +204,36 @@ All pipeline state lives under `<project>/.hermes/`:
 5. **Multi-project scan** — Each project has its own lock, so a slow or
    overlapping tick skips only that project while the scan continues.
 
-### TODOS Manager Skill (v2.1)
+### Backlog: GitHub Issues
 
-The `todos-manager` skill enforces the canonical TODOS.md schema and provides eight subcommands:
-- `--init`: Initialize TODOS.md with `## Metadata`, `## Entry Schema`, and `## Entries`, then create TODOS-archive.md
-- `--add`: Add a new entry and author a validated manifest for a selected new or legacy actionable Plan
-- `--convert`: Convert existing TODOS.md layout and report Plan readiness and migration needs
-- `--audit`: Audit format, reconcile invalid tracked ID metadata, and report Plan readiness without editing Plans
-- `--archive`: Move completed `[x]` entries while preserving attached Plan bytes
-- `--complete`: Complete one TODO after a TPO-verified pull-request handoff while preserving attached Plan bytes
-- `--list`: List active TODO entries and Plan readiness (optional `--all` also shows archived entries)
-- `--revise`: Revise one entry and explicitly create, replace, remove, or convert one Plan
+The TODO backlog lives in GitHub Issues on the project's github.com `origin`
+([ADR-0003](adr/0003-github-issues-are-the-todo-backlog.md)). A TODO is an open
+issue carrying `tpo:todo`; its canonical ID is `TODO-<issue-number>`. `TODOS.md`
+and `TODOS-archive.md` are retired (see
+[migration notes](migration/todos-to-issues.md)).
 
-The skill source lives at `hermes_pipeline/data/skills/todos-manager/SKILL.md` (platform-neutral, git-tracked) and is installed to user-level skill directories via `tpo skills install --target all`. The skill enforces:
-- Required fields: **What:**, **Why:**, **Decisions:**
-- Optional fields: **Pros:**, **Cons:**, **Context:**, **Depends on:**, **Assumptions:**, **Completed:**, **Resolved design:**
-- Stable TODO-<n> IDs: assigned `TODO-<n>` IDs are immutable once committed; `NEXT_TODO_ID` under `## Metadata` is the common-path source and advances after each successful add, while active and archived IDs are scanned only for reconciliation
-- `TODOS.md` stores tracked ID state under `## Metadata` as `NEXT_TODO_ID: <n>`. The `## Entry Schema` section documents the format and is never parsed as active TODO content. Active entries live under `## Entries`.
-
-`Plan:` is the execution-authority attachment. A valid existing `json tpo-plan`
-manifest is preserved byte-for-byte. When `--add` or `--revise` selects a new
-or legacy actionable Plan, the skill drafts only evidence-supported manifest
-fields, stages a same-directory candidate, and validates it with
-`tpo plan validate <project> --todo TODO-N --plan <candidate> --require-manifest`.
-Separate approval gates cover the Plan source, exact Plan
-diff, and final TODO preview; preimage checks prevent installation after Plan or
-TODO drift. `--convert`, `--audit`, and `--list` report `manifest`, `legacy`,
-`invalid`, or `none`, making migration needs visible without editing Plans.
-
-The skill's deterministic logic (ID sequencing, entry parsing, format validation, archive logic) has a structural unit test suite at `tests/skill-test-environment/` — golden YAML assertions run against a demo-project fixture, zero token cost. This Phase 1 harness provides pure-Python implementations of skill rules that serve as the test oracle, enabling instant feedback without API tokens. See:
-- [Reference: Skill Test Harness API](reference-skill-test-harness.md) — Complete function signatures, assertion types, fixtures
-- [How To: Skill Test Environment](howto-skill-test-environment.md) — Add unit tests, golden files, debug failures
-- [Explanation: Skill Test Harness Design](explanation-skill-test-harness-design.md) — Why pure-Python + golden files, Phase 1 vs. Phase 2 plans
-- [tests/skill-test-environment/README.md](../tests/skill-test-environment/README.md) — Quick start
+- **Label vocabulary and eligibility** — `tpo:todo` + `ready-for-agent` make an
+  issue selectable; `tpo:on-hold`, `tpo:in-progress`, and pending-triage labels
+  block it. Decisions live in the issue body; labels are mirrors. See
+  [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
+  [triage labels](agents/triage-labels.md).
+- **Snapshot authority** — registration pins the issue identity (`issue_number`,
+  `issue_url`) and a hashed `issue_snapshot` in `runs/<tick-id>/registration.json`
+  (schema v2). Schema v1 registrations are rejected; finish or abandon those runs
+  before upgrading. The Plan stays git-pinned and remains the sole execution
+  authority (ADR-0001).
+- **Drift is a human boundary** — live issue drift after registration
+  (`issue_drift`, `issue_closed`, `issue_on_hold`, `issue_identity_mismatch`)
+  blocks the run as `needs_input` and is never auto-repaired;
+  `issue_unavailable:<code>` only warns. Tracker outages during selection are
+  persisted as `tracker_error: <gh code>` decisions.
+- **Closeout** — after the PR merges, TPO closes the issue via `gh`, removes
+  `tpo:in-progress`, and writes the `issue-closed` run marker.
+- **Offline harness** — `tpo test` serves every `gh` call from a bundled fake
+  (`TPO_GH_BIN`, `TPO_FAKE_GH_STATE`); the minimum real `gh` is 2.44.
 
 ## See Also
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state
 - [Pipeline State Machine](hermes-state-machine.md) — Full tick lifecycle transitions
 - [Modularization Plan](pipeline-modularization-plan.md) — Design history and rationale
-- [Multi-Project Scan](explanation-multi-project-scan.md) — Per-project locking and state migration decisions
+- [Multi-Project Scan](explanation-multi-project-scan.md) — Per-project locking and discovery decisions

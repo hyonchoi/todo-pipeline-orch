@@ -228,7 +228,6 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | [Set up multiple projects](docs/howto-multi-project-setup.md) | How-to | Configuring per-project settings and the scan loop |
 | [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
 | [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Global lock, migration decisions, and trade-offs |
-| [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
 
 ### Contracts, profiles, and adapters
 

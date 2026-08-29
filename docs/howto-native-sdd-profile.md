@@ -64,8 +64,9 @@ no gstack, superpowers, or client-side workflow skill is used.
 3. A fresh review session reports `clean` or structured P0-P3 findings. Findings
    create stable `review-fix`, fix-validation, and re-review cards. After five
    unsuccessful rounds the review gate stays `needs_input`; automation stops.
-4. Clean review enables finish, deterministic `todos-manager --complete`
-   closeout, remote-head/check verification, and the human merge gate.
+4. Clean review enables finish, deterministic issue closeout (the `tpo:todo`
+   issue is closed via `gh` after the merge), remote-head/check verification,
+   and the human merge gate.
 
 Exactly one run is active per project. Retries reconcile the same keys. Drifted
 authority, branch, worktree, PR, or remote head is preserved and blocked for
