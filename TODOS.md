@@ -102,4 +102,6 @@ NEXT_TODO_ID: 44
   - **Context:** `hermes_pipeline/cli.py`, `hermes_pipeline/harness.py`, `hermes_pipeline/kanban_tasks.py`, `docs/ARCHITECTURE.md`
   - **Depends on:** (none)
   - **Assumptions:** Refactoring will be divided into independently reviewable, behavior-preserving slices; existing provider-free tests remain the primary regression gate, with live Hermes validation identified separately where necessary.
-  - **Decisions:** Priority `P2`, Effort `L`, Phase `2 (Design)`, Branch `feature/refactor-production-orchestration-hotspots`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
+  - **Plan:** docs/superpowers/plans/2026-08-20-todo-43-production-orchestration-hotspots.md
+  - **Reference:** docs/ARCHITECTURE.md
+  - **Decisions:** Priority `P2`, Effort `L`, Phase `2 (Design)`, Branch `feature/todo-43-orchestration-hotspots-impl`, Test Coverage `required`, Security Review `not-required`, UI Review `not-required`
