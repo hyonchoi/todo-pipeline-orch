@@ -216,6 +216,9 @@ and `TODOS-archive.md` are retired (see
   section, a repo-relative Plan document that may carry one strict
   `json tpo-plan` block; its `todo_id` must equal `TODO-<issue-number>`, so file
   the issue before authoring the manifest ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)).
+  Manifest-free Markdown remains a legacy compatibility contract that compiles
+  to one development card; validate a Plan with
+  `tpo plan validate <project> --todo <n> --require-manifest`.
 - **Label vocabulary and eligibility** — `tpo:todo` + `ready-for-agent` make an
   issue selectable; `tpo:on-hold`, `tpo:in-progress`, and pending-triage labels
   block it. Decisions live in the issue body; labels are mirrors. See
