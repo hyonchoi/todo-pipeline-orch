@@ -479,3 +479,22 @@ def test_phase_label_slugifies_phase_value(phase, expected):
 
 def test_legacy_id_label_uses_todo_id():
     assert legacy_id_label("TODO-12") == "legacy-id:TODO-12"
+
+
+def test_entry_hash_ignores_mutable_issue_state():
+    base = issue_from_api(_payload(9, body="### What\n\nStable\n"), repo=REPO)
+    changed = issue_from_api(
+        _payload(
+            9,
+            body="### What\n\nStable\n",
+            state="closed",
+            labels=("tpo:on-hold", "priority:P0"),
+            assignees=("octocat",),
+            blocked_by=3,
+        ),
+        repo=REPO,
+    )
+    edited = issue_from_api(_payload(9, body="### What\n\nEdited\n"), repo=REPO)
+
+    assert changed.entry_hash == base.entry_hash
+    assert edited.entry_hash != base.entry_hash

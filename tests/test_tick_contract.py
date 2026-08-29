@@ -43,7 +43,7 @@ def _run_project_tick(
         return_value=_make_decision("TODO-10"),
     )
     registration = mocker.patch(
-        "hermes_pipeline.run_registration.register_pinned_run",
+        "hermes_pipeline.run_registration.register_pinned_run_from_entry",
         return_value=SimpleNamespace(worktree=project_dir / ".worktrees" / "todo-10"),
         side_effect=registration_side_effect,
     )
@@ -353,6 +353,51 @@ class TestPendingTaskCreateGate:
             project_dir.name, "01PRIOR", state_dir=project_state
         )
         run_selection.assert_not_called()
+
+
+class TestPriorTickRegistrationValidation:
+    def test_unsupported_prior_registration_logs_code_and_counts_no_progress(
+        self, tmp_path, mocker, caplog
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        (project_state / "runs" / "01PRIOR").mkdir(parents=True)
+        (project_state / "pipeline.toml").write_text(
+            'schema_version = 2\nassignee = "pipeline"\n'
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+        )
+        (project_state / "runs" / "01PRIOR" / "registration.json").write_text(
+            json.dumps({"schema_version": 1, "tick_id": "01PRIOR"})
+        )
+        mocker.patch("hermes_pipeline.kanban_tasks.reconcile_pending_task_create", return_value=True)
+        mocker.patch("hermes_pipeline.cli._read_prior_tick_id", return_value="01PRIOR")
+        mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+        mocker.patch("hermes_pipeline.ship.read_sidecar", return_value=None)
+        cb = mocker.Mock()
+        mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=cb)
+        all_complete = mocker.patch("hermes_pipeline.cli.all_phases_complete")
+        run_selection = mocker.patch("hermes_pipeline.cli.run_selection")
+        caplog.set_level("ERROR", logger="hermes_pipeline.cli")
+
+        _tick_project(
+            project_dir=project_dir,
+            project_slug=project_dir.name,
+            project_state=project_state,
+            config=Config(),
+            cb_cfg=CircuitBreakerConfig(),
+            tick_id="01NEXT",
+            project_toml={},
+        )
+
+        cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
+        all_complete.assert_not_called()
+        run_selection.assert_not_called()
+        assert any(
+            "01PRIOR" in record.getMessage()
+            and "registration_invalid" in record.getMessage()
+            and "schema_version" in record.getMessage()
+            for record in caplog.records
+        )
 
 
 class TestTickPromptPreparation:

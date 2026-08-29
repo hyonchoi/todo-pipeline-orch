@@ -240,9 +240,51 @@ def test_doctor_reports_installed_skill_drift(tmp_path, mocker, capsys):
     assert "tpo skills install" in output
 
 
+ORIGIN = ("git", "remote", "get-url", "origin")
+API = ("gh", "api", "-H", "Accept: application/vnd.github+json")
+
+
+def _pin_live_issue(fake_gh, issue, *, body=None, state="open", labels=("tpo:todo",)):
+    from tests.gh_fakes import issue_payload
+
+    fake_gh.on(*ORIGIN, stdout=f"https://github.com/{issue.repo}.git\n")
+    fake_gh.on(
+        *API,
+        stdout=__import__("json").dumps(
+            issue_payload(
+                issue.number,
+                title=issue.title,
+                body=issue.body if body is None else body,
+                state=state,
+                labels=labels,
+            )
+        ),
+    )
+
+
+def test_doctor_active_registration_reports_unsupported_schema(tmp_path, capsys):
+    project = tmp_path / "repo"
+    state = project / ".hermes"
+    (state / "runs" / "tick-1").mkdir(parents=True)
+    (state / "current_tick_id.txt").write_text("tick-1\n")
+    (state / "runs" / "tick-1" / "registration.json").write_text(
+        __import__("json").dumps({"schema_version": 1, "todo_id": "TODO-1"})
+    )
+
+    assert _doctor_active_registration(project, state) is False
+    output = capsys.readouterr().out
+    assert "REGISTRATION UNSUPPORTED: schema_version 1" in output
+    assert "finish or abandon this run before upgrading" in output
+    assert "DRIFT" not in output
+
+
 def test_doctor_active_registration_reports_expected_and_actual_hashes(
-    tmp_path, mocker, capsys
+    tmp_path, mocker, capsys, fake_gh
 ):
+    from tests.gh_fakes import make_issue
+
+    issue = make_issue(1, repo="acme/repo", title="Example", body="### Plan\n\nplan.md\n")
+    _pin_live_issue(fake_gh, issue)
     project = tmp_path / "repo"
     worktree = project / ".worktrees" / "todo-1-example"
     state = project / ".hermes"
@@ -256,6 +298,7 @@ def test_doctor_active_registration_reports_expected_and_actual_hashes(
     (state / "runs" / "tick-1" / "registration.json").write_text(
         __import__("json").dumps(
             {
+                "schema_version": 2,
                 "todo_id": "TODO-1",
                 "repository": str(project),
                 "worktree": str(worktree),
@@ -263,7 +306,10 @@ def test_doctor_active_registration_reports_expected_and_actual_hashes(
                 "base_sha": "a" * 40,
                 "plan_path": "plan.md",
                 "plan_hash": "0" * 64,
-                "selected_entry_hash": "0" * 64,
+                "issue_number": 1,
+                "issue_url": issue.url,
+                "issue_snapshot": issue.snapshot + "tampered\n",
+                "selected_entry_hash": issue.entry_hash,
             }
         )
     )
@@ -290,11 +336,13 @@ def test_doctor_active_registration_reports_expected_and_actual_hashes(
     assert "plan_hash expected=" in output
     assert "actual=" in output
     assert "selected_entry_hash expected=" in output
+    assert "REGISTRATION DRIFT: selected_entry_hash" in output
+    assert "Issue authority: pinned" in output
 
 
-def test_doctor_active_registration_accepts_post_closeout_todo_state(tmp_path, capsys):
+def _closeout_project(tmp_path):
     from hermes_pipeline.run_registration import register_pinned_run
-    from hermes_pipeline.todos_md import parse_todo_entries
+    from tests.gh_fakes import make_issue
 
     project = tmp_path / "repo"
     project.mkdir()
@@ -302,6 +350,7 @@ def test_doctor_active_registration_accepts_post_closeout_todo_state(tmp_path, c
         ("init", "-q"),
         ("config", "user.email", "test@example.com"),
         ("config", "user.name", "Test"),
+        ("remote", "add", "origin", "https://github.com/acme/repo.git"),
     ):
         _test_sp.run(["git", *command], cwd=project, check=True)
     todos = (
@@ -317,7 +366,13 @@ def test_doctor_active_registration_accepts_post_closeout_todo_state(tmp_path, c
         project_dir=project,
         state_dir=state,
         tick_id="tick-1",
-        selected_entry=parse_todo_entries(todos)[0],
+        selected_issue=make_issue(
+            1,
+            repo="acme/repo",
+            title="Example",
+            body="### Plan\n\nplan.md\n\n### Branch\n\nfeat/example\n",
+        ),
+        repo="acme/repo",
         plan_path="plan.md",
         profile="native-sdd",
         prompt_client="codex",
@@ -336,12 +391,68 @@ def test_doctor_active_registration_accepts_post_closeout_todo_state(tmp_path, c
         cwd=registration.worktree,
         check=True,
     )
+    return project, state, registration
+
+
+def test_doctor_active_registration_accepts_post_closeout_todo_state(
+    tmp_path, capsys, fake_gh
+):
+    from hermes_pipeline.github_issues import issue_from_api
+    from tests.gh_fakes import issue_payload
+
+    project, state, registration = _closeout_project(tmp_path)
+    issue = issue_from_api(
+        issue_payload(1, title="Example", body="### Plan\n\nplan.md\n\n### Branch\n\nfeat/example\n"),
+        repo="acme/repo",
+    )
+    assert issue.entry_hash == registration.selected_entry_hash
+    _pin_live_issue(fake_gh, issue)
 
     assert _doctor_active_registration(project, state) is True
     output = capsys.readouterr().out
     assert "base_sha expected=" in output
     assert "Current lifecycle: head_sha=" in output
     assert "REGISTRATION DRIFT" not in output
+    assert "Issue authority: pinned" in output
+
+
+@pytest.mark.parametrize(
+    ("live", "code"),
+    [
+        ({"body": "### Plan\n\nplan.md\n\n### Branch\n\nfeat/other\n"}, "issue_drift"),
+        ({"state": "closed"}, "issue_closed"),
+        ({"labels": ("tpo:todo", "tpo:on-hold")}, "issue_on_hold"),
+    ],
+)
+def test_doctor_active_registration_reports_live_issue_drift(
+    tmp_path, capsys, fake_gh, live, code
+):
+    from hermes_pipeline.github_issues import issue_from_api
+    from tests.gh_fakes import issue_payload
+
+    project, state, _registration = _closeout_project(tmp_path)
+    issue = issue_from_api(
+        issue_payload(1, title="Example", body="### Plan\n\nplan.md\n\n### Branch\n\nfeat/example\n"),
+        repo="acme/repo",
+    )
+    _pin_live_issue(fake_gh, issue, **live)
+
+    assert _doctor_active_registration(project, state) is False
+    output = capsys.readouterr().out
+    assert f"ISSUE DRIFT: {code}" in output
+    assert "REGISTRATION DRIFT" not in output
+
+
+def test_doctor_active_registration_warns_when_issue_check_unavailable(
+    tmp_path, capsys, fake_gh
+):
+    project, state, _registration = _closeout_project(tmp_path)
+    fake_gh.on(*ORIGIN, stdout="https://github.com/acme/repo.git\n")
+    fake_gh.on(*API, rc=1, stderr="HTTP 429 rate limit exceeded")
+
+    assert _doctor_active_registration(project, state) is True
+    output = capsys.readouterr().out
+    assert "WARNING: issue check unavailable (gh_rate_limited)" in output
 
 
 def test_hermes_registry_prerequisite_requires_exact_enabled_skill_name(mocker):

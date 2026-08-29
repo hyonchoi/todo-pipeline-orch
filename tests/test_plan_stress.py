@@ -66,7 +66,7 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
         reconcile_plan_task_results,
     )
     from hermes_pipeline.run_registration import register_pinned_run
-    from hermes_pipeline.todos_md import parse_todo_entries
+    from tests.gh_fakes import make_issue
 
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -94,6 +94,7 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
     )
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/repo.git")
 
     prepared = prepare_todo_phases(
         todo_id=TODO_ID,
@@ -160,7 +161,12 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
         project_dir=repo,
         state_dir=state,
         tick_id=TICK_ID,
-        selected_entry=parse_todo_entries(todos)[0],
+        selected_issue=make_issue(
+            int(TODO_ID[5:]),
+            repo="acme/repo",
+            title="Stress compilation",
+            body="### Plan\n\nplan.md\n\n### Branch\n\ntodo-50-stress\n",
+        ),
         plan_path="plan.md",
         profile="native-sdd",
         prompt_client="claude",

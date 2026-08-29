@@ -39,6 +39,8 @@ ON_HOLD_LABEL = "tpo:on-hold"
 IN_PROGRESS_LABEL = "tpo:in-progress"
 TRIAGE_PENDING_LABELS = ("needs-triage", "needs-info", "ready-for-human", "wontfix")
 MAX_ISSUE_BODY_CHARS = 65_536
+MAX_ISSUE_SNAPSHOT_CHARS = MAX_ISSUE_BODY_CHARS + 4096
+REGISTRATION_SCHEMA_VERSION = 2
 SNAPSHOT_HEADER = "tpo-issue-snapshot/1"
 SELECTION_BODY_MAX_CHARS = 4000
 NO_RESPONSE = "_No response_"
@@ -219,7 +221,8 @@ class IssueTodo:
     entry_hash: str
 
 
-def _first_lines(values: tuple[str, ...]) -> tuple[str, ...]:
+def first_lines(values: tuple[str, ...]) -> tuple[str, ...]:
+    """First non-empty line of each section value; empty values are dropped."""
     result: list[str] = []
     for value in values:
         first = next((line.strip() for line in value.split("\n") if line.strip()), "")
@@ -253,7 +256,7 @@ def issue_from_api(payload: Mapping, *, repo: str) -> IssueTodo:
             raise ValueError("blocked_by must be an integer")
         blocked_by_open = blocked_by
     sections = parse_issue_body(body)
-    spec_values = _first_lines(sections.get("Spec", ()))
+    spec_values = first_lines(sections.get("Spec", ()))
     references = tuple(
         item.strip()
         for value in sections.get("Reference", ())
@@ -276,8 +279,8 @@ def issue_from_api(payload: Mapping, *, repo: str) -> IssueTodo:
         blocked_by_open=blocked_by_open,
         spec=spec_values[0] if spec_values else None,
         references=references,
-        plan_values=_first_lines(sections.get("Plan", ())),
-        branch_values=_first_lines(sections.get("Branch", ())),
+        plan_values=first_lines(sections.get("Plan", ())),
+        branch_values=first_lines(sections.get("Branch", ())),
         snapshot=snapshot,
         entry_hash=snapshot_hash(snapshot),
     )
@@ -638,6 +641,43 @@ def fetch_issue(project_dir: Path, number: int, *, repo: str | None = None) -> I
     repo = _repo(project_dir, repo)
     stdout = _gh_api(project_dir, [f"repos/{repo}/issues/{number}"])
     return _issue_from_payload(_decode_json(stdout, "api"), repo=repo, verb="api")
+
+
+def check_issue_drift(
+    project_dir: Path, registration_payload: Mapping, *, repo: str | None = None
+) -> str | None:
+    """Compare a registration's pinned issue hash with the live issue.
+
+    Returns ``None`` when unchanged, else ``"issue_unavailable:<code>"`` (``gh``
+    failure or malformed registration), ``"issue_identity_mismatch"``,
+    ``"issue_closed"``, ``"issue_on_hold"`` (``tpo:on-hold`` or ``wontfix``), or
+    ``"issue_drift"``. Drift covers title and body only; other gating labels are
+    evaluated by eligibility, not here.
+    """
+    number = registration_payload.get("issue_number")
+    pinned_hash = registration_payload.get("selected_entry_hash")
+    pinned_url = registration_payload.get("issue_url")
+    if (
+        not isinstance(number, int)
+        or isinstance(number, bool)
+        or number <= 0
+        or not isinstance(pinned_hash, str)
+        or not isinstance(pinned_url, str)
+    ):
+        return "issue_unavailable:registration_invalid"
+    try:
+        live = fetch_issue(project_dir, number, repo=repo)
+    except GitHubIssuesError as exc:
+        return f"issue_unavailable:{exc.code}"
+    if live.url.lower() != pinned_url.lower():
+        return "issue_identity_mismatch"
+    if live.state != "open":
+        return "issue_closed"
+    if ON_HOLD_LABEL in live.labels or "wontfix" in live.labels:
+        return "issue_on_hold"
+    if live.entry_hash != pinned_hash:
+        return "issue_drift"
+    return None
 
 
 def list_comment_bodies(

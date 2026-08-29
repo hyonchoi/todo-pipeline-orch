@@ -1408,6 +1408,13 @@ def reconcile_plan_task_results(
         return True  # Legacy and pre-registration runs have nothing to reconcile.
     try:
         registration = load_validated_registration(project_dir, state_dir, tick_id)
+    except ResultContractError as exc:
+        log.warning(
+            "cannot reconcile plan results for tick %s: %s",
+            tick_id,
+            sanitize_result_text(str(exc), maximum=1000),
+        )
+        raise
     except (
         OSError,
         UnicodeError,
@@ -1415,7 +1422,6 @@ def reconcile_plan_task_results(
         KeyError,
         TypeError,
         ValueError,
-        ResultContractError,
     ) as exc:
         log.warning(
             "cannot reconcile plan results for tick %s: %s",

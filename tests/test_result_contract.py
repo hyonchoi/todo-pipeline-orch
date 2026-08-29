@@ -8,6 +8,16 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.gh_fakes import make_issue
+
+REPO = "acme/repo"
+ISSUE_BODY = "### What\n\nResult contract.\n\n### Plan\n\nplan.md\n\n### Branch\n\ntodo-42\n"
+
+from hermes_pipeline.github_issues import (
+    MAX_ISSUE_SNAPSHOT_CHARS,
+    canonical_issue_snapshot,
+    snapshot_hash,
+)
 from hermes_pipeline.result_contract import (
     ResultContractError,
     load_validated_registration,
@@ -444,22 +454,15 @@ def test_registration_rejects_unknown_keys_and_mutable_plan_drift(tmp_path):
     assert authority.manifest.tasks[0].id == "task-1"
 
 
-def _registered_repo(tmp_path):
+def _registered_repo(tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str = "plan.md"):
     from hermes_pipeline.run_registration import register_pinned_run
-    from hermes_pipeline.todos_md import parse_todo_entries
 
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
-    todos = (
-        "## Entries\n\n"
-        "- [ ] **TODO-42: Do it** — Result contract.\n"
-        "  - **Plan:** plan.md\n"
-        "  - **Branch:** todo-42\n"
-    )
-    (repo / "TODOS.md").write_text(todos)
+    _git(repo, "remote", "add", "origin", f"git@github.com:{REPO}.git")
     (repo / "plan.md").write_text(PLAN)
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
@@ -469,8 +472,8 @@ def _registered_repo(tmp_path):
         project_dir=repo,
         state_dir=state,
         tick_id="01TICK",
-        selected_entry=parse_todo_entries(todos)[0],
-        plan_path="plan.md",
+        selected_issue=make_issue(42, repo=REPO, title="Do it", body=issue_body),
+        plan_path=plan_path,
         profile="native-sdd",
         prompt_client="claude",
         assignee="pipeline",
@@ -478,6 +481,156 @@ def _registered_repo(tmp_path):
         step_keys=("plan:task-1", "validate:task-1"),
     )
     return repo, registration.worktree, state, parent
+
+
+def _rewrite_registration(state, mutate):
+    path = state / "runs" / "01TICK" / "registration.json"
+    payload = json.loads(path.read_text())
+    mutate(payload)
+    path.write_text(json.dumps(payload))
+    return payload
+
+
+def test_registration_authority_is_the_issue_snapshot(tmp_path):
+    repo, worktree, state, parent = _registered_repo(tmp_path)
+
+    authority = load_validated_registration(repo, state, "01TICK")
+
+    assert authority.issue_number == 42
+    assert authority.issue_url == "https://github.com/acme/repo/issues/42"
+    assert authority.branch == "todo-42"
+    assert authority.plan_path == "plan.md"
+    assert authority.worktree == (repo / ".worktrees" / "todo-42-do-it").resolve()
+    assert authority.manifest.tasks[0].id == "task-1"
+    assert not (repo / "TODOS.md").exists()
+
+
+def test_registration_rejects_schema_v1_payload(tmp_path):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+
+    def downgrade(payload):
+        payload["schema_version"] = 1
+        for key in ("issue_number", "issue_url", "issue_snapshot"):
+            del payload[key]
+
+    _rewrite_registration(state, downgrade)
+    with pytest.raises(ResultContractError, match="registration_invalid.*schema_version"):
+        load_validated_registration(repo, state, "01TICK")
+
+
+def _retitle(payload):
+    payload["issue_snapshot"] = payload["issue_snapshot"].replace("title: Do it", "title: Other")
+
+
+def _renumber(payload):
+    payload["issue_snapshot"] = payload["issue_snapshot"].replace("number: 42", "number: 43")
+
+
+def _rebody(payload):
+    payload["issue_snapshot"] = payload["issue_snapshot"].replace("todo-42", "todo-43")
+
+
+def _replan(payload):
+    payload["issue_snapshot"] = payload["issue_snapshot"].replace("\nplan.md\n", "\nother.md\n")
+
+
+def _rehash(mutate):
+    def apply(payload):
+        mutate(payload)
+        payload["selected_entry_hash"] = snapshot_hash(payload["issue_snapshot"])
+
+    return apply
+
+
+def _consistent_renumber(payload):
+    _renumber(payload)
+    payload["issue_number"] = 43
+    payload["issue_url"] = "https://github.com/acme/repo/issues/43"
+    payload["selected_entry_hash"] = snapshot_hash(payload["issue_snapshot"])
+
+
+def _foreign_repo(payload):
+    payload["issue_snapshot"] = canonical_issue_snapshot("other/repo", 42, "Do it", ISSUE_BODY)
+    payload["issue_url"] = "https://github.com/other/repo/issues/42"
+    payload["selected_entry_hash"] = snapshot_hash(payload["issue_snapshot"])
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(_renumber, id="tampered-number-line"),
+        pytest.param(_rebody, id="tampered-body"),
+        pytest.param(_retitle, id="tampered-title"),
+        pytest.param(_rehash(_renumber), id="rehashed-number-mismatch"),
+        pytest.param(_rehash(_rebody), id="rehashed-branch-from-snapshot"),
+        pytest.param(_rehash(_replan), id="rehashed-plan-from-snapshot"),
+        pytest.param(_rehash(_retitle), id="rehashed-worktree-slug-from-title"),
+        pytest.param(_consistent_renumber, id="todo-id-mismatch"),
+        pytest.param(_foreign_repo, id="foreign-repo"),
+        pytest.param(
+            lambda payload: payload.update(issue_url="https://github.com/acme/repo/issues/7"),
+            id="url-mismatch",
+        ),
+        pytest.param(
+            lambda payload: payload.update(issue_snapshot="not a snapshot\n"),
+            id="malformed-snapshot",
+        ),
+    ],
+)
+def test_registration_rejects_snapshot_tampering(tmp_path, mutate):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+    _rewrite_registration(state, mutate)
+
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "01TICK")
+
+
+def test_registration_rejects_stale_hash_after_body_edit(tmp_path):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+    _rewrite_registration(
+        state,
+        lambda payload: payload.update(
+            issue_snapshot=payload["issue_snapshot"].replace(
+                "Result contract.", "Result contract!"
+            )
+        ),
+    )
+
+    with pytest.raises(ResultContractError, match="issue snapshot hash"):
+        load_validated_registration(repo, state, "01TICK")
+
+
+def test_registration_bounds_snapshot_size_instead_of_scanning_it(tmp_path):
+    repo, _worktree, state, _parent = _registered_repo(
+        tmp_path, issue_body=ISSUE_BODY + "\n### Why\n\ntoken: ghp_abcdefghijklmnopqrstuvwxyz\x0c\n"
+    )
+    assert load_validated_registration(repo, state, "01TICK").issue_number == 42
+
+    def oversize(payload):
+        payload["issue_snapshot"] = payload["issue_snapshot"] + "x" * MAX_ISSUE_SNAPSHOT_CHARS
+        payload["selected_entry_hash"] = snapshot_hash(payload["issue_snapshot"])
+
+    _rewrite_registration(state, oversize)
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "01TICK")
+
+
+def test_registration_repo_identity_is_case_insensitive(tmp_path):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+    _git(repo, "remote", "set-url", "origin", "git@github.com:ACME/REPO.git")
+
+    assert load_validated_registration(repo, state, "01TICK").issue_number == 42
+
+
+def test_registration_repo_must_match_live_identity(tmp_path):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+
+    load_validated_registration(repo, state, "01TICK", repo=REPO)
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "01TICK", repo="other/repo")
+    _git(repo, "remote", "remove", "origin")
+    with pytest.raises(ResultContractError, match="git_verification_failed"):
+        load_validated_registration(repo, state, "01TICK")
 
 
 def test_reconcile_completed_worker_validates_then_completes_gate(tmp_path, mocker):
@@ -543,18 +696,13 @@ def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, moc
     from hermes_pipeline.review_reconciliation import reconcile_reviews
     from hermes_pipeline.run_registration import register_pinned_run
     from hermes_pipeline.todos_completion import reconcile_todo_completion
-    from hermes_pipeline.todos_md import parse_todo_entries
 
     repo = tmp_path / "legacy"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
-    todos = (
-        "## Entries\n\n- [ ] **TODO-7: Legacy work**\n"
-        "  - **Plan:** plan.md\n  - **Branch:** todo-7\n"
-    )
-    (repo / "TODOS.md").write_text(todos)
+    _git(repo, "remote", "add", "origin", f"https://github.com/{REPO}")
     (repo / "plan.md").write_text("# Legacy Plan\n\nImplement it.\n")
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
@@ -563,7 +711,12 @@ def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, moc
         project_dir=repo,
         state_dir=state,
         tick_id="LEGACY-TICK",
-        selected_entry=parse_todo_entries(todos)[0],
+        selected_issue=make_issue(
+            7,
+            repo=REPO,
+            title="Legacy work",
+            body="### Plan\n\nplan.md\n\n### Branch\n\ntodo-7\n",
+        ),
         plan_path="plan.md",
         profile="native-sdd",
         prompt_client="claude",

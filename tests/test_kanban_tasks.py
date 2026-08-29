@@ -2865,3 +2865,22 @@ def test_mark_gate_needs_input_uses_installed_hermes_positional_contract(mocker)
         "hermes", "kanban", "block", "--kind", "needs_input",
         "t_0000000a", "bounded reason",
     ]
+
+
+def test_reconcile_plan_task_results_surfaces_registration_code(tmp_path, caplog):
+    from hermes_pipeline.kanban_tasks import reconcile_plan_task_results
+    from hermes_pipeline.result_contract import ResultContractError
+
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text(
+        json.dumps({"schema_version": 1, "tick_id": "01TICK"})
+    )
+    caplog.set_level("WARNING", logger="hermes_pipeline.kanban_tasks")
+
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        reconcile_plan_task_results(
+            project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK"
+        )
+
+    assert any("registration_invalid" in record.getMessage() for record in caplog.records)

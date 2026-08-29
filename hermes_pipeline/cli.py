@@ -115,6 +115,14 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
                 encoding="utf-8"
             )
         )
+        from .github_issues import REGISTRATION_SCHEMA_VERSION
+
+        if registration.get("schema_version") != REGISTRATION_SCHEMA_VERSION:
+            print(
+                f"REGISTRATION UNSUPPORTED: schema_version {registration.get('schema_version')}; "
+                "finish or abandon this run before upgrading"
+            )
+            return False
         worktree = Path(registration["worktree"])
         actual: dict[str, str] = {"worktree": str(worktree.resolve())}
         branch = _cli_sp.run(
@@ -159,26 +167,10 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
             if plan_at_base.returncode == 0
             else "<missing>"
         )
-        from .todos_md import parse_todo_entries
-
-        todos_at_base = _cli_sp.run(
-            ["git", "show", f"{registration['base_sha']}:TODOS.md"],
-            cwd=worktree,
-            capture_output=True,
-        )
-        todos_bytes = todos_at_base.stdout
-        if isinstance(todos_bytes, bytes):
-            todos_text = todos_bytes.decode("utf-8")
-        else:
-            todos_text = todos_bytes
-        entries = parse_todo_entries(todos_text if todos_at_base.returncode == 0 else "")
-        selected = next(
-            (entry for entry in entries if entry.todo_id == registration["todo_id"]),
-            None,
-        )
+        snapshot = registration.get("issue_snapshot")
         actual["selected_entry_hash"] = (
-            hashlib.sha256(selected.raw.encode()).hexdigest()
-            if selected is not None
+            hashlib.sha256(snapshot.encode()).hexdigest()
+            if isinstance(snapshot, str)
             else "<missing>"
         )
     except (OSError, UnicodeError, KeyError, TypeError, json.JSONDecodeError):
@@ -223,6 +215,16 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
             f"REGISTRATION DRIFT: {field} expected={expected[field]} "
             f"actual={actual[field]}"
         )
+    from .github_issues import check_issue_drift
+
+    issue_state = check_issue_drift(project_dir, registration)
+    if issue_state is None:
+        print("Issue authority: pinned")
+    elif issue_state.startswith("issue_unavailable:"):
+        print(f"WARNING: issue check unavailable ({issue_state.partition(':')[2]})")
+    else:
+        print(f"ISSUE DRIFT: {issue_state}")
+        return False
     return not mismatches
 
 
@@ -1376,49 +1378,40 @@ def _tick_project(
 
         if not pr_handoff_resolved:
             from .kanban_tasks import reconcile_plan_task_results
-
-            if not reconcile_plan_task_results(
-                project_dir=project_dir,
-                state_dir=project_state,
-                tenant=project_slug,
-                tick_id=prior_tick_id,
-            ):
-                log.info(
-                    "project %s: prior tick %s result reconciliation is blocked, skipping",
-                    project_slug,
-                    prior_tick_id,
-                )
-                return
-
+            from .result_contract import ResultContractError, sanitize_result_text
             from .review_reconciliation import reconcile_reviews
-
-            if not reconcile_reviews(
-                project_dir=project_dir,
-                state_dir=project_state,
-                tenant=project_slug,
-                tick_id=prior_tick_id,
-            ):
-                log.info(
-                    "project %s: prior tick %s review reconciliation is blocked, skipping",
-                    project_slug,
-                    prior_tick_id,
-                )
-                return
-
             from .todos_completion import reconcile_todo_completion
 
-            if not reconcile_todo_completion(
-                project_dir=project_dir,
-                state_dir=project_state,
-                tenant=project_slug,
-                tick_id=prior_tick_id,
-            ):
-                log.info(
-                    "project %s: prior tick %s delivery reconciliation is blocked, skipping",
-                    project_slug,
-                    prior_tick_id,
-                )
-                return
+            reconcilers = (
+                ("result", reconcile_plan_task_results),
+                ("review", reconcile_reviews),
+                ("delivery", reconcile_todo_completion),
+            )
+            for label, reconcile in reconcilers:
+                try:
+                    reconciled = reconcile(
+                        project_dir=project_dir,
+                        state_dir=project_state,
+                        tenant=project_slug,
+                        tick_id=prior_tick_id,
+                    )
+                except ResultContractError as exc:
+                    log.error(
+                        "project %s: prior tick %s registration cannot be validated: %s",
+                        project_slug,
+                        prior_tick_id,
+                        sanitize_result_text(str(exc), maximum=1000),
+                    )
+                    cb.observe(picked=None, counts_as_no_progress=True)
+                    return
+                if not reconciled:
+                    log.info(
+                        "project %s: prior tick %s %s reconciliation is blocked, skipping",
+                        project_slug,
+                        prior_tick_id,
+                        label,
+                    )
+                    return
 
         if not pr_handoff_resolved and not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
@@ -1661,7 +1654,10 @@ def _tick_project(
 
     registration = None
     if phase_profile.requires_plan:
-        from .run_registration import RunRegistrationError, register_pinned_run
+        from .run_registration import (
+            RunRegistrationError,
+            register_pinned_run_from_entry,
+        )
 
         selected = next(
             candidate.entry
@@ -1669,7 +1665,7 @@ def _tick_project(
             if candidate.entry.todo_id == picked
         )
         try:
-            registration = register_pinned_run(
+            registration = register_pinned_run_from_entry(
                 project_dir=project_dir,
                 state_dir=project_state,
                 tick_id=tick_id,

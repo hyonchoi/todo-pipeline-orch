@@ -17,6 +17,7 @@ from hermes_pipeline.github_issues import (
     add_comment,
     add_label,
     check_auth,
+    check_issue_drift,
     close_issue,
     create_issue,
     ensure_labels,
@@ -548,3 +549,92 @@ def test_add_blocked_by_treats_rejected_post_as_existing_edge(fake_gh, tmp_path)
     fake_gh.on(*API, "--method", "POST", rc=1, stderr="HTTP 404: Not Found")
     with pytest.raises(GitHubIssuesError, match="gh_not_found"):
         add_blocked_by(tmp_path, 7, 3, repo=REPO)
+
+
+# ---------------------------------------------------------------------------
+# check_issue_drift
+# ---------------------------------------------------------------------------
+
+
+def _drift_registration(number: int = 7) -> dict:
+    issue = gi.issue_from_api(issue_payload(number), repo=REPO)
+    return {
+        "issue_number": number,
+        "issue_url": issue.url,
+        "selected_entry_hash": issue.entry_hash,
+    }
+
+
+def test_check_issue_drift_returns_none_when_live_issue_matches(fake_gh, tmp_path):
+    fake_gh.on(*API, stdout=json.dumps(issue_payload(7)))
+    assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) is None
+    assert fake_gh.gh_calls() == [["api", *ACCEPT, "repos/acme/repo/issues/7"]]
+
+
+def test_check_issue_drift_detects_edited_issue(fake_gh, tmp_path):
+    fake_gh.on(*API, stdout=json.dumps(issue_payload(7, body="### What\n\nEdited\n")))
+    assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) == "issue_drift"
+
+
+def test_check_issue_drift_reports_closed_before_drift(fake_gh, tmp_path):
+    fake_gh.on(
+        *API,
+        stdout=json.dumps(issue_payload(7, state="closed", body="### What\n\nEdited\n")),
+    )
+    assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) == "issue_closed"
+
+
+def test_check_issue_drift_reports_unavailable_with_code(fake_gh, tmp_path):
+    fake_gh.on(*API, rc=1, stderr="HTTP 404: Not Found")
+    assert (
+        check_issue_drift(tmp_path, _drift_registration(), repo=REPO)
+        == "issue_unavailable:gh_not_found"
+    )
+    fake_gh.on(*API, raises=FileNotFoundError("gh"))
+    assert (
+        check_issue_drift(tmp_path, _drift_registration(), repo=REPO)
+        == "issue_unavailable:gh_missing"
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.pop("issue_number"),
+        lambda payload: payload.pop("selected_entry_hash"),
+        lambda payload: payload.pop("issue_url"),
+        lambda payload: payload.update(issue_number="7"),
+    ],
+)
+def test_check_issue_drift_rejects_malformed_registration_without_calling_gh(
+    fake_gh, tmp_path, mutate
+):
+    payload = _drift_registration()
+    mutate(payload)
+    assert (
+        check_issue_drift(tmp_path, payload, repo=REPO)
+        == "issue_unavailable:registration_invalid"
+    )
+    assert fake_gh.gh_calls() == []
+
+
+def test_check_issue_drift_detects_identity_mismatch(fake_gh, tmp_path):
+    fake_gh.on(
+        *API,
+        stdout=json.dumps(issue_payload(7, html_url="https://github.com/acme/repo/issues/8")),
+    )
+    assert (
+        check_issue_drift(tmp_path, _drift_registration(), repo=REPO)
+        == "issue_identity_mismatch"
+    )
+
+
+@pytest.mark.parametrize("label", [gi.ON_HOLD_LABEL, "wontfix"])
+def test_check_issue_drift_reports_on_hold_before_drift(fake_gh, tmp_path, label):
+    fake_gh.on(
+        *API,
+        stdout=json.dumps(
+            issue_payload(7, labels=("tpo:todo", label), body="### What\n\nEdited\n")
+        ),
+    )
+    assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) == "issue_on_hold"

@@ -101,3 +101,17 @@ def issue_payload(
         payload["pull_request"] = {"url": f"https://api.github.com/repos/acme/repo/pulls/{number}"}
     payload.update(extra)
     return payload
+
+
+def make_issue(
+    number: int = 7,
+    *,
+    repo: str = "acme/repo",
+    title: str = "Ship the widget",
+    body: str = "### What\n\nWidget\n",
+    **extra: Any,
+):
+    """Build an ``IssueTodo`` the way the client does, from a synthetic REST payload."""
+    from hermes_pipeline.github_issues import issue_from_api
+
+    return issue_from_api(issue_payload(number, title=title, body=body, **extra), repo=repo)

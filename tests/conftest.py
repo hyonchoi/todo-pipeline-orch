@@ -1,4 +1,7 @@
+import os
 from pathlib import Path
+
+os.environ.setdefault("TPO_LEGACY_TODOS_SHIM", "1")  # TODO(1.5): remove with the shim
 
 # Map hyphenated directory to valid Python package name for imports.
 _skill_test_dir = Path(__file__).parent / "skill-test-environment"
