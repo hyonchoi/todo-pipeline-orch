@@ -7,6 +7,7 @@ import re
 import subprocess
 from pathlib import Path
 
+from .github_issues import parse_github_remote
 from .kanban_tasks import (
     _mark_gate_needs_input,
     _show_task_payload,
@@ -115,10 +116,9 @@ def _check_state(worktree: Path, pr_url: str) -> str:
 
 def _github_identity(worktree: Path) -> tuple[str, str]:
     remote = _git(worktree, "remote", "get-url", "origin")
-    match = re.search(r"github\.com[/:]([^/]+/[^/]+?)(?:\.git)?$", remote)
-    if match is None:
+    repository = parse_github_remote(remote)
+    if repository is None:
         raise ResultContractError("origin_identity_invalid")
-    repository = match.group(1).removesuffix(".git")
     symbolic = _git(worktree, "symbolic-ref", "refs/remotes/origin/HEAD")
     prefix = "refs/remotes/origin/"
     if not symbolic.startswith(prefix):

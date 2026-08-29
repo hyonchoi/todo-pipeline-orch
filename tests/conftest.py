@@ -29,3 +29,16 @@ def state_dir(tmp_path, monkeypatch):
     sd = tmp_path / "state"
     (sd / "pipeline_locks").mkdir(parents=True)
     return sd
+
+
+@pytest.fixture
+def fake_gh(monkeypatch):
+    """Patch ``hermes_pipeline.github_issues._run`` (its subprocess seam) with a FakeGh recorder."""
+    from tests.gh_fakes import FakeGh
+
+    monkeypatch.delenv("TPO_GH_BIN", raising=False)
+    fake = FakeGh()
+    from hermes_pipeline import github_issues
+
+    monkeypatch.setattr(github_issues, "_run", fake)
+    return fake

@@ -179,6 +179,10 @@ def test_github_identity_accepts_https_and_rejects_non_github_origin(tmp_path, m
     with pytest.raises(ResultContractError, match="origin_identity_invalid"):
         _github_identity(tmp_path)
 
+    git.side_effect = ["https://evil.example/x?y=github.com/acme/repo"]
+    with pytest.raises(ResultContractError, match="origin_identity_invalid"):
+        _github_identity(tmp_path)
+
 
 def test_github_identity_rejects_invalid_origin_head_ref(tmp_path, mocker):
     mocker.patch(
