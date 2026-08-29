@@ -212,6 +212,10 @@ issue carrying `tpo:todo`; its canonical ID is `TODO-<issue-number>`. `TODOS.md`
 and `TODOS-archive.md` are retired (see
 [migration notes](migration/todos-to-issues.md)).
 
+- **Plan manifests** — a TODO becomes pipeline-actionable through its `### Plan`
+  section, a repo-relative Plan document that may carry one strict
+  `json tpo-plan` block; its `todo_id` must equal `TODO-<issue-number>`, so file
+  the issue before authoring the manifest ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)).
 - **Label vocabulary and eligibility** — `tpo:todo` + `ready-for-agent` make an
   issue selectable; `tpo:on-hold`, `tpo:in-progress`, and pending-triage labels
   block it. Decisions live in the issue body; labels are mirrors. See
