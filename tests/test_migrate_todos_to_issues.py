@@ -464,7 +464,7 @@ def test_live_run_argv_sequence_and_doc(fake_gh, tmp_path, capsys):
     assert calls[0][:2] == ["auth", "status"]
     assert calls[1][:2] == ["label", "list"]
     creates = [c for c in calls if c[:2] == ["label", "create"]]
-    assert {c[-1] for c in creates} == {"phase:2-design", "phase:4-development", "legacy-id:TODO-43", "legacy-id:TODO-50"}
+    assert {c[-1] for c in creates} == {"legacy-id:TODO-43", "legacy-id:TODO-50"}
     rest = calls[len(creates) + 2:]
     assert rest[0] == ["api", *ACCEPT, "--paginate", "--slurp", LEGACY_43]
     assert rest[1][:2] == ["issue", "create"]

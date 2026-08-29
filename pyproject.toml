@@ -58,6 +58,7 @@ ignore = [
 python_files = ["test_*.py", "runner.py"]
 testpaths = ["tests"]
 norecursedirs = ["skill_test_environment"]
+markers = ["real_git: exercises the real git binary instead of the fake subprocess runner"]
 
 [tool.coverage.report]
 fail_under = 88

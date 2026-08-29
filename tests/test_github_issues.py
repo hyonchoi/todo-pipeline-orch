@@ -8,6 +8,8 @@ import pytest
 
 from hermes_pipeline.github_issues import (
     KNOWN_SECTIONS,
+    LABEL_VOCABULARY,
+    PHASE_OPTIONS,
     SELECTION_BODY_MAX_CHARS,
     EligibleTodo,
     NotAnIssueError,
@@ -91,6 +93,56 @@ def test_parse_issue_body_is_case_sensitive_and_ignores_lower_headings():
     body = "### what\n\nlowercase\n\n#### What\n\nnested heading\n"
 
     assert parse_issue_body(body) == {}
+
+
+@pytest.mark.parametrize("fence", ["```", "~~~"])
+def test_parse_issue_body_ignores_headings_inside_fenced_code(fence):
+    body = (
+        "### Context\n\nExample form:\n\n"
+        f"{fence}markdown\n### Priority\n\nP0\n\n### Plan\n\ndocs/x.md\n\n### Branch\n\nmain\n{fence}\n\n"
+        "### Priority\n\nP2\n"
+    )
+
+    sections = parse_issue_body(body)
+    assert sections["Priority"] == ("P2",)
+    assert "Plan" not in sections and "Branch" not in sections
+    assert "### Plan" in sections["Context"][0] and sections["Context"][0].endswith(fence)
+
+
+def test_parse_issue_body_unterminated_fence_runs_to_end():
+    body = "### What\n\nx\n\n```\n### Branch\n\nmain\n\n### Priority\n\nP0\n"
+
+    assert parse_issue_body(body) == {"What": ("x\n\n```\n### Branch\n\nmain\n\n### Priority\n\nP0",)}
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        # A closer carries no info string: ```text does not close an open backtick fence.
+        ("### What\n\n```\n```text\n### Why\n\nfenced\n```\n", {"What": ("```\n```text\n### Why\n\nfenced\n```",)}),
+        # A closer must use the opener's marker character: ~~~ does not close a backtick fence.
+        ("### What\n\n```\n~~~\n### Why\n\nfenced\n```\n", {"What": ("```\n~~~\n### Why\n\nfenced\n```",)}),
+        # Four spaces of indent is an indented code block, not a fence opener.
+        ("### What\n\n    ```\n### Why\n\nreal\n", {"What": ("```",), "Why": ("real",)}),
+    ],
+)
+def test_parse_issue_body_fence_edge_rules(body, expected):
+    assert parse_issue_body(body) == expected
+
+
+def test_parse_issue_body_fence_may_be_indented_and_longer_closer_closes():
+    body = "### What\n\n   ````py\n### Why\n```\nstill fenced\n`````\n\n### Why\n\nreal\n"
+
+    assert parse_issue_body(body) == {
+        "What": ("````py\n### Why\n```\nstill fenced\n`````",),
+        "Why": ("real",),
+    }
+
+
+def test_issue_from_api_ignores_fenced_plan_and_branch():
+    issue = _issue(1, body="### Context\n\n```\n### Plan\n\ndocs/x.md\n\n### Branch\n\nfeat/x\n```\n")
+
+    assert issue.plan_values == () and issue.branch_values == ()
 
 
 # --- render_issue_body ------------------------------------------------------
@@ -503,6 +555,16 @@ def test_render_selection_markdown_neutralizes_hostile_body_and_truncates():
 )
 def test_phase_label_slugifies_phase_value(phase, expected):
     assert phase_label(phase) == expected
+
+
+def test_phase_label_rejects_empty_slug():
+    with pytest.raises(ValueError):
+        phase_label("  ()  ")
+
+
+def test_label_vocabulary_mirrors_every_phase_option():
+    names = {name for name, _color, _description in LABEL_VOCABULARY}
+    assert PHASE_OPTIONS and all(phase_label(option) in names for option in PHASE_OPTIONS)
 
 
 def test_legacy_id_label_uses_todo_id():

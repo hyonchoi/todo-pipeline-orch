@@ -403,6 +403,405 @@ class TestTodosLabelsSync:
         assert fake_gh.gh_calls() == []
 
 
+FULL_BODY = (
+    "### What\n\nWidget\n\n### Why\n\nBecause\n\n### Branch\n\nfeat/todo\n\n"
+    "### Priority\n\nP1\n\n### Effort\n\nM\n\n### Phase\n\n4 (Development)\n\n"
+    "### Test Coverage\n\nrequired\n\n### Security Review\n\nnot-required\n\n"
+    "### UI Review\n\nnot-required\n"
+)
+FULL_LABELS = (
+    "tpo:todo", "ready-for-agent", "priority:P1", "effort:M", "phase:4-development",
+    "test-coverage:required", "security-review:not-required", "ui-review:not-required",
+)
+MANIFEST_TEMPLATE = (
+    '```json tpo-plan\n{{"schema_version":1,"todo_id":"{todo_id}","tasks":'
+    '[{{"id":"t","title":"B","instructions":"I","acceptance_criteria":["A"],'
+    '"verification":["v"],"commit_message":"c"}}]}}\n```\n'
+)
+
+
+class TestTodosAudit:
+    """``tpo todos audit <project>`` reports body/label drift and normalizes mirror labels."""
+
+    @pytest.fixture(autouse=True)
+    def _fake_git(self, monkeypatch, request):
+        """Answer the audit's ``git`` calls without spawning a process (unless ``real_git``)."""
+        self.git = {"default": None, "calls": []}
+        if "real_git" in request.keywords:
+            return
+
+        def run(cmd, **_kwargs):
+            self.git["calls"].append(list(cmd))
+            if cmd[:3] == ["git", "check-ref-format", "--branch"]:
+                bad = ".." in cmd[3] or cmd[3].startswith("-")
+                return MagicMock(returncode=128 if bad else 0, stdout="" if bad else cmd[3] + "\n", stderr="")
+            if cmd[:2] == ["git", "symbolic-ref"]:
+                default = self.git["default"]
+                return MagicMock(returncode=0 if default else 128, stdout=f"origin/{default}\n" if default else "", stderr="")
+            pytest.fail(f"unexpected subprocess: {cmd}")
+
+        monkeypatch.setattr("hermes_pipeline.cli._cli_sp.run", run)
+
+    def _project(self, tmp_path, fake_gh, issues):
+        from tests.gh_fakes import seed_project_issues
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir(exist_ok=True)
+        _create_project(projects_dir, "demo")
+        seed_project_issues(fake_gh, issues)
+        return Config(projects_dir=projects_dir)
+
+    def _run(self, config, *extra):
+        from hermes_pipeline.cli import _cmd_todos_audit
+
+        args = build_parser().parse_args(["todos", "audit", "demo", *extra])
+        return _cmd_todos_audit(args, config)
+
+    @staticmethod
+    def _edits(fake_gh):
+        return [c for c in fake_gh.gh_calls() if c[:2] == ["issue", "edit"]]
+
+    def test_parser(self):
+        args = build_parser().parse_args(["todos", "audit", "demo", "--todo", "TODO-5", "--fix", "--dry-run"])
+        assert (args.todos_command, args.project, args.todo) == ("audit", "demo", 5)
+        assert args.fix and args.dry_run
+        assert "audit" in _todos_help()
+
+    def test_dry_run_requires_fix(self, tmp_path, fake_gh, capsys):
+        config = self._project(tmp_path, fake_gh, [])
+        assert self._run(config, "--dry-run") == 2
+        assert "--dry-run requires --fix" in capsys.readouterr().err
+        assert fake_gh.gh_calls() == []
+
+    def test_clean_issue_returns_0_with_summary(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY, labels=FULL_LABELS)])
+        assert self._run(config) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out == ["TODO-7: plan:missing", "audit: issues=1 findings=1 fixable=0"]
+        assert self._edits(fake_gh) == []
+
+    @pytest.mark.parametrize("body, labels, finding", [
+        (FULL_BODY.replace("### Why\n\nBecause\n\n", ""), FULL_LABELS, "missing-section:Why"),
+        (FULL_BODY.replace("### Why\n\nBecause", "### Why\n\n_No response_"), FULL_LABELS, "missing-section:Why"),
+        (FULL_BODY + "\n### Effort\n\nS\n", FULL_LABELS, "duplicate-section:Effort"),
+        (FULL_BODY.replace("feat/todo", "-x"), FULL_LABELS, "branch:invalid"),
+        (FULL_BODY.replace("feat/todo", "refs/heads/x"), FULL_LABELS, "branch:invalid"),
+        (FULL_BODY.replace("feat/todo", "main"), FULL_LABELS, "branch:default"),
+        (FULL_BODY.replace("### Branch\n\nfeat/todo\n\n", ""), FULL_LABELS, "missing-section:Branch"),
+        (FULL_BODY.replace("P1", "P9"), FULL_LABELS, "decision:Priority:P9"),
+        (FULL_BODY.replace("4 (Development)", "9 (Nope)"), FULL_LABELS, "decision:Phase:9 (Nope)"),
+        (FULL_BODY.replace("### Test Coverage\n\nrequired", "### Test Coverage\n\nmaybe"), FULL_LABELS,
+         "decision:Test Coverage:maybe"),
+        (FULL_BODY + "\n### Plan\n\ndocs/nope.md\n", FULL_LABELS, "plan:invalid:missing_file"),
+        (FULL_BODY + "\n### Plan\n\ndocs/a.md\n\n### Plan\n\ndocs/b.md\n", FULL_LABELS, "plan:duplicate"),
+        (FULL_BODY, FULL_LABELS[:-1], "label:missing:ui-review:not-required"),
+        (FULL_BODY, (*FULL_LABELS, "priority:P3"), "label:extra:priority:P3"),
+    ])
+    def test_reports_each_finding(self, tmp_path, fake_gh, capsys, body, labels, finding):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=body, labels=labels)])
+        assert self._run(config) == 1
+        out = capsys.readouterr().out
+        assert f"TODO-7: {finding}" in out.splitlines()
+        assert out.splitlines()[-1].startswith("audit: issues=1 findings=")
+        assert self._edits(fake_gh) == []
+
+    @pytest.mark.real_git
+    def test_branch_validity_uses_git_check_ref_format(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY.replace("feat/todo", "bad..name"), labels=FULL_LABELS)])
+        assert self._run(config) == 1
+        assert "TODO-7: branch:invalid" in capsys.readouterr().out.splitlines()
+
+    def test_default_branch_comes_from_origin_head(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        self.git["default"] = "develop"
+        config = self._project(tmp_path, fake_gh, [
+            issue_payload(7, body=FULL_BODY.replace("feat/todo", "develop"), labels=FULL_LABELS),
+            issue_payload(8, body=FULL_BODY.replace("feat/todo", "main"), labels=FULL_LABELS),
+            issue_payload(9, body=FULL_BODY.replace("feat/todo", "develop"), labels=FULL_LABELS),
+        ])
+        assert self._run(config) == 1
+        out = capsys.readouterr().out.splitlines()
+        assert "TODO-7: branch:default" in out and "TODO-9: branch:default" in out
+        assert "TODO-8: branch:default" not in out
+        # check-ref-format is memoized per branch value; origin HEAD is resolved once.
+        checks = [c for c in self.git["calls"] if c[1] == "check-ref-format"]
+        assert sorted(c[3] for c in checks) == ["develop", "main"]
+        assert sum(1 for c in self.git["calls"] if c[1] == "symbolic-ref") == 1
+
+    def test_duplicate_sections_follow_known_section_order(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        body = FULL_BODY + "\n### UI Review\n\nrequired\n\n### What\n\nAgain\n\n### Effort\n\nS\n"
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=body, labels=FULL_LABELS)])
+        assert self._run(config) == 1
+        out = capsys.readouterr().out.splitlines()
+        dupes = [line for line in out if "duplicate-section" in line]
+        assert dupes == [
+            "TODO-7: duplicate-section:What",
+            "TODO-7: duplicate-section:Effort",
+            "TODO-7: duplicate-section:UI Review",
+        ]
+
+    def test_plan_manifest_must_name_the_issue(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(
+            7, body=FULL_BODY + "\n### Plan\n\ndocs/plan.md\n", labels=FULL_LABELS,
+        )])
+        docs = config.projects_dir / "demo" / "docs"
+        docs.mkdir()
+        (docs / "plan.md").write_text(MANIFEST_TEMPLATE.format(todo_id="TODO-8"))
+        assert self._run(config) == 1
+        assert "TODO-7: plan:invalid:todo_id_mismatch" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("document", ["# Plan\n", MANIFEST_TEMPLATE.format(todo_id="TODO-7")])
+    def test_valid_plan_reports_no_plan_finding(self, tmp_path, fake_gh, capsys, document):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(
+            7, body=FULL_BODY + "\n### Plan\n\ndocs/plan.md\n", labels=FULL_LABELS,
+        )])
+        docs = config.projects_dir / "demo" / "docs"
+        docs.mkdir()
+        (docs / "plan.md").write_text(document)
+        assert self._run(config) == 0
+        assert capsys.readouterr().out.splitlines() == ["audit: issues=1 findings=0 fixable=0"]
+
+    def test_issues_are_grouped_in_number_order(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [
+            issue_payload(9, body=FULL_BODY, labels=FULL_LABELS[:-1]),
+            issue_payload(3, body=FULL_BODY.replace("### Why\n\nBecause\n\n", ""), labels=FULL_LABELS),
+        ])
+        assert self._run(config) == 1
+        out = capsys.readouterr().out.splitlines()
+        assert out == [
+            "TODO-3: missing-section:Why",
+            "TODO-3: plan:missing",
+            "TODO-9: plan:missing",
+            "TODO-9: label:missing:ui-review:not-required",
+            "audit: issues=2 findings=4 fixable=1",
+        ]
+
+    def test_single_issue_flag_fetches_one_issue_including_closed(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [
+            issue_payload(7, body=FULL_BODY, labels=FULL_LABELS, state="closed"),
+            issue_payload(8, body="", labels=FULL_LABELS),
+        ])
+        assert self._run(config, "--todo", "7") == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out == ["TODO-7: state:closed", "TODO-7: plan:missing", "audit: issues=1 findings=2 fixable=0"]
+        api = [c for c in fake_gh.gh_calls() if c[0] == "api"]
+        assert api == [["api", "-H", "Accept: application/vnd.github+json", "repos/acme/repo/issues/7"]]
+
+    def test_single_issue_without_todo_label_is_reported_and_never_fixed(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY, labels=("bug", "priority:P3"))])
+        assert self._run(config, "--todo", "7", "--fix") == 1
+        out = capsys.readouterr().out.splitlines()
+        assert "TODO-7: not-a-todo" in out
+        assert not any(line.startswith("fixed ") for line in out)
+        assert out[-1] == "audit: issues=1 findings=9 fixable=7 skipped=1 applied=0"
+        assert self._edits(fake_gh) == []
+
+    def test_fix_applies_mirror_labels_in_order_and_is_idempotent(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload, seed_project_issues
+
+        labels = (*FULL_LABELS[:-1], "priority:P3", "effort:L")
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY, labels=labels)])
+        assert self._run(config, "--fix") == 0
+        out = capsys.readouterr().out.splitlines()
+        assert out[:2] == ["TODO-7: plan:missing", "TODO-7: label:missing:ui-review:not-required"]
+        assert "fixed TODO-7: +ui-review:not-required" in out
+        assert "fixed TODO-7: -priority:P3" in out
+        assert "fixed TODO-7: -effort:L" in out
+        assert out[-1] == "audit: issues=1 findings=4 fixable=3 skipped=0 applied=3"
+        assert self._edits(fake_gh) == [
+            ["issue", "edit", "7", "--repo", "acme/repo", "--add-label", "ui-review:not-required"],
+            ["issue", "edit", "7", "--repo", "acme/repo", "--remove-label", "effort:L"],
+            ["issue", "edit", "7", "--repo", "acme/repo", "--remove-label", "priority:P3"],
+        ]
+
+        # A second run against the normalized issue makes zero writes.
+        fake_gh.calls.clear()
+        seed_project_issues(fake_gh, [issue_payload(7, body=FULL_BODY, labels=FULL_LABELS)])
+        assert self._run(config, "--fix") == 0
+        assert self._edits(fake_gh) == []
+        assert capsys.readouterr().out.splitlines()[-1] == "audit: issues=1 findings=1 fixable=0 skipped=0 applied=0"
+
+    def test_fix_leaves_rc_1_when_non_label_findings_remain(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        body = FULL_BODY.replace("### Why\n\nBecause\n\n", "")
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=body, labels=FULL_LABELS[:-1])])
+        assert self._run(config, "--fix") == 1
+        out = capsys.readouterr().out.splitlines()
+        assert "fixed TODO-7: +ui-review:not-required" in out
+        assert out[-1] == "audit: issues=1 findings=3 fixable=1 skipped=0 applied=1"
+
+    def test_mirror_labels_match_case_insensitively_and_converge(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload, seed_project_issues
+
+        labels = (*FULL_LABELS[2:], "Priority:P1")
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY, labels=(*FULL_LABELS[:2], *labels))])
+        assert self._run(config) == 0
+        out = capsys.readouterr().out.splitlines()
+        assert not any("label:" in line for line in out)
+
+        # A differently-cased duplicate of another mirror is still extra; removal uses its real casing.
+        seed_project_issues(fake_gh, [issue_payload(7, body=FULL_BODY, labels=(*FULL_LABELS, "Priority:P3"))])
+        assert self._run(config, "--fix") == 0
+        out = capsys.readouterr().out.splitlines()
+        assert "TODO-7: label:extra:Priority:P3" in out
+        assert ["issue", "edit", "7", "--repo", "acme/repo", "--remove-label", "Priority:P3"] in self._edits(fake_gh)
+
+    def test_fix_skips_closed_issues(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY, labels=FULL_LABELS[:-1], state="closed")])
+        assert self._run(config, "--todo", "7", "--fix") == 1
+        out = capsys.readouterr().out.splitlines()
+        assert "TODO-7: label:missing:ui-review:not-required" in out
+        assert not any(line.startswith("fixed ") for line in out)
+        assert out[-1] == "audit: issues=1 findings=3 fixable=1 skipped=1 applied=0"
+        assert self._edits(fake_gh) == []
+
+    def test_dry_run_reports_adds_and_removes_without_writing(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        labels = (*FULL_LABELS[:-1], "effort:S")
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY, labels=labels)])
+        assert self._run(config, "--fix", "--dry-run") == 1
+        out = capsys.readouterr().out.splitlines()
+        assert "would fix TODO-7: +ui-review:not-required" in out
+        assert "would fix TODO-7: -effort:S" in out
+        assert not any(line.startswith("fixed ") for line in out)
+        assert out[-1] == "audit: issues=1 findings=3 fixable=2 skipped=0 applied=0"
+        assert self._edits(fake_gh) == []
+
+    def test_fix_isolates_failures_per_issue(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [
+            issue_payload(3, body=FULL_BODY, labels=(*FULL_LABELS[:-1], "effort:S")),
+            issue_payload(4, body=FULL_BODY, labels=FULL_LABELS[:-1]),
+        ])
+        fake_gh.on("gh", "issue", "edit", handler=lambda argv: (
+            (1, "", "HTTP 429 rate limit exceeded token=secret") if argv[3] == "3" and "--remove-label" in argv else (0, "", "")
+        ))
+        assert self._run(config, "--fix") == 1
+        captured = capsys.readouterr()
+        out = captured.out.splitlines()
+        assert "fixed TODO-3: +ui-review:not-required" in out
+        assert "unfixed TODO-3: gh_rate_limited" in out
+        assert "fixed TODO-4: +ui-review:not-required" in out
+        assert out[-1] == "audit: issues=2 findings=5 fixable=3 skipped=0 applied=2"
+        assert "secret" not in captured.out + captured.err
+        assert len(self._edits(fake_gh)) == 3
+
+    def test_never_touches_control_labels(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        labels = (*FULL_LABELS, "tpo:on-hold", "needs-info", "legacy-id:TODO-99", "bug")
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=FULL_BODY, labels=labels)])
+        assert self._run(config, "--fix") == 0
+        assert "label:" not in capsys.readouterr().out
+        assert self._edits(fake_gh) == []
+
+    @pytest.mark.parametrize("body", [
+        FULL_BODY.replace("### Priority\n\nP1\n\n", ""),
+        FULL_BODY.replace("P1", "P9"),
+        FULL_BODY.replace("4 (Development)", "9 (Nope)"),
+    ])
+    def test_labels_without_a_valid_body_decision_are_left_alone(self, tmp_path, fake_gh, capsys, body):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=body, labels=FULL_LABELS)])
+        assert self._run(config, "--fix") == 1
+        out = capsys.readouterr().out
+        assert "label:" not in out
+        assert self._edits(fake_gh) == []
+
+    def test_untrusted_report_fragments_are_sanitized_and_bounded(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        hostile = "P\x1b[31m1\x07" + "x" * 60_000
+        body = FULL_BODY.replace("### Priority\n\nP1", f"### Priority\n\n{hostile}")
+        labels = (*FULL_LABELS, "effort:\x1bL" + "y" * 500)
+        config = self._project(tmp_path, fake_gh, [issue_payload(7, body=body, labels=labels)])
+        assert self._run(config) == 1
+        out = capsys.readouterr().out
+        assert "\x1b" not in out and "\x07" not in out
+        decision = next(line for line in out.splitlines() if line.startswith("TODO-7: decision:Priority:"))
+        assert decision.startswith("TODO-7: decision:Priority:P[31m1xxx")
+        assert len(decision) <= len("TODO-7: decision:Priority:") + 120
+        extra = next(line for line in out.splitlines() if line.startswith("TODO-7: label:extra:"))
+        assert len(extra) <= len("TODO-7: label:extra:") + 120
+
+    def test_phase_options_come_from_the_project_form_when_present(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import issue_payload
+
+        config = self._project(tmp_path, fake_gh, [
+            issue_payload(7, body=FULL_BODY.replace("4 (Development)", "1 (Custom)"), labels=FULL_LABELS),
+        ])
+        form = config.projects_dir / "demo" / ".github" / "ISSUE_TEMPLATE" / "tpo-todo.yml"
+        form.parent.mkdir(parents=True)
+        form.write_text(
+            "body:\n  - type: dropdown\n    attributes:\n      label: Phase\n      options:\n"
+            "        - 1 (Custom)\n        - 4 (Development)\n"
+        )
+        # The project form accepts the value, but no vocabulary label mirrors it: report, never write.
+        assert self._run(config, "--fix") == 1
+        out = capsys.readouterr().out.splitlines()
+        assert "TODO-7: decision:Phase:1 (Custom)" in out
+        assert not any("phase:" in line for line in out)
+        assert self._edits(fake_gh) == []
+
+    @pytest.mark.parametrize("form_text", ["body: 5\n", "- just\n- a list\n", "body:\n  - 5\n", "{{{{ not yaml", None])
+    def test_malformed_project_form_falls_back_to_builtin_phase_options(self, tmp_path, fake_gh, form_text):
+        from hermes_pipeline.cli import _audit_phase_options
+        from hermes_pipeline.github_issues import PHASE_OPTIONS
+
+        project = tmp_path / "demo"
+        form = project / ".github" / "ISSUE_TEMPLATE" / "tpo-todo.yml"
+        form.parent.mkdir(parents=True)
+        if form_text is None:
+            form.write_text("body:\n  - type: dropdown\n    attributes:\n      label: Phase\n      options: [" + "a, " * 400_000 + "]\n")
+            assert form.stat().st_size > 1_000_000
+        else:
+            form.write_text(form_text)
+        assert _audit_phase_options(project) == PHASE_OPTIONS
+
+    def test_unknown_project_returns_2_without_gh_calls(self, tmp_path, fake_gh):
+        config = self._project(tmp_path, fake_gh, [])
+        from hermes_pipeline.cli import _cmd_todos_audit
+
+        args = build_parser().parse_args(["todos", "audit", "nope"])
+        assert _cmd_todos_audit(args, config) == 2
+        assert fake_gh.gh_calls() == []
+
+    def test_github_failure_returns_1_without_stderr_leak(self, tmp_path, fake_gh, capsys):
+        from tests.gh_fakes import API_ARGV
+
+        config = self._project(tmp_path, fake_gh, [])
+        fake_gh.on(*API_ARGV, "--paginate", "--slurp", rc=1, stderr="HTTP 401 token=secret")
+        assert self._run(config) == 1
+        captured = capsys.readouterr()
+        assert captured.err.strip() == "Error: gh_auth"
+        assert "secret" not in captured.err
+
+
 def _create_valid_doctor_project(projects_dir, profile="gstack"):
     project_dir = _create_project(projects_dir, "demo")
     (project_dir / ".hermes").mkdir(parents=True)

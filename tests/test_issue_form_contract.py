@@ -16,6 +16,7 @@ from hermes_pipeline.github_issues import (
     KNOWN_SECTIONS,
     LABEL_VOCABULARY,
     NO_RESPONSE,
+    PHASE_OPTIONS,
     REQUIRED_SECTIONS,
     TODO_LABEL,
     parse_issue_body,
@@ -114,7 +115,8 @@ def test_phase_options_map_to_well_formed_phase_labels(body):
     assert len(set(labels)) == len(labels)
     for option, label in zip(phase["attributes"]["options"], labels):
         assert PHASE_LABEL_RE.match(label), (option, label)
-        assert label not in LABEL_NAMES  # phase labels are created on demand, not in the static vocabulary
+        assert label in LABEL_NAMES  # mirror labels must exist so `tpo todos audit --fix` can apply them
+    assert tuple(phase["attributes"]["options"]) == PHASE_OPTIONS
 
 
 def test_phase_options_are_the_gstack_profile_phases(body):

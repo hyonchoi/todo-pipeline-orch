@@ -67,6 +67,29 @@ KNOWN_SECTIONS: tuple[str, ...] = (
     "Legacy ID",
 )
 REQUIRED_SECTIONS = ("What", "Why", "Branch", "Priority", "Effort")
+# Phase dropdown options of the issue form (single source; the form contract test binds
+# .github/ISSUE_TEMPLATE/tpo-todo.yml to this tuple).
+PHASE_OPTIONS: tuple[str, ...] = (
+    "2 (Design)",
+    "3 (Writing Plan)",
+    "4 (Development)",
+    "5 (Code Review)",
+    "6.1 (CSO Security Review)",
+    "6.2 (QA)",
+    "7 (Document Release)",
+    "8 (Finish Branch)",
+)
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def phase_label(phase_value: str) -> str:
+    """Map a free-form Phase value (``"4 (Development)"``) to ``phase:4-development``."""
+    slug = _SLUG_RE.sub("-", phase_value.strip().lower()).strip("-")
+    if not slug:
+        raise ValueError("phase value has no label slug")
+    return f"phase:{slug}"
+
 
 LABEL_VOCABULARY: tuple[tuple[str, str, str], ...] = (
     (TODO_LABEL, "1d76db", "Managed TODO entry for todo-pipeline-orchestrator"),
@@ -90,10 +113,12 @@ LABEL_VOCABULARY: tuple[tuple[str, str, str], ...] = (
     ("security-review:not-required", "e6e6e6", "Security review not required"),
     ("ui-review:required", "5319e7", "UI review required"),
     ("ui-review:not-required", "e6e6e6", "UI review not required"),
+    *((phase_label(option), "c5def5", f"Phase {option}") for option in PHASE_OPTIONS),
 )
 
 _HEADING_RE = re.compile(r"^### (.+?)\s*$", re.MULTILINE)
-_SLUG_RE = re.compile(r"[^a-z0-9]+")
+# CommonMark fenced code block delimiter: up to 3 spaces of indent, then >=3 backticks or tildes.
+_FENCE_RE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 _SNAPSHOT_NUMBER_RE = re.compile(r"0|[1-9][0-9]*")
 _H3_LINE_RE = re.compile(r"^### ", re.MULTILINE)
 _HOSTILE_SELECTION_LINE_RE = re.compile(
@@ -110,12 +135,6 @@ class NotAnIssueError(ValueError):
     """The REST payload describes a pull request, not an issue."""
 
 
-def phase_label(phase_value: str) -> str:
-    """Map a free-form Phase value (``"4 (Development)"``) to ``phase:4-development``."""
-    slug = _SLUG_RE.sub("-", phase_value.strip().lower()).strip("-")
-    return f"phase:{slug}"
-
-
 def legacy_id_label(todo_id: str) -> str:
     return f"legacy-id:{todo_id}"
 
@@ -125,19 +144,47 @@ def _normalize_newlines(text: str) -> str:
 
 
 def parse_issue_body(body: str) -> dict[str, tuple[str, ...]]:
-    """Split an issue body on ``### <Section>`` headings into known sections."""
-    text = _normalize_newlines(body)
-    matches = list(_HEADING_RE.finditer(text))
+    """Split an issue body on ``### <Section>`` headings into known sections.
+
+    Headings inside fenced code blocks (three or more backticks or tildes, indented up
+    to three spaces) do not start a section; the fenced text stays part of the
+    enclosing section. An unterminated fence runs to the end of the body.
+    """
     sections: dict[str, list[str]] = {}
-    for index, match in enumerate(matches):
-        heading = match.group(1).strip()
-        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
-        if heading not in KNOWN_SECTIONS:
-            continue
-        value = text[match.end():end].strip()
-        if not value or value == NO_RESPONSE:
-            continue
-        sections.setdefault(heading, []).append(value)
+    current: str | None = None
+    buffer: list[str] = []
+    fence: tuple[str, int] | None = None
+
+    def flush() -> None:
+        if current is None:
+            return
+        value = "\n".join(buffer).strip()
+        if value and value != NO_RESPONSE:
+            sections.setdefault(current, []).append(value)
+
+    for line in _normalize_newlines(body).split("\n"):
+        fence_match = _FENCE_RE.match(line)
+        if fence is None:
+            if fence_match:
+                fence = (fence_match.group(1)[0], len(fence_match.group(1)))
+            else:
+                heading_match = _HEADING_RE.match(line)
+                if heading_match:
+                    flush()
+                    heading = heading_match.group(1).strip()
+                    current = heading if heading in KNOWN_SECTIONS else None
+                    buffer = []
+                    continue
+        elif (
+            fence_match
+            and fence_match.group(1)[0] == fence[0]
+            and len(fence_match.group(1)) >= fence[1]
+            and not fence_match.group(2).strip()
+        ):
+            fence = None
+        if current is not None:
+            buffer.append(line)
+    flush()
     return {key: tuple(values) for key, values in sections.items()}
 
 

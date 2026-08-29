@@ -675,6 +675,25 @@ def build_parser() -> argparse.ArgumentParser:
     labels_sync_parser.add_argument("project", help="Project name")
     labels_sync_parser.set_defaults(func=_cmd_todos_labels_sync)
 
+    audit_parser = todos_subparsers.add_parser(
+        "audit",
+        help="Check TODO issue bodies against the backlog contract and their mirror labels",
+    )
+    audit_parser.add_argument("project", help="Project name")
+    audit_parser.add_argument(
+        "--todo", type=_parse_todo_id_flag, default=None,
+        help="Audit one issue (e.g. TODO-5 or 5), open or closed",
+    )
+    audit_parser.add_argument(
+        "--fix", action="store_true",
+        help="Normalize mirror labels (priority/effort/phase/review) to match the body",
+    )
+    audit_parser.add_argument(
+        "--dry-run", action="store_true",
+        help="With --fix: print the label changes without applying them",
+    )
+    audit_parser.set_defaults(func=_cmd_todos_audit)
+
     # init: Write the default pipeline execution contract
     init_parser = subparsers.add_parser(
         "init",
@@ -2194,6 +2213,277 @@ def _cmd_todos_labels_sync(args, config: Config) -> int:
         print(f"created: {name}")
     return 0
 
+
+_AUDIT_ISSUE_FORM = Path(".github") / "ISSUE_TEMPLATE" / "tpo-todo.yml"
+_AUDIT_FORM_MAX_BYTES = 1_000_000
+# Body decision -> mirror label prefix. Phase is handled via ``phase_label``.
+_AUDIT_MIRROR_PREFIXES: dict[str, str] = {
+    "Priority": "priority",
+    "Effort": "effort",
+    "Test Coverage": "test-coverage",
+    "Security Review": "security-review",
+    "UI Review": "ui-review",
+}
+_AUDIT_INFORMATIONAL = frozenset({"plan:missing", "state:closed"})
+_AUDIT_FRAGMENT_MAX = 120
+
+
+def _audit_phase_options(project_dir: Path) -> tuple[str, ...]:
+    """Phase options from the project's issue form, else ``PHASE_OPTIONS``."""
+    import yaml
+
+    from .github_issues import PHASE_OPTIONS
+
+    path = project_dir / _AUDIT_ISSUE_FORM
+    try:
+        if path.stat().st_size > _AUDIT_FORM_MAX_BYTES:
+            return PHASE_OPTIONS
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError, RecursionError, MemoryError):
+        return PHASE_OPTIONS
+    if not isinstance(data, dict) or not isinstance(data.get("body"), list):
+        return PHASE_OPTIONS
+    for item in data["body"]:
+        if not isinstance(item, dict) or item.get("type") != "dropdown":
+            continue
+        attributes = item.get("attributes")
+        if not isinstance(attributes, dict) or attributes.get("label") != "Phase":
+            continue
+        options = attributes.get("options")
+        if isinstance(options, list) and options and all(isinstance(o, str) for o in options):
+            return tuple(options)
+    return PHASE_OPTIONS
+
+
+def _audit_default_branch(project_dir: Path) -> str | None:
+    try:
+        result = _cli_sp.run(
+            ["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+            cwd=project_dir, capture_output=True, text=True, check=False, timeout=30,
+        )
+    except (OSError, _cli_sp.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.strip().removeprefix("origin/")
+
+
+def _audit_branch_valid(project_dir: Path, branch: str, cache: dict[str, bool]) -> bool:
+    if branch in cache:
+        return cache[branch]
+    valid = False
+    if not (branch.startswith("refs/") or branch.startswith("-")):
+        try:
+            result = _cli_sp.run(
+                ["git", "check-ref-format", "--branch", branch],
+                cwd=project_dir, capture_output=True, text=True, check=False, timeout=30,
+            )
+        except (OSError, _cli_sp.TimeoutExpired):
+            result = None
+        valid = result is not None and result.returncode == 0
+    cache[branch] = valid
+    return valid
+
+
+def _audit_issue(
+    project_dir: Path,
+    issue,
+    *,
+    phase_options: tuple[str, ...],
+    default_branch: str | None,
+    branch_cache: dict[str, bool],
+    require_todo_label: bool,
+) -> tuple[list[str], list[str], list[str]]:
+    """Return (findings, labels to add, labels to remove) for one issue.
+
+    Mirror labels are only reconciled for decisions the body states exactly once
+    with a value present in ``LABEL_VOCABULARY``; labels outside the mirror
+    prefixes are never touched. Label names are compared case-insensitively
+    (GitHub labels are); removals use the label's actual casing.
+    """
+    from .github_issues import (
+        KNOWN_SECTIONS,
+        LABEL_VOCABULARY,
+        REQUIRED_SECTIONS,
+        TODO_LABEL,
+        first_lines,
+        parse_issue_body,
+        phase_label,
+    )
+    from .plan_manifest import (
+        PlanManifestValidationError,
+        TodoPlanValidationError,
+        validate_plan_candidate,
+    )
+    from .result_contract import sanitize_result_text
+
+    def safe(fragment: str) -> str:
+        return sanitize_result_text(fragment, maximum=_AUDIT_FRAGMENT_MAX)
+
+    findings: list[str] = []
+    if issue.state == "closed":
+        findings.append("state:closed")
+    lower_labels = {name.lower() for name in issue.labels}
+    if require_todo_label and TODO_LABEL not in lower_labels:
+        findings.append("not-a-todo")
+    sections = parse_issue_body(issue.body)
+    findings.extend(f"missing-section:{name}" for name in REQUIRED_SECTIONS if name not in sections)
+    findings.extend(
+        f"duplicate-section:{name}" for name in KNOWN_SECTIONS if len(sections.get(name, ())) > 1
+    )
+
+    if not issue.plan_values:
+        findings.append("plan:missing")
+    elif len(issue.plan_values) > 1:
+        findings.append("plan:duplicate")
+    else:
+        try:
+            validate_plan_candidate(
+                project_dir, issue.plan_values[0], expected_todo_id=issue.todo_id
+            )
+        except (TodoPlanValidationError, PlanManifestValidationError) as exc:
+            findings.append(f"plan:invalid:{exc.code}")
+        except (OSError, ValueError, UnicodeError):
+            findings.append("plan:invalid:unreadable")
+
+    if "Branch" in sections:
+        if len(issue.branch_values) != 1 or not _audit_branch_valid(
+            project_dir, issue.branch_values[0], branch_cache
+        ):
+            findings.append("branch:invalid")
+        else:
+            branch = issue.branch_values[0]
+            if branch == default_branch or (default_branch is None and branch in ("main", "master")):
+                findings.append("branch:default")
+
+    vocabulary = {name.lower(): name for name, _color, _description in LABEL_VOCABULARY}
+    expected: dict[str, str] = {}  # mirror prefix -> the one canonical label the body implies
+    for name, prefix in _AUDIT_MIRROR_PREFIXES.items():
+        values = first_lines(sections.get(name, ()))
+        if len(values) != 1:
+            continue
+        canonical = vocabulary.get(f"{prefix}:{values[0]}".lower())
+        if canonical is not None:
+            expected[prefix] = canonical
+        else:
+            findings.append(f"decision:{name}:{safe(values[0])}")
+    phases = first_lines(sections.get("Phase", ()))
+    if len(phases) == 1:
+        canonical = None
+        if phases[0] in phase_options:
+            try:
+                canonical = vocabulary.get(phase_label(phases[0]).lower())
+            except ValueError:
+                canonical = None
+        if canonical is not None:
+            expected["phase"] = canonical
+        else:
+            findings.append(f"decision:Phase:{safe(phases[0])}")
+
+    add: list[str] = []
+    remove: list[str] = []
+    for prefix, label in expected.items():
+        present = [name for name in issue.labels if name.lower().startswith(f"{prefix}:")]
+        if label.lower() not in {name.lower() for name in present}:
+            add.append(label)
+        remove.extend(name for name in present if name.lower() != label.lower())
+    add.sort()
+    remove.sort()
+    findings.extend(f"label:missing:{safe(label)}" for label in add)
+    findings.extend(f"label:extra:{safe(label)}" for label in remove)
+    return findings, add, remove
+
+
+def _cmd_todos_audit(args, config: Config) -> int:
+    """Audit TODO issues against the backlog contract; ``--fix`` normalizes mirror labels.
+
+    Exit codes: 0 no actionable finding (after ``--fix``: nothing left unfixed),
+    1 actionable findings, skipped or failed fixes, or a GitHub failure,
+    2 usage or unknown project.
+    """
+    from .github_issues import (
+        GitHubIssuesError,
+        add_label,
+        fetch_issue,
+        list_todo_issues,
+        remove_label,
+        repository_identity,
+    )
+    from .result_contract import sanitize_result_text
+
+    if args.dry_run and not args.fix:
+        print("Error: --dry-run requires --fix", file=sys.stderr)
+        return 2
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None:
+        return 2
+    try:
+        repo = repository_identity(project_dir)
+        if args.todo is not None:
+            issues = (fetch_issue(project_dir, args.todo, repo=repo),)
+        else:
+            issues = list_todo_issues(project_dir, repo=repo)
+    except GitHubIssuesError as exc:
+        detail = f": {exc.detail}" if exc.detail else ""
+        print(f"Error: {exc.code}{detail}", file=sys.stderr)
+        return 1
+
+    phase_options = _audit_phase_options(project_dir)
+    default_branch = _audit_default_branch(project_dir)
+    branch_cache: dict[str, bool] = {}
+    total_findings = 0
+    actionable = 0
+    fixable = 0
+    fixes: list[tuple[int, list[str], list[str], bool]] = []
+    for issue in sorted(issues, key=lambda item: item.number):
+        findings, add, remove = _audit_issue(
+            project_dir,
+            issue,
+            phase_options=phase_options,
+            default_branch=default_branch,
+            branch_cache=branch_cache,
+            require_todo_label=args.todo is not None,
+        )
+        for finding in findings:
+            print(f"{issue.todo_id}: {finding}")
+        total_findings += len(findings)
+        actionable += sum(1 for finding in findings if finding not in _AUDIT_INFORMATIONAL)
+        fixable += len(add) + len(remove)
+        if add or remove:
+            skip = issue.state == "closed" or "not-a-todo" in findings
+            fixes.append((issue.number, add, remove, skip))
+
+    summary = f"audit: issues={len(issues)} findings={total_findings} fixable={fixable}"
+    if not args.fix:
+        print(summary)
+        return 1 if actionable else 0
+
+    prefix = "would fix" if args.dry_run else "fixed"
+    applied = 0
+    skipped = 0
+    failed = False
+    for number, add, remove, skip in fixes:
+        if skip:
+            skipped += 1
+            continue
+        try:
+            for label in add:
+                if not args.dry_run:
+                    add_label(project_dir, number, label, repo=repo)
+                    applied += 1
+                print(f"{prefix} TODO-{number}: +{sanitize_result_text(label, maximum=_AUDIT_FRAGMENT_MAX)}")
+            for label in remove:
+                if not args.dry_run:
+                    remove_label(project_dir, number, label, repo=repo)
+                    applied += 1
+                print(f"{prefix} TODO-{number}: -{sanitize_result_text(label, maximum=_AUDIT_FRAGMENT_MAX)}")
+        except GitHubIssuesError as exc:
+            print(f"unfixed TODO-{number}: {exc.code}")
+            failed = True
+    print(f"{summary} skipped={skipped} applied={applied}")
+    if args.dry_run:
+        return 1 if actionable else 0
+    return 1 if (actionable > fixable) or skipped or failed or applied < fixable else 0
 
 def _cmd_init(args, config: Config) -> int:
     """Handle 'init' subcommand — write the default pipeline execution contract."""

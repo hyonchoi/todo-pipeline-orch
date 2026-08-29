@@ -463,9 +463,9 @@ def test_ensure_labels_creates_only_missing_including_extra(fake_gh, tmp_path):
     fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(present))
     fake_gh.on("gh", "label", "create")
     created = ensure_labels(
-        tmp_path, repo=REPO, extra=[("phase:4-development", "abcdef", "Phase 4")]
+        tmp_path, repo=REPO, extra=[("phase:9-custom", "abcdef", "Phase 9")]
     )
-    assert created == ("effort:L", "phase:4-development", "tpo:on-hold")
+    assert created == ("effort:L", "phase:9-custom", "tpo:on-hold")
     creates = [c for c in fake_gh.gh_calls() if c[:2] == ["label", "create"]]
     assert creates == [
         ["label", "create", "--repo", "acme/repo", "--color", "e4e669",
@@ -473,7 +473,7 @@ def test_ensure_labels_creates_only_missing_including_extra(fake_gh, tmp_path):
         ["label", "create", "--repo", "acme/repo", "--color", "9ecbff",
          "--description", "Effort: large", "--force", "--", "effort:L"],
         ["label", "create", "--repo", "acme/repo", "--color", "abcdef",
-         "--description", "Phase 4", "--force", "--", "phase:4-development"],
+         "--description", "Phase 9", "--force", "--", "phase:9-custom"],
     ]
 
 
