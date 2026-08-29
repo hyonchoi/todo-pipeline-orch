@@ -9,6 +9,7 @@ report contents) per the design doc's "assertion granularity" decision.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import tomllib
 from importlib.resources import files
@@ -18,6 +19,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from hermes_pipeline.github_issues import repository_identity
 from hermes_pipeline.harness import _offline_terminal_phase_key, run_harness
 from hermes_pipeline.phases import (
     load_phases,
@@ -63,14 +65,24 @@ def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
     )
     mocker.patch("hermes_pipeline.harness.time.sleep")
     mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+    monkeypatch.delenv("TPO_GH_BIN", raising=False)
+    monkeypatch.delenv("TPO_FAKE_GH_STATE", raising=False)
+    gh_env_during_run: dict[str, str | None] = {}
+
+    def _capture_env(*_args, **_kwargs):
+        gh_env_during_run["TPO_GH_BIN"] = os.environ.get("TPO_GH_BIN")
+        gh_env_during_run["TPO_FAKE_GH_STATE"] = os.environ.get("TPO_FAKE_GH_STATE")
+        return completed
+
+    completed: dict[str, str] = {}
     selected_profile_path = resolve_profile_phases_path(profile_name)
     selected_phases = load_phases(selected_profile_path)
     expected_phase_keys = [phase.phase_key for phase in selected_phases]
     offline_terminal_key = _offline_terminal_phase_key(selected_phases, profile_name)
-    completed = {phase_key: "done" for phase_key in expected_phase_keys}
+    completed.update({phase_key: "done" for phase_key in expected_phase_keys})
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
-        return_value=completed,
+        side_effect=_capture_env,
     )
 
     result = run_harness(
@@ -96,13 +108,25 @@ def test_happy_path_e2e_runs_offline_full_profile_and_generates_report(
     assert registered_phase_keys == expected_phase_keys
     assert "local terminal workflow" in terminal["prompt"].lower()
     assert "do not push or open a pull request" in terminal["prompt"].lower()
-    assert subprocess.run(
-        ["git", "remote"],
-        cwd=workspace / "project",
+    # The placeholder origin is never contacted; it only gives the tick a
+    # GitHub repository identity to resolve through the bundled fake gh.
+    assert repository_identity(workspace / "project") == "tpo-harness/mock-project"
+    fake_gh = workspace / "project" / "bin" / "gh"
+    assert gh_env_during_run == {
+        "TPO_GH_BIN": str(fake_gh),
+        "TPO_FAKE_GH_STATE": str(workspace / "project" / ".hermes" / "fake-gh-state.json"),
+    }
+    assert "TPO_GH_BIN" not in os.environ
+    assert "TPO_FAKE_GH_STATE" not in os.environ
+    listed = subprocess.run(
+        [str(fake_gh), "api", "-H", "Accept: application/vnd.github+json", "--paginate", "--slurp",
+         "repos/tpo-harness/mock-project/issues?state=open&labels=tpo%3Atodo&per_page=100"],
         check=True,
         capture_output=True,
         text=True,
-    ).stdout == ""
+        env={**os.environ, "TPO_FAKE_GH_STATE": gh_env_during_run["TPO_FAKE_GH_STATE"]},
+    )
+    assert [issue["number"] for page in json.loads(listed.stdout) for issue in page] == [1]
     contract = tomllib.loads(
         (workspace / "project" / ".hermes" / "pipeline.toml").read_text()
     )

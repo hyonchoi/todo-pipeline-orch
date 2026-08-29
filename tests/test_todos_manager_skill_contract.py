@@ -3,8 +3,6 @@ import re
 from importlib.resources import files
 from pathlib import Path
 
-import hermes_pipeline.harness as harness
-
 DATA = files("hermes_pipeline").joinpath("data", "skills", "todos-manager")
 CANONICAL_ATTACHMENT_CONFIRMATION = (
     "Attachments may be proposed by `--add` or `--revise`, but require explicit "
@@ -52,7 +50,6 @@ def test_every_canonical_preamble_has_current_attachment_contract():
         "demo project": Path(
             "tests/skill-test-environment/demo-project/TODOS.md"
         ).read_text(encoding="utf-8"),
-        "harness fixture": harness._get_todos_for_fixture("happy-path"),
         "repository TODOs": Path("TODOS.md").read_text(encoding="utf-8"),
     }
 
