@@ -10,6 +10,10 @@ ROOT = Path(__file__).parents[1]
 DOCS = (
     ROOT / "README.md",
     ROOT / "docs" / "reference-cli.md",
+    ROOT / "docs" / "howto-github-issues-todos.md",
+    ROOT / "docs" / "tutorial-getting-started.md",
+    ROOT / "docs" / "agents" / "issue-tracker.md",
+    ROOT / "docs" / "agents" / "triage-labels.md",
     ROOT / "docs" / "howto-agent-skills-profile.md",
     ROOT / "docs" / "release-qualification-agent-clients.md",
     ROOT / "docs" / "release-evidence" / "agent-clients" / "README.md",

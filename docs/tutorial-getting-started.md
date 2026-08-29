@@ -64,9 +64,9 @@ git clone https://github.com/<you>/demo-app.git
 cd demo-app
 ```
 
-Create the label vocabulary once per repository. `tpo todos labels sync <project>`
-will do this once it lands; until then, run the bootstrap one-liner from
-[issue tracker conventions](agents/issue-tracker.md#tpo-backlog-items).
+The label vocabulary is created in Step 5, after the project is registered
+under `projects_dir`. See [Manage TODOs as GitHub Issues](howto-github-issues-todos.md)
+for the full backlog workflow.
 
 ## Step 4: Configure project discovery
 
@@ -98,8 +98,12 @@ suggesting `tpo init`.
 
 ```bash
 tpo init demo-app
+tpo todos labels sync demo-app
 tpo doctor demo-app
 ```
+
+`tpo todos labels sync` creates the pipeline label vocabulary once per
+repository; `doctor` reports any label still missing.
 
 For the supported `gstack` profile, doctor first prints the selected prompt
 client and prerequisite diagnostics. Successful output ends with:
@@ -110,7 +114,11 @@ OK: schema_version=2
 
 ## Step 6: File and triage a TODO
 
-File the first TODO through the "TPO TODO" issue form:
+The "TPO TODO" form is repository-local: copy `.github/ISSUE_TEMPLATE/tpo-todo.yml`
+from the `todo-pipeline-orchestrator` repository into
+`demo-app/.github/ISSUE_TEMPLATE/` and commit it (or use the scripted
+`render_issue_body` + `--body-file` path). `tpo todos audit` reads the project's
+copy for the allowed Phase options. Then file the first TODO through the form:
 
 ```bash
 gh issue create --web --template "TPO TODO"

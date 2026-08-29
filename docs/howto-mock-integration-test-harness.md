@@ -289,7 +289,5 @@ feature.
 
 ## Related
 
-- [Explanation: Skill Test Harness Design](explanation-skill-test-harness-design.md) — Design rationale, phase 2 plans
-- [Reference: Skill Test Harness API](reference-skill-test-harness.md) — Complete function signatures
 - [How to: Eval Suite](howto-eval-suite.md) — Live API selection agent tests
 - [Implementation Plan](superpowers/plans/2026-07-14-mock-integration-test-harness.md) — Full task breakdown

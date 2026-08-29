@@ -5,8 +5,8 @@ for coding agents working in this repository.
 
 ## Project
 
-`todo-pipeline-orchestrator` is a Python 3.12+ package that orchestrates
-schema-enforced `TODOS.md` workflows through Hermes agent selection and Kanban
+`todo-pipeline-orchestrator` is a Python 3.12+ package that orchestrates a
+GitHub Issues TODO backlog through Hermes agent selection and Kanban
 execution. The installed CLI and Python package are named `tpo` and
 `hermes-pipeline`, respectively.
 
@@ -50,21 +50,24 @@ Start with these sources when relevant:
 - Do not add dependencies unless the standard library and existing dependencies
   cannot reasonably solve the problem.
 
-## `TODOS.md` management
+## Backlog management
 
-- Use the `todos-manager` skill for every `TODOS.md` mutation: add, initialize,
-  convert, audit, archive, list, or revise.
-- The canonical skill source is
-  `hermes_pipeline/data/skills/todos-manager/SKILL.md`. Follow it rather than
-  manually reproducing its parsing or mutation workflow.
-- `TODOS.md` owns schema rules and the tracked `NEXT_TODO_ID`. Assigned
-  `TODO-<n>` IDs are stable and must not be renumbered or reused.
-- `Plan:` is the execution-authority field. Do not make another attachment
-  field implicitly actionable.
-- Install skill copies with `tpo skills install --target all`, or use a scoped
-  target when the task requires it. When changing the bundled skill or install
-  behavior, verify source behavior, install parity, and the skill test fixtures
-  that cover the affected workflow.
+- The backlog is GitHub Issues carrying `tpo:todo`
+  (`docs/adr/0003-github-issues-are-the-todo-backlog.md`). File TODOs through
+  the "TPO TODO" issue form or `gh issue create --web --template "TPO TODO"`;
+  see `docs/howto-github-issues-todos.md`.
+- The issue number is the ID (`TODO-<issue-number>`); legacy `TODO-<n>` IDs
+  from the retired `TODOS.md` live in `legacy-id:` labels and are never reused.
+- The label vocabulary and issue body contract are defined in
+  `docs/agents/issue-tracker.md` and `hermes_pipeline/github_issues.py`.
+  Decisions live in the body; labels are mirrors. Bootstrap labels with
+  `tpo todos labels sync <project>` and normalize with
+  `tpo todos audit <project> --fix`.
+- `Plan` is the execution-authority field
+  (`docs/adr/0001-plan-is-the-execution-authority.md`). Do not make another
+  attachment field implicitly actionable, and validate Plan changes with
+  `tpo plan validate <project> --todo N --require-manifest` (omit
+  `--require-manifest` for a legacy manifest-free Plan).
 
 ## Version and changelog synchronization
 

@@ -33,11 +33,12 @@ tpo tick myproject    # tick one project
 1. Load pipeline contract from `.hermes/pipeline.toml`
 2. Check prior tick outcomes; observe circuit breaker
 3. Check in-flight phase state and circuit breaker progress
-4. Run Hermes agent selection on TODOS.md
+4. Run Hermes agent selection over the eligible `tpo:todo` GitHub issues
 5. Register kanban phases with `--parent` dependency chains; profiles may also define blocked, nonspawnable gates
 
 Without a project argument, scans all subdirectories of the global
-`projects_dir` for `TODOS.md` files. Per-project locks isolate failures — one
+`projects_dir` for a `.hermes/pipeline.toml` contract; the backlog itself is
+read from each project's GitHub Issues. Per-project locks isolate failures — one
 project's held lock does not block others. Scan order rotates each tick for
 fairness.
 
@@ -74,18 +75,6 @@ tpo approve myproject --todo TODO-5 --force --force
 
 ---
 
-### `recover-counter`
-
-Initialize `.hermes/todo_id_counter` from tracked `NEXT_TODO_ID` metadata, falling back to a TODOS.md plus TODOS-archive.md scan for legacy files.
-
-```bash
-tpo recover-counter myproject
-```
-
-Useful when bootstrapping a project with hand-written TODOs but no counter file.
-
----
-
 ### `init`
 
 Write the default pipeline execution contract (`.hermes/pipeline.toml`) for a project.
@@ -113,8 +102,8 @@ Capabilities are computed from `phases.yaml` at write time, not hardcoded.
 ### `doctor`
 
 Verify a project's pipeline execution contract against `phases.yaml`, require
-Hermes >= 0.19.0, compare an installed project-scoped `todos-manager` skill to
-the bundled source, and report Plan readiness for Plan-required profiles.
+Hermes >= 0.19.0, check the GitHub backlog (auth, repository identity, label
+vocabulary, Plan readiness), and inspect run registrations.
 
 ```bash
 tpo doctor myproject
@@ -123,28 +112,162 @@ tpo doctor myproject
 **Exit codes:**
 | Code | Meaning |
 |------|---------|
-| 0 | Clean; legacy Plan warnings may still be present |
-| 1 | Contract capability or installed-skill drift |
-| 2 | Missing/invalid contract, unsupported Hermes version, unknown project/profile, or an `Unverified` prerequisite |
+| 0 | Clean; contract, GitHub checks, and the active registration all verified (legacy Plan warnings may still be present) |
+| 1 | Drift: contract capability mismatch, registration or issue drift, or any `WARNING:`/`INVALID:` line from the GitHub checks |
+| 2 | Missing/invalid contract, unsupported Hermes version, unknown project, missing Hermes profile, or an `Unverified` prerequisite |
 
 If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes profile exists.
 
-For `native-sdd`, readiness output counts `manifest`, `legacy`, and `invalid`
-Plan entries. A legacy entry is executable as one card but receives a warning.
-For an active registration, `doctor` compares the registered values with the
-actual repository, worktree, branch, base commit, and TODO/Plan bytes read from
-that immutable base. It reports the current head and clean/dirty lifecycle
-state separately, so a valid later implementation or TODO-closeout commit is
-not misreported as authority drift.
+After the prerequisite and Hermes version lines, the GitHub checks print, in order:
+
+| Line | Meaning |
+|------|---------|
+| `GitHub auth: ok` / `WARNING: GitHub auth unavailable (<code>)` | `gh auth status` against the project |
+| `Repository: <owner>/<repo>` / `INVALID: repository identity: ...` | The github.com `origin` remote |
+| `Label vocabulary: ok` / `INVALID: missing <labels>; Fix: tpo todos labels sync <project>` | Every pipeline label exists |
+| `Plan readiness: eligible=N blocked=N (<reason>=N ...)` | Selectable `tpo:todo` issues and blocked reasons grouped by prefix (`status_closed`, `dependency_incomplete`, `branch_invalid`, `plan_invalid`, ...) |
+| `Runs: active=N delivered=N abandoned=N [unsupported=N]` | Run registrations under `.hermes/runs/`; `unsupported` counts malformed or schema v1 registrations |
+| `tick <id> → #N` | Each active run and the issue it pins; a run that is not the current tick prints a `WARNING` and a `Fix` line |
+| `tick <id> → #N (active; no current tick)` | An active run while no `current_tick_id.txt` exists |
+| `tick <id>: unsupported or malformed registration` | One line per registration counted as `unsupported` |
+
+Every GitHub check is offline-tolerant: a failure prints one `WARNING` line and
+the remaining checks still run, but the exit code becomes 1.
+
+For the current registration, `doctor` then prints `Issue authority: pinned`
+when the pinned issue still matches, `ISSUE DRIFT: <code>` (`issue_drift`,
+`issue_closed`, `issue_on_hold`, `issue_identity_mismatch`) when it does not,
+`REGISTRATION UNSUPPORTED: schema_version 1 ...` for a run registered under the
+retired TODOS.md schema, or `Current tick <id>: no registration (no TODO
+selected)` when the last tick picked nothing. It compares the registered
+repository, worktree, branch, base commit, and Plan bytes read from that
+immutable base and reports the current head and clean/dirty lifecycle state
+separately, so a valid later implementation or closeout commit is not
+misreported as authority drift. See
+[recovering runs and issue state](howto-debugging-and-recovery.md#recovering-runs-and-issue-state).
+
+---
+
+### `todos`
+
+Manage the GitHub Issues backlog. All three subcommands run `gh` against the
+project's `origin` and exit 2 for an unknown project.
+
+#### `todos complete`
+
+Run the idempotent issue-close state machine by hand for a delivered TODO
+(closeout normally does this on the next tick after the PR merges):
+
+```bash
+tpo todos complete myproject --todo TODO-5 --pr 71
+tpo todos complete myproject --todo 5 --pr 71 --date 2026-08-29 --force
+```
+
+**Arguments:**
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `project` | Yes | Project slug |
+| `--todo` | Yes | Issue to close (`TODO-5` or `5`) |
+| `--pr` | Yes | Merged pull request number |
+| `--date` | No | Completion date `YYYY-MM-DD`; defaults to today (UTC) |
+| `--force` | No | Proceed although the PR is not merged, a run for the issue is still active, or the issue was already closed against a different PR |
+
+**Exit codes:**
+| Code | Meaning |
+|------|---------|
+| 0 | `completed` — issue closed, marker comment present, `tpo:in-progress` removed |
+| 1 | GitHub failure (`Error: <code>`) |
+| 2 | Refused (PR not merged, run still active) or usage error |
+| 3 | `pending` — GitHub has not yet reflected the close; retry |
+
+An issue closed as `not_planned` is always refused.
+
+#### `todos labels sync`
+
+Create any missing pipeline labels (`tpo:*`, triage, and mirror labels) in the
+project's repository. Existing labels are left untouched, including color and
+description.
+
+```bash
+tpo todos labels sync myproject
+```
+
+Prints `created: <label>` per label, or `labels up to date (<N> names present;
+color/description not compared)`. Exit codes: 0
+synced or up to date, 1 GitHub failure (partial `created:` lines are printed
+first; `gh_truncated` means the label list hit the 1000 cap), 2 unknown project.
+
+#### `todos audit`
+
+Check TODO issue bodies against the backlog contract and, with `--fix`,
+normalize the mirror labels (priority/effort/phase/review) to match the body.
+
+```bash
+tpo todos audit myproject
+tpo todos audit myproject --todo 5
+tpo todos audit myproject --fix --dry-run
+tpo todos audit myproject --fix
+```
+
+**Arguments:**
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `project` | Yes | Project slug |
+| `--todo` | No | Audit one issue (`TODO-5` or `5`), open or closed; default is every open `tpo:todo` issue |
+| `--fix` | No | Apply mirror-label changes; closed issues and non-TODO issues are skipped |
+| `--dry-run` | No | With `--fix`: print the changes as `would fix` without applying them |
+
+Findings print as `TODO-<N>: <finding>` using the vocabulary
+`missing-section:<Name>`, `duplicate-section:<Name>`, `plan:missing`,
+`plan:duplicate`, `plan:invalid:<code>`, `branch:invalid`, `branch:default`,
+`decision:<Name>:<value>`, `label:missing:<label>`, `label:extra:<label>`,
+`state:closed`, and `not-a-todo`. The summary is
+`audit: issues=N findings=N fixable=N`, extended with `skipped=N applied=N`
+under `--fix`. Only `label:*` findings are fixable; `plan:missing` and
+`state:closed` are informational.
+
+**Exit codes:**
+| Code | Meaning |
+|------|---------|
+| 0 | No actionable finding (after `--fix`: nothing left unfixed) |
+| 1 | Actionable findings, skipped or failed fixes, or a GitHub failure |
+| 2 | Usage (`--dry-run` without `--fix`) or unknown project |
+
+See [Manage TODOs as GitHub Issues](howto-github-issues-todos.md) for the
+finding table with remediation.
+
+---
 
 ### `plan validate`
 
-Validate a TODO's tracked Plan attachment and optional manifest:
+Validate a TODO's Plan attachment and optional `tpo-plan` manifest. Without
+`--plan`, the Plan path is read from the issue's `### Plan` section:
 
 ```bash
 tpo plan validate myproject --todo TODO-42
 tpo plan validate myproject --todo TODO-42 --require-manifest
+tpo plan validate myproject --todo 42 --plan docs/pipeline/TODO-42-plan.md --require-manifest
 ```
+
+**Arguments:**
+| Arg | Required | Description |
+|-----|----------|-------------|
+| `project` | Yes | Project slug |
+| `--todo` | Yes | TODO to validate (`TODO-42` or `42`) |
+| `--plan` | No | Repository-relative Plan candidate to validate instead of the issue's Plan |
+| `--require-manifest` | No | Reject a valid legacy Plan that has no `json tpo-plan` block |
+
+Success prints `Plan has a valid manifest for TODO-N: <k> tasks` (exit 0) or,
+for manifest-free Markdown, `Plan is valid legacy Markdown for TODO-N; warning:
+no tpo-plan manifest` (exit 0 unless `--require-manifest`). Failures print
+`Plan validation failed for TODO-N: <code>` and exit 1, where `<code>` is
+`plan_invalid:missing` or `plan_invalid:duplicate` (not exactly one Plan value
+in the issue), `attachment_<code>` (the path is not an existing regular file
+inside the repository, or unreadable), a manifest validation code,
+`--require-manifest requires a tpo-plan block`, bare `unreadable` (the Plan
+file could not be read), or a `gh` error code. When the issue is closed the
+line ends with
+`; warning: issue is closed (<reason>)`. Exit 2 for an unknown project.
 
 See the [Plan template](templates/tpo-plan.md).
 
@@ -162,34 +285,6 @@ tpo install-profile --force
 Creates a `pipeline` profile cloned from the active Hermes profile, then overlays the bundled `SOUL.md`. With `--force`, deletes an existing `pipeline` profile first.
 
 After install, set the assignee: `tpo init myproject --assignee pipeline`.
-
----
-
-### `skills`
-
-Install or remove the bundled `todos-manager` skill.
-
-```bash
-tpo skills install
-tpo skills install --target all --reinstall
-tpo skills uninstall --target codex --yes
-```
-
-**Install arguments:**
-| Arg | Required | Default | Description |
-|-----|----------|---------|-------------|
-| `--target` | No | `claude` | Install to `claude`, `codex`, or `all` skill directories |
-| `--scope` | No | `user` | Install under the user home directory or the current project |
-| `--reinstall` | No | false | Replace an existing installed copy after explicit review |
-
-**Uninstall arguments:**
-| Arg | Required | Default | Description |
-|-----|----------|---------|-------------|
-| `--target` | No | `claude` | Remove from `claude`, `codex`, or `all` skill directories |
-| `--scope` | No | `user` | Remove from the user home directory or the current project |
-| `--yes` | Yes | false | Confirm removal without an interactive prompt |
-
-Install refuses to overwrite an existing destination unless `--reinstall` is set. Install and uninstall preflight all selected targets before replacing or removing an installed skill. Reinstall rejects symlink destinations; uninstall removes the link itself without following its target. Both commands return nonzero if rollback or cleanup leaves a recoverable backup behind.
 
 ---
 
@@ -341,6 +436,7 @@ Individual `PIPELINE_*` environment variables do not override config entries.
 
 - [Getting-started tutorial](tutorial-getting-started.md) — End-to-end walkthrough
 - [How to approve and ship a TODO](howto-approve-and-ship.md) — The full ship workflow
-- [How to debug ticks and recover counters](howto-debugging-and-recovery.md) — Using `--verbose`, `--debug`, `recover-counter`
+- [How to debug ticks and recover runs](howto-debugging-and-recovery.md) — Using `--verbose`, `--debug`, run markers, and issue-state recovery
+- [Manage TODOs as GitHub Issues](howto-github-issues-todos.md) — Filing, triage, audit, and completion of `tpo:todo` issues
 - [Circuit breaker explanation](explanation-circuit-breaker.md) — How no-progress tracking works
 - [Pipeline contract explanation](explanation-pipeline-contract.md) — Why versioned contracts exist
