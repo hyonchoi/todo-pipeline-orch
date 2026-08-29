@@ -1324,6 +1324,10 @@ class TestKanbanModeHermes:
         call_kwargs = mock_register.call_args
         assert call_kwargs.kwargs.get("phases_path") is not None
         assert call_kwargs.kwargs["prompt_client"] == "codex"
+        # The harness compiles without TODOS.md: the Plan is passed explicitly.
+        assert call_kwargs.kwargs["plan_path"] == "docs/harness/TODO-1-plan.md"
+        assert call_kwargs.kwargs["spec_path"] is None
+        assert call_kwargs.kwargs["reference_paths"] == ()
 
     @pytest.mark.parametrize(
         ("config", "expected"),

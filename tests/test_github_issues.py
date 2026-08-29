@@ -339,12 +339,21 @@ def _body(plan: str | list[str] | None = "docs/legacy.md", branch: str | list[st
             {},
             "plan_invalid:duplicate",
         ),
-        ({"labels": READY, "body": _body(plan="../outside.md")}, {}, "plan_invalid:outside_repository"),
+        ({"labels": READY, "body": _body(plan="../outside.md")}, {}, "plan_invalid:non_canonical"),
         ({"labels": READY, "body": _body(plan="docs/wrong.md")}, {}, "plan_invalid:todo_id_mismatch"),
         ({"labels": READY, "body": _body(plan="docs/binary.md")}, {}, "plan_invalid:unreadable"),
         ({"labels": READY, "body": _body(branch=None)}, {}, "branch_invalid"),
         ({"labels": READY, "body": _body(branch=["a", "b"])}, {}, "branch_invalid"),
         ({"labels": READY, "body": _body(branch=None)}, {"requires_plan": False}, "branch_invalid"),
+        ({"labels": READY, "body": _body(plan="./docs/legacy.md")}, {}, "plan_invalid:non_canonical"),
+        ({"labels": READY, "body": _body(plan="docs/./legacy.md")}, {}, "plan_invalid:non_canonical"),
+        ({"labels": READY, "body": _body(plan="docs/../docs/legacy.md")}, {}, "plan_invalid:non_canonical"),
+        ({"labels": READY, "body": _body(plan="docs//legacy.md")}, {}, "plan_invalid:non_canonical"),
+        ({"labels": READY, "body": _body(plan="docs/legacy.md/")}, {}, "plan_invalid:non_canonical"),
+        # An active registration is ownership proof regardless of labels (C5).
+        ({"labels": READY}, {"active_registration_ids": {1}}, "in_flight"),
+        ({"labels": ("tpo:todo",)}, {"active_registration_ids": {1}}, "in_flight"),
+        ({"labels": READY}, {"active_registration_ids": {1}, "kanban_available": False}, "in_flight"),
     ],
 )
 def test_compile_eligible_issues_blocks_with_precedence(tmp_path, kwargs, compile_kwargs, reason):

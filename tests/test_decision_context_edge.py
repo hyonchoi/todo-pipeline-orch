@@ -148,6 +148,16 @@ class TestFetchKanbanSnapshot:
         result = fetch_kanban_snapshot("demo")
         assert result == {"tasks": []}
 
+    def test_empty_stdout_is_an_empty_board_not_a_failure(self, mocker):
+        """rc 0 with blank stdout is an empty board, not an unavailable Kanban."""
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "  \n"
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = fetch_kanban_snapshot("demo")
+        assert result == {"tasks": []}
+
     def test_cli_failure_returns_none(self, mocker):
         """hermes not found -> None."""
         mocker.patch("subprocess.run", side_effect=FileNotFoundError("hermes not found"))

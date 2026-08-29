@@ -108,8 +108,9 @@ def fetch_kanban_snapshot(project_slug: str) -> dict | None:
             timeout=10,
             check=False,
         )
-        if r.returncode == 0 and r.stdout.strip():
-            return json.loads(r.stdout)
+        if r.returncode == 0:
+            # An empty board prints nothing: that is a reachable Kanban, not a failure.
+            return json.loads(r.stdout) if r.stdout.strip() else {"tasks": []}
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
         pass
     return None

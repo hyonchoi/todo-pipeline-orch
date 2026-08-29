@@ -275,11 +275,11 @@ def _ensure_rereview(*, project_dir: Path, round_number: int, validation_id: str
 
 
 def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
-                      tick_id: str) -> bool:
+                      tick_id: str, repo: str | None = None) -> bool:
     """Reconcile review state from authoritative Kanban cards and run metadata."""
     if not (state_dir / "runs" / tick_id / "registration.json").exists():
         return True
-    registration = load_validated_registration(project_dir, state_dir, tick_id)
+    registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)

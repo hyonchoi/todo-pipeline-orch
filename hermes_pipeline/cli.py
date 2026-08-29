@@ -691,7 +691,7 @@ def _cmd_approve(args, config: Config) -> int:
     Exit codes: 0 shipped, 3 refused by a guard, 2 unexpected error.
     """
     from . import ship
-    from .state_migration import _get_project_state_dir
+    from .project_config import _get_project_state_dir
 
     project_dir = _resolve_project_dir(config, args.project)
     if project_dir is None:
@@ -1061,8 +1061,7 @@ def _cmd_tick(args, config: Config) -> int:
     already in flight.  Per-project errors are isolated — one project's failure
     (or held lock) doesn't block the others.
     """
-    from .project_config import _discover_projects
-    from .state_migration import _get_project_state_dir, _migrate_global_state
+    from .project_config import _discover_projects, _get_project_state_dir
 
     state_dir = config.state_dir
 
@@ -1085,8 +1084,14 @@ def _cmd_tick(args, config: Config) -> int:
         project_dir = _resolve_project_dir(config, args.project)
         if project_dir is None:
             return 2
-        if not (project_dir / "TODOS.md").exists():
-            log.error("no TODOS.md in project: %s", args.project)
+        from .github_issues import GitHubIssuesError, repository_identity
+
+        try:
+            repository_identity(project_dir)
+        except GitHubIssuesError as exc:
+            log.error(
+                "project %s: origin is not a github.com remote (%s)", args.project, exc.code
+            )
             return 2
         from .project_config import _is_enabled, _read_project_toml
 
@@ -1096,6 +1101,15 @@ def _cmd_tick(args, config: Config) -> int:
                 args.project,
             )
             return 2
+        from .project_config import PIPELINE_TOML_PATH
+
+        if not (project_dir / PIPELINE_TOML_PATH).is_file():
+            log.warning(
+                "project %s: no .hermes/pipeline.toml (run `tpo init %s`); "
+                "using the default contract",
+                args.project,
+                args.project,
+            )
         explicit_toml = _read_project_toml(project_dir)
         projects = [(project_dir, explicit_toml)]
     else:
@@ -1114,43 +1128,7 @@ def _cmd_tick(args, config: Config) -> int:
 
     log.info("discovered %d active projects", len(projects))
 
-    # --- Step 3: One-time global state migration ---
-    # The old single-project state (~/.hermes/) belongs to whichever project
-    # used it before.  Migrate it to the first project only — copying the same
-    # current_tick_id.txt / circuit.json to every project would cause new
-    # projects to inherit a stale tick_id they never owned, permanently
-    # stalling as "prior tick in-flight".
-    #
-    # Only auto-migrate when there's exactly one project.  With multiple
-    # projects we can't know which one owned the old state, so skip and ask the
-    # operator to handle it manually.
-    if len(projects) == 1:
-        first_project, _ = projects[0]
-        try:
-            _migrate_global_state(first_project, config)
-        except Exception as e:
-            log.warning("one-time state migration to %s: %s", first_project.name, e)
-    else:
-        global_src = config.state_dir / "current_tick_id.txt"
-        if global_src.is_file():
-            # Only warn once per session, not every tick — a persistent
-            # global file is a known multi-project situation and the
-            # operator is responsible for resolving it.
-            warn_suppressed = state_dir / "migration_warning_suppressed"
-            try:
-                if not warn_suppressed.exists():
-                    log.warning(
-                        "global state exists at %s but %d projects were discovered — "
-                        "can't determine which project owns the old state.  Migrate "
-                        "manually to the correct project or remove the file.",
-                        config.state_dir,
-                        len(projects),
-                    )
-                    warn_suppressed.touch(exist_ok=True)
-            except OSError:
-                pass
-
-    # --- Step 4: Fairness rotation, then per-project tick ---
+    # --- Step 3: Fairness rotation, then per-project tick ---
     projects = _rotate_projects(projects, state_dir)
 
     for project_dir, project_toml in projects:
@@ -1189,6 +1167,65 @@ def _cmd_tick(args, config: Config) -> int:
 
     vlog.info("scan complete: scan_id=%s", scan_id)
     return 0
+
+
+# Tracker failures that an operator must fix; anything else is treated as transient.
+_TRACKER_CONFIG_FAULT_CODES = frozenset({"gh_missing", "gh_auth", "origin_identity_invalid"})
+
+
+# Registration failures caused by the issue's own content (not infrastructure):
+# the issue is demoted to needs-info so it stops being re-selected every tick.
+_CONTENT_REGISTRATION_CODES = frozenset({
+    "plan_invalid", "branch_invalid", "branch_exists", "authority_untracked",
+    "authority_invalid", "branch_mismatch",
+})
+
+
+def _demote_issue(project_dir: Path, issue, *, repo: str, project_slug: str, code: str) -> None:
+    """Best-effort ``ready-for-agent`` -> ``needs-info`` after a content-caused failure."""
+    from . import github_issues
+
+    try:
+        github_issues.remove_label(project_dir, issue.number, github_issues.READY_LABEL, repo=repo)
+        github_issues.add_label(project_dir, issue.number, "needs-info", repo=repo)
+    except github_issues.GitHubIssuesError as exc:
+        log.warning(
+            "project %s: could not demote #%d to needs-info after %s (%s)",
+            project_slug, issue.number, code, exc.code,
+        )
+        return
+    log.error(
+        "project %s: #%d demoted to needs-info — registration failed with %s; "
+        "fix the issue and re-add ready-for-agent",
+        project_slug, issue.number, code,
+    )
+
+
+def _record_tracker_error(
+    project_state: Path, tick_id: str, project_slug: str, exc, cb: CircuitBreaker
+) -> None:
+    """Persist a tracker_error no-pick and observe it on the circuit breaker."""
+    from .decision import record_tracker_error
+
+    config_fault = exc.code in _TRACKER_CONFIG_FAULT_CODES
+    record_tracker_error(
+        state_dir=project_state,
+        tick_id=tick_id,
+        project_slug=project_slug,
+        code=exc.code,
+        counts_as_no_progress=not config_fault,
+    )
+    cb.observe(picked=None, counts_as_no_progress=not config_fault)
+    if config_fault:
+        log.error(
+            "project %s: GitHub Issues unavailable (%s) — fix `gh`/origin configuration",
+            project_slug,
+            exc.code,
+        )
+    else:
+        log.warning(
+            "project %s: GitHub Issues temporarily unavailable (%s)", project_slug, exc.code
+        )
 
 
 def _tick_project(
@@ -1237,7 +1274,6 @@ def _tick_project(
         required_capabilities,
     )
     from .phases import (
-        PhasePromptRenderError,
         load_phase_profile,
         load_profile_prerequisites,
         resolve_profile_phases_path,
@@ -1343,6 +1379,9 @@ def _tick_project(
 
     cb = _make_circuit_breaker(project_state, cb_cfg, slack_channel)
 
+    from . import github_issues
+    from .github_issues import GitHubIssuesError
+
     if prior_tick_id is not None:
         pr_handoff_resolved = False
         # Legacy ship-gate compatibility: custom/older profiles can still have
@@ -1380,7 +1419,80 @@ def _tick_project(
             from .kanban_tasks import reconcile_plan_task_results
             from .result_contract import ResultContractError, sanitize_result_text
             from .review_reconciliation import reconcile_reviews
+            from .run_registration import ensure_in_progress_label, registration_state
             from .todos_completion import reconcile_todo_completion
+
+            run_dir = project_state / "runs" / prior_tick_id
+            registration_path = run_dir / "registration.json"
+            repo = None
+            if registration_path.exists() and registration_state(run_dir) == "active":
+                try:
+                    pinned = json.loads(registration_path.read_text(encoding="utf-8"))
+                except (OSError, UnicodeError, json.JSONDecodeError):
+                    pinned = {}
+                if not isinstance(pinned, dict):
+                    pinned = {}
+                number = pinned.get("issue_number")
+                live = None
+                try:
+                    repo = github_issues.repository_identity(project_dir)
+                    if type(number) is int and number > 0:
+                        # Exactly one live read per resume tick; drift and the
+                        # claim label are both evaluated from it.
+                        live = github_issues.fetch_issue(project_dir, number, repo=repo)
+                except GitHubIssuesError as exc:
+                    drift = f"issue_unavailable:{exc.code}"
+                else:
+                    drift = github_issues.check_issue_drift(
+                        project_dir, pinned, repo=repo, live=live
+                    )
+                if drift is None:
+                    # The claim label is best-effort; re-add it only for a run
+                    # whose issue is still the pinned, open, un-held issue.
+                    ensure_in_progress_label(project_dir, pinned, repo=repo, live=live)
+                if drift is not None and drift.startswith("issue_unavailable:"):
+                    log.warning(
+                        "project %s: prior tick %s pinned issue could not be verified (%s); "
+                        "continuing reconciliation",
+                        project_slug,
+                        prior_tick_id,
+                        drift,
+                    )
+                elif drift is not None:
+                    from .todos_completion import flag_issue_drift
+
+                    try:
+                        flag_issue_drift(
+                            project_dir=project_dir,
+                            state_dir=project_state,
+                            tenant=project_slug,
+                            tick_id=prior_tick_id,
+                            code=drift,
+                            repo=repo,
+                        )
+                    except ResultContractError as exc:
+                        log.error(
+                            "project %s: prior tick %s registration cannot be validated: %s",
+                            project_slug,
+                            prior_tick_id,
+                            sanitize_result_text(str(exc), maximum=1000),
+                        )
+                    except Exception as exc:
+                        # The gate is best-effort; the block + no-progress below must run.
+                        log.error(
+                            "project %s: prior tick %s drift gate failed: error_type=%s",
+                            project_slug,
+                            prior_tick_id,
+                            type(exc).__name__,
+                        )
+                    log.error(
+                        "project %s: prior tick %s pinned issue drifted (%s); delivery blocked",
+                        project_slug,
+                        prior_tick_id,
+                        drift,
+                    )
+                    cb.observe(picked=None, counts_as_no_progress=True)
+                    return
 
             reconcilers = (
                 ("result", reconcile_plan_task_results),
@@ -1394,6 +1506,7 @@ def _tick_project(
                         state_dir=project_state,
                         tenant=project_slug,
                         tick_id=prior_tick_id,
+                        repo=repo,
                     )
                 except ResultContractError as exc:
                     log.error(
@@ -1411,16 +1524,29 @@ def _tick_project(
                         prior_tick_id,
                         label,
                     )
+                    cb.observe(picked=None, counts_as_no_progress=True)
                     return
 
         if not pr_handoff_resolved and not all_phases_complete(
             project_slug, prior_tick_id, state_dir=project_state
         ):
-            log.info(
-                "project %s: prior tick %s still in-flight, skipping",
-                project_slug,
-                prior_tick_id,
-            )
+            from .kanban_tasks import get_todo_kanban_status
+
+            if not get_todo_kanban_status(project_slug, prior_tick_id):
+                # A persisted tick with no cards is a stall (crash before/during
+                # card creation), not a legitimate in-flight skip.
+                log.warning(
+                    "project %s: prior tick %s has no kanban tasks; treating as a stall",
+                    project_slug,
+                    prior_tick_id,
+                )
+                cb.observe(picked=None, counts_as_no_progress=True)
+            else:
+                log.info(
+                    "project %s: prior tick %s still in-flight, skipping",
+                    project_slug,
+                    prior_tick_id,
+                )
             return
 
         # Prior tick complete — fail closed if status/outcome observation breaks.
@@ -1466,28 +1592,38 @@ def _tick_project(
             cb.observe(picked=None, counts_as_no_progress=True)
             return
 
-    # Step 3: Build context & run selection
-    todos_path = project_dir / "TODOS.md"
-    if not todos_path.exists():
-        raise FileNotFoundError(f"TODOS.md not found in {project_dir}")
-
+    # Step 3: Build context & run selection. GitHub Issues are the sole TODO source.
     from .decision.context import build_in_flight, fetch_kanban_snapshot
-    from .todos_md import compile_eligible_todos
+    from .run_registration import active_registration_issue_numbers
 
     # Compile the exact candidate set server-side for every profile; the
-    # selector only ever sees eligible entries and may only pick their ids.
-    # The kanban snapshot is fetched once and shared with build_context.
+    # selector only ever sees eligible issues and may only pick their ids.
+    # The kanban snapshot is fetched once and shared with build_context; a
+    # missing snapshot is not a tracker error, it only makes a claimed
+    # (`tpo:in-progress`) issue unverifiable rather than stale.
     kanban_snapshot = fetch_kanban_snapshot(project_slug)
+    kanban_available = kanban_snapshot is not None
+    if kanban_snapshot is None:
+        # Marker shared with build_context so nothing re-fetches the board.
+        kanban_snapshot = {"columns": [], "_error": "kanban snapshot unavailable"}
     in_flight = build_in_flight(
         project_state,
         max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
         board_slug=project_slug,
         snapshot=kanban_snapshot,
     )
-    eligibility = compile_eligible_todos(
+    try:
+        repo = github_issues.repository_identity(project_dir)
+        issues = github_issues.list_todo_issues(project_dir, repo=repo)
+    except GitHubIssuesError as exc:
+        _record_tracker_error(project_state, tick_id, project_slug, exc, cb)
+        return
+    eligibility = github_issues.compile_eligible_issues(
         project_dir,
-        todos_path,
+        issues,
         in_flight=set(in_flight),
+        active_registration_ids=active_registration_issue_numbers(project_state),
+        kanban_available=kanban_available,
         requires_plan=phase_profile.requires_plan,
     )
     ctx = build_context(
@@ -1537,16 +1673,6 @@ def _tick_project(
         min(MAX_TIMEOUT_SECONDS, budget_s - _SELECTION_TIMEOUT_RESERVE_S),
     )
 
-    if (
-        not eligibility.candidates
-        and not eligibility.blocked_reasons
-        and re.search(r"TODO-\d+", todos_path.read_text(encoding="utf-8"))
-    ):
-        log.warning(
-            "project %s: TODOS.md mentions TODO ids but has no canonical entries "
-            "(`- [ ] **TODO-N: title**`); run todos-manager --convert",
-            project_slug,
-        )
     if not eligibility.candidates:
         from .decision import record_no_candidates
 
@@ -1616,27 +1742,16 @@ def _tick_project(
             _persist_tick_id(project_state, tick_id, write_sentinel=False)
         return
 
-    plan_path = None
-    if phase_profile.requires_plan:
-        from .todos_md import TodoPlanValidationError, resolve_todo_plan
-
-        try:
-            plan_path = resolve_todo_plan(project_dir, todos_path, picked)
-        except TodoPlanValidationError as exc:
-            _record_failed_to_spawn(
-                project_state,
-                tick_id,
-                picked,
-                exc,
-                reason="plan_validation_failed",
-            )
-            cb.observe(picked=None, counts_as_no_progress=True)
-            log.error(
-                "project %s: selected TODO failed Plan validation: code=%s",
-                project_slug,
-                exc.code,
-            )
-            return
+    # The selector may only return a compiled candidate; its Plan was already
+    # validated (and its kind resolved) by compile_eligible_issues.
+    selected = next(
+        (candidate for candidate in eligibility.candidates if candidate.entry.todo_id == picked),
+        None,
+    )
+    if selected is None:
+        raise RuntimeError(f"selection returned a non-candidate id: {picked}")
+    plan_path = selected.plan_path
+    issue = selected.entry
 
     # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
     from .kanban_tasks import create_prepared_todo_phases, prepare_todo_phases
@@ -1650,9 +1765,11 @@ def _tick_project(
             phases_path=phases_path,
             prompt_client=config.prompt_client,
             plan_path=plan_path,
+            spec_path=issue.spec,
+            reference_paths=issue.references,
             project_dir=project_dir,
         )
-    except PhasePromptRenderError as exc:
+    except Exception as exc:  # PhasePromptRenderError, path validation, manifest errors
         _record_failed_to_spawn(
             project_state,
             tick_id,
@@ -1670,23 +1787,16 @@ def _tick_project(
 
     registration = None
     if phase_profile.requires_plan:
-        from .run_registration import (
-            RunRegistrationError,
-            register_pinned_run_from_entry,
-        )
+        from .run_registration import RunRegistrationError, register_pinned_run
 
-        selected = next(
-            candidate.entry
-            for candidate in eligibility.candidates
-            if candidate.entry.todo_id == picked
-        )
         try:
-            registration = register_pinned_run_from_entry(
+            registration = register_pinned_run(
                 project_dir=project_dir,
                 state_dir=project_state,
                 tick_id=tick_id,
-                selected_entry=selected,
+                selected_issue=issue,
                 plan_path=plan_path,
+                repo=repo,
                 profile=contract.profile,
                 prompt_client=config.prompt_client,
                 assignee=contract.assignee,
@@ -1707,6 +1817,8 @@ def _tick_project(
                 project_slug,
                 exc.code,
             )
+            if exc.code in _CONTENT_REGISTRATION_CODES:
+                _demote_issue(project_dir, issue, repo=repo, project_slug=project_slug, code=exc.code)
             return
 
     # Step 5: Persist immediately before the first Hermes mutation. The
@@ -1743,6 +1855,22 @@ def _tick_project(
             reason="kanban_registration_failed",
         )
         raise
+
+    # Step 7: Claim the issue. Best-effort: Kanban in-flight state and the
+    # registration are the hard guards; a missing label is re-added next tick.
+    if github_issues.IN_PROGRESS_LABEL not in issue.labels:
+        try:
+            github_issues.add_label(
+                project_dir, issue.number, github_issues.IN_PROGRESS_LABEL, repo=repo
+            )
+        except GitHubIssuesError as exc:
+            log.warning(
+                "project %s: could not add %s to #%d (%s); continuing",
+                project_slug,
+                github_issues.IN_PROGRESS_LABEL,
+                issue.number,
+                exc.code,
+            )
 
     # Observe circuit breaker
     cb.observe(picked=picked, counts_as_no_progress=False)
@@ -1802,7 +1930,7 @@ def _cmd_init(args, config: Config) -> int:
         write_default_contract,
     )
     from .phases import resolve_profile_phases_path
-    from .state_migration import _get_project_state_dir
+    from .project_config import _get_project_state_dir
 
     profile = getattr(args, "profile", "gstack") or "gstack"
     if not PROFILE_NAME_RE.match(profile):
@@ -1927,7 +2055,7 @@ def _cmd_doctor(args, config: Config) -> int:
         load_contract,
         missing_capabilities,
     )
-    from .state_migration import _get_project_state_dir
+    from .project_config import _get_project_state_dir
 
     project_state = _get_project_state_dir(project_dir)
 

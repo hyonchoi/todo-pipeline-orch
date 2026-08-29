@@ -24,6 +24,7 @@ from .plan_manifest import (
     PlanManifestValidationError,
     TodoPlanValidationError,
     validate_plan_candidate,
+    validate_plan_path,
 )
 
 log = logging.getLogger(__name__)
@@ -321,6 +322,9 @@ def _status_reason(
     triage = next((label for label in TRIAGE_PENDING_LABELS if label in issue.labels), None)
     if triage is not None:
         return f"triage_pending:{triage}"
+    # An active registration is ownership proof, whatever the labels say.
+    if issue.number in active_registration_ids:
+        return "in_flight"
     if READY_LABEL not in issue.labels:
         return "not_ready"
     if issue.todo_id in in_flight:
@@ -336,6 +340,13 @@ def _status_reason(
     if issue.blocked_by_open > 0:
         return f"dependency_incomplete:{issue.blocked_by_open}"
     return None
+
+
+def _is_canonical_relative_path(value: str) -> bool:
+    """Reject ``./``, ``//``, trailing ``/`` and ``.``/``..`` segments (must be already normalized)."""
+    if value.startswith("./") or "//" in value or value.endswith("/"):
+        return False
+    return all(segment not in (".", "..") for segment in value.split("/"))
 
 
 def compile_eligible_issues(
@@ -364,16 +375,20 @@ def compile_eligible_issues(
         if reason is None and requires_plan:
             if len(issue.plan_values) != 1:
                 reason = "plan_invalid:missing" if len(issue.plan_values) < 2 else "plan_invalid:duplicate"
+            elif not _is_canonical_relative_path(issue.plan_values[0]):
+                reason = "plan_invalid:non_canonical"
             else:
-                plan_path = issue.plan_values[0]
                 try:
+                    plan_path = validate_plan_path(project_dir, issue.plan_values[0])
                     manifest = validate_plan_candidate(
                         project_dir, plan_path, expected_todo_id=issue.todo_id
                     )
                     plan_kind = "manifest" if manifest is not None else "legacy"
                 except (TodoPlanValidationError, PlanManifestValidationError) as exc:
+                    plan_path = None
                     reason = f"plan_invalid:{exc.code}"
                 except (OSError, UnicodeError):
+                    plan_path = None
                     reason = "plan_invalid:unreadable"
         if reason is None and len(issue.branch_values) != 1:
             reason = "branch_invalid"
@@ -654,10 +669,15 @@ def fetch_issue(project_dir: Path, number: int, *, repo: str | None = None) -> I
 
 
 def check_issue_drift(
-    project_dir: Path, registration_payload: Mapping, *, repo: str | None = None
+    project_dir: Path,
+    registration_payload: Mapping,
+    *,
+    repo: str | None = None,
+    live: IssueTodo | None = None,
 ) -> str | None:
     """Compare a registration's pinned issue hash with the live issue.
 
+    ``live`` is an already-fetched issue; when omitted the issue is fetched here.
     Returns ``None`` when unchanged, else ``"issue_unavailable:<code>"`` (``gh``
     failure or malformed registration), ``"issue_identity_mismatch"``,
     ``"issue_closed"``, ``"issue_on_hold"`` (``tpo:on-hold`` or ``wontfix``), or
@@ -675,10 +695,11 @@ def check_issue_drift(
         or not isinstance(pinned_url, str)
     ):
         return "issue_unavailable:registration_invalid"
-    try:
-        live = fetch_issue(project_dir, number, repo=repo)
-    except GitHubIssuesError as exc:
-        return f"issue_unavailable:{exc.code}"
+    if live is None:
+        try:
+            live = fetch_issue(project_dir, number, repo=repo)
+        except GitHubIssuesError as exc:
+            return f"issue_unavailable:{exc.code}"
     if live.url.lower() != pinned_url.lower():
         return "issue_identity_mismatch"
     if live.state != "open":

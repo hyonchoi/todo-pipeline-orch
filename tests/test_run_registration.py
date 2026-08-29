@@ -8,15 +8,20 @@ from pathlib import Path
 
 import pytest
 
-from hermes_pipeline.github_issues import MAX_ISSUE_SNAPSHOT_CHARS, snapshot_hash
+from hermes_pipeline.github_issues import (
+    IN_PROGRESS_LABEL,
+    MAX_ISSUE_SNAPSHOT_CHARS,
+    snapshot_hash,
+)
 from hermes_pipeline.result_contract import load_validated_registration
 from hermes_pipeline.run_registration import (
     RunRegistrationError,
+    active_registration_issue_numbers,
+    ensure_in_progress_label,
     register_pinned_run,
-    register_pinned_run_from_entry,
+    registration_state,
 )
-from hermes_pipeline.todos_md import parse_todo_entries
-from tests.gh_fakes import make_issue
+from tests.gh_fakes import API_ARGV, issue_payload, make_issue
 
 REPO = "acme/repo"
 BODY = (
@@ -371,89 +376,142 @@ def test_repo_identity_comparison_is_case_insensitive(tmp_path):
     assert registration.issue_number == 42
 
 
-# -- TODO(1.5): remove with the shim -------------------------------------------
-
-TODOS = (
-    "# TODOS\n\n## Entries\n\n"
-    "- [ ] **TODO-42: Ship the feature**\n"
-    "  - **Plan:** docs/plan.md\n"
-    "  - **Branch:** feat/todo-42\n"
-)
+# -- active-registration predicate ---------------------------------------------
 
 
-def _shim_repo(tmp_path, todos: str = TODOS):
+def _write_registration(state_dir: Path, tick_id: str, payload) -> Path:
+    run_dir = state_dir / "runs" / tick_id
+    run_dir.mkdir(parents=True)
+    path = run_dir / "registration.json"
+    path.write_text(payload if isinstance(payload, str) else json.dumps(payload))
+    return run_dir
+
+
+def test_registration_state_reads_run_markers(tmp_path):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    assert registration_state(run_dir) == "active"
+    (run_dir / "abandoned").touch()
+    assert registration_state(run_dir) == "abandoned"
+    (run_dir / "issue-closed").touch()
+    assert registration_state(run_dir) == "delivered"
+
+
+def test_active_registration_issue_numbers_filters_state_schema_and_malformed(
+    tmp_path, caplog
+):
+    state = tmp_path / ".hermes"
+    _write_registration(state, "t-active", {"schema_version": 2, "issue_number": 7})
+    delivered = _write_registration(state, "t-done", {"schema_version": 2, "issue_number": 8})
+    (delivered / "issue-closed").touch()
+    abandoned = _write_registration(state, "t-gone", {"schema_version": 2, "issue_number": 9})
+    (abandoned / "abandoned").touch()
+    _write_registration(state, "t-v1", {"schema_version": 1, "issue_number": 10})
+    _write_registration(state, "t-bad", "{not json")
+    _write_registration(state, "t-num", {"schema_version": 2, "issue_number": "11"})
+
+    with caplog.at_level("WARNING"):
+        numbers = active_registration_issue_numbers(state)
+
+    assert numbers == frozenset({7})
+    assert isinstance(numbers, frozenset)
+    assert "t-bad" in caplog.text and "t-num" in caplog.text and "t-v1" in caplog.text
+
+
+def test_active_registration_issue_numbers_without_runs_dir(tmp_path):
+    assert active_registration_issue_numbers(tmp_path / "missing") == frozenset()
+
+
+# -- ensure_in_progress_label ---------------------------------------------------
+
+
+def _live(fake_gh, number, labels):
+    fake_gh.on(
+        *API_ARGV, f"repos/{REPO}/issues/{number}",
+        stdout=json.dumps(issue_payload(number, labels=labels)),
+    )
+    fake_gh.on("gh", "issue", "edit")
+
+
+def test_ensure_in_progress_label_adds_missing_label(tmp_path, fake_gh):
+    _live(fake_gh, 42, ("tpo:todo", "ready-for-agent"))
+
+    assert ensure_in_progress_label(tmp_path, {"issue_number": 42}, repo=REPO) is True
+    assert [
+        "issue", "edit", "42", "--repo", REPO, "--add-label", IN_PROGRESS_LABEL
+    ] in fake_gh.gh_calls()
+
+
+def test_ensure_in_progress_label_is_idempotent(tmp_path, fake_gh):
+    _live(fake_gh, 42, ("tpo:todo", IN_PROGRESS_LABEL))
+
+    assert ensure_in_progress_label(tmp_path, {"issue_number": 42}, repo=REPO) is False
+    assert not any(call[:2] == ["issue", "edit"] for call in fake_gh.gh_calls())
+
+
+def test_ensure_in_progress_label_is_best_effort(tmp_path, fake_gh, caplog):
+    fake_gh.on(*API_ARGV, rc=1, stderr="HTTP 500")
+
+    with caplog.at_level("WARNING"):
+        assert ensure_in_progress_label(tmp_path, {"issue_number": 42}, repo=REPO) is False
+    assert "gh_unavailable" in caplog.text
+    assert ensure_in_progress_label(tmp_path, {"issue_number": "x"}, repo=REPO) is False
+
+
+# -- branch safety (C1) ---------------------------------------------------------
+
+
+def test_rejects_default_branch_as_run_branch(tmp_path):
     repo, _ = _repo(tmp_path)
-    (repo / "TODOS.md").write_text(todos)
-    _git(repo, "add", "TODOS.md")
-    _git(repo, "commit", "-m", "todos")
-    return repo, parse_todo_entries(todos)[0]
+
+    with pytest.raises(RunRegistrationError, match="branch_invalid: default_branch"):
+        _register(repo, issue=_issue(body=BODY.replace("feat/todo-42", "main")))
 
 
-def _register_from_entry(repo, entry):
-    return register_pinned_run_from_entry(
-        project_dir=repo,
-        state_dir=repo / ".hermes",
-        tick_id="01TICK",
-        selected_entry=entry,
-        plan_path="docs/plan.md",
-        profile="native-sdd",
-        prompt_client="codex",
-        assignee="implementer",
-        review_assignee=None,
-        step_keys=("task-1",),
-    )
+def test_rejects_default_branch_resolved_from_origin_head(tmp_path):
+    repo, _ = _repo(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/develop", "HEAD")
+    _git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop")
+
+    with pytest.raises(RunRegistrationError, match="branch_invalid: default_branch"):
+        _register(repo, issue=_issue(body=BODY.replace("feat/todo-42", "develop")))
 
 
-def test_shim_registration_round_trips_through_loader(tmp_path):
-    repo, entry = _shim_repo(tmp_path)
+def test_rejects_branch_that_already_exists_for_another_run(tmp_path):
+    repo, _ = _repo(tmp_path)
+    _git(repo, "branch", "feat/todo-42")
 
-    registration = _register_from_entry(repo, entry)
-
-    assert "### Plan\n\ndocs/plan.md" in registration.issue_snapshot
-    assert "### Branch\n\nfeat/todo-42" in registration.issue_snapshot
-    authority = load_validated_registration(repo, repo / ".hermes", "01TICK")
-    assert authority.branch == "feat/todo-42"
-    assert authority.worktree.name == "todo-42-ship-the-feature"
+    with pytest.raises(RunRegistrationError, match="branch_exists"):
+        _register(repo)
+    assert not (repo / ".hermes" / "runs" / "01TICK" / "registration.json").exists()
 
 
-def test_shim_is_disabled_outside_tests(tmp_path, monkeypatch):
-    repo, entry = _shim_repo(tmp_path)
-    monkeypatch.delenv("TPO_LEGACY_TODOS_SHIM")
+def test_rejects_branch_that_exists_only_on_origin(tmp_path):
+    repo, _ = _repo(tmp_path)
+    _git(repo, "update-ref", "refs/remotes/origin/feat/todo-42", "HEAD")
 
-    with pytest.raises(RunRegistrationError, match="legacy_shim_disabled"):
-        _register_from_entry(repo, entry)
-
-
-def test_shim_requires_github_origin(tmp_path):
-    repo, entry = _shim_repo(tmp_path)
-    _git(repo, "remote", "remove", "origin")
-
-    with pytest.raises(RunRegistrationError, match="origin_identity_invalid"):
-        _register_from_entry(repo, entry)
+    with pytest.raises(RunRegistrationError, match="branch_exists"):
+        _register(repo)
 
 
-def test_shim_rejects_todos_drift_against_base(tmp_path):
-    repo, entry = _shim_repo(tmp_path)
-    (repo / "TODOS.md").write_text(TODOS.replace("Ship the feature", "Changed"))
-    _git(repo, "add", "TODOS.md")
-    _git(repo, "commit", "-m", "drift")
+def test_resume_of_the_same_issue_may_reuse_its_branch(tmp_path):
+    repo, _ = _repo(tmp_path)
+    first = _register(repo, tick_id="01FIRST")
 
-    with pytest.raises(RunRegistrationError, match="authority_drift"):
-        _register_from_entry(repo, entry)
+    second = _register(repo, tick_id="02SECOND")
 
-
-def test_shim_rejects_non_canonical_todo_id(tmp_path):
-    repo, entry = _shim_repo(tmp_path, TODOS.replace("TODO-42", "TODO-007"))
-
-    with pytest.raises(RunRegistrationError, match="authority_invalid"):
-        _register_from_entry(repo, entry)
+    assert second.branch == first.branch == "feat/todo-42"
+    assert second.worktree == first.worktree
 
 
-def test_shim_preserves_duplicate_branch_values(tmp_path):
-    repo, entry = _shim_repo(
-        tmp_path, TODOS + "  - **Branch:** feat/other\n"
-    )
-    assert len(entry.branch_values) == 2
+def test_active_registration_issue_numbers_warns_once_per_run_dir(tmp_path, caplog):
+    state = tmp_path / ".hermes"
+    _write_registration(state, "t-bad", "{not json")
 
-    with pytest.raises(RunRegistrationError, match="branch_invalid"):
-        _register_from_entry(repo, entry)
+    with caplog.at_level("DEBUG"):
+        active_registration_issue_numbers(state)
+        active_registration_issue_numbers(state)
+
+    warnings = [r for r in caplog.records if r.levelname == "WARNING" and "t-bad" in r.getMessage()]
+    debugs = [r for r in caplog.records if r.levelname == "DEBUG" and "t-bad" in r.getMessage()]
+    assert len(warnings) == 1 and len(debugs) == 1

@@ -143,3 +143,16 @@ def test_accepts_commonmark_fence_indentation(indent):
     document = f"{indent}```json tpo-plan\n{payload}\n{indent}```\n"
 
     assert parse_plan_manifest(document, expected_todo_id="TODO-42") is not None
+
+
+def test_todo_43_orchestration_plan_manifest_targets_issue_68():
+    from pathlib import Path
+
+    from hermes_pipeline.plan_manifest import validate_plan_candidate
+
+    root = Path(__file__).resolve().parents[1]
+    plan = "docs/superpowers/plans/2026-08-20-todo-43-production-orchestration-hotspots.md"
+
+    manifest = validate_plan_candidate(root, plan, expected_todo_id="TODO-68")
+
+    assert manifest is not None and manifest.todo_id == "TODO-68"

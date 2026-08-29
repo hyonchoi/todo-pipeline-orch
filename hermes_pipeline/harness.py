@@ -418,6 +418,9 @@ def _poll_kanban_phases(
         phases_path=phases_path,
         assignee=assignee,
         prompt_client=prompt_client,
+        plan_path=_HARNESS_PLAN_PATH,
+        spec_path=None,
+        reference_paths=(),
         cancel_event=cancel_event,
     )
     # Intentionally unguarded — fail fast before polling begins, matching

@@ -557,3 +557,144 @@ def test_merged_closeout_creates_missing_gate_before_checks_without_remote_head(
         complete.assert_called_once_with("demo", "human-id")
     else:
         complete.assert_not_called()
+
+
+def test_flag_issue_drift_marks_existing_human_gate_and_skips_creation(tmp_path, mocker):
+    from hermes_pipeline.todos_completion import flag_issue_drift
+
+    state = tmp_path / ".hermes"
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(
+            todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"
+        ),
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
+        return_value={
+            "plan:task-1": SimpleNamespace(task_id="t-1", status="done"),
+            "human-gate": SimpleNamespace(task_id="gate-1", status="blocked"),
+        },
+    )
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
+    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+
+    assert flag_issue_drift(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+        code="issue_drift", repo="acme/repo",
+    ) is False
+
+    create.assert_not_called()
+    mark.assert_called_once_with("gate-1", "TPO delivery blocked: issue_drift")
+
+
+def test_flag_issue_drift_creates_human_gate_under_an_existing_card(tmp_path, mocker):
+    from hermes_pipeline.todos_completion import flag_issue_drift
+
+    state = tmp_path / ".hermes"
+    load = mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(
+            todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"
+        ),
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
+        return_value={"plan:task-1": SimpleNamespace(task_id="t-1", status="in_progress")},
+    )
+    create = mocker.patch(
+        "hermes_pipeline.todos_completion._create_task", return_value="gate-new"
+    )
+    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+
+    assert flag_issue_drift(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+        code="issue_closed", repo="acme/repo",
+    ) is False
+
+    assert load.call_args.kwargs["repo"] == "acme/repo"
+    assert create.call_args.kwargs["key"] == "human-gate"
+    assert create.call_args.kwargs["parent"] == "t-1"
+    assert create.call_args.kwargs["gate"] is True
+    mark.assert_called_once_with("gate-new", "TPO delivery blocked: issue_closed")
+
+
+def test_flag_issue_drift_without_cards_only_logs(tmp_path, mocker, caplog):
+    from hermes_pipeline.todos_completion import flag_issue_drift
+
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(
+            todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"
+        ),
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks", return_value={}
+    )
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
+
+    with caplog.at_level("WARNING"):
+        assert flag_issue_drift(
+            project_dir=tmp_path, state_dir=tmp_path / ".hermes", tenant="demo",
+            tick_id="01TICK", code="issue_drift",
+        ) is False
+    create.assert_not_called()
+    assert "issue_drift" in caplog.text
+
+
+def test_reconcile_todo_completion_forwards_repo_to_registration_loader(tmp_path, mocker):
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text("{}")
+    load = mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(manifest=None),
+    )
+
+    assert reconcile_todo_completion(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", repo="acme/repo"
+    )
+    assert load.call_args.kwargs["repo"] == "acme/repo"
+
+
+def test_flag_issue_drift_without_cards_persists_a_decision(tmp_path, mocker):
+    import json
+
+    from hermes_pipeline.todos_completion import flag_issue_drift
+
+    state = tmp_path / ".hermes"
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"),
+    )
+    mocker.patch("hermes_pipeline.todos_completion.get_todo_kanban_tasks", return_value={})
+
+    assert flag_issue_drift(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", code="issue_closed",
+    ) is False
+
+    decision = json.loads((state / "decisions" / "01TICK-issue-drift.json").read_text())
+    assert decision["picked"] is None
+    assert decision["rationale"] == "tracker_error: issue_drift:issue_closed"
+
+
+def test_flag_issue_drift_without_cards_survives_existing_decisions(tmp_path, mocker, caplog):
+    """The tick's own decision file is write-once and already exists; drift must not raise."""
+    from hermes_pipeline.todos_completion import flag_issue_drift
+
+    state = tmp_path / ".hermes"
+    (state / "decisions").mkdir(parents=True)
+    (state / "decisions" / "01TICK.json").write_text("{}")
+    (state / "decisions" / "01TICK-issue-drift.json").write_text("{}")
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"),
+    )
+    mocker.patch("hermes_pipeline.todos_completion.get_todo_kanban_tasks", return_value={})
+
+    with caplog.at_level("DEBUG", logger="hermes_pipeline.todos_completion"):
+        assert flag_issue_drift(
+            project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", code="issue_drift",
+        ) is False
+    assert (state / "decisions" / "01TICK-issue-drift.json").read_text() == "{}"
+    assert any(r.levelname == "DEBUG" and "already" in r.getMessage() for r in caplog.records)

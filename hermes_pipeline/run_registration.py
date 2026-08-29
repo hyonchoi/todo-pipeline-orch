@@ -3,28 +3,38 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+import logging
 import re
 import subprocess
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from typing import Literal
 
 from . import github_issues
 from .github_issues import (
+    IN_PROGRESS_LABEL,
     MAX_ISSUE_SNAPSHOT_CHARS,
     REGISTRATION_SCHEMA_VERSION,
     GitHubIssuesError,
     IssueTodo,
     canonical_issue_snapshot,
-    render_issue_body,
     snapshot_hash,
 )
 from .state import _atomic_write_text
-from .todos_md import TodoEntry, parse_todo_entries
 
-LEGACY_SHIM_ENV = "TPO_LEGACY_TODOS_SHIM"  # TODO(1.5): remove with the shim
+log = logging.getLogger(__name__)
 _SLUG_UNSAFE_RE = re.compile(r"[^a-z0-9]+")
+# Run dirs already reported as malformed in this process (WARNING once, DEBUG after).
+_WARNED_RUN_DIRS: set[Path] = set()
+
+
+def _warn_once(run_dir: Path, message: str, *args: object) -> None:
+    if run_dir in _WARNED_RUN_DIRS:
+        log.debug(message, *args)
+        return
+    _WARNED_RUN_DIRS.add(run_dir)
+    log.warning(message, *args)
 
 
 class RunRegistrationError(RuntimeError):
@@ -108,13 +118,50 @@ def _tracked_bytes(
     return result.stdout
 
 
-def _validate_branch(project_dir: Path, issue: IssueTodo) -> str:
+def _default_branch(project_dir: Path) -> str | None:
+    result = _git(
+        project_dir, "symbolic-ref", "--short", "refs/remotes/origin/HEAD", check=False
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    return result.stdout.strip().removeprefix("origin/")
+
+
+def _ref_exists(project_dir: Path, ref: str) -> bool:
+    return _git(project_dir, "show-ref", "--verify", "--quiet", ref, check=False).returncode == 0
+
+
+def _branch_registered_for_issue(state_dir: Path, number: int, branch: str) -> bool:
+    """True when an earlier registration of the same issue already pinned ``branch``."""
+    for path in (state_dir / "runs").glob("*/registration.json"):
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            continue
+        if (
+            isinstance(payload, Mapping)
+            and payload.get("issue_number") == number
+            and payload.get("branch") == branch
+        ):
+            return True
+    return False
+
+
+def _validate_branch(project_dir: Path, issue: IssueTodo, *, state_dir: Path) -> str:
     if len(issue.branch_values) != 1 or not issue.branch_values[0]:
         raise RunRegistrationError("branch_invalid", "exactly one Branch is required")
     branch = issue.branch_values[0]
     result = _git(project_dir, "check-ref-format", "--branch", branch, check=False)
-    if result.returncode != 0 or branch.startswith("refs/"):
+    if result.returncode != 0 or branch.startswith("refs/") or branch.startswith("-"):
         raise RunRegistrationError("branch_invalid", "unsafe Branch value")
+    default = _default_branch(project_dir)
+    if branch == default or (default is None and branch in ("main", "master")):
+        raise RunRegistrationError("branch_invalid", "default_branch")
+    exists = _ref_exists(project_dir, f"refs/heads/{branch}") or _ref_exists(
+        project_dir, f"refs/remotes/origin/{branch}"
+    )
+    if exists and not _branch_registered_for_issue(state_dir, issue.number, branch):
+        raise RunRegistrationError("branch_exists", branch)
     return branch
 
 
@@ -213,13 +260,14 @@ def _validate_or_create_worktree(registration: RunRegistration) -> None:
         branch_sha = branch_ref.stdout.split(maxsplit=1)[0]
         if branch_sha != registration.base_sha:
             raise RunRegistrationError("branch_mismatch", registration.branch)
-        args = ("worktree", "add", str(target), registration.branch)
+        args = ("worktree", "add", "--", str(target), registration.branch)
     else:
         args = (
             "worktree",
             "add",
             "-b",
             registration.branch,
+            "--",
             str(target),
             registration.base_sha,
         )
@@ -256,7 +304,7 @@ def register_pinned_run(
     _validate_issue_authority(selected_issue, repo, plan_path)
     base_sha = _git(project_dir, "rev-parse", "HEAD").stdout.strip()
     plan_bytes = _tracked_bytes(project_dir, base_sha, plan_path)
-    branch = _validate_branch(project_dir, selected_issue)
+    branch = _validate_branch(project_dir, selected_issue, state_dir=state_dir)
     worktree = (repository / ".worktrees" / _slug(selected_issue)).resolve()
     registration = RunRegistration(
         schema_version=REGISTRATION_SCHEMA_VERSION,
@@ -290,54 +338,87 @@ def register_pinned_run(
     return registration
 
 
-# TODO(1.5): remove. Test-only adapter for the TODOS.md-based tick wiring until
-# selection yields IssueTodo values. ``number`` is the legacy TODO id, NOT a live
-# issue; ``issue_url`` is synthetic. Disabled unless TPO_LEGACY_TODOS_SHIM=1.
-def register_pinned_run_from_entry(*, project_dir: Path, selected_entry: TodoEntry, **kwargs):
-    if os.environ.get(LEGACY_SHIM_ENV) != "1":
-        raise RunRegistrationError("legacy_shim_disabled", "TODOS.md")
-    if not selected_entry.todo_id.startswith("TODO-") or not selected_entry.todo_id[5:].isdigit():
-        raise RunRegistrationError("authority_invalid", "todo_id is not TODO-<n>")
-    project_dir = project_dir.resolve()
+# -- run state -----------------------------------------------------------------
+
+RegistrationState = Literal["active", "delivered", "abandoned"]
+
+
+def registration_state(run_dir: Path) -> RegistrationState:
+    """``delivered`` once ``issue-closed`` exists, ``abandoned`` once ``abandoned`` does."""
+    if (run_dir / "issue-closed").exists():
+        return "delivered"
+    if (run_dir / "abandoned").exists():
+        return "abandoned"
+    return "active"
+
+
+def _registration_issue_number(payload: object) -> int | None:
+    if not isinstance(payload, Mapping):
+        return None
+    number = payload.get("issue_number")
+    if type(number) is not int or number <= 0:
+        return None
+    return number
+
+
+def active_registration_issue_numbers(state_dir: Path) -> frozenset[int]:
+    """Issue numbers pinned by every schema-v2 ``registration.json`` still ``active``.
+
+    Malformed or unsupported registrations are skipped with a WARNING; they never
+    widen or narrow the eligible set silently.
+    """
+    numbers: set[int] = set()
+    runs_dir = state_dir / "runs"
+    if not runs_dir.is_dir():
+        return frozenset()
+    for path in sorted(runs_dir.glob("*/registration.json")):
+        if registration_state(path.parent) != "active":
+            continue
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            _warn_once(path.parent, "skipping unreadable registration %s", path)
+            continue
+        number = _registration_issue_number(payload)
+        if (
+            not isinstance(payload, Mapping)
+            or payload.get("schema_version") != REGISTRATION_SCHEMA_VERSION
+            or number is None
+        ):
+            _warn_once(path.parent, "skipping malformed or unsupported registration %s", path)
+            continue
+        numbers.add(number)
+    return frozenset(numbers)
+
+
+def ensure_in_progress_label(
+    project_dir: Path,
+    registration_payload: Mapping,
+    *,
+    repo: str | None = None,
+    live: IssueTodo | None = None,
+) -> bool:
+    """Re-add ``tpo:in-progress`` to the pinned issue if the live issue lacks it.
+
+    ``live`` is an already-fetched issue (avoids a second ``gh`` read). Idempotent
+    and best-effort: returns True only when the label was added; any ``gh``
+    failure is logged as a WARNING (Kanban in-flight state and the registration
+    remain the hard guards against double selection).
+    """
+    number = _registration_issue_number(registration_payload)
+    if number is None:
+        return False
     try:
-        repo = github_issues.repository_identity(project_dir)
+        if live is None:
+            live = github_issues.fetch_issue(project_dir, number, repo=repo)
+        if IN_PROGRESS_LABEL in live.labels:
+            return False
+        github_issues.add_label(project_dir, number, IN_PROGRESS_LABEL, repo=repo)
     except GitHubIssuesError as exc:
-        raise RunRegistrationError(exc.code, "origin") from exc
-    base_sha = _git(project_dir, "rev-parse", "HEAD").stdout.strip()
-    todos_bytes = _tracked_bytes(project_dir, base_sha, "TODOS.md", require_unchanged=False)
-    tracked = next(
-        (
-            entry
-            for entry in parse_todo_entries(todos_bytes.decode("utf-8"))
-            if entry.todo_id == selected_entry.todo_id
-        ),
-        None,
+        log.warning("could not ensure %s on #%d: %s", IN_PROGRESS_LABEL, number, exc.code)
+        return False
+    log.info(
+        "re-added %s on #%d; use %s to pause this run",
+        IN_PROGRESS_LABEL, number, github_issues.ON_HOLD_LABEL,
     )
-    if tracked is None or tracked.raw != selected_entry.raw:
-        raise RunRegistrationError("authority_drift", selected_entry.todo_id)
-    try:
-        body = "\n".join(
-            render_issue_body({section: value}, include_empty=False)
-            for section, values in (
-                ("Plan", selected_entry.plan_values),
-                ("Branch", selected_entry.branch_values),
-            )
-            for value in values
-        )
-    except ValueError as exc:
-        raise RunRegistrationError("authority_invalid", "legacy entry fields") from exc
-    number = int(selected_entry.todo_id[5:])
-    issue = github_issues.issue_from_api(
-        {
-            "number": number,
-            "title": selected_entry.title,
-            "body": body,
-            "state": "open",
-            "labels": [],
-            "html_url": expected_issue_url(repo, number),
-        },
-        repo=repo,
-    )
-    if issue.todo_id != selected_entry.todo_id:
-        raise RunRegistrationError("authority_invalid", "todo_id is not canonical")
-    return register_pinned_run(project_dir=project_dir, selected_issue=issue, repo=repo, **kwargs)
+    return True

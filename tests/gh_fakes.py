@@ -1,12 +1,16 @@
 """Reusable ``subprocess.run`` stand-in for ``gh``/``git`` calls in client tests."""
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
 Handler = Callable[[list[str]], tuple[int, str, str]]
+
+ORIGIN_ARGV = ("git", "remote", "get-url", "origin")
+API_ARGV = ("gh", "api", "-H", "Accept: application/vnd.github+json")
 
 
 @dataclass
@@ -103,6 +107,15 @@ def issue_payload(
     return payload
 
 
+ELIGIBLE_BODY = "### What\n\nWidget\n\n### Branch\n\nfeat/todo\n"
+
+
+def todo_payload(number: int = 7, **kwargs: Any) -> dict[str, Any]:
+    """``issue_payload`` whose body carries the single Branch eligibility requires."""
+    kwargs.setdefault("body", ELIGIBLE_BODY)
+    return issue_payload(number, **kwargs)
+
+
 def make_issue(
     number: int = 7,
     *,
@@ -115,3 +128,22 @@ def make_issue(
     from hermes_pipeline.github_issues import issue_from_api
 
     return issue_from_api(issue_payload(number, title=title, body=body, **extra), repo=repo)
+
+
+def seed_project_issues(
+    fake: FakeGh, issues: Sequence[dict[str, Any]] = (), *, repo: str = "acme/repo"
+) -> FakeGh:
+    """Serve ``repo`` as ``origin`` plus ``issues`` for the tick's GitHub reads and label edits.
+
+    Registers the ``tpo:todo`` list call (one page), a ``fetch_issue`` handler per
+    issue, and an always-successful ``gh issue edit`` so ``add_label`` succeeds.
+    Tests override any of these with a later ``on()`` of equal prefix length.
+    """
+    fake.on(*ORIGIN_ARGV, stdout=f"https://github.com/{repo}.git\n")
+    fake.on(*API_ARGV, "--paginate", "--slurp", stdout=json.dumps([list(issues)]))
+    for payload in issues:
+        fake.on(
+            *API_ARGV, f"repos/{repo}/issues/{payload['number']}", stdout=json.dumps(payload)
+        )
+    fake.on("gh", "issue", "edit")
+    return fake

@@ -319,3 +319,18 @@ def test_fifth_findings_blocks_gate_and_creates_no_sixth_round(tmp_path, mocker)
     reason = block.call_args.args[1]
     assert "limit reached" in reason
     assert "super-secret-value" not in reason
+
+
+def test_reconcile_reviews_forwards_repo_to_registration_loader(tmp_path, mocker):
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text("{}")
+    load = mocker.patch(
+        "hermes_pipeline.review_reconciliation.load_validated_registration",
+        return_value=SimpleNamespace(manifest=None),
+    )
+
+    assert reconcile_reviews(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", repo="acme/repo"
+    )
+    assert load.call_args.kwargs["repo"] == "acme/repo"

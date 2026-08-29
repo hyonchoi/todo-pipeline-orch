@@ -73,13 +73,6 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
-    todos = (
-        "## Entries\n\n"
-        f"- [ ] **{TODO_ID}: Stress compilation** — Exercise the supported cap.\n"
-        "  - **Plan:** plan.md\n"
-        "  - **Branch:** todo-50-stress\n"
-    )
-    (repo / "TODOS.md").write_text(todos)
     (repo / "plan.md").write_text(_manifest())
     phases = repo / "phases.yaml"
     phases.write_text(
@@ -101,6 +94,7 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
         tick_id=TICK_ID,
         board_slug="stress",
         phases_path=phases,
+        plan_path="plan.md",
         project_dir=repo,
     )
     expected_keys = [

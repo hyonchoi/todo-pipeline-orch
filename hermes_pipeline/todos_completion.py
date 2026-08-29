@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import re
 import subprocess
 from pathlib import Path
@@ -23,6 +24,8 @@ from .result_contract import (
 )
 from .review_reconciliation import REVIEW_ACCEPTANCE_KEY, _create_task
 from .state import _atomic_write_text
+
+log = logging.getLogger(__name__)
 
 FINISH_KEY = "finish"
 CLOSEOUT_KEY = "closeout"
@@ -247,14 +250,52 @@ def _human_merge_gate(*, tasks: dict, registration, tenant: str,
     )
 
 
+def flag_issue_drift(
+    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str, code: str,
+    repo: str | None = None,
+) -> bool:
+    """Block delivery on pinned-issue drift by marking the human gate ``needs_input``.
+
+    Creates the gate (parented to an existing card of the tick) when absent.
+    Without any card there is nothing to gate; the drift is logged and persisted
+    as a ``tracker_error`` decision so ``tpo status`` surfaces it. Always returns
+    False.
+    """
+    registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
+    tasks = get_todo_kanban_tasks(tenant, tick_id)
+    if not tasks:
+        from .decision import record_tracker_error
+
+        log.warning(
+            "tick %s: pinned issue drift (%s) but no kanban card exists to gate",
+            tick_id, code,
+        )
+        try:
+            # The tick's own decision file is write-once and already exists, so
+            # the drift record lives under its own key.
+            record_tracker_error(
+                state_dir=state_dir, tick_id=f"{tick_id}-issue-drift", project_slug=tenant,
+                code=f"issue_drift:{code}", counts_as_no_progress=True,
+            )
+        except FileExistsError:
+            log.debug("tick %s: issue drift decision already recorded", tick_id)
+        return False
+    parent = next(iter(tasks.values())).task_id
+    return _needs_input(
+        tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
+        parent=parent, code=code,
+    )
+
+
 def reconcile_todo_completion(
-    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str
+    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str,
+    repo: str | None = None,
 ) -> bool:
     """Reconcile delivery from Kanban/GitHub facts; never merge or repair drift."""
     registration_path = state_dir / "runs" / tick_id / "registration.json"
     if not registration_path.exists():
         return True
-    registration = load_validated_registration(project_dir, state_dir, tick_id)
+    registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)

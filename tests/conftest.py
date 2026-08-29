@@ -1,7 +1,4 @@
-import os
 from pathlib import Path
-
-os.environ.setdefault("TPO_LEGACY_TODOS_SHIM", "1")  # TODO(1.5): remove with the shim
 
 # Map hyphenated directory to valid Python package name for imports.
 _skill_test_dir = Path(__file__).parent / "skill-test-environment"
@@ -19,10 +16,13 @@ import pytest
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """A scratch project dir with TODOS.md + .hermes/."""
+    """A scratch project dir marked by its .hermes/pipeline.toml contract."""
     proj = tmp_path / "demo"
     (proj / ".hermes").mkdir(parents=True)
-    (proj / "TODOS.md").write_text("# TODOS\n\n")
+    (proj / ".hermes" / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\n'
+        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+    )
     (proj / ".hermes" / "todo_id_counter").write_text("0")
     return proj
 
