@@ -19,6 +19,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .plan_manifest import (
+    PlanManifestValidationError,
+    TodoPlanValidationError,
+    validate_plan_candidate,
+    validate_plan_path,
+)
+
 log = logging.getLogger(__name__)
 
 _ENTRY_HEADER_RE = re.compile(
@@ -42,14 +49,6 @@ _ENTRIES_HEADING_RE = re.compile(r"^## Entries[ \t]*$", re.MULTILINE)
 _TOP_LEVEL_SECTION_RE = re.compile(r"^## [^\n]+$", re.MULTILINE)
 
 _EMPTY_RESULT = {"spec": None, "references": []}
-
-
-class TodoPlanValidationError(ValueError):
-    """A selected TODO does not have one safe, readable Plan attachment."""
-
-    def __init__(self, code: str):
-        super().__init__(code)
-        self.code = code
 
 
 @dataclass(frozen=True)
@@ -283,11 +282,6 @@ def compile_eligible_todos(
             else:
                 plan_path = entry.plan_values[0]
                 try:
-                    from .plan_manifest import (
-                        PlanManifestValidationError,
-                        validate_plan_candidate,
-                    )
-
                     manifest = validate_plan_candidate(
                         project_dir, plan_path, expected_todo_id=entry.todo_id
                     )
@@ -352,37 +346,3 @@ def resolve_todo_plan(project_dir: Path, todos_md_path: Path, todo_id: str) -> s
         raise TodoPlanValidationError("missing")
 
     return validate_plan_path(project_dir, matches[0])
-
-
-def validate_plan_path(project_dir: Path, plan_path: str) -> str:
-    """Validate one candidate Plan path without requiring a persisted TODO."""
-    raw_path = Path(plan_path)
-    if raw_path.is_absolute():
-        raise TodoPlanValidationError("absolute")
-
-    root = project_dir.resolve()
-    candidate = project_dir / raw_path
-    unresolved = candidate.resolve(strict=False)
-    try:
-        unresolved.relative_to(root)
-    except ValueError as exc:
-        raise TodoPlanValidationError("outside_repository") from exc
-    try:
-        resolved = candidate.resolve(strict=True)
-    except FileNotFoundError as exc:
-        raise TodoPlanValidationError("missing_file") from exc
-    except OSError as exc:
-        raise TodoPlanValidationError("unreadable") from exc
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise TodoPlanValidationError("outside_repository") from exc
-    if not resolved.is_file():
-        raise TodoPlanValidationError("not_regular_file")
-    try:
-        with open(resolved, "rb"):
-            pass
-    except OSError as exc:
-        raise TodoPlanValidationError("unreadable") from exc
-
-    return raw_path.as_posix()
