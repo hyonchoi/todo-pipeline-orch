@@ -345,8 +345,9 @@ class FakeRemoteIssue:
             )), ""
         ))
         fake.on(*API, "--paginate", "--slurp", f"{base}/comments", handler=lambda argv: (
-            0, json.dumps([[{"body": body} for body in self.comments]]), ""
+            0, json.dumps([[self._comment(entry) for entry in self.comments]]), ""
         ))
+        fake.on(*API, "user", "--jq", ".login", stdout=f"{self.login}\n")
 
         def comment(argv):
             with open(argv[argv.index("--body-file") + 1]) as handle:
@@ -365,6 +366,14 @@ class FakeRemoteIssue:
         fake.on("gh", "issue", "comment", handler=comment)
         fake.on("gh", "issue", "close", handler=close)
         fake.on("gh", "issue", "edit", handler=edit)
+
+    login = "tpo-bot"
+
+    @classmethod
+    def _comment(cls, entry):
+        """``str`` entries are TPO's own comments; ``(login, body)`` pairs name another author."""
+        login, body = entry if isinstance(entry, tuple) else (cls.login, entry)
+        return {"body": body, "user": {"login": login}}
 
     def _wrote(self, verb):
         self.writes.append(verb)
@@ -402,10 +411,12 @@ def test_close_issue_for_delivery_comments_closes_unlabels_and_marks_run(tmp_pat
     assert issue.comments[0].startswith(f"Completed: PR #7 {PR_URL}, 20")
     assert issue.comments[0].rstrip().endswith(MARKER)
     assert (run_dir / "issue-closed").exists()
-    assert fake_gh.gh_calls() == [
+    assert (run_dir / "issue-commented").read_text() == "tpo-bot\n"
+    assert fake_gh.gh_calls() == [  # login is resolved once, after commenting, for the breadcrumb
         [*API[1:], "repos/acme/repo/issues/3"],
         [*API[1:], "--paginate", "--slurp", "repos/acme/repo/issues/3/comments"],
         ["issue", "comment", "3", "--repo", REPO, "--body-file", fake_gh.gh_calls()[2][-1]],
+        [*API[1:], "user", "--jq", ".login"],
         ["issue", "close", "3", "--repo", REPO, "--reason", "completed"],
         ["issue", "edit", "3", "--repo", REPO, "--remove-label", "tpo:in-progress"],
         [*API[1:], "repos/acme/repo/issues/3"],
@@ -454,6 +465,108 @@ def test_close_issue_for_delivery_adds_its_own_marker_beside_an_older_ticks(tmp_
     )
     assert _close(tmp_path, state) == "closed"
     assert issue.writes == ["comment"]
+
+
+def test_close_issue_for_delivery_ignores_completion_markers_by_other_authors(tmp_path, fake_gh):
+    """Only TPO-authored markers count: a pasted marker can neither conflict nor satisfy dedup."""
+    state, run_dir = _run_dir(tmp_path)
+    issue = FakeRemoteIssue(
+        fake_gh,
+        comments=[
+            ("mallory", "Completed: PR #6\n<!-- tpo-completed tick=00OLD pr=6 -->"),
+            ("mallory", MARKER.replace("01TICK", "00ELSEWHERE")),  # no such local run
+        ],
+    )
+
+    assert _close(tmp_path, state) == "closed"
+
+    assert issue.writes == ["comment", "close", "edit"]
+    assert [c for c in issue.comments if isinstance(c, str)] == [issue.comments[-1]]
+    assert MARKER in issue.comments[-1]
+    assert (run_dir / "issue-closed").exists()
+
+
+def test_close_issue_for_delivery_ignores_a_foreign_author_reusing_a_local_tick(tmp_path, fake_gh):
+    """A pasted marker naming one of our ticks is not ours when that run recorded another login."""
+    state, _run_dir_ = _run_dir(tmp_path)
+    (state / "runs" / "00OLD").mkdir()
+    (state / "runs" / "00OLD" / "issue-commented").write_text("tpo-bot\n")
+    issue = FakeRemoteIssue(
+        fake_gh,
+        comments=[
+            ("mallory", "Completed: PR #6\n<!-- tpo-completed tick=00OLD pr=6 -->"),
+            ("mallory", "<!-- tpo-completed tick=00OLD pr=7 -->"),
+        ],
+    )
+    assert _close(tmp_path, state) == "closed"  # neither conflict nor dedup
+    assert issue.writes == ["comment", "close", "edit"]
+
+
+def test_close_issue_for_delivery_owns_markers_by_the_login_recorded_for_their_run(tmp_path, fake_gh):
+    """Rotated token: the run's breadcrumb still names the login that commented."""
+    state, _run_dir_ = _run_dir(tmp_path)
+    (state / "runs" / "00OLD").mkdir()
+    (state / "runs" / "00OLD" / "issue-commented").write_text("previous-bot\n")
+    issue = FakeRemoteIssue(
+        fake_gh, comments=[("previous-bot", "Completed: PR #6\n<!-- tpo-completed tick=00OLD pr=6 -->")],
+    )
+    with pytest.raises(GitHubIssuesError) as excinfo:
+        _close(tmp_path, state)
+    assert excinfo.value.code == "completion_conflict"
+    assert issue.writes == []
+
+
+def test_close_issue_for_delivery_owns_markers_whose_tick_has_a_local_run_dir(tmp_path, fake_gh):
+    """Legacy breadcrumbs (``pr=N`` or missing) recorded no login: the local tick alone suffices."""
+    state, _run_dir_ = _run_dir(tmp_path)
+    (state / "runs" / "00OLD").mkdir()
+    (state / "runs" / "00OLD" / "issue-commented").write_text("pr=6\n")
+    issue = FakeRemoteIssue(
+        fake_gh, comments=[("previous-bot", "Completed: PR #6\n<!-- tpo-completed tick=00OLD pr=6 -->")],
+    )
+    with pytest.raises(GitHubIssuesError) as excinfo:
+        _close(tmp_path, state)
+    assert excinfo.value.code == "completion_conflict"
+
+    # And a rotated-login copy of our own marker still satisfies dedup.
+    issue = FakeRemoteIssue(fake_gh, state="closed", labels=("tpo:todo",), comments=[("previous-bot", MARKER)])
+    assert _close(tmp_path, state) == "closed"
+    assert issue.writes == []
+
+
+def test_close_issue_for_delivery_skips_login_lookup_when_no_remote_marker_needs_judging(tmp_path, fake_gh):
+    state, run_dir = _run_dir(tmp_path)
+    # Our own comment already landed (local breadcrumb): nothing to attribute or write.
+    (run_dir / "issue-commented").write_text("tpo-bot\n")
+    issue = FakeRemoteIssue(fake_gh, comments=["unrelated chatter"])
+    assert _close(tmp_path, state) == "closed"
+    assert issue.writes == ["close", "edit"]
+    assert not any(call[:1] == ["api"] and "user" in call for call in fake_gh.gh_calls())
+
+    # Local issue-commented marker plus a foreign-looking marker copy: the local
+    # marker settles dedup, so the login is still not needed.
+    state2 = tmp_path / "second" / ".hermes"
+    (state2 / "runs" / "01TICK").mkdir(parents=True)
+    (state2 / "runs" / "01TICK" / "issue-commented").write_text("pr=7\n")
+    fake_gh.calls.clear()
+    FakeRemoteIssue(fake_gh, state="closed", labels=("tpo:todo",), comments=[("someone", MARKER)])
+    assert _close(tmp_path, state2) == "closed"
+    assert not any("user" in call for call in fake_gh.gh_calls())
+
+
+def test_close_issue_for_delivery_falls_back_to_run_dir_ownership_when_user_lookup_is_forbidden(
+    tmp_path, fake_gh, caplog
+):
+    state, run_dir = _run_dir(tmp_path)
+    issue = FakeRemoteIssue(fake_gh, comments=[("mallory", "<!-- tpo-completed tick=00OTHER pr=6 -->")])
+    fake_gh.on(*API, "user", "--jq", ".login", rc=1, stderr="HTTP 403: Resource not accessible by integration")
+
+    with caplog.at_level("WARNING", logger="hermes_pipeline.todos_completion"):
+        assert _close(tmp_path, state) == "closed"
+
+    assert issue.writes == ["comment", "close", "edit"]
+    assert (run_dir / "issue-commented").read_text() == "\n"
+    assert any("gh_auth" in r.getMessage() and "read:user" in r.getMessage() for r in caplog.records)
 
 
 def test_close_issue_for_delivery_refuses_a_conflicting_completion_unless_forced(tmp_path, fake_gh):

@@ -66,6 +66,27 @@ _HARNESS_PLAN = """\
 Acceptance requires `normalize_names([" Alice ", "", "BOB"])` to return
 `["alice", "bob"]`, `normalize_names([])` to return `[]`, and the generated
 fixture worktree to be clean after its implementation phases complete.
+
+```json tpo-plan
+{
+  "schema_version": 1,
+  "todo_id": "TODO-1",
+  "tasks": [
+    {
+      "id": "task-1",
+      "title": "Implement normalize_names in mock_transform.py",
+      "instructions": "Add focused tests for `normalize_names` (whitespace trimming, empty values, lowercasing, input order, empty input) and confirm they fail. Then create `mock_transform.py` implementing `normalize_names(names: list[str]) -> list[str]` with the standard library only.",
+      "acceptance_criteria": [
+        "normalize_names([' Alice ', '', 'BOB']) returns ['alice', 'bob']",
+        "normalize_names([]) returns []",
+        "The fixture worktree is clean after the task commit"
+      ],
+      "verification": ["uv run pytest"],
+      "commit_message": "feat: add normalize_names mock transform"
+    }
+  ]
+}
+```
 """
 
 
@@ -167,35 +188,43 @@ def _get_issue_body_for_fixture(fixture_name: str) -> str:
 
     if fixture_name != "happy-path":
         raise ValueError(f"Unknown fixture: {fixture_name}")
-    return render_issue_body(
-        {
-            "What": (
-                "Create `mock_transform.py` with "
-                "`normalize_names(names: list[str]) -> list[str]`. For each input "
-                "string, strip surrounding whitespace, discard empty strings after "
-                "stripping, lowercase the remaining value, and preserve input order. "
-                "Return an empty list for empty input."
-            ),
-            "Why": (
-                "Provide a small, executable feature that exercises the complete "
-                "harness pipeline without external services."
-            ),
-            "Context": (
-                "Language `Python 3.12+`, Dependencies `standard library only`. "
-                'Acceptance criteria: `normalize_names([" Alice ", "", "BOB"])` '
-                'returns `["alice", "bob"]`; `normalize_names([])` returns `[]`; '
-                "tests run with `uv run pytest`."
-            ),
-            "Plan": _HARNESS_PLAN_PATH,
-            "Branch": f"feat/mock-{fixture_name}",
-            "Priority": "P1",
-            "Effort": "S",
-            "Phase": "4 (Development)",
-            "Test Coverage": "required",
-            "Security Review": "not-required",
-        },
-        include_empty=False,
-    )
+    return render_issue_body(_HARNESS_ISSUE_FIELDS | {"Branch": f"feat/mock-{fixture_name}"}, include_empty=False)
+
+
+def _harness_decisions() -> dict[str, str]:
+    """The fixture's decisions, derived from the same fields that build its issue body."""
+    from .github_issues import DECISION_SECTIONS
+
+    return {key: _HARNESS_ISSUE_FIELDS[key] for key in DECISION_SECTIONS if key in _HARNESS_ISSUE_FIELDS}
+
+
+# Offline fixture issue: every review is opted out so the harness never blocks.
+_HARNESS_ISSUE_FIELDS: dict[str, str] = {
+    "What": (
+        "Create `mock_transform.py` with "
+        "`normalize_names(names: list[str]) -> list[str]`. For each input "
+        "string, strip surrounding whitespace, discard empty strings after "
+        "stripping, lowercase the remaining value, and preserve input order. "
+        "Return an empty list for empty input."
+    ),
+    "Why": (
+        "Provide a small, executable feature that exercises the complete "
+        "harness pipeline without external services."
+    ),
+    "Context": (
+        "Language `Python 3.12+`, Dependencies `standard library only`. "
+        'Acceptance criteria: `normalize_names([" Alice ", "", "BOB"])` '
+        'returns `["alice", "bob"]`; `normalize_names([])` returns `[]`; '
+        "tests run with `uv run pytest`."
+    ),
+    "Plan": _HARNESS_PLAN_PATH,
+    "Priority": "P1",
+    "Effort": "S",
+    "Phase": "4 (Development)",
+    "Test Coverage": "required",
+    "Security Review": "not-required",
+    "UI Review": "not-required",
+}
 
 
 def _fake_gh_state_for_fixture(fixture_name: str) -> dict[str, Any]:
@@ -501,10 +530,14 @@ def _poll_kanban_phases(
     prompt_client: PromptClient = "claude",
     cancel_event: Any = None,
     registration_event: Any = None,
+    offline_terminal_phase_key: str | None = None,
 ) -> bool:
     """Poll kanban-as-scheduler phases to completion.
 
-    1. Registers all phases as kanban tasks (register_todo_phases).
+    1. Registers all phases as kanban tasks. With a written harness profile the
+       cards are pre-rendered (a tpo-plan manifest fans the development phase
+       out into ``plan:``/``validate:`` cards) and created directly; every loop
+       decision below is keyed on that registered card set, not the profile.
     2. Auto-completes gate tasks so child phases become ready.
     3. Polls get_todo_kanban_status() until all phases terminal.
     4. Emits JSONL events via monitor.
@@ -519,6 +552,7 @@ def _poll_kanban_phases(
         observe_outcomes,
         register_todo_phases,
     )
+    from .phases import Phase as _Phase
 
     # Resolve assignee from project contract (same path as tpo tick)
     assignee = "default"
@@ -532,6 +566,23 @@ def _poll_kanban_phases(
     # only durable recovery marker to be deleted with the harness workspace.
     if registration_event is not None:
         registration_event.set()
+    # Registration renders the cards (a tpo-plan manifest fans the development
+    # phase out into plan:/validate: cards). Capture that set so every loop
+    # decision keys on the registered cards, and give the last worker card the
+    # offline workflow when the manifest skipped the profile's terminal phase.
+    registered_cards: list[_Phase] = []
+
+    def _on_prepared(prepared):
+        if offline_terminal_phase_key is not None and not any(
+            task.phase_key == offline_terminal_phase_key for task in prepared
+        ):
+            prepared = _with_offline_terminal_card(prepared)
+        registered_cards[:] = [
+            _Phase(phase_key=task.phase_key, name=task.name, gate=task.gate, kind=task.kind)
+            for task in prepared
+        ]
+        return prepared
+
     register_todo_phases(
         todo_id=todo_id,
         tick_id=tick_id,
@@ -543,8 +594,12 @@ def _poll_kanban_phases(
         plan_path=_HARNESS_PLAN_PATH,
         spec_path=None,
         reference_paths=(),
+        decisions=_harness_decisions(),
         cancel_event=cancel_event,
+        transform_prepared=_on_prepared,
     )
+    # Callers that stub registration never render cards: fall back to the profile.
+    cards: list[_Phase] | None = registered_cards or phases
     # Intentionally unguarded — fail fast before polling begins, matching
     # register_todo_phases()'s unguarded call above.
     initial_status = get_todo_kanban_status(project_slug, tick_id)
@@ -560,16 +615,24 @@ def _poll_kanban_phases(
     previous_status: dict[str, str] = {}
     all_terminal = False
     current_interval = poll_interval
-    phase_by_key = {phase.phase_key: phase for phase in phases or []}
-    expected_phase_keys = frozenset(phase_by_key)
+    card_by_key = {card.phase_key: card for card in cards or []}
+    # Completion means every *registered* card is terminal — keying this on the
+    # profile phases would spin forever under a manifest fan-out.
+    expected_phase_keys = frozenset(card_by_key)
     pre_run_statuses = (None, "todo", "ready", "blocked")
     unstarted_statuses = (None, "todo", "ready")
 
     def _is_terminal_status(phase_key: str, status: str) -> bool:
         if status in TERMINAL_STATUSES:
             return True
-        phase = phase_by_key.get(phase_key)
-        return status == "blocked" and not getattr(phase, "gate", False)
+        if status != "blocked":
+            return False
+        if not card_by_key:
+            return True  # no card knowledge at all (bare unit callers): legacy rule
+        card = card_by_key.get(phase_key)
+        # A blocked registered gate waits for auto-completion; a blocked worker
+        # is stuck for good. An unregistered key is never terminal by omission.
+        return card is not None and not card.gate
 
     while not all_terminal:
         if cancel_event is not None:
@@ -603,7 +666,7 @@ def _poll_kanban_phases(
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
                     # Auto-complete any gate task whose predecessor just finished
                     _auto_complete_gate_tasks(
-                        project_slug, tick_id, completed_phase_key=phase_key, phases=phases
+                        project_slug, tick_id, completed_phase_key=phase_key, phases=cards
                     )
 
                 elif prev == "running" and status == "failed":
@@ -634,7 +697,7 @@ def _poll_kanban_phases(
                     monitor.current_phase_key = None
                     monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
                     _auto_complete_gate_tasks(
-                        project_slug, tick_id, completed_phase_key=phase_key, phases=phases
+                        project_slug, tick_id, completed_phase_key=phase_key, phases=cards
                     )
 
                 elif prev in pre_run_statuses and status == "failed":
@@ -775,6 +838,22 @@ def _offline_terminal_phase_key(
         profile_name,
         "terminal gate has no executable predecessor",
     )
+
+
+def _with_offline_terminal_card(prepared: list) -> list:
+    """Append the offline workflow to the last worker card's external-agent prompt."""
+    for index in range(len(prepared) - 1, -1, -1):
+        task = prepared[index]
+        if task.gate:
+            continue
+        marker = "END EXTERNAL AGENT PROMPT\n"
+        body = (
+            task.body.replace(marker, f"\n{_OFFLINE_TERMINAL_PROMPT.rstrip()}\n{marker}", 1)
+            if marker in task.body
+            else f"{task.body.rstrip()}\n\n{_OFFLINE_TERMINAL_PROMPT}"
+        )
+        return [*prepared[:index], replace(task, body=body), *prepared[index + 1:]]
+    return prepared
 
 
 def _with_offline_terminal_workflow(
@@ -1090,6 +1169,7 @@ def run_harness(
                         prompt_client=prompt_client,
                         cancel_event=cancel_event,
                         registration_event=registration_event,
+                        offline_terminal_phase_key=offline_terminal_phase_key,
                     )
 
                 try:

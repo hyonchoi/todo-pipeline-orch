@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import signal
 import subprocess as _cli_sp
@@ -160,7 +161,7 @@ def _doctor_github_checks(
 
     counts = {"active": 0, "delivered": 0, "abandoned": 0}
     unsupported: list[str] = []
-    active_runs: list[tuple[str, int]] = []
+    active_runs: list[tuple[str, int, Mapping]] = []
     runs_dir = state_dir / "runs"
     if runs_dir.exists() and not runs_dir.is_dir():
         print(f"WARNING: {runs_dir} is not a directory")
@@ -184,7 +185,7 @@ def _doctor_github_checks(
             state = registration_state(path.parent)
             counts[state] += 1
             if state == "active":
-                active_runs.append((tick_id, number))
+                active_runs.append((tick_id, number, payload))
     line = (
         f"Runs: active={counts['active']} delivered={counts['delivered']} "
         f"abandoned={counts['abandoned']}"
@@ -198,17 +199,27 @@ def _doctor_github_checks(
         current_tick = (state_dir / CURRENT_TICK_ID_FILE).read_text(encoding="utf-8").strip() or None
     except (OSError, UnicodeError):
         current_tick = None
-    for tick_id, number in active_runs:
+    for tick_id, number, payload in active_runs:
         if current_tick is None:
             print(f"tick {tick_id} → #{number} (active; no current tick)")
             continue
         print(f"tick {tick_id} → #{number}")
         if tick_id != current_tick:
             print(f"WARNING: run {tick_id} is active but is not the current tick")
-            print(
+            fix = (
                 f"Fix (tick {tick_id}): tpo todos complete {project} --todo {number} --pr <pr> "
                 f"if delivered, or touch {runs_dir / tick_id / 'abandoned'} to give up"
             )
+            worktree, branch = payload.get("worktree"), payload.get("branch")
+            if isinstance(worktree, str) and isinstance(branch, str) and worktree and branch:
+                from .result_contract import sanitize_result_text
+
+                fix += (
+                    f", then git worktree remove --force "
+                    f"{shlex.quote(sanitize_result_text(worktree, maximum=4096))} && "
+                    f"git branch -D {shlex.quote(sanitize_result_text(branch, maximum=255))}"
+                )
+            print(fix)
             ok = False
     return ok
 
@@ -1316,15 +1327,74 @@ def _cmd_tick(args, config: Config) -> int:
 
 
 # Tracker failures that an operator must fix; anything else is treated as transient.
-_TRACKER_CONFIG_FAULT_CODES = frozenset({"gh_missing", "gh_auth", "origin_identity_invalid"})
+_TRACKER_CONFIG_FAULT_CODES = frozenset({
+    "gh_missing", "gh_auth", "gh_version", "gh_not_found", "git_unavailable",
+    "origin_identity_invalid",
+})
 
 
 # Registration failures caused by the issue's own content (not infrastructure):
 # the issue is demoted to needs-info so it stops being re-selected every tick.
-_CONTENT_REGISTRATION_CODES = frozenset({
-    "plan_invalid", "branch_invalid", "branch_exists", "authority_untracked",
-    "authority_invalid", "branch_mismatch",
-})
+# Codes that a later tick or a human may resolve without editing the issue
+# (``authority_untracked``, ``branch_mismatch``, and ``authority_invalid``, which a
+# repository rename redirect can trigger) never demote.
+_CONTENT_REGISTRATION_CODES = frozenset({"plan_invalid", "branch_invalid", "branch_exists"})
+
+_PLAN_TRACKED_TIMEOUT = 30.0
+
+
+def _plan_tracked_at_head(project_dir: Path, plan_path: str) -> bool:
+    """True only when ``plan_path`` is committed at ``HEAD`` of ``project_dir``.
+
+    Raises ``GitHubIssuesError("git_unavailable", ...)`` when git itself cannot
+    run (missing binary, timeout): that is an operator fault, not a Plan fault.
+    """
+    from .github_issues import GitHubIssuesError
+
+    try:
+        result = _cli_sp.run(
+            ["git", "cat-file", "-e", f"HEAD:{plan_path}"],
+            cwd=project_dir,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_PLAN_TRACKED_TIMEOUT,
+        )
+    except (OSError, _cli_sp.TimeoutExpired) as exc:
+        raise GitHubIssuesError("git_unavailable", "git cat-file") from exc
+    return result.returncode == 0
+
+
+def _block_untracked_plans(project_dir: Path, eligibility):
+    """Move candidates whose Plan is not tracked at HEAD to ``plan_invalid:untracked``.
+
+    Registration would otherwise fail with ``authority_untracked`` every tick;
+    an uncommitted Plan is a content fault the author fixes by committing it,
+    so it is blocked before selection rather than demoted. A git outage
+    propagates as ``git_unavailable`` (a tracker config fault for the tick).
+    """
+    from .github_issues import EligibilityResult, GitHubIssuesError
+
+    if eligibility.candidates:
+        try:
+            head = _cli_sp.run(
+                ["git", "rev-parse", "--verify", "HEAD"],
+                cwd=project_dir, capture_output=True, text=True, check=False,
+                timeout=_PLAN_TRACKED_TIMEOUT,
+            )
+        except (OSError, _cli_sp.TimeoutExpired) as exc:
+            raise GitHubIssuesError("git_unavailable", "git rev-parse") from exc
+        if head.returncode != 0:
+            # Not a repository or an unborn HEAD: the project, not its issues, is at fault.
+            raise GitHubIssuesError("git_unavailable", "git rev-parse")
+    kept = []
+    blocked = dict(eligibility.blocked_reasons)
+    for candidate in eligibility.candidates:
+        if candidate.plan_path and not _plan_tracked_at_head(project_dir, candidate.plan_path):
+            blocked[candidate.entry.todo_id] = "plan_invalid:untracked"
+        else:
+            kept.append(candidate)
+    return EligibilityResult(tuple(kept), blocked)
 
 
 def _demote_issue(project_dir: Path, issue, *, repo: str, project_slug: str, code: str) -> None:
@@ -1795,6 +1865,12 @@ def _tick_project(
         kanban_available=kanban_available,
         requires_plan=phase_profile.requires_plan,
     )
+    if phase_profile.requires_plan:
+        try:
+            eligibility = _block_untracked_plans(project_dir, eligibility)
+        except GitHubIssuesError as exc:
+            _record_tracker_error(project_state, tick_id, project_slug, exc, cb)
+            return
     ctx = build_context(
         tick_id=tick_id,
         state_dir=project_state,
@@ -1937,6 +2013,7 @@ def _tick_project(
             spec_path=issue.spec,
             reference_paths=issue.references,
             project_dir=project_dir,
+            decisions=github_issues.issue_decisions(issue),
         )
     except Exception as exc:  # PhasePromptRenderError, path validation, manifest errors
         _record_failed_to_spawn(
@@ -2025,8 +2102,11 @@ def _tick_project(
         )
         raise
 
-    # Step 7: Claim the issue. Best-effort: Kanban in-flight state and the
-    # registration are the hard guards; a missing label is re-added next tick.
+    # Step 7: Claim the issue for every profile: the label is the re-selection
+    # guard between PR-open and merge. Closeout releases it for registered runs;
+    # other profiles release it through `tpo todos complete`. Best-effort: Kanban
+    # in-flight state and the registration are the hard guards; a missing label
+    # is re-added next tick.
     if github_issues.IN_PROGRESS_LABEL not in issue.labels:
         try:
             github_issues.add_label(
@@ -2054,7 +2134,7 @@ def _cmd_todos_complete(args, config: Config) -> int:
     from .github_issues import GitHubIssuesError, repository_identity
     from .project_config import _get_project_state_dir
     from .result_contract import ResultContractError
-    from .run_registration import active_registration_issue_numbers, registration_state
+    from .run_registration import active_runs_for_issue
     from .todos_completion import _pr_view, close_issue_for_delivery
 
     project_dir = _resolve_project_dir(config, args.project)
@@ -2069,17 +2149,8 @@ def _cmd_todos_complete(args, config: Config) -> int:
             print(f"Error: {pr_url} is not merged (state {view.get('state')}); "
                   "use --force to close the issue anyway", file=sys.stderr)
             return 2
-        if not args.force and args.todo in active_registration_issue_numbers(state_dir):
-            ticks = []
-            for path in sorted((state_dir / "runs").glob("*/registration.json")):
-                if registration_state(path.parent) != "active":
-                    continue
-                try:
-                    payload = json.loads(path.read_text(encoding="utf-8"))
-                except (OSError, UnicodeError, json.JSONDecodeError):
-                    continue
-                if isinstance(payload, dict) and payload.get("issue_number") == args.todo:
-                    ticks.append(path.parent.name)
+        ticks = active_runs_for_issue(state_dir, args.todo) if not args.force else ()
+        if ticks:
             print(f"Error: run {', '.join(ticks)} is active for TODO-{args.todo}; "
                   "let the tick finish it or use --force", file=sys.stderr)
             return 2
@@ -2654,7 +2725,7 @@ def _cmd_doctor(args, config: Config) -> int:
     )
     print(
         "Mixed-client fleets require separate project roots; per-project "
-        "selection is deferred to TODO-42."
+        "selection is deferred to issue #67 (legacy TODO-42)."
     )
     print(f"Prerequisites for profile '{contract.profile}':")
     has_unverified_prerequisites = False

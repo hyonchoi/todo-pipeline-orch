@@ -2999,21 +2999,26 @@ def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles
         '"commit_message":"feat: first"}]}\n```\n'
     )
     marker = "Spec (authoritative): docs/spec.md\nReference material: docs/ref.md\n"
+    decisions_marker = "Decisions:\n- Effort: S\n- Security Review: not-required\n"
 
     def render(profile):
         return prepare_todo_phases(
             todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
             phases_path=resolve_profile_phases_path(profile), project_dir=repo,
             plan_path="docs/plan.md", spec_path="docs/spec.md", reference_paths=("docs/ref.md",),
+            decisions={"Effort": "S", "Security Review": "not-required"},
         )
 
     for profile in ("gstack", "agent-skills"):
         for task in render(profile):
             assert (marker in task.body) is (not task.gate), (profile, task.phase_key)
+            assert (decisions_marker in task.body) is (not task.gate), (profile, task.phase_key)
 
     native = {task.phase_key: task for task in render("native-sdd")}
     assert marker in native["plan:task-1"].body
+    assert decisions_marker in native["plan:task-1"].body
     assert marker not in native["validate:task-1"].body
+    assert "Security Review:" not in native["validate:task-1"].body
     assert native["validate:task-1"].gate and native["validate:task-1"].kind == "controller_gate"
     assert not any(key.startswith(("phase_5", "phase_8", "phase_9")) for key in native)
 

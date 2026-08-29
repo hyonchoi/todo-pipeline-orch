@@ -4,8 +4,8 @@ phases:
     prompt: |
       Use the agent-skills:spec-driven-development skill's Specify phase in {agent_product}.
 
-      The selected TODO is {todo_id} — it is already marked in-flight in TODOS.md.
-      Work on {todo_id} only; do not pick a different TODO.
+      The selected TODO is {todo_id} — its decisions are in the Decisions block
+      of this prompt. Work on {todo_id} only; do not pick a different TODO.
 
       1. Write the spec to SPEC.md at the repo root.
       2. Create a new branch from main.

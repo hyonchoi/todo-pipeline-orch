@@ -17,7 +17,11 @@ vocabulary created by `tpo todos labels sync <project>`, alongside the `tpo:*`
 and mirror labels listed under
 [TPO backlog items](issue-tracker.md#tpo-backlog-items). For pipeline TODOs,
 `ready-for-agent` is the selection gate and any other triage label blocks
-selection.
+selection. TPO itself may move an issue from `ready-for-agent` to `needs-info`
+when run registration fails on a permanent content fault (`plan_invalid`,
+`branch_invalid`, `branch_exists`); infrastructure codes such as
+`authority_untracked` or `authority_invalid` never demote, and it never applies any
+other triage label.
 
 The right-hand column is fixed for pipeline TODOs: `tpo todos labels sync`
 creates these exact labels and `tpo doctor` reports any that are missing.

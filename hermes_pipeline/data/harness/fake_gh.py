@@ -7,8 +7,9 @@ State lives in the JSON file named by ``TPO_FAKE_GH_STATE``::
      "comments": {"1": [{"body": "..."}]}, "labels": ["tpo:todo"],
      "dependencies": [[blocked_number, blocker_id]]}
 
-Supported: ``auth status``; ``api`` list/single issue/comments/dependencies POST;
-``issue edit|comment|close|create``; ``label list|create``. Anything else exits 1
+Supported: ``auth status``; ``--version``; ``api`` list/single issue/comments/
+dependencies POST/``user --jq .login``; ``issue edit|comment|close|create``;
+``label list|create``. Anything else exits 1
 with ``fake gh: unsupported: <argv>``. Stdlib only; no network.
 """
 from __future__ import annotations
@@ -22,6 +23,7 @@ from pathlib import Path
 from urllib.parse import parse_qs
 
 STATE_ENV = "TPO_FAKE_GH_STATE"
+FAKE_LOGIN = "fake-gh"
 _ISSUES_RE = re.compile(r"^repos/([^/]+/[^/]+)/issues(?:\?(.*))?$")
 _ISSUE_RE = re.compile(r"^repos/([^/]+/[^/]+)/issues/(\d+)(/comments|/dependencies/blocked_by)?$")
 
@@ -123,10 +125,14 @@ def _split_labels(values: list[str]) -> list[str]:
 
 
 def _api(state: dict, path: Path, argv: list[str]) -> str:
-    flags, positionals = _flags(argv, valued=("-H", "--method", "-F", "-f"), boolean=("--paginate", "--slurp"))
+    flags, positionals = _flags(argv, valued=("-H", "--method", "-F", "-f", "--jq"), boolean=("--paginate", "--slurp"))
     if len(positionals) != 1:
         raise Failure(f"fake gh: unsupported: {sys.argv[1:]}")
     endpoint = positionals[0]
+    if endpoint == "user":
+        if flags.get("--jq") == [".login"]:
+            return f"{FAKE_LOGIN}\n"
+        return json.dumps({"login": FAKE_LOGIN})
     method = (flags.get("--method") or ["GET"])[0].upper()
     wrap = "--slurp" in flags
 
@@ -218,7 +224,11 @@ def _issue_cmd(state: dict, path: Path, argv: list[str]) -> str:
         else:
             raise Failure(f"fake gh: unsupported: {sys.argv[1:]}")
         comments = state["comments"].setdefault(str(issue["number"]), [])
-        comments.append({"id": 5000 + sum(len(items) for items in state["comments"].values()), "body": body})
+        comments.append({
+            "id": 5000 + sum(len(items) for items in state["comments"].values()),
+            "body": body,
+            "user": {"login": FAKE_LOGIN},
+        })
         _save(path, state)
         return f"{issue['html_url']}#issuecomment-{comments[-1]['id']}\n"
     if verb == "close":
@@ -257,6 +267,9 @@ def main(argv: list[str]) -> int:
     try:
         if argv[:2] == ["auth", "status"]:
             sys.stderr.write("github.com\n  ✓ Logged in to github.com account fake-gh\n")
+            return 0
+        if argv == ["--version"]:
+            sys.stdout.write("gh version 2.44.0 (fake)\n")
             return 0
         raw = os.environ.get(STATE_ENV)
         if not raw:

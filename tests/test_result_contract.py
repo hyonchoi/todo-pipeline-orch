@@ -151,6 +151,7 @@ def test_summary_and_diagnostics_are_sanitized():
     assert "\x00" not in sanitized
     assert secret not in sanitized
     assert "[REDACTED]" in sanitized
+    assert sanitize_result_text("a\u2028b\u2029c\u202ed\u2066e\r\n\tf", maximum=100) == "a b cde f"
 
 
 @pytest.mark.parametrize(

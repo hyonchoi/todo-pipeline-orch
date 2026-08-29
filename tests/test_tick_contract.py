@@ -603,6 +603,30 @@ class TestTickPromptPreparation:
         assert "disk full" not in caplog.text
 
 
+MANIFEST_PLAN = (
+    "# Plan\n\n```json tpo-plan\n"
+    '{"schema_version":1,"todo_id":"TODO-10","tasks":[{"id":"task-1","title":"Do",'
+    '"instructions":"Do it","acceptance_criteria":["Works"],"verification":["uv run pytest"],'
+    '"commit_message":"feat: do"}]}\n```\n'
+)
+
+
+def _commit_plan(project_dir, relative_path="docs/plan.md", text=MANIFEST_PLAN):
+    """Track the Plan at HEAD: a plan-gated profile only selects committed plans."""
+    plan = project_dir / relative_path
+    plan.parent.mkdir(parents=True, exist_ok=True)
+    plan.write_text(text)
+    for command in (
+        ("init", "-q", "-b", "main"),
+        ("config", "user.email", "t@example.com"),
+        ("config", "user.name", "T"),
+        ("add", relative_path),
+        ("commit", "-qm", "plan"),
+    ):
+        subprocess.run(["git", *command], cwd=project_dir, check=True, capture_output=True)
+    return plan
+
+
 class TestTickPlanRequirement:
     @staticmethod
     def _configure_profile(project_dir, tmp_path, mocker):
@@ -666,12 +690,10 @@ class TestTickPlanRequirement:
         project_state = project_dir / ".hermes"
         project_state.mkdir()
         self._configure_profile(project_dir, tmp_path, mocker)
-        plan = project_dir / "docs" / "plan.md"
-        plan.parent.mkdir()
-        plan.write_text("# Plan\n")
+        _commit_plan(project_dir)
         seed_project_issues(
             fake_gh,
-            [todo_payload(10, title="Test", body=PLAN_BODY + "\n### Spec\n\ndocs/spec.md\n\n### Reference\n\ndocs/a.md, docs/b.md\n")],
+            [todo_payload(10, title="Test", body=PLAN_BODY + "\n### Spec\n\ndocs/spec.md\n\n### Reference\n\ndocs/a.md, docs/b.md\n\n### Priority\n\nP1\n\n### Security Review\n\nnot-required\nwhy: docs only\n")],
         )
         prepare = mocker.patch(
             "hermes_pipeline.kanban_tasks.prepare_todo_phases",
@@ -692,6 +714,92 @@ class TestTickPlanRequirement:
         assert prepare.call_args.kwargs["plan_path"] == "docs/plan.md"
         assert prepare.call_args.kwargs["spec_path"] == "docs/spec.md"
         assert prepare.call_args.kwargs["reference_paths"] == ("docs/a.md", "docs/b.md")
+        assert prepare.call_args.kwargs["decisions"] == {
+            "Priority": "P1", "Security Review": "not-required",
+        }
+
+    def test_untracked_plan_is_blocked_before_selection_without_demotion(
+        self, tmp_path, mocker, fake_gh
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        _commit_plan(project_dir, "docs/other.md")
+        (project_dir / "docs" / "plan.md").write_text(MANIFEST_PLAN)  # present, not committed
+        seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=PLAN_BODY)])
+        prepare = mocker.patch("hermes_pipeline.kanban_tasks.prepare_todo_phases")
+        create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases")
+
+        selection = _run_project_tick(
+            project_dir=project_dir, config=Config(prompt_client="codex"),
+            tick_id="01UNTRACKED", mocker=mocker,
+        )
+
+        selection.assert_not_called()
+        selection.registration.assert_not_called()
+        prepare.assert_not_called()
+        create.assert_not_called()
+        assert not any(call[:2] == ["issue", "edit"] for call in fake_gh.gh_calls())
+        decision = json.loads((project_state / "decisions" / "01UNTRACKED.json").read_text())
+        assert decision["picked"] is None
+        assert decision["blocked_reasons"] == {"TODO-10": "plan_invalid:untracked"}
+
+    def test_project_without_a_commit_is_a_tracker_config_fault_not_a_plan_fault(
+        self, tmp_path, mocker, fake_gh, caplog
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        (project_dir / "docs").mkdir()
+        (project_dir / "docs" / "plan.md").write_text(MANIFEST_PLAN)  # no git repo at all
+        seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=PLAN_BODY)])
+        create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases")
+
+        with caplog.at_level("ERROR", logger="hermes_pipeline.cli"):
+            selection = _run_project_tick(
+                project_dir=project_dir, config=Config(prompt_client="codex"),
+                tick_id="01NOREPO", mocker=mocker,
+            )
+
+        selection.assert_not_called()
+        create.assert_not_called()
+        selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=False)
+        decision = json.loads((project_state / "decisions" / "01NOREPO.json").read_text())
+        assert decision["rationale"] == "tracker_error: git_unavailable"
+        assert decision["blocked_reasons"] == {}
+
+    def test_git_unavailable_during_plan_check_is_a_tracker_config_fault(
+        self, tmp_path, mocker, fake_gh, caplog
+    ):
+        from hermes_pipeline.github_issues import GitHubIssuesError
+
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        _commit_plan(project_dir)
+        seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=PLAN_BODY)])
+        mocker.patch(
+            "hermes_pipeline.cli._plan_tracked_at_head",
+            side_effect=GitHubIssuesError("git_unavailable", "git cat-file"),
+        )
+        create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases")
+
+        with caplog.at_level("ERROR", logger="hermes_pipeline.cli"):
+            selection = _run_project_tick(
+                project_dir=project_dir, config=Config(prompt_client="codex"),
+                tick_id="01GITDOWN", mocker=mocker,
+            )
+
+        selection.assert_not_called()
+        create.assert_not_called()
+        selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=False)
+        decision = json.loads((project_state / "decisions" / "01GITDOWN.json").read_text())
+        assert decision["rationale"] == "tracker_error: git_unavailable"
+        assert any("git_unavailable" in r.getMessage() for r in caplog.records)
+        assert not (project_state / "current_tick_id.txt").exists()
 
     def test_registration_precedes_kanban_and_uses_pinned_worktree(
         self, tmp_path, mocker, fake_gh
@@ -700,9 +808,7 @@ class TestTickPlanRequirement:
         project_state = project_dir / ".hermes"
         project_state.mkdir()
         self._configure_profile(project_dir, tmp_path, mocker)
-        plan = project_dir / "docs" / "plan.md"
-        plan.parent.mkdir()
-        plan.write_text("# Plan\n")
+        _commit_plan(project_dir)
         seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=PLAN_BODY)])
         fake_gh.on(
             "gh", "issue", "edit",
@@ -756,13 +862,13 @@ class TestTickPlanRequirement:
         project_state = project_dir / ".hermes"
         project_state.mkdir()
         self._configure_profile(project_dir, tmp_path, mocker)
-        docs = project_dir / "docs"
-        docs.mkdir()
-        (docs / "plan.md").write_text("# Legacy plan\n")
+        _commit_plan(project_dir)
+        _commit_plan(project_dir, "docs/legacy.md", text="# Legacy plan\n")
         seed_project_issues(
             fake_gh,
             [
                 todo_payload(10, title="Eligible", body=PLAN_BODY),
+                todo_payload(13, title="Legacy plan", body=PLAN_BODY.replace("docs/plan.md", "docs/legacy.md")),
                 todo_payload(11, title="Missing plan", body="### Branch\n\nfeat/11\n"),
                 todo_payload(12, title="Complete", body=PLAN_BODY, state="closed"),
             ],
@@ -787,6 +893,7 @@ class TestTickPlanRequirement:
         assert "TODO-10" in context.selection_markdown
         assert "TODO-11" not in context.selection_markdown
         assert "TODO-12" not in context.selection_markdown
+        assert "TODO-13" not in context.selection_markdown
         assert context.candidate_ids == ("TODO-10",)
         assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset({"TODO-10"})
 
@@ -851,6 +958,26 @@ class TestTickSelectionCandidates:
             assert blocked not in context.selection_markdown
         assert context.candidate_ids == ("TODO-10",)
         assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset({"TODO-10"})
+
+    def test_non_plan_profile_creates_cards_and_claims_the_issue(self, tmp_path, mocker, fake_gh):
+        """The claim guards re-selection between PR-open and merge; ``todos complete`` releases it."""
+        project_dir = _create_project(tmp_path, "demo")
+        (project_dir / ".hermes").mkdir()
+        mocker.patch("hermes_pipeline.kanban_tasks.prepare_todo_phases", return_value=["prepared"])
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases", return_value=["task-1"]
+        )
+
+        selection = _run_project_tick(
+            project_dir=project_dir, config=Config(prompt_client="codex"),
+            tick_id="01NOCLAIM", mocker=mocker, patch_registration=False,
+        )
+
+        create.assert_called_once()
+        assert fake_gh.gh_calls()[-1] == [
+            "issue", "edit", "10", "--repo", REPO, "--add-label", "tpo:in-progress"
+        ]
+        selection.cb.observe.assert_called_once_with(picked="TODO-10", counts_as_no_progress=False)
 
     def test_zero_candidates_without_plan_skips_selection_call(self, tmp_path, mocker, fake_gh):
         project_dir = _create_project(tmp_path, "demo")
@@ -924,8 +1051,10 @@ class TestTickGitHubSource:
             (lambda gh: gh.on(*API_ARGV, "--paginate", "--slurp", rc=1, stderr="To get started with GitHub CLI, please run: gh auth login"), "gh_auth", False),
             (lambda gh: gh.on(*API_ARGV, "--paginate", "--slurp", rc=1, stderr="connection reset"), "gh_unavailable", True),
             (lambda gh: gh.on(*API_ARGV, "--paginate", "--slurp", rc=1, stderr="API rate limit exceeded"), "gh_rate_limited", True),
+            (lambda gh: gh.on(*API_ARGV, "--paginate", "--slurp", rc=1, stderr="HTTP 404: Not Found"), "gh_not_found", False),
+            (lambda gh: gh.on(*API_ARGV, "--paginate", "--slurp", rc=1, stderr="unknown flag: --slurp"), "gh_version", False),
         ],
-        ids=["origin", "missing", "auth", "unavailable", "rate-limited"],
+        ids=["origin", "missing", "auth", "unavailable", "rate-limited", "not-found", "version"],
     )
     def test_tracker_errors_record_decision_and_classify_progress(
         self, tmp_path, mocker, fake_gh, caplog, setup, code, no_progress
@@ -1098,7 +1227,7 @@ def _git_project(tmp_path):
     """A real git repository with a tracked Plan so register_pinned_run can run unmocked."""
     project_dir = tmp_path / "demo"
     (project_dir / "docs").mkdir(parents=True)
-    (project_dir / "docs" / "plan.md").write_text("# Plan\n")
+    (project_dir / "docs" / "plan.md").write_text(MANIFEST_PLAN)
     for command in (
         ("init", "-q", "-b", "main"),
         ("config", "user.email", "test@example.com"),
@@ -1151,11 +1280,17 @@ class TestTickCrashRecovery:
 
         # Next tick: the orphaned registration is ownership proof — #10 is in_flight
         # (no worktree_mismatch loop); a different eligible issue proceeds instead.
+        (project_dir / "docs" / "plan-11.md").write_text(MANIFEST_PLAN.replace("TODO-10", "TODO-11"))
+        for command in (("add", "docs/plan-11.md"), ("commit", "-qm", "plan 11")):
+            subprocess.run(["git", *command], cwd=project_dir, check=True, capture_output=True)
         seed_project_issues(
             fake_gh,
             [
                 todo_payload(10, title="test", body=PLAN_BODY),
-                todo_payload(11, title="other", body=PLAN_BODY.replace("feat/todo-10", "feat/todo-11")),
+                todo_payload(
+                    11, title="other",
+                    body=PLAN_BODY.replace("feat/todo-10", "feat/todo-11").replace("docs/plan.md", "docs/plan-11.md"),
+                ),
             ],
         )
         selection = _run_project_tick(
@@ -1219,7 +1354,7 @@ class TestTickCrashRecovery:
 class TestTickFixRound1:
     """C2/C3/C4/C6/C7/C8 rulings."""
 
-    @pytest.mark.parametrize("code", ["branch_invalid", "branch_exists", "plan_invalid", "authority_untracked"])
+    @pytest.mark.parametrize("code", ["branch_invalid", "branch_exists", "plan_invalid"])
     def test_content_caused_registration_failure_demotes_issue(
         self, tmp_path, mocker, fake_gh, caplog, code
     ):
@@ -1228,8 +1363,7 @@ class TestTickFixRound1:
         project_dir = _create_project(tmp_path, "demo")
         (project_dir / ".hermes").mkdir()
         TestTickPlanRequirement._configure_profile(project_dir, tmp_path, mocker)
-        (project_dir / "docs").mkdir()
-        (project_dir / "docs" / "plan.md").write_text("# Plan\n")
+        _commit_plan(project_dir)
         seed_project_issues(fake_gh, [todo_payload(10, title="test", body=PLAN_BODY)])
         mocker.patch("hermes_pipeline.kanban_tasks.prepare_todo_phases", return_value=[SimpleNamespace(phase_key="t")])
         create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases")
@@ -1249,15 +1383,21 @@ class TestTickFixRound1:
         assert any(code in r.getMessage() and "needs-info" in r.getMessage() for r in caplog.records)
         selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
 
-    @pytest.mark.parametrize("code", ["git_error", "worktree_mismatch", "worktree_create_failed"])
+    @pytest.mark.parametrize(
+        "code",
+        [
+            "git_error", "worktree_mismatch", "worktree_create_failed",
+            "authority_untracked", "authority_invalid", "branch_mismatch",
+        ],
+    )
     def test_infrastructure_registration_failure_does_not_demote(self, tmp_path, mocker, fake_gh, code):
+        """Transient or operator-resolvable codes never move the issue to needs-info."""
         from hermes_pipeline.run_registration import RunRegistrationError
 
         project_dir = _create_project(tmp_path, "demo")
         (project_dir / ".hermes").mkdir()
         TestTickPlanRequirement._configure_profile(project_dir, tmp_path, mocker)
-        (project_dir / "docs").mkdir()
-        (project_dir / "docs" / "plan.md").write_text("# Plan\n")
+        _commit_plan(project_dir)
         seed_project_issues(fake_gh, [todo_payload(10, title="test", body=PLAN_BODY)])
         mocker.patch("hermes_pipeline.kanban_tasks.prepare_todo_phases", return_value=[SimpleNamespace(phase_key="t")])
 
@@ -1274,8 +1414,7 @@ class TestTickFixRound1:
         project_dir = _create_project(tmp_path, "demo")
         (project_dir / ".hermes").mkdir()
         TestTickPlanRequirement._configure_profile(project_dir, tmp_path, mocker)
-        (project_dir / "docs").mkdir()
-        (project_dir / "docs" / "plan.md").write_text("# Plan\n")
+        _commit_plan(project_dir)
         seed_project_issues(fake_gh, [todo_payload(10, title="test", body=PLAN_BODY)])
         fake_gh.on("gh", "issue", "edit", rc=1, stderr="HTTP 500")
         mocker.patch("hermes_pipeline.kanban_tasks.prepare_todo_phases", return_value=[SimpleNamespace(phase_key="t")])
@@ -1487,7 +1626,10 @@ class TestResumeIssueCloseout:
                                         labels=remote["labels"])), ""
         ))
         fake_gh.on(*API_ARGV, "--paginate", "--slurp", f"repos/{REPO}/issues/10/comments",
-                   handler=lambda argv: (0, json.dumps([[{"body": b} for b in remote["comments"]]]), ""))
+                   handler=lambda argv: (0, json.dumps(
+                       [[{"body": b, "user": {"login": "tpo-bot"}} for b in remote["comments"]]]
+                   ), ""))
+        fake_gh.on(*API_ARGV, "user", "--jq", ".login", stdout="tpo-bot\n")
 
         def comment(argv):
             with open(argv[argv.index("--body-file") + 1]) as handle:

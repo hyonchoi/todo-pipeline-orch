@@ -67,6 +67,8 @@ KNOWN_SECTIONS: tuple[str, ...] = (
     "Legacy ID",
 )
 REQUIRED_SECTIONS = ("What", "Why", "Branch", "Priority", "Effort")
+# Decision sections rendered into every worker prompt's ``Decisions:`` block.
+DECISION_SECTIONS = ("Priority", "Effort", "Phase", "Test Coverage", "Security Review", "UI Review")
 # Phase dropdown options of the issue form (single source; the form contract test binds
 # .github/ISSUE_TEMPLATE/tpo-todo.yml to this tuple).
 PHASE_OPTIONS: tuple[str, ...] = (
@@ -280,6 +282,39 @@ def first_lines(values: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(result)
 
 
+_DECISION_LABEL_PREFIX = {
+    "Priority": "priority:",
+    "Effort": "effort:",
+    "Test Coverage": "test-coverage:",
+    "Security Review": "security-review:",
+    "UI Review": "ui-review:",
+}
+_LABEL_NAMES = frozenset(name for name, _color, _description in LABEL_VOCABULARY)
+
+
+def _decision_is_valid(section: str, value: str) -> bool:
+    if section == "Phase":
+        return value in PHASE_OPTIONS
+    return f"{_DECISION_LABEL_PREFIX[section]}{value}" in _LABEL_NAMES
+
+
+def issue_decisions(issue: IssueTodo) -> dict[str, str]:
+    """First-line value of each present decision section, in canonical order.
+
+    Only vocabulary values pass through (a ``LABEL_VOCABULARY`` mirror for
+    Priority/Effort/Test Coverage/Security Review/UI Review, ``PHASE_OPTIONS`` for
+    Phase); anything else renders as ``unrecognized`` so a worker prompt never
+    carries free text that could be mistaken for a decision.
+    """
+    sections = parse_issue_body(issue.body)
+    decisions: dict[str, str] = {}
+    for section in DECISION_SECTIONS:
+        values = first_lines(sections.get(section, ()))
+        if values:
+            decisions[section] = values[0] if _decision_is_valid(section, values[0]) else "unrecognized"
+    return decisions
+
+
 def issue_from_api(payload: Mapping, *, repo: str) -> IssueTodo:
     """Map one REST issue JSON object onto :class:`IssueTodo`."""
     if "pull_request" in payload:
@@ -383,8 +418,6 @@ def _status_reason(
     if IN_PROGRESS_LABEL in issue.labels:
         if not kanban_available:
             return "in_progress_unverified"
-        if issue.number in active_registration_ids:
-            return "in_flight"
         return "in_progress_stale"
     if issue.blocked_by_open is None:
         return "dependency_unknown"
@@ -437,6 +470,11 @@ def compile_eligible_issues(
                         project_dir, plan_path, expected_todo_id=issue.todo_id
                     )
                     plan_kind = "manifest" if manifest is not None else "legacy"
+                    if plan_kind == "legacy":
+                        # Plan-gated closeout reconciles manifest tasks; a
+                        # manifest-free Plan can only run under a non-plan profile.
+                        plan_path = None
+                        reason = "plan_invalid:manifest_required"
                 except (TodoPlanValidationError, PlanManifestValidationError) as exc:
                     plan_path = None
                     reason = f"plan_invalid:{exc.code}"
@@ -498,7 +536,9 @@ _GITHUB_REMOTE_RE = re.compile(
     rf"({_REPO_SEGMENT})/({_REPO_SEGMENT}?)(?:\.git)?/?$"
 )
 _REPO_RE = re.compile(rf"{_REPO_SEGMENT}/{_REPO_SEGMENT}")
-_AUTH_RE = re.compile(r"(?i)gh auth login|HTTP 401|not logged in")
+_AUTH_RE = re.compile(r"(?i)gh auth login|HTTP 401|not logged in|HTTP 403|Resource not accessible")
+_VERSION_STDERR_RE = re.compile(r"(?i)unknown flag|unknown command")
+_GH_VERSION_RE = re.compile(r"gh version (\d+)\.(\d+)(?:\.(\d+))?")
 _RATE_LIMIT_RE = re.compile(r"(?i)rate limit exceeded|secondary rate limit|HTTP 429")
 _NOT_FOUND_RE = re.compile(r"(?i)HTTP 404|Could not resolve")
 _REJECTED_RE = re.compile(r"(?i)HTTP 4(?:00|09|22)|Validation Failed|could not (?:add|remove) label")
@@ -543,10 +583,12 @@ def _verb(args: Sequence[str]) -> str:
 
 
 def _classify_stderr(stderr: str) -> str:
+    if _VERSION_STDERR_RE.search(stderr):
+        return "gh_version"  # an older gh that lacks a flag or subcommand we rely on
+    if _RATE_LIMIT_RE.search(stderr):
+        return "gh_rate_limited"  # before auth: rate limits also arrive as HTTP 403
     if _AUTH_RE.search(stderr):
         return "gh_auth"
-    if _RATE_LIMIT_RE.search(stderr):
-        return "gh_rate_limited"
     if _NOT_FOUND_RE.search(stderr):
         return "gh_not_found"
     if _REJECTED_RE.search(stderr):
@@ -708,11 +750,22 @@ def _list_issues(project_dir: Path, repo: str, query: str) -> tuple[IssueTodo, .
         timeout=_LIST_TIMEOUT,
     )
     data = _decode_json(stdout, "api", empty=[])
-    issues = [
-        _issue_from_payload(payload, repo=repo, verb="api")
-        for payload in _flatten_pages(data, "api")
-        if not (isinstance(payload, Mapping) and "pull_request" in payload)
-    ]
+    issues: list[IssueTodo] = []
+    skipped = 0
+    for payload in _flatten_pages(data, "api"):
+        if isinstance(payload, Mapping) and "pull_request" in payload:
+            continue
+        try:
+            issues.append(_issue_from_payload(payload, repo=repo, verb="api"))
+        except (GitHubIssuesError, SnapshotFormatError, ValueError):
+            # One malformed issue must not hide the whole backlog; the number is
+            # the only payload detail logged.
+            number = payload.get("number") if isinstance(payload, Mapping) else None
+            label = f"#{number}" if isinstance(number, int) else "<unknown>"
+            log.warning("skipping malformed issue payload %s in %s", label, repo)
+            skipped += 1
+    if skipped and not issues:
+        raise _fail("gh_invalid", "api")  # nothing mapped: the response is unusable
     return tuple(sorted(issues, key=lambda issue: issue.number))
 
 
@@ -782,9 +835,10 @@ def check_issue_drift(
     return None
 
 
-def list_comment_bodies(
+def list_comments(
     project_dir: Path, number: int, *, repo: str | None = None
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, str], ...]:
+    """``(author_login, body)`` for every comment; missing fields render as ``""``."""
     number = _issue_number(number)
     repo = _repo(project_dir, repo)
     stdout = _gh_api(
@@ -792,12 +846,32 @@ def list_comment_bodies(
         ["--paginate", "--slurp", f"repos/{repo}/issues/{number}/comments"],
         timeout=_LIST_TIMEOUT,
     )
-    bodies: list[str] = []
+    comments: list[tuple[str, str]] = []
     for comment in _flatten_pages(_decode_json(stdout, "api", empty=[]), "api"):
         if not isinstance(comment, Mapping):
             raise _fail("gh_invalid", "api")
-        bodies.append(str(comment.get("body") or ""))
-    return tuple(bodies)
+        user = comment.get("user")
+        login = str(user.get("login") or "") if isinstance(user, Mapping) else ""
+        comments.append((login, str(comment.get("body") or "")))
+    return tuple(comments)
+
+
+def list_comment_bodies(
+    project_dir: Path, number: int, *, repo: str | None = None
+) -> tuple[str, ...]:
+    return tuple(body for _login, body in list_comments(project_dir, number, repo=repo))
+
+
+def current_login(project_dir: Path) -> str:
+    """Login of the account whose token ``gh`` uses (``gh api user``)."""
+    login = _gh_api(project_dir, ["user", "--jq", ".login"]).strip()
+    if not login or "\n" in login:
+        raise _fail("gh_invalid", "api")
+    return login
+
+
+def _version_tuple(text: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in text.split("."))
 
 
 def check_auth(project_dir: Path) -> None:
@@ -808,6 +882,10 @@ def check_auth(project_dir: Path) -> None:
     reports the missing login on stdout). Every other classification
     (``gh_missing``, ``gh_rate_limited``, and ``gh_unavailable`` for timeouts,
     network or 5xx text, or any other unrecognized stderr) passes through unchanged.
+
+    After auth, ``gh --version`` must report at least :data:`MIN_GH_VERSION`;
+    an older or unparseable version raises ``gh_version`` (``detail`` carries the
+    versions, never process output).
     """
     try:
         _gh(project_dir, ["auth", "status", "--hostname", "github.com"])
@@ -815,6 +893,13 @@ def check_auth(project_dir: Path) -> None:
         if exc.code == "gh_unavailable" and exc.returncode is not None and exc.stderr_blank:
             raise GitHubIssuesError("gh_auth", "auth status") from exc
         raise
+    match = _GH_VERSION_RE.search(_gh(project_dir, ["--version"]))
+    found = ".".join(group for group in match.groups() if group) if match else None
+    if found is None or _version_tuple(found) < _version_tuple(MIN_GH_VERSION):
+        raise _fail(
+            "gh_version", "version",
+            detail=f"gh {found or 'version unparseable'} < {MIN_GH_VERSION}",
+        )
 
 
 def list_labels(project_dir: Path, *, repo: str | None = None) -> frozenset[str]:

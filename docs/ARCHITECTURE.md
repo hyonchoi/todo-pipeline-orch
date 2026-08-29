@@ -217,7 +217,9 @@ and `TODOS-archive.md` are retired (see
   `json tpo-plan` block; its `todo_id` must equal `TODO-<issue-number>`, so file
   the issue before authoring the manifest ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)).
   Manifest-free Markdown remains a legacy compatibility contract that compiles
-  to one development card; validate a Plan with
+  to one development card, but only non-plan profiles accept it: a plan-gated
+  profile (`requires_plan`) blocks such an issue as
+  `plan_invalid:manifest_required`. Validate a Plan with
   `tpo plan validate <project> --todo <n> --require-manifest`.
 - **Label vocabulary and eligibility** — `tpo:todo` + `ready-for-agent` make an
   issue selectable; `tpo:on-hold`, `tpo:in-progress`, and pending-triage labels
@@ -234,8 +236,15 @@ and `TODOS-archive.md` are retired (see
   blocks the run as `needs_input` and is never auto-repaired;
   `issue_unavailable:<code>` only warns. Tracker outages during selection are
   persisted as `tracker_error: <gh code>` decisions.
-- **Closeout** — after the PR merges, TPO closes the issue via `gh`, removes
-  `tpo:in-progress`, and writes the `issue-closed` run marker.
+- **Claim and closeout** — the tick that creates a run's cards adds
+  `tpo:in-progress` under every profile; it is the re-selection guard between
+  PR-open and merge. Under a plan-gated profile (`requires_plan`) closeout
+  closes the issue via `gh`, removes the label, and writes the `issue-closed`
+  run marker after the PR merges. Non-plan profiles keep the claim until you run
+  `tpo todos complete <project> --todo N --pr N` after the merge; until then
+  `in_progress_stale` is the expected blocked reason for a delivered issue.
+  Completion markers count only when TPO wrote them (the current `gh` login, or
+  a `tick=` naming a local `runs/<tick>` directory).
 - **Offline harness** — `tpo test` serves every `gh` call from a bundled fake
   (`TPO_GH_BIN`, `TPO_FAKE_GH_STATE`); the minimum real `gh` is 2.44.
 

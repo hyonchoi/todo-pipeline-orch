@@ -127,7 +127,103 @@ class TestCreateMockProject:
         assert result["todo_id"] == 1
         assert result["fixture_name"] == "happy-path"
 
-    @pytest.mark.parametrize("profile_name", ["gstack", "agent-skills"])
+    def test_native_sdd_mock_project_compiles_the_manifest_fan_out(self, tmp_path: Path):
+        """The fixture Plan carries a tpo-plan manifest, so native-sdd gets plan:/validate: cards."""
+        from hermes_pipeline.harness import _HARNESS_PLAN_PATH
+        from hermes_pipeline.kanban_tasks import prepare_todo_phases
+        from hermes_pipeline.phases import resolve_profile_phases_path
+
+        create_mock_project(tmp_path, "happy-path", "native-sdd")
+
+        prepared = prepare_todo_phases(
+            todo_id="TODO-1", tick_id="01HARNESS", board_slug="mock-project",
+            phases_path=resolve_profile_phases_path("native-sdd"), project_dir=tmp_path,
+            plan_path=_HARNESS_PLAN_PATH,
+        )
+        keys = [task.phase_key for task in prepared]
+        assert keys == ["plan:task-1", "validate:task-1"]
+        assert "phase_4_development" not in keys
+        assert "mock_transform.py" in prepared[0].body and "uv run pytest" in prepared[0].body
+
+        gstack = prepare_todo_phases(
+            todo_id="TODO-1", tick_id="01HARNESS", board_slug="mock-project",
+            phases_path=resolve_profile_phases_path("gstack"), project_dir=tmp_path,
+            plan_path=_HARNESS_PLAN_PATH,
+        )
+        assert [task.phase_key for task in gstack][0] == "phase_2_autoplan"
+
+    def test_poll_converges_on_manifest_cards_not_profile_phases(self, tmp_path: Path, mocker, monkeypatch):
+        """Expected/terminal/gate logic must follow the registered plan:/validate: cards."""
+        import threading
+
+        import yaml
+
+        from hermes_pipeline.harness import (
+            _build_harness_profile_data,
+            _offline_terminal_phase_key,
+            _poll_kanban_phases,
+            _with_offline_terminal_workflow,
+        )
+        from hermes_pipeline.kanban_tasks import KanbanTaskInfo
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+        create_mock_project(tmp_path, "happy-path", "native-sdd")
+        profile_path = resolve_profile_phases_path("native-sdd")
+        phases = load_phases(profile_path)
+        phases = _with_offline_terminal_workflow(phases, _offline_terminal_phase_key(phases))
+        harness_yaml = tmp_path / "harness-phases.yaml"
+        harness_yaml.write_text(yaml.safe_dump(_build_harness_profile_data(
+            yaml.safe_load(profile_path.read_text()), phases,
+        )))
+        monkeypatch.setattr("hermes_pipeline.harness.time.sleep", lambda *_a, **_k: None)
+        mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases", return_value=["t1", "t2"])
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        board = {"plan:task-1": "ready", "validate:task-1": "blocked"}
+        cancel = threading.Event()
+        snapshots = iter([
+            dict(board),
+            {"plan:task-1": "running", "validate:task-1": "blocked"},
+            {"plan:task-1": "done", "validate:task-1": "blocked"},
+        ])
+
+        def status(*_a, **_k):
+            try:
+                snap = next(snapshots)
+            except StopIteration:
+                snap = dict(board)
+                cancel.set()  # under a regression the loop would spin forever
+            board.update(snap)
+            return dict(board)
+
+        completed = []
+
+        def complete(_tenant, task_id):
+            completed.append(task_id)
+            board["validate:task-1"] = "done"
+            return True
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+            side_effect=lambda *_a: {
+                key: KanbanTaskInfo(task_id=f"t_{key}", phase_key=key, status=value, todo_id="TODO-1")
+                for key, value in board.items()
+            },
+        )
+        mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", side_effect=complete)
+        log_path = tmp_path / "events.jsonl"
+        detector = ConvergenceDetector(threshold=99)
+        monitor = _ConvergenceMonitor(HarnessMonitor(log_path), detector, {})
+
+        assert _poll_kanban_phases(
+            project_slug="mock-project", tick_id="01HARNESS", state_dir=tmp_path / ".hermes",
+            todo_id="TODO-1", project_dir=tmp_path, phases_path=harness_yaml,
+            monitor=monitor, detector=detector, phases=phases,
+            offline_terminal_phase_key="phase_8_finish_branch", cancel_event=cancel,
+        ) is True
+        assert completed == ["t_validate:task-1"]
+
+    @pytest.mark.parametrize("profile_name", ["gstack", "agent-skills", "native-sdd"])
     def test_create_mock_project_writes_selected_profile_and_plan(
         self, tmp_path: Path, profile_name: str
     ):

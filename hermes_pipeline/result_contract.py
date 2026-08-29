@@ -29,7 +29,9 @@ MAX_LOCATION_LENGTH = 256
 MAX_FINDING_TEXT_LENGTH = 1000
 SCHEMA_VERSION = 1
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C0/DEL controls plus Unicode line/paragraph separators and bidi overrides.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]")
+_LINE_BREAK_RE = re.compile(r"[\n\r\t\u2028\u2029]+")
 _SECRET_RE = re.compile(
     r"(?i)(?:gh[pousr]_[A-Za-z0-9_]{20,}|(?:authorization|token|password|secret)\s*[:=]\s*\S+)"
 )
@@ -117,6 +119,7 @@ class ValidatedRegistration:
 def sanitize_result_text(value: object, *, maximum: int) -> str:
     """Return bounded, display-safe diagnostics without credential material."""
     text = _CONTROL_RE.sub("", str(value))
+    text = _LINE_BREAK_RE.sub(" ", text)
     text = _SECRET_RE.sub("[REDACTED]", text)
     return text[:maximum]
 

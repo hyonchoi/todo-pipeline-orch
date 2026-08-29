@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as _dt
 import logging
 import string
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final, Literal
@@ -335,6 +336,7 @@ def _render_phase_prompt(
     reference_paths: list[str] | None = None,
     prompt_client: PromptClient = "claude",
     template_source: str | None = None,
+    decisions: Mapping[str, str] | None = None,
 ) -> str:
     """Inject the pipeline context the phase prompt needs.
 
@@ -345,10 +347,14 @@ def _render_phase_prompt(
     into prose.
 
     `plan_path`/`spec_path`/`reference_paths` are optional, pre-validated (existence +
-    project_dir containment already checked by the caller) TODOS.md
-    Spec:/Reference: values for the pipeline's first phase only. Omitted
-    entirely when absent so prompt output for TODOs without these fields
-    stays byte-identical to before this feature existed.
+    project_dir containment already checked by the caller) values taken from the
+    selected issue's Plan/Spec/Reference sections. Omitted entirely when absent
+    so prompt output for TODOs without these fields stays byte-identical to
+    before this feature existed.
+
+    `decisions` (Priority, Effort, Security Review, ...) are the issue's decision
+    values; workers read them from the rendered ``Decisions:`` block because no
+    phase may consult a TODOS.md entry. Values are sanitized before rendering.
     """
     source = template_source or "<phase prompt>"
     header = (
@@ -367,6 +373,14 @@ def _render_phase_prompt(
         spec_reference_block += f"Reference material: {', '.join(reference_paths)}\n"
     if spec_reference_block:
         header += spec_reference_block + "\n"
+    if decisions:
+        from .result_contract import sanitize_result_text
+
+        header += "Decisions:\n" + "".join(
+            f"- {sanitize_result_text(key, maximum=80)}: "
+            f"{sanitize_result_text(value, maximum=200)}\n"
+            for key, value in decisions.items()
+        ) + "\n"
     try:
         vocabulary = CLIENT_VOCABULARY[prompt_client]
     except KeyError as exc:

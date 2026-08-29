@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -733,11 +733,13 @@ def prepare_todo_phases(
     spec_path: str | None = None,
     reference_paths: Sequence[str] = (),
     project_dir: str | Path | None = None,
+    decisions: Mapping[str, str] | None = None,
 ) -> list[PreparedPhaseTask]:
     """Render every phase card for ``todo_id`` without touching Hermes.
 
-    ``plan_path``/``spec_path``/``reference_paths`` come from the selected issue;
-    nothing is resolved from TODOS.md. When ``project_dir`` is given the Plan's
+    ``plan_path``/``spec_path``/``reference_paths``/``decisions`` come from the
+    selected issue; nothing is resolved from TODOS.md. Every worker card carries
+    the ``Decisions:`` block (gates never do). When ``project_dir`` is given the Plan's
     optional ``tpo-plan`` manifest is validated (and compiled) and Spec/Reference
     paths are checked for repository containment.
     """
@@ -802,6 +804,7 @@ def prepare_todo_phases(
                     reference_paths=references,
                     prompt_client=prompt_client,
                     template_source=f"manifest:{worker_key}",
+                    decisions=decisions,
                 ) + worker_prompt
                 prepared.append(
                     PreparedPhaseTask(
@@ -870,6 +873,7 @@ def prepare_todo_phases(
             reference_paths=None if phase.gate else references,
             prompt_client=prompt_client,
             template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
+            decisions=None if phase.gate else decisions,
         )
         if phase.gate:
             body_prompt = rendered_prompt
@@ -1276,9 +1280,15 @@ def register_todo_phases(
     plan_path: str | None = None,
     spec_path: str | None = None,
     reference_paths: Sequence[str] = (),
+    decisions: Mapping[str, str] | None = None,
     cancel_event: object | None = None,
+    transform_prepared: Callable[[list[PreparedPhaseTask]], list[PreparedPhaseTask]] | None = None,
 ) -> list[str]:
-    """Prepare and register phases as backward-compatible kanban tasks."""
+    """Prepare and register phases as backward-compatible kanban tasks.
+
+    ``transform_prepared`` lets a caller inspect or adjust the rendered cards
+    (the offline harness rewrites the last worker card) before they are created.
+    """
     prepared = prepare_todo_phases(
         todo_id=todo_id,
         tick_id=tick_id,
@@ -1289,7 +1299,10 @@ def register_todo_phases(
         spec_path=spec_path,
         reference_paths=reference_paths,
         project_dir=project_dir,
+        decisions=decisions,
     )
+    if transform_prepared is not None:
+        prepared = transform_prepared(prepared)
     return create_prepared_todo_phases(
         prepared=prepared,
         tick_id=tick_id,

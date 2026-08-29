@@ -8,8 +8,6 @@ import pytest
 
 from hermes_pipeline.github_issues import (
     KNOWN_SECTIONS,
-    LABEL_VOCABULARY,
-    PHASE_OPTIONS,
     SELECTION_BODY_MAX_CHARS,
     EligibleTodo,
     NotAnIssueError,
@@ -353,7 +351,7 @@ def _plan_project(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def _body(plan: str | list[str] | None = "docs/legacy.md", branch: str | list[str] | None = "feature/x") -> str:
+def _body(plan: str | list[str] | None = "docs/manifest.md", branch: str | list[str] | None = "feature/x") -> str:
     parts = []
     for label, value in (("Plan", plan), ("Branch", branch)):
         if value is None:
@@ -394,6 +392,8 @@ def _body(plan: str | list[str] | None = "docs/legacy.md", branch: str | list[st
         ({"labels": READY, "body": _body(plan="../outside.md")}, {}, "plan_invalid:non_canonical"),
         ({"labels": READY, "body": _body(plan="docs/wrong.md")}, {}, "plan_invalid:todo_id_mismatch"),
         ({"labels": READY, "body": _body(plan="docs/binary.md")}, {}, "plan_invalid:unreadable"),
+        # native-sdd closeout needs a manifest: manifest-free Plans are only for non-plan profiles.
+        ({"labels": READY, "body": _body(plan="docs/legacy.md")}, {}, "plan_invalid:manifest_required"),
         ({"labels": READY, "body": _body(branch=None)}, {}, "branch_invalid"),
         ({"labels": READY, "body": _body(branch=["a", "b"])}, {}, "branch_invalid"),
         ({"labels": READY, "body": _body(branch=None)}, {"requires_plan": False}, "branch_invalid"),
@@ -450,10 +450,11 @@ def test_compile_eligible_issues_orders_candidates_and_classifies_plans(tmp_path
 
     assert [(c.entry.number, c.plan_path, c.plan_kind) for c in result.candidates] == [
         (1, "docs/manifest.md", "manifest"),
-        (5, "docs/legacy.md", "legacy"),
     ]
-    assert result.todo_ids == frozenset({"TODO-1", "TODO-5"})
-    assert result.blocked_reasons == {"TODO-3": "dependency_incomplete:1"}
+    assert result.todo_ids == frozenset({"TODO-1"})
+    assert result.blocked_reasons == {
+        "TODO-3": "dependency_incomplete:1", "TODO-5": "plan_invalid:manifest_required",
+    }
     assert result.selection_markdown == render_selection_markdown(result.candidates)
 
 
@@ -562,9 +563,35 @@ def test_phase_label_rejects_empty_slug():
         phase_label("  ()  ")
 
 
-def test_label_vocabulary_mirrors_every_phase_option():
-    names = {name for name, _color, _description in LABEL_VOCABULARY}
-    assert PHASE_OPTIONS and all(phase_label(option) in names for option in PHASE_OPTIONS)
+@pytest.mark.parametrize(
+    ("section", "value", "expected"),
+    [
+        ("Priority", "P1", "P1"),
+        ("Effort", "M", "M"),
+        ("Phase", "4 (Development)", "4 (Development)"),
+        ("Test Coverage", "required", "required"),
+        ("Security Review", "not-required", "not-required"),
+        ("UI Review", "required", "required"),
+        ("Security Review", "required  # not-required", "unrecognized"),
+        ("Priority", "urgent", "unrecognized"),
+        ("Phase", "9 (Nope)", "unrecognized"),
+        ("Effort", "S\nsecond line ignored", "S"),
+    ],
+)
+def test_issue_decisions_only_passes_vocabulary_values(section, value, expected):
+    from hermes_pipeline.github_issues import issue_decisions
+
+    issue = issue_from_api(_payload(1, body=f"### {section}\n\n{value}\n"), repo=REPO)
+    assert issue_decisions(issue) == {section: expected}
+
+
+def test_issue_decisions_keeps_canonical_order_and_skips_absent_sections():
+    from hermes_pipeline.github_issues import issue_decisions
+
+    body = "### UI Review\n\nrequired\n\n### Priority\n\nP0\n\n### Branch\n\nfeat/x\n"
+    assert list(issue_decisions(issue_from_api(_payload(1, body=body), repo=REPO)).items()) == [
+        ("Priority", "P0"), ("UI Review", "required"),
+    ]
 
 
 def test_legacy_id_label_uses_todo_id():

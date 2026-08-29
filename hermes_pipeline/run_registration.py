@@ -6,7 +6,7 @@ import json
 import logging
 import re
 import subprocess
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
@@ -361,16 +361,15 @@ def _registration_issue_number(payload: object) -> int | None:
     return number
 
 
-def active_registration_issue_numbers(state_dir: Path) -> frozenset[int]:
-    """Issue numbers pinned by every schema-v2 ``registration.json`` still ``active``.
+def _active_registrations(state_dir: Path) -> Iterator[tuple[Path, int]]:
+    """Yield ``(run_dir, issue_number)`` for every schema-v2 registration still ``active``.
 
     Malformed or unsupported registrations are skipped with a WARNING; they never
     widen or narrow the eligible set silently.
     """
-    numbers: set[int] = set()
     runs_dir = state_dir / "runs"
     if not runs_dir.is_dir():
-        return frozenset()
+        return
     for path in sorted(runs_dir.glob("*/registration.json")):
         if registration_state(path.parent) != "active":
             continue
@@ -387,8 +386,21 @@ def active_registration_issue_numbers(state_dir: Path) -> frozenset[int]:
         ):
             _warn_once(path.parent, "skipping malformed or unsupported registration %s", path)
             continue
-        numbers.add(number)
-    return frozenset(numbers)
+        yield path.parent, number
+
+
+def active_registration_issue_numbers(state_dir: Path) -> frozenset[int]:
+    """Issue numbers pinned by every schema-v2 ``registration.json`` still ``active``."""
+    return frozenset(number for _run_dir, number in _active_registrations(state_dir))
+
+
+def active_runs_for_issue(state_dir: Path, issue_number: int) -> tuple[str, ...]:
+    """Tick ids of active schema-v2 registrations pinning ``issue_number`` (same predicate)."""
+    return tuple(
+        run_dir.name
+        for run_dir, number in _active_registrations(state_dir)
+        if number == issue_number
+    )
 
 
 def ensure_in_progress_label(

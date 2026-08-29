@@ -10,7 +10,6 @@ def tmp_project(tmp_path):
         'schema_version = 2\nassignee = "default"\n'
         'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
     )
-    (proj / ".hermes" / "todo_id_counter").write_text("0")
     return proj
 
 @pytest.fixture
@@ -28,6 +27,8 @@ def fake_gh(monkeypatch):
 
     monkeypatch.delenv("TPO_GH_BIN", raising=False)
     fake = FakeGh()
+    # ``check_auth`` verifies the gh version after auth; serve a supported one by default.
+    fake.on("gh", "--version", stdout="gh version 2.60.0 (2025-01-01)\nhttps://github.com/cli/cli/releases/tag/v2.60.0\n")
     from hermes_pipeline import github_issues
 
     monkeypatch.setattr(github_issues, "_run", fake)

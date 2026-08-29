@@ -86,6 +86,15 @@ audit but no longer pins its issue, so the next tick can select again:
 touch ~/projects/my-project/.hermes/runs/<tick-id>/abandoned
 ```
 
+Then remove the pinned worktree and branch, using the `worktree` and `branch`
+values from that run's `registration.json` (`tpo doctor` prints both commands
+on its `Fix (tick <id>):` line):
+
+```bash
+git worktree remove --force <worktree>
+git branch -D <branch>
+```
+
 The counterpart marker `issue-closed` is written by closeout when the PR merged
 and the issue was closed (`delivered`); never create it by hand.
 

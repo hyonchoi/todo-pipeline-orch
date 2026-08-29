@@ -418,6 +418,7 @@ def reconcile_todo_completion(
 
 COMPLETION_MARKER = "<!-- tpo-completed tick={tick_id} pr={pr_number} -->"
 _COMPLETION_MARKER_RE = re.compile(r"<!-- tpo-completed tick=\S+ pr=(\d+) -->")
+_COMPLETION_TICK_RE = re.compile(r"<!-- tpo-completed tick=([A-Za-z0-9_-]+) pr=\d+ -->")
 # Written next to the immutable registration; ``registration_state`` reads ``issue-closed``.
 CLOSE_STARTED_MARKER = "issue-close-started"
 COMMENTED_MARKER = "issue-commented"
@@ -455,18 +456,66 @@ def close_issue_for_delivery(
     marker = COMPLETION_MARKER.format(tick_id=tick_id, pr_number=pr_number)
     run_dir = state_dir / "runs" / tick_id
     has_run = run_dir.is_dir()
+    # Markers only count when TPO wrote them: anyone can paste the HTML comment,
+    # so a foreign copy must neither satisfy dedup nor conflict. Ownership is the
+    # current token login, or a marker whose ``tick=`` names a local run (the
+    # login may have rotated since that run commented).
+    runs_dir = state_dir / "runs"
+    login_cache: list[str | None] = []
 
-    def marker_present(bodies) -> bool:
+    def current_login() -> str | None:
+        """Resolved once, and only when a remote marker must be attributed."""
+        if not login_cache:
+            try:
+                login_cache.append(github_issues.current_login(project_dir))
+            except github_issues.GitHubIssuesError as exc:
+                if exc.code != "gh_auth":
+                    raise
+                log.warning(
+                    "gh api user failed (%s; token lacks read:user?) — "
+                    "attributing completion markers by local run directory only",
+                    exc.code,
+                )
+                login_cache.append(None)
+        return login_cache[0]
+
+    def recorded_login(tick: str) -> str | None:
+        """Login stamped into ``runs/<tick>/issue-commented``; None for legacy ``pr=N`` files."""
+        try:
+            text = (runs_dir / tick / COMMENTED_MARKER).read_text(encoding="utf-8").strip()
+        except (OSError, UnicodeError):
+            return None
+        return None if not text or text.startswith("pr=") else text
+
+    def owns_local_tick(author: str, tick: str) -> bool:
+        if not (runs_dir / tick).is_dir():
+            return False
+        recorded = recorded_login(tick)
+        return recorded is None or author == recorded
+
+    def own_bodies(comments) -> list[str]:
+        owned: list[str] = []
+        for author, body in comments:
+            ticks = _COMPLETION_TICK_RE.findall(body)
+            if not ticks:
+                continue
+            if any(owns_local_tick(author, tick) for tick in ticks):
+                owned.append(body)
+            elif author and author == current_login():
+                owned.append(body)
+        return owned
+
+    def marker_present(comments) -> bool:
         return (has_run and (run_dir / COMMENTED_MARKER).exists()) or any(
-            marker in body for body in bodies
+            marker in body for body in own_bodies(comments)
         )
 
     live = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
     if live.state == "closed" and live.state_reason == "not_planned":
         raise github_issues.GitHubIssuesError("issue_not_planned", "issue close")
-    comments = github_issues.list_comment_bodies(project_dir, issue_number, repo=repo)
+    comments = github_issues.list_comments(project_dir, issue_number, repo=repo)
     if not force:
-        for body in comments:
+        for body in own_bodies(comments):
             for other in _COMPLETION_MARKER_RE.findall(body):
                 if int(other) != pr_number:
                     raise github_issues.GitHubIssuesError("completion_conflict", "issue comment")
@@ -479,7 +528,8 @@ def close_issue_for_delivery(
             f"Completed: PR #{pr_number} {pr_url}, {date}\n{marker}", repo=repo,
         )
         if has_run:
-            _atomic_write_text(run_dir / COMMENTED_MARKER, f"pr={pr_number}\n")
+            # Breadcrumb records who commented so ownership survives a token rotation.
+            _atomic_write_text(run_dir / COMMENTED_MARKER, f"{current_login() or ''}\n")
     if live.state == "open":
         github_issues.close_issue(project_dir, issue_number, repo=repo)
     if IN_PROGRESS_LABEL in live.labels:
@@ -487,7 +537,7 @@ def close_issue_for_delivery(
 
     live = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
     comment_present = marker_present(
-        github_issues.list_comment_bodies(project_dir, issue_number, repo=repo)
+        github_issues.list_comments(project_dir, issue_number, repo=repo)
     )
     if live.state == "open" or not comment_present or IN_PROGRESS_LABEL in live.labels:
         return "pending"

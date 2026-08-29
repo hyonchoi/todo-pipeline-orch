@@ -13,7 +13,9 @@ rules are in [issue tracker conventions](agents/issue-tracker.md#tpo-backlog-ite
   pipeline contract (`tpo init <project>`); see the
   [getting-started tutorial](tutorial-getting-started.md).
 - `gh` >= 2.44 on `PATH`, authenticated against the project's `origin`
-  (`gh auth status`).
+  (`gh auth status`). The token needs the `repo` scope plus `read:user`
+  (closeout calls `gh api user` to identify its own comments); a missing scope
+  surfaces as `gh_auth` (HTTP 403).
 - Write access to the repository (labels and issue edits).
 - The "TPO TODO" form is repository-local: copy
   `.github/ISSUE_TEMPLATE/tpo-todo.yml` from this repository into
@@ -108,8 +110,9 @@ Without `--plan`, the Plan path is resolved from the issue body
 `### Plan` value). `--plan` validates a repository-relative candidate before you
 put it in the issue. `--require-manifest` rejects a legacy Markdown Plan with no
 `json tpo-plan` block; without it a manifest-free Plan passes with
-`warning: no tpo-plan manifest` and compiles to a single development card. A
-closed issue appends `warning: issue is closed (...)`. See the
+`warning: no tpo-plan manifest` and compiles to a single development card —
+under a non-plan profile only; a plan-gated profile (`requires_plan`) blocks
+the issue as `plan_invalid:manifest_required`. A closed issue appends `warning: issue is closed (...)`. See the
 [CLI reference](reference-cli.md#plan-validate) for the failure codes.
 
 ## Triage to `ready-for-agent`
@@ -124,8 +127,8 @@ gh issue edit <N> --remove-label needs-triage --add-label ready-for-agent
 
 The label roles are described in [triage labels](agents/triage-labels.md).
 `tpo doctor <project>` prints `Plan readiness: eligible=N blocked=N (...)` with
-the blocked reasons grouped by prefix (for example `status_closed`,
-`dependency_incomplete`, `branch_invalid`, `plan_invalid`), so you can see
+the blocked reasons grouped by prefix (for example `dependency_incomplete`,
+`branch_invalid`, `plan_invalid`), so you can see
 whether a triaged issue is actually selectable.
 
 ## Audit issue bodies and normalize labels
@@ -159,7 +162,9 @@ Findings are printed as `TODO-<N>: <finding>`:
 | `not-a-todo` | `--todo` named an issue without `tpo:todo` | no |
 
 The summary line is `audit: issues=N findings=N fixable=N`, extended with
-`skipped=N applied=N` under `--fix`. `--fix` only touches mirror-prefix labels
+`skipped=N applied=N` under `--fix`. A `gh` failure while fixing one issue is
+printed as `unfixed TODO-<N>: <code>`; the run continues with the next issue
+and exits 1. `--fix` only touches mirror-prefix labels
 and skips closed issues and non-TODO issues. Exit codes: 0 no actionable
 finding (`plan:missing` and `state:closed` are informational), 1 actionable
 findings remain or a fix was skipped or failed, 2 usage (`--dry-run` without
@@ -192,13 +197,29 @@ is closed.
 
 ## Complete a TODO
 
-Normally you do nothing: once the pull request merges, the next tick's closeout
-comments on the issue, closes it, removes `tpo:in-progress`, and writes the
-`issue-closed` run marker (`delivered`). The closeout is idempotent and retries
-on GitHub propagation lag.
+Every profile claims the selected issue with `tpo:in-progress` when its cards
+are created; the label keeps the issue from being re-selected while the PR is
+open. Under a plan-gated profile (`requires_plan`, for example `native-sdd`) you
+then do nothing: once the pull request merges the next tick's closeout comments
+on the issue, closes it, removes the label, and writes the `issue-closed` run
+marker (`delivered`). The closeout is idempotent and retries on GitHub
+propagation lag. Only completion markers written by TPO count for both the
+dedup and `completion_conflict`: a marker is TPO's when its author is the
+current `gh` login (`gh api user`), or when its `tick=` names a local
+`runs/<tick>` directory whose `issue-commented` breadcrumb records that same
+author (or records no login — breadcrumbs written before this rule, or a
+missing/unreadable breadcrumb). A marker pasted by anyone else is ignored. When the token lacks `read:user`, the login
+lookup fails with `gh_auth`; TPO logs a WARNING and degrades to run-directory
+ownership only — a marker naming a locally known tick is accepted unless that
+run's breadcrumb records a different login; markers naming unknown ticks are
+ignored. Other lookup failures (`gh_invalid`, `gh_rate_limited`,
+`gh_unavailable`) abort the closeout for that tick and retry later.
 
-Run the same state machine by hand when a run was lost or you merged outside
-the pipeline:
+Non-plan profiles (`gstack`, `agent-skills`) keep the claim until you run
+`tpo todos complete <project> --todo N --pr N` after the merge; until you do,
+`tpo doctor` reports the delivered issue as `in_progress_stale`, which is the
+expected signal. Run the same state machine by hand under any profile when a
+run was lost or you merged outside the pipeline:
 
 ```bash
 tpo todos complete <project> --todo <N> --pr <PR> [--date YYYY-MM-DD] [--force]
@@ -215,6 +236,18 @@ tpo todos complete <project> --todo <N> --pr <PR> [--date YYYY-MM-DD] [--force]
 the issue is still active, or although the issue was already closed against a
 different PR (`completion_conflict`). It never overrides an issue closed as
 `not_planned`. `--date` defaults to today (UTC).
+
+## When TPO demotes an issue
+
+Under a plan-gated profile, an uncommitted Plan is blocked before selection as
+`plan_invalid:untracked` (commit it and the next tick reconsiders the issue).
+When run registration itself fails because of the issue's content —
+`plan_invalid`, `branch_invalid`, or `branch_exists` —
+TPO moves the issue from `ready-for-agent` to `needs-info` and logs an ERROR so
+it is not re-selected every tick. Fix the Plan or Branch section and re-add
+`ready-for-agent`. Infrastructure or operator-resolvable failures
+(`git_error`, `authority_untracked`, `authority_invalid`, `branch_mismatch`,
+worktree errors) never demote.
 
 ## Look up a legacy `TODO-<n>` ID
 

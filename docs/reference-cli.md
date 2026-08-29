@@ -125,9 +125,9 @@ After the prerequisite and Hermes version lines, the GitHub checks print, in ord
 | `GitHub auth: ok` / `WARNING: GitHub auth unavailable (<code>)` | `gh auth status` against the project |
 | `Repository: <owner>/<repo>` / `INVALID: repository identity: ...` | The github.com `origin` remote |
 | `Label vocabulary: ok` / `INVALID: missing <labels>; Fix: tpo todos labels sync <project>` | Every pipeline label exists |
-| `Plan readiness: eligible=N blocked=N (<reason>=N ...)` | Selectable `tpo:todo` issues and blocked reasons grouped by prefix (`status_closed`, `dependency_incomplete`, `branch_invalid`, `plan_invalid`, ...) |
+| `Plan readiness: eligible=N blocked=N (<reason>=N ...)` | Selectable `tpo:todo` issues and blocked reasons grouped by prefix (`dependency_incomplete`, `branch_invalid`, `plan_invalid`, ...) |
 | `Runs: active=N delivered=N abandoned=N [unsupported=N]` | Run registrations under `.hermes/runs/`; `unsupported` counts malformed or schema v1 registrations |
-| `tick <id> → #N` | Each active run and the issue it pins; a run that is not the current tick prints a `WARNING` and a `Fix` line |
+| `tick <id> → #N` | Each active run and the issue it pins; a run that is not the current tick prints a `WARNING` and a `Fix` line (complete or abandon it, then `git worktree remove --force <worktree> && git branch -D <branch>`) |
 | `tick <id> → #N (active; no current tick)` | An active run while no `current_tick_id.txt` exists |
 | `tick <id>: unsupported or malformed registration` | One line per registration counted as `unsupported` |
 
@@ -224,7 +224,8 @@ Findings print as `TODO-<N>: <finding>` using the vocabulary
 `state:closed`, and `not-a-todo`. The summary is
 `audit: issues=N findings=N fixable=N`, extended with `skipped=N applied=N`
 under `--fix`. Only `label:*` findings are fixable; `plan:missing` and
-`state:closed` are informational.
+`state:closed` are informational. A `gh` failure while fixing one issue prints
+`unfixed TODO-<N>: <code>`; the command continues to the next issue and exits 1.
 
 **Exit codes:**
 | Code | Meaning |

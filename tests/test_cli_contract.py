@@ -311,7 +311,8 @@ class TestTodosLabelsSync:
         assert f"created: {names[0]}" in out and f"created: {names[1]}" in out
         calls = fake_gh.gh_calls()
         assert calls[0] == ["auth", "status", "--hostname", "github.com"]
-        assert calls[1][:2] == ["label", "list"]
+        assert calls[1] == ["--version"]
+        assert calls[2][:2] == ["label", "list"]
         creates = [c for c in calls if c[:2] == ["label", "create"]]
         assert [c[-1] for c in creates] == names[:2]
         assert all("--repo" in c and "acme/repo" in c for c in creates)
@@ -963,7 +964,11 @@ def _seed_runs(state, runs):
 
 
 _THREE_RUNS = (
-    ("tick-a", {"schema_version": 2, "issue_number": 5}, None),
+    (
+        "tick-a",
+        {"schema_version": 2, "issue_number": 5, "worktree": "/w/my todo-5\x1b", "branch": "feat/todo-5\x7f"},
+        None,
+    ),
     ("tick-b", {"schema_version": 2, "issue_number": 6}, "issue-closed"),
     ("tick-c", {"schema_version": 2, "issue_number": 7}, "abandoned"),
 )
@@ -1006,7 +1011,8 @@ def test_doctor_flags_orphaned_active_run_when_current_tick_differs(
     assert "WARNING: run tick-a is active but is not the current tick" in output
     assert (
         "Fix (tick tick-a): tpo todos complete demo --todo 5 --pr <pr> if delivered, "
-        f"or touch {state / 'runs' / 'tick-a' / 'abandoned'} to give up"
+        f"or touch {state / 'runs' / 'tick-a' / 'abandoned'} to give up, then "
+        "git worktree remove --force '/w/my todo-5' && git branch -D feat/todo-5"
     ) in output
     assert "Current tick tick-z: no registration (no TODO selected)" in output
     assert "Fix: preserve" not in output
@@ -1721,7 +1727,7 @@ class TestDoctorProfileAware:
             in output
         )
         assert "separate project roots" in output
-        assert "TODO-42" in output
+        assert "deferred to issue #67 (legacy TODO-42)" in output
 
     @pytest.mark.parametrize(
         ("prompt_client", "discovery_root", "invocation"),
@@ -2277,7 +2283,10 @@ class TestTodosComplete:
             )), ""
         ))
         fake_gh.on(*API, "--paginate", "--slurp", "repos/acme/repo/issues/5/comments",
-                   handler=lambda argv: (0, json.dumps([[{"body": b} for b in remote["comments"]]]), ""))
+                   handler=lambda argv: (0, json.dumps(
+                       [[{"body": b, "user": {"login": "tpo-bot"}} for b in remote["comments"]]]
+                   ), ""))
+        fake_gh.on(*API, "user", "--jq", ".login", stdout="tpo-bot\n")
 
         def comment(argv):
             with open(argv[argv.index("--body-file") + 1]) as handle:
@@ -2417,6 +2426,10 @@ class TestTodosComplete:
             (run / "registration.json").write_text(json.dumps({"schema_version": 2, "issue_number": number}))
             if closed:
                 (run / "issue-closed").write_text("")
+        # Unsupported schema: the gate ignores it, so the listing must too.
+        legacy = runs / "tick-legacy"
+        legacy.mkdir()
+        (legacy / "registration.json").write_text(json.dumps({"schema_version": 1, "issue_number": 5}))
         broken = runs / "tick-broken"
         broken.mkdir()
         (broken / "registration.json").write_text('{"issue_number": 5')
@@ -2426,6 +2439,7 @@ class TestTodosComplete:
         err = capsys.readouterr().err
         assert "Error: run tick-5 is active for TODO-5" in err
         assert "tick-55" not in err and "tick-old" not in err and "tick-broken" not in err
+        assert "tick-legacy" not in err
 
     def test_not_planned_issue_exits_1(self, tmp_path, fake_gh, capsys):
         from hermes_pipeline.cli import _cmd_todos_complete

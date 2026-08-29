@@ -75,12 +75,13 @@ phases:
   - phase_key: "phase_6_1_cso"
     name: "Phase 6.1: CSO Security Review"
     prompt: |
-      Check {todo_id}'s TODOS.md entry for `Security Review: required` in its
-      Decisions line. If it says `not-required`, exit 0 immediately — do not
-      run any review.
+      Read the Decisions block in this prompt. Exit 0 immediately — without
+      running any review — only if it says exactly `Security Review: not-required`.
+      If the decision is absent or anything else (`required`, `unrecognized`,
+      ...), perform the review.
 
-      If `required`: use the gstack {skill_prefix}cso skill. Run a security
-      review of the current branch.
+      Use the gstack {skill_prefix}cso skill. Run a security review of the
+      current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. If the skill would normally ask for approval before
@@ -94,13 +95,13 @@ phases:
   - phase_key: "phase_6_2_qa"
     name: "Phase 6.2: QA"
     prompt: |
-      Check {todo_id}'s TODOS.md entry for `UI Review: required` in its
-      Decisions line. If the `UI Review` decision is absent or says
-      `not-required`, exit 0 immediately — do not run any QA and do not block
-      the task.
+      Read the Decisions block in this prompt. Exit 0 immediately — without
+      running any QA — only if it says exactly `UI Review: not-required`. If
+      the decision is absent or anything else (`required`, `unrecognized`,
+      ...), perform the review.
 
-      Only if `UI Review: required` is explicitly present: use the gstack
-      {skill_prefix}qa skill. Test the web UI changes on the current branch.
+      Use the gstack {skill_prefix}qa skill. Test the web UI changes on the
+      current branch.
 
       AUTONOMOUS MODE — there is no human at the terminal. Do NOT pause for
       user input. If the skill would normally ask for approval before
@@ -120,8 +121,8 @@ phases:
          {skill_prefix}document-generate skill to create those missing
          docs.
 
-      2. Determine the version bump level from {todo_id}'s TODOS.md Decisions
-         line: Effort `S` → patch bump, Effort `M` or `L` → minor bump.
+      2. Determine the version bump level from the Decisions block in this
+         prompt: Effort `S` → patch bump, Effort `M` or `L` → minor bump.
 
       3. Bump the version and keep every version-bearing file in this project
          in sync, in the same commit — this includes VERSION/package.json

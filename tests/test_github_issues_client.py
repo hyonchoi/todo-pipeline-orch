@@ -54,8 +54,12 @@ def test_gh_bin_honours_environment_override(monkeypatch):
 def test_gh_bin_is_used_as_argv0(fake_gh, tmp_path, monkeypatch):
     monkeypatch.setenv(GH_BIN_ENV, "/opt/gh")
     fake_gh.on("/opt/gh", "auth", "status")
+    fake_gh.on("/opt/gh", "--version", stdout="gh version 2.60.0 (2025-01-01)\n")
     check_auth(tmp_path)
-    assert fake_gh.calls == [["/opt/gh", "auth", "status", "--hostname", "github.com"]]
+    assert fake_gh.calls == [
+        ["/opt/gh", "auth", "status", "--hostname", "github.com"],
+        ["/opt/gh", "--version"],
+    ]
 
 
 def test_fake_gh_does_not_patch_subprocess_run_globally(fake_gh):
@@ -101,7 +105,11 @@ def test_list_calls_use_long_timeout(fake_gh, tmp_path):
         (None, 1, "HTTP 409: Conflict", "gh_rejected"),
         (None, 1, "HTTP 400: Bad Request", "gh_rejected"),
         (None, 1, "could not add label: 'x' not found", "gh_rejected"),
-        (None, 1, "HTTP 403: Resource not accessible by integration", "gh_unavailable"),
+        (None, 1, "unknown flag: --slurp", "gh_version"),
+        (None, 1, 'unknown command "api" for "gh"', "gh_version"),
+        (None, 1, "HTTP 403: Resource not accessible by integration", "gh_auth"),
+        (None, 1, "HTTP 403: Forbidden", "gh_auth"),
+        (None, 1, "gh: API rate limit exceeded for user ID 1. (HTTP 403)", "gh_rate_limited"),
         (None, 2, f"something exploded {TOKEN}", "gh_unavailable"),
     ],
 )
@@ -281,6 +289,8 @@ def test_list_todo_issues_empty_and_invalid(fake_gh, tmp_path):
     fake_gh.on(*API, stdout='{"number": 1}')
     with pytest.raises(GitHubIssuesError, match="gh_invalid"):
         list_todo_issues(tmp_path, repo=REPO)
+    # A malformed issue among good ones is skipped (see the dedicated skip test),
+    # but a page where nothing maps is an unusable response.
     fake_gh.on(*API, stdout='[[{"title": "no number"}]]')
     with pytest.raises(GitHubIssuesError, match="gh_invalid"):
         list_todo_issues(tmp_path, repo=REPO)
@@ -366,6 +376,69 @@ def test_check_auth_passes_through_infrastructure_errors(fake_gh, tmp_path, rule
     with pytest.raises(GitHubIssuesError) as info:
         check_auth(tmp_path)
     assert info.value.code == code
+
+
+@pytest.mark.parametrize(
+    ("stdout", "detail"),
+    [
+        ("gh version 2.43.1 (2024-02-01)\n", "gh 2.43.1 < 2.44"),
+        ("gh version 1.9.0 (2021-05-01)\n", "gh 1.9.0 < 2.44"),
+        ("something else\n", "gh version unparseable < 2.44"),
+    ],
+)
+def test_check_auth_rejects_gh_older_than_minimum(fake_gh, tmp_path, stdout, detail):
+    fake_gh.on("gh", "auth", "status")
+    fake_gh.on("gh", "--version", stdout=stdout)
+    with pytest.raises(GitHubIssuesError) as info:
+        check_auth(tmp_path)
+    assert (info.value.code, info.value.verb) == ("gh_version", "version")
+    assert info.value.detail == detail
+
+
+@pytest.mark.parametrize("stdout", ["gh version 2.44.0 (2024-03-01)\n", "gh version 2.80.1-dev (2026-01-01)\n"])
+def test_check_auth_accepts_supported_gh_version(fake_gh, tmp_path, stdout):
+    fake_gh.on("gh", "auth", "status")
+    fake_gh.on("gh", "--version", stdout=stdout)
+    check_auth(tmp_path)
+    assert [c[:1] for c in fake_gh.gh_calls()] == [["auth"], ["--version"]]
+
+
+def test_list_comments_pairs_author_login_with_body(fake_gh, tmp_path):
+    from hermes_pipeline.github_issues import list_comments
+
+    fake_gh.on(*API, stdout=_pages(
+        [{"body": "one", "user": {"login": "alice"}}, {"body": None}],
+        [{"body": "three", "user": {"login": "tpo-bot"}}],
+    ))
+    assert list_comments(tmp_path, 7, repo=REPO) == (("alice", "one"), ("", ""), ("tpo-bot", "three"))
+    assert fake_gh.gh_calls() == [
+        ["api", *ACCEPT, "--paginate", "--slurp", "repos/acme/repo/issues/7/comments"]
+    ]
+
+
+def test_current_login_reads_the_token_owner(fake_gh, tmp_path):
+    from hermes_pipeline.github_issues import current_login
+
+    fake_gh.on(*API, "user", "--jq", ".login", stdout="tpo-bot\n")
+    assert current_login(tmp_path) == "tpo-bot"
+    fake_gh.on(*API, "user", "--jq", ".login", stdout="\n")
+    with pytest.raises(GitHubIssuesError, match="gh_invalid"):
+        current_login(tmp_path)
+
+
+def test_list_issues_skips_a_malformed_payload_and_keeps_the_rest(fake_gh, tmp_path, caplog):
+    from tests.gh_fakes import issue_payload
+
+    good_1 = issue_payload(1)
+    bad = issue_payload(2, title=None)
+    bad["title"] = ["not", "a", "string"]
+    good_3 = issue_payload(3)
+    fake_gh.on(*API, stdout=_pages([good_1, bad, good_3]))
+    with caplog.at_level(logging.WARNING, logger="hermes_pipeline.github_issues"):
+        issues = list_todo_issues(tmp_path, repo=REPO)
+    assert [issue.number for issue in issues] == [1, 3]
+    assert any("#2" in r.getMessage() and "skipping" in r.getMessage() for r in caplog.records)
+    assert all("not" not in r.getMessage() or "a string" not in r.getMessage() for r in caplog.records)
 
 
 def test_list_labels(fake_gh, tmp_path):

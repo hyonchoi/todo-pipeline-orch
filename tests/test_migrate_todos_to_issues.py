@@ -462,10 +462,11 @@ def test_live_run_argv_sequence_and_doc(fake_gh, tmp_path, capsys):
     assert rc == 0
     calls = fake_gh.gh_calls()
     assert calls[0][:2] == ["auth", "status"]
-    assert calls[1][:2] == ["label", "list"]
+    assert calls[1] == ["--version"]
+    assert calls[2][:2] == ["label", "list"]
     creates = [c for c in calls if c[:2] == ["label", "create"]]
     assert {c[-1] for c in creates} == {"legacy-id:TODO-43", "legacy-id:TODO-50"}
-    rest = calls[len(creates) + 2:]
+    rest = calls[len(creates) + 3:]
     assert rest[0] == ["api", *ACCEPT, "--paginate", "--slurp", LEGACY_43]
     assert rest[1][:2] == ["issue", "create"]
     assert rest[1][rest[1].index("--title") + 1] == "Refactor production orchestration hotspots"
