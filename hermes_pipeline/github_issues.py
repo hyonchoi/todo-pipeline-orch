@@ -384,6 +384,18 @@ def compile_eligible_issues(
     return EligibilityResult(tuple(candidates), blocked)
 
 
+def escape_hostile_selection_lines(text: str) -> str:
+    """Backslash-escape lines that could forge an entry header or a prompt fence.
+
+    Shared by every selection-markdown renderer so untrusted body text can never
+    widen the candidate set or break out of the `<candidate_todos>` fence.
+    """
+    return "\n".join(
+        "\\" + line if _HOSTILE_SELECTION_LINE_RE.match(line) else line
+        for line in text.split("\n")
+    )
+
+
 def render_selection_markdown(candidates: Iterable[IssueTodo | EligibleTodo]) -> str:
     """Render candidates as a deterministic markdown checklist for the selector."""
     entries: list[str] = []
@@ -400,9 +412,7 @@ def render_selection_markdown(candidates: Iterable[IssueTodo | EligibleTodo]) ->
         truncated = len(body) > SELECTION_BODY_MAX_CHARS
         if truncated:
             body = body[:SELECTION_BODY_MAX_CHARS].rstrip()
-        for line in body.split("\n") if body else ():
-            if _HOSTILE_SELECTION_LINE_RE.match(line):
-                line = "\\" + line
+        for line in escape_hostile_selection_lines(body).split("\n") if body else ():
             lines.append(f"  {line}" if line else "")
         if truncated:
             lines.append("  … (truncated)")

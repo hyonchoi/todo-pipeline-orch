@@ -28,7 +28,7 @@ def _create_project(projects_dir, name, todos=True):
     project_dir = projects_dir / name
     project_dir.mkdir(parents=True, exist_ok=True)
     if todos:
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-10: test**\n")
     return project_dir
 
 
@@ -498,7 +498,7 @@ class TestSecurityHardening:
         # Real project
         real_project = projects_dir / "real"
         real_project.mkdir()
-        (real_project / "TODOS.md").write_text("# TODOS\n\nTODO-1 — test\n")
+        (real_project / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: test**\n")
 
         # Symlink pointing to the real project (escape attempt)
         symlink = projects_dir / "symlink-project"

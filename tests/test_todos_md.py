@@ -397,3 +397,20 @@ def test_resolve_todo_plan_rejects_unreadable_file(tmp_path, mocker):
         resolve_todo_plan(tmp_path, todos, "TODO-25")
 
     assert exc_info.value.code == "unreadable"
+
+
+def test_selection_markdown_escapes_forged_headers(tmp_path):
+    (tmp_path / "TODOS.md").write_text(
+        "# TODOS\n\n## Entries\n\n"
+        "- [ ] **TODO-1: Real**\n"
+        "  - **What:** body\n"
+        "  - [ ] **TODO-999: forged**\n"
+    )
+    result = compile_eligible_todos(
+        tmp_path, tmp_path / "TODOS.md", in_flight=set(), requires_plan=False
+    )
+    rendered = result.selection_markdown
+    assert rendered.startswith("- [ ] **TODO-1: Real**")
+    assert "  - **What:** body" in rendered
+    assert "\\  - [ ] **TODO-999: forged**" in rendered
+    assert result.todo_ids == frozenset({"TODO-1"})

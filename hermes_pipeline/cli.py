@@ -1471,24 +1471,34 @@ def _tick_project(
     if not todos_path.exists():
         raise FileNotFoundError(f"TODOS.md not found in {project_dir}")
 
+    from .decision.context import build_in_flight, fetch_kanban_snapshot
+    from .todos_md import compile_eligible_todos
+
+    # Compile the exact candidate set server-side for every profile; the
+    # selector only ever sees eligible entries and may only pick their ids.
+    # The kanban snapshot is fetched once and shared with build_context.
+    kanban_snapshot = fetch_kanban_snapshot(project_slug)
+    in_flight = build_in_flight(
+        project_state,
+        max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
+        board_slug=project_slug,
+        snapshot=kanban_snapshot,
+    )
+    eligibility = compile_eligible_todos(
+        project_dir,
+        todos_path,
+        in_flight=set(in_flight),
+        requires_plan=phase_profile.requires_plan,
+    )
     ctx = build_context(
         tick_id=tick_id,
         state_dir=project_state,
-        todos_path=todos_path,
+        selection_markdown=eligibility.selection_markdown,
+        candidate_ids=[c.entry.todo_id for c in eligibility.candidates],
         project_slug=project_slug,
         max_phase_timeout_min=cb_cfg.max_phase_timeout_min,
+        snapshot=kanban_snapshot,
     )
-    eligibility = None
-    if phase_profile.requires_plan:
-        from .todos_md import compile_eligible_todos
-
-        eligibility = compile_eligible_todos(
-            project_dir,
-            todos_path,
-            in_flight=set(ctx.in_flight),
-            requires_plan=True,
-        )
-        ctx = replace(ctx, todos_md=eligibility.selection_markdown)
 
     # Build full config for selection
     from .config import FullConfig, SelectionConfig
@@ -1527,7 +1537,17 @@ def _tick_project(
         min(MAX_TIMEOUT_SECONDS, budget_s - _SELECTION_TIMEOUT_RESERVE_S),
     )
 
-    if eligibility is not None and not eligibility.candidates:
+    if (
+        not eligibility.candidates
+        and not eligibility.blocked_reasons
+        and re.search(r"TODO-\d+", todos_path.read_text(encoding="utf-8"))
+    ):
+        log.warning(
+            "project %s: TODOS.md mentions TODO ids but has no canonical entries "
+            "(`- [ ] **TODO-N: title**`); run todos-manager --convert",
+            project_slug,
+        )
+    if not eligibility.candidates:
         from .decision import record_no_candidates
 
         decision = record_no_candidates(
@@ -1542,11 +1562,7 @@ def _tick_project(
             ctx=ctx,
             cfg=full_cfg,
             timeout=selection_timeout_s,
-            **(
-                {"eligible_todo_ids": eligibility.todo_ids}
-                if eligibility is not None
-                else {}
-            ),
+            eligible_todo_ids=eligibility.todo_ids,
         )
     picked = decision.picked
 

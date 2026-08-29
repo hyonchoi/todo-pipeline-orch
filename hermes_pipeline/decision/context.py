@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 from . import store as _store
@@ -60,7 +61,7 @@ def _kanban_in_flight_ids(board_slug: str) -> set[str] | None:
         Set of TODO IDs with tasks in created/ready/running status,
         or None if the kanban CLI is unavailable.
     """
-    snapshot = _fetch_kanban_snapshot(board_slug)
+    snapshot = fetch_kanban_snapshot(board_slug)
     if snapshot is None:
         return None
     return _extract_in_flight_ids(snapshot)
@@ -78,7 +79,7 @@ def build_in_flight(
         state_dir: State directory path (no longer used for fallback).
         max_phase_timeout_min: Max age in minutes before a lock is stale (no longer used).
         board_slug: Kanban board slug for kanban-aware lookup.
-        snapshot: Pre-fetched kanban snapshot (from _fetch_kanban_snapshot).
+        snapshot: Pre-fetched kanban snapshot (from fetch_kanban_snapshot).
             If provided, used instead of fetching from the CLI.
 
     Returns:
@@ -93,7 +94,7 @@ def build_in_flight(
             return sorted(kanban_in_flight)
     return []
 
-def _fetch_kanban_snapshot(project_slug: str) -> dict | None:
+def fetch_kanban_snapshot(project_slug: str) -> dict | None:
     """Fetch kanban board state via `hermes kanban list --json`.
 
     Returns:
@@ -113,13 +114,15 @@ def _fetch_kanban_snapshot(project_slug: str) -> dict | None:
         pass
     return None
 
+_fetch_kanban_snapshot = fetch_kanban_snapshot  # backward-compatible alias
+
 def _kanban_snapshot(project_slug: str) -> dict:
     """Capture current Kanban state via `hermes kanban list`.
 
     Returns a dict suitable for the selection prompt. On CLI failure,
     returns an error marker dict.
     """
-    snapshot = _fetch_kanban_snapshot(project_slug)
+    snapshot = fetch_kanban_snapshot(project_slug)
     if snapshot is not None:
         return snapshot
     return {"columns": [], "_error": "kanban snapshot unavailable"}
@@ -157,19 +160,26 @@ def build_context(
     *,
     tick_id: str,
     state_dir: Path,
-    todos_path: Path,
+    selection_markdown: str,
+    candidate_ids: Sequence[str],
     project_slug: str,
     max_phase_timeout_min: int,
     recent_n: int = 5,
+    snapshot: dict | None = None,
 ) -> SelectionContext:
     """Assemble the full SelectionContext for a tick.
 
-    Fetches the kanban snapshot once and reuses it for both in-flight
-    detection and the kanban_snapshot field (avoids duplicate CLI calls).
+    The caller supplies the already-compiled candidate list (rendered
+    markdown plus ordered ids); this function never reads TODOS.md.
+    Fetches the kanban snapshot once (unless a pre-fetched `snapshot` is
+    passed) and reuses it for both in-flight detection and the
+    kanban_snapshot field (avoids duplicate CLI calls).
     """
-    snapshot = _fetch_kanban_snapshot(project_slug)
+    if snapshot is None:
+        snapshot = fetch_kanban_snapshot(project_slug)
     return SelectionContext(
-        todos_md=todos_path.read_text(),
+        selection_markdown=selection_markdown,
+        candidate_ids=tuple(candidate_ids),
         in_flight=build_in_flight(
             state_dir,
             max_phase_timeout_min=max_phase_timeout_min,

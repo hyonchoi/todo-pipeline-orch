@@ -1,5 +1,6 @@
 ---
 name: outcome_aware_avoids_failed
+candidate_ids: [TODO-1, TODO-2]
 in_flight: []
 recent_decisions:
   - tick_id: "old1"

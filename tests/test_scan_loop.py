@@ -29,11 +29,11 @@ def test_tick_scans_multiple_projects(tmp_path: Path):
 
     pa = projects_dir / "project-a"
     pa.mkdir()
-    (pa / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pa / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
 
     pb = projects_dir / "project-b"
     pb.mkdir()
-    (pb / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pb / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -42,7 +42,7 @@ def test_tick_scans_multiple_projects(tmp_path: Path):
 
     selection_calls = []
 
-    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
         selection_calls.append(ctx.project_slug)
         return _make_decision()
 
@@ -63,11 +63,11 @@ def test_tick_skips_disabled_projects(tmp_path: Path):
 
     pa = projects_dir / "project-a"
     pa.mkdir()
-    (pa / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pa / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
 
     pb = projects_dir / "project-b"
     pb.mkdir()
-    (pb / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pb / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
     pb_hermes = pb / ".hermes"
     pb_hermes.mkdir()
     (pb_hermes / "project.toml").write_text("[active]\nenabled = false\n")
@@ -79,7 +79,7 @@ def test_tick_skips_disabled_projects(tmp_path: Path):
 
     selection_calls = []
 
-    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
         selection_calls.append(ctx.project_slug)
         return _make_decision()
 
@@ -100,11 +100,11 @@ def test_tick_error_isolation(tmp_path: Path):
 
     pa = projects_dir / "project-a"
     pa.mkdir()
-    (pa / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pa / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
 
     pb = projects_dir / "project-b"
     pb.mkdir()
-    (pb / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pb / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -113,7 +113,7 @@ def test_tick_error_isolation(tmp_path: Path):
 
     selection_calls = []
 
-    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
         if ctx.project_slug == "project-a":
             raise RuntimeError("simulated error in project-a")
         selection_calls.append(ctx.project_slug)
@@ -135,7 +135,7 @@ def test_tick_uses_per_project_state_dir(tmp_path: Path):
 
     pa = projects_dir / "project-a"
     pa.mkdir()
-    (pa / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pa / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -150,7 +150,7 @@ def test_tick_uses_per_project_state_dir(tmp_path: Path):
         ctx.project_slug = "project-a"
         return ctx
 
-    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
         return _make_decision()
 
     args = FakeArgs()
@@ -171,7 +171,7 @@ def test_tick_performs_state_migration(tmp_path: Path):
 
     pa = projects_dir / "project-a"
     pa.mkdir()
-    (pa / "TODOS.md").write_text("# TODOS\n\nTODO-1 — First task\n")
+    (pa / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-1: First task**\n")
 
     state_dir = tmp_path / "state"
     state_dir.mkdir()
@@ -179,7 +179,7 @@ def test_tick_performs_state_migration(tmp_path: Path):
 
     config = Config(projects_dir=projects_dir, state_dir=state_dir)
 
-    def mock_selection(*, tick_id, ctx, cfg, timeout=None):
+    def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
         return _make_decision()
 
     args = FakeArgs()

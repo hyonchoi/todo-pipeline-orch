@@ -1,5 +1,7 @@
 ---
 name: heavy_drift_no_metadata
+note: "model-robustness fixture; not production-shaped"
+candidate_ids: [TODO-1, TODO-3, TODO-5]
 in_flight: []
 recent_decisions: []
 expected_picked_in: ["TODO-1", "TODO-3"]

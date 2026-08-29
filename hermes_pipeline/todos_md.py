@@ -84,7 +84,15 @@ class EligibilityResult:
 
     @property
     def selection_markdown(self) -> str:
-        return "\n".join(candidate.entry.raw.rstrip() for candidate in self.candidates)
+        from .github_issues import escape_hostile_selection_lines
+
+        rendered: list[str] = []
+        for candidate in self.candidates:
+            header, _, body = candidate.entry.raw.rstrip().partition("\n")
+            rendered.append(
+                header if not body else header + "\n" + escape_hostile_selection_lines(body)
+            )
+        return "\n".join(rendered)
 
 
 def parse_todo_entries(text: str) -> tuple[TodoEntry, ...]:

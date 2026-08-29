@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as _dt
+import logging as _logging
 import re as _re
 import subprocess
 from contextlib import nullcontext as _nullcontext
@@ -15,12 +16,12 @@ from hermes_pipeline.hermes_adapter import (
     HermesCallError,
     HermesDependencyError,
 )
-from hermes_pipeline.todos_md import parse_todo_entries, todo_entry_ids
 
 from . import store as _store
 from .agent import PromptShaMismatch, call_agent, compute_prompt_sha
 from .schema import HermesSelectionDecision, Outcome, SelectionContext
 
+_log = _logging.getLogger(__name__)
 _TODO_ID_RE = _re.compile(r"^TODO-\d+$")
 
 __all__ = [
@@ -28,6 +29,7 @@ __all__ = [
     "Outcome",
     "SelectionContext",
     "record_no_candidates",
+    "record_tracker_error",
     "run_selection",
 ]
 
@@ -50,6 +52,43 @@ def record_no_candidates(
     state_dir = _P(cfg.base.state_dir)
     _store.persist(state_dir, decision)
     _store.rotate_if_needed(state_dir, hot_cap=50)
+    return decision
+
+
+# NOTE: wired into the tick loop in task 1.5 (kanban/tracker unavailability)
+def record_tracker_error(
+    *,
+    state_dir,
+    tick_id: str,
+    project_slug: str,
+    code: str,
+    counts_as_no_progress: bool,
+) -> HermesSelectionDecision:
+    """Persist a deterministic no-pick when the issue tracker cannot be read.
+
+    `code` is a stable, secret-free classifier (e.g. ``gh_unavailable``) that
+    becomes the rationale suffix. `counts_as_no_progress` is the circuit-breaker
+    hint the caller derived for this code; it is not part of the persisted
+    decision shape, so it is only echoed in the log line here.
+    """
+    decision = HermesSelectionDecision(
+        tick_id=tick_id,
+        timestamp=_now_iso(),
+        model="",
+        prompt_sha="",
+        candidates_considered=[],
+        picked=None,
+        rationale=f"tracker_error: {code}",
+        blocked_reasons={},
+        in_flight=[],
+    )
+    state_dir = _P(state_dir)
+    _store.persist(state_dir, decision)
+    _store.rotate_if_needed(state_dir, hot_cap=50)
+    _log.warning(
+        "project %s: tick %s tracker_error=%s counts_as_no_progress=%s",
+        project_slug, tick_id, code, counts_as_no_progress,
+    )
     return decision
 
 
@@ -170,14 +209,14 @@ def run_selection(
     # LLM-output trust boundary. Three failure modes to gate against:
     #   1. `picked` doesn't match the TODO-N shape (model returned a string,
     #      a dict, a hallucinated value).
-    #   2. `picked` is shaped correctly but isn't a declared TODOS.md entry.
-    #   3. `picked` is a declared entry but was filtered out (e.g., it's already
-    #      in_flight from a prior tick).
-    # Validate against the server-parsed TODO ids in `ctx.todos_md`, NOT
-    # against the LLM-supplied `candidates_considered` (which is itself
-    # untrusted output and can be made to agree with `picked` by injection).
-    ordered_real_ids = [entry.todo_id for entry in parse_todo_entries(ctx.todos_md)]
-    real_ids = todo_entry_ids(ctx.todos_md)
+    #   2. `picked` is shaped correctly but isn't a server-compiled candidate.
+    #   3. `picked` is a known candidate but was filtered out (e.g., it's
+    #      already in_flight from a prior tick).
+    # Validate against the server-compiled `ctx.candidate_ids`, NOT against
+    # the LLM-supplied `candidates_considered` (which is itself untrusted
+    # output and can be made to agree with `picked` by injection).
+    ordered_real_ids = list(ctx.candidate_ids)
+    real_ids = set(ordered_real_ids)
     allowed_ids = set(eligible_todo_ids) if eligible_todo_ids is not None else real_ids
     in_flight_set = set(ctx.in_flight)
     picked = parsed.get("picked")
@@ -186,7 +225,7 @@ def run_selection(
         if not isinstance(picked, str) or not _TODO_ID_RE.match(picked):
             reason = f"invalid_pick_shape: picked={picked!r}"
         elif picked not in real_ids:
-            reason = f"pick_not_in_todos_md: picked={picked!r} known={sorted(real_ids)}"
+            reason = f"pick_not_known: picked={picked!r} known={sorted(real_ids)}"
         elif picked not in allowed_ids:
             reason = f"pick_not_eligible: picked={picked!r} eligible={sorted(allowed_ids)}"
         elif picked in in_flight_set:

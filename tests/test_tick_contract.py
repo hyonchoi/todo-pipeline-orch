@@ -21,7 +21,7 @@ def _make_decision(picked):
 def _create_project(projects_dir, name):
     project_dir = projects_dir / name
     project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+    (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] **TODO-10: test**\n")
     return project_dir
 
 
@@ -748,9 +748,10 @@ class TestTickPlanRequirement:
         )
 
         context = selection.call_args.kwargs["ctx"]
-        assert "TODO-10" in context.todos_md
-        assert "TODO-11" not in context.todos_md
-        assert "TODO-12" not in context.todos_md
+        assert "TODO-10" in context.selection_markdown
+        assert "TODO-11" not in context.selection_markdown
+        assert "TODO-12" not in context.selection_markdown
+        assert context.candidate_ids == ("TODO-10",)
         assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset({"TODO-10"})
 
     def test_requires_plan_with_zero_candidates_skips_selection_call(
@@ -777,3 +778,102 @@ class TestTickPlanRequirement:
         selection.assert_not_called()
         create.assert_not_called()
         assert (project_state / "outcomes" / "01NONEELIGIBLE-phases.json").exists()
+
+
+class TestTickSelectionCandidates:
+    """Non-plan profiles also hand the selector only compiled candidates."""
+
+    def test_blocked_entries_never_reach_selection_context(self, tmp_path, mocker):
+        project_dir = _create_project(tmp_path, "demo")
+        (project_dir / ".hermes").mkdir()
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n"
+            "- [ ] **TODO-10: Eligible**\n"
+            "- [~] **TODO-11: On hold**\n"
+            "- [ ] **TODO-12: Waits on TODO-11**\n"
+            "  - **Depends on:** `TODO-11`\n"
+            "- [x] **TODO-13: Done**\n"
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            return_value=["prepared"],
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["task-1"],
+        )
+
+        selection = _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id="01NONPLAN",
+            mocker=mocker,
+        )
+
+        context = selection.call_args.kwargs["ctx"]
+        assert "TODO-10" in context.selection_markdown
+        for blocked in ("TODO-11", "TODO-12", "TODO-13"):
+            assert blocked not in context.selection_markdown
+        assert context.candidate_ids == ("TODO-10",)
+        assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset({"TODO-10"})
+
+    def test_zero_candidates_without_plan_skips_selection_call(self, tmp_path, mocker):
+        project_dir = _create_project(tmp_path, "demo")
+        project_state = project_dir / ".hermes"
+        project_state.mkdir()
+        (project_dir / "TODOS.md").write_text(
+            "# TODOS\n\n- [~] **TODO-10: On hold**\n"
+        )
+        create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases")
+
+        selection = _run_project_tick(
+            project_dir=project_dir,
+            config=Config(prompt_client="codex"),
+            tick_id="01NONPLANNONE",
+            mocker=mocker,
+        )
+
+        selection.assert_not_called()
+        create.assert_not_called()
+        decision = json.loads((project_state / "decisions" / "01NONPLANNONE.json").read_text())
+        assert decision["picked"] is None
+        assert decision["rationale"] == "no_eligible_candidates"
+        assert decision["blocked_reasons"] == {"TODO-10": "status_on_hold"}
+
+    def test_warns_when_todos_md_has_ids_but_no_canonical_entries(
+        self, tmp_path, mocker, caplog
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        (project_dir / ".hermes").mkdir()
+        (project_dir / "TODOS.md").write_text("# TODOS\n\n- TODO-10: freeform\n")
+
+        with caplog.at_level("WARNING", logger="hermes_pipeline.cli"):
+            selection = _run_project_tick(
+                project_dir=project_dir,
+                config=Config(prompt_client="codex"),
+                tick_id="01FREEFORM",
+                mocker=mocker,
+            )
+
+        selection.assert_not_called()
+        assert any(
+            "no canonical entries" in rec.getMessage() and "todos-manager --convert" in rec.getMessage()
+            for rec in caplog.records
+        )
+
+    def test_no_warning_when_entries_are_blocked_not_malformed(
+        self, tmp_path, mocker, caplog
+    ):
+        project_dir = _create_project(tmp_path, "demo")
+        (project_dir / ".hermes").mkdir()
+        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [~] **TODO-10: On hold**\n")
+
+        with caplog.at_level("WARNING", logger="hermes_pipeline.cli"):
+            _run_project_tick(
+                project_dir=project_dir,
+                config=Config(prompt_client="codex"),
+                tick_id="01BLOCKEDONLY",
+                mocker=mocker,
+            )
+
+        assert not any("no canonical entries" in rec.getMessage() for rec in caplog.records)

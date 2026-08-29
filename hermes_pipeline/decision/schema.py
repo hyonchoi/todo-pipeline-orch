@@ -51,8 +51,15 @@ class HermesSelectionDecision:
 
 @dataclass(frozen=True)
 class SelectionContext:
-    """Input to `run_selection`. Built per-tick by `decision/context.py`."""
-    todos_md: str
+    """Input to `run_selection`. Built per-tick by `decision/context.py`.
+
+    `selection_markdown` is the rendered candidate list shown to the model
+    (one `- [ ] **TODO-N: title**` header per eligible candidate).
+    `candidate_ids` is the server-compiled, ordered set of ids the model may
+    legally pick; `run_selection` validates `picked` against it.
+    """
+    selection_markdown: str
+    candidate_ids: tuple[str, ...]
     in_flight: list[str]
     recent_decisions: list[dict]
     kanban_snapshot: dict
