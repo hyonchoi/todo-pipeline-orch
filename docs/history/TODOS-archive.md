@@ -1,5 +1,9 @@
 # TODOS Archive
 
+> **Read-only historical record.** Completed TODOs archived from the retired `TODOS.md`
+> workflow. The backlog now lives in GitHub Issues; see `docs/migration/todos-to-issues.md`.
+> Legacy `TODO-<n>` IDs here are not issue numbers.
+
 Completed TODOs, archived via `todos-manager --archive`.
 
 Archived: 2026-07-14T00:00:00Z
