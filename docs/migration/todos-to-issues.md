@@ -44,3 +44,16 @@ Already satisfied (dependency outside this run):
 ## Legacy references
 
 Legacy `TODO-<n>` identifiers remain in plan filenames (`docs/superpowers/plans/*-todo-<n>-*.md`), branch names (`feature/todo-<n>-*`), `docs/pipeline/TODO-25-*`, and issues #16 and #21 carry legacy `TODO-N:` title prefixes. Each migrated issue carries `legacy-id:TODO-<n>` and a `### Legacy ID` section so those references stay resolvable.
+
+## Upgrade precondition and rollback
+
+**Upgrade precondition:** no active schema-1 runs. `tpo doctor <project>` reports each as `REGISTRATION UNSUPPORTED: schema_version 1; finish or abandon this run before upgrading`. Finish or abandon (see [docs/howto-debugging-and-recovery.md](../howto-debugging-and-recovery.md)) before deploying this version. No v1→v2 registration conversion exists, by design. The selection prompt SHA changed; re-pin `selection.expected_prompt_sha` to `11c04ee5cf7fb92e369cc3e095b9f62aef28f52ea815ffd09486ee818032bf6e` ([docs/howto-prompt-sha-mismatch.md](../howto-prompt-sha-mismatch.md)).
+
+**Rollback (this version → previous):**
+
+1. Block: if any v2 `registration.json` under `<state>/runs/` is active (no `issue-closed`/`abandoned` marker), abandon those runs first (archive their Kanban cards per the recovery how-to; `touch <state>/runs/<tick>/abandoned`). v1 cannot read v2 registrations. Acceptance: on the reverted version `tpo doctor <project>` reports no active registration.
+2. `git revert` the PR series in reverse order (restores TODOS.md with the seven entries as `[ ]`, the skill, and the tests; the revert is clean because no task edited the migrated entries' content).
+3. Issue-state reconciliation using the mapping table above: remove `tpo:in-progress` from migrated issues; for any issue closed by a v2 closeout whose TODO is not `[x]` in the restored TODOS.md, either mark the TODO `[x]` (v1 `tpo todos complete`) or `gh issue reopen` — record the choice here. Other issues may stay open (harmless) or be closed with `--comment "rolled back to TODOS.md"`.
+4. Verify: `uv run pytest`, `tpo doctor <project>`, one `tpo tick` on a fixture project.
+
+Created labels (`tpo:todo`, `tpo:on-hold`, `tpo:in-progress`, triage vocabulary, `legacy-id:*`) are inert and may stay.
