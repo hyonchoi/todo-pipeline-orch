@@ -1077,24 +1077,6 @@ def test_doctor_warns_when_runs_is_not_a_directory(tmp_path, mocker, capsys, fak
     assert "OK:" not in output
 
 
-def test_doctor_reports_installed_skill_drift(tmp_path, mocker, capsys):
-    args = _create_valid_doctor_project(tmp_path)
-    installed = tmp_path / "demo" / ".agents" / "skills" / "todos-manager"
-    installed.mkdir(parents=True)
-    (installed / "SKILL.md").write_text("stale skill\n")
-    mocker.patch(
-        "hermes_pipeline.cli._cli_sp.run",
-        side_effect=_allow_hermes_registry_skill_check,
-    )
-
-    assert _cmd_doctor(
-        args, Config(projects_dir=tmp_path, prompt_client="codex")
-    ) == 1
-    output = capsys.readouterr().out
-    assert "SKILL DRIFT" in output
-    assert "tpo skills install" in output
-
-
 ORIGIN = ("git", "remote", "get-url", "origin")
 API = ("gh", "api", "-H", "Accept: application/vnd.github+json")
 
@@ -1677,6 +1659,10 @@ class TestCmdDoctor:
             "hermes_pipeline.cli._cli_sp.run",
             side_effect=_allow_hermes_registry_skill_check,
         )
+        # A stale project-scoped skill must no longer be inspected by doctor.
+        stale_skill = project_dir / ".claude" / "skills" / "todos-manager"
+        stale_skill.mkdir(parents=True)
+        (stale_skill / "SKILL.md").write_text("stale skill\n")
         config = Config(projects_dir=projects_dir)
 
         result = _cmd_doctor(FakeArgs(project="demo"), config)
@@ -1685,6 +1671,8 @@ class TestCmdDoctor:
         output = capsys.readouterr().out
         assert "OK" in output
         assert "Plan readiness: eligible=0 blocked=0\n" in output
+        assert "todos-manager" not in output
+        assert "Skill parity" not in output
 
     def test_doctor_drift_returns_1(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"
@@ -2504,3 +2492,13 @@ class TestPriorTickId:
         with caplog.at_level("ERROR", logger="hermes_pipeline.cli"):
             assert _read_prior_tick_id(tmp_path) is None
         assert any(r.levelname == "ERROR" and "tick id" in r.getMessage() for r in caplog.records)
+
+
+class TestSkillsRemoved:
+    def test_skills_install_is_rejected(self):
+        with pytest.raises(SystemExit) as excinfo:
+            build_parser().parse_args(["skills", "install"])
+        assert excinfo.value.code == 2
+
+    def test_skills_absent_from_usage(self):
+        assert "skills" not in build_parser().format_usage()

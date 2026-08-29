@@ -245,9 +245,9 @@ class TestResolveBundledDir:
         """Normal (non-zip) install: returns a real, existing directory."""
         from hermes_pipeline.contract import _resolve_bundled_dir
 
-        result = _resolve_bundled_dir("skills", "todos-manager")
+        result = _resolve_bundled_dir("hermes-identity", "pipeline")
         assert result.is_dir()
-        assert (result / "SKILL.md").is_file()
+        assert (result / "SOUL.md").is_file()
 
     def test_falls_back_to_tempdir_for_non_filesystem_traversable(self, mocker):
         """Zip-wheel install: Path(traversable) raises, falls back to a real temp copy."""
@@ -267,11 +267,11 @@ class TestResolveBundledDir:
             def is_dir(self):
                 return True
 
-            name = "todos-manager"
+            name = "pipeline"
 
         mocker.patch.object(
             contract_mod, "_bundled_data_root",
             return_value=FakeTraversable(),
         )
-        result = _resolve_bundled_dir("skills", "todos-manager")
+        result = _resolve_bundled_dir("hermes-identity", "pipeline")
         assert result.is_dir()

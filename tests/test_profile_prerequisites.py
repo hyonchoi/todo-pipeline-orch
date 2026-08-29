@@ -21,10 +21,10 @@ def test_verify_registry_skill_uses_selected_assignee():
 
     def runner(cmd, **kwargs):
         calls.append((cmd, kwargs))
-        return CompletedProcess(cmd, 0, stdout="todos-manager enabled\n", stderr="")
+        return CompletedProcess(cmd, 0, stdout="example-skill enabled\n", stderr="")
 
     assert verify_hermes_skill_registry_prerequisite(
-        assignee="pipeline", skill_id="todos-manager", runner=runner
+        assignee="pipeline", skill_id="example-skill", runner=runner
     ) == (True, "")
     assert calls[0][0] == [
         "hermes",
@@ -60,7 +60,7 @@ def test_verify_registry_skill_fails_closed_on_timeout():
         raise TimeoutExpired(cmd, 10)
 
     verified, detail = verify_hermes_skill_registry_prerequisite(
-        assignee="pipeline", skill_id="todos-manager", runner=runner
+        assignee="pipeline", skill_id="example-skill", runner=runner
     )
 
     assert verified is False
