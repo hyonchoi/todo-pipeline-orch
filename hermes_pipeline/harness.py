@@ -13,8 +13,9 @@ import time
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import yaml
@@ -249,16 +250,136 @@ def github_preflight(
     return GitHubPreflight(viewer=viewer, default_branch=default_branch, permission=permission)
 
 
+# Seam for tests: ``hermes_pipeline.harness._git`` is monkeypatched to a recorder.
+_git = subprocess.run
+_SANDBOX_SEED_PATHS = ("pyproject.toml", "tests/__init__.py", "docs/harness/SANDBOX.md")
+_HARNESS_GIT_USER_EMAIL = "test@localhost"
+_HARNESS_GIT_USER_NAME = "TPO Harness"
+
+
+_URL_USERINFO_RE = re.compile(r"://[^/@\s]+@")
+_GIT_NO_PROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "GCM_INTERACTIVE": "never"}
+
+
+def _run_git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    try:
+        result = _git(
+            ["git", *args],
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            check=False,
+            env={**os.environ, **_GIT_NO_PROMPT_ENV},
+        )
+    except OSError as exc:
+        raise HarnessPreflightError("git_error", f"git {args[0]} failed: {exc}") from exc
+    if check and result.returncode != 0:
+        stderr = _URL_USERINFO_RE.sub("://***@", (result.stderr or "").strip())[:200]
+        raise HarnessPreflightError("git_error", f"git {args[0]} failed: {stderr}")
+    return result
+
+
+def clone_sandbox(sandbox: SandboxRepo, project_dir: Path) -> None:
+    """Clone *sandbox* into *project_dir* and set a local harness git identity."""
+    if project_dir.exists():
+        raise HarnessPreflightError("workspace_exists", str(project_dir))
+    project_dir.parent.mkdir(parents=True, exist_ok=True)
+    _run_git(["clone", "--", sandbox.url, str(project_dir)], cwd=project_dir.parent)
+    _run_git(["config", "user.email", _HARNESS_GIT_USER_EMAIL], cwd=project_dir)
+    _run_git(["config", "user.name", _HARNESS_GIT_USER_NAME], cwd=project_dir)
+
+
+def sandbox_seed_check(project_dir: Path, sandbox: SandboxRepo) -> None:
+    """Require every sandbox seed path to be a tracked file (blob) at HEAD of the clone."""
+    missing = []
+    for rel in _SANDBOX_SEED_PATHS:
+        result = _run_git(["cat-file", "-t", f"HEAD:{rel}"], cwd=project_dir, check=False)
+        if result.returncode != 0 or result.stdout.strip() != "blob":
+            missing.append(rel)
+    if missing:
+        raise HarnessPreflightError(
+            "sandbox_not_seeded",
+            f"missing: {', '.join(missing)}; run tpo test --repo {sandbox.repo} --init-sandbox",
+        )
+
+
+@dataclass(frozen=True)
+class RunBaseline:
+    """Remote state captured before a live harness run, for verification and cleanup."""
+
+    head_pairs: tuple[tuple[str, str], ...]
+    started_at: datetime
+    viewer: str
+    default_branch: str
+
+    @property
+    def heads(self) -> Mapping[str, str]:
+        """Read-only ``{branch: sha}`` view of the remote heads."""
+        return MappingProxyType(dict(self.head_pairs))
+
+
+def take_baseline(
+    project_dir: Path, *, viewer: str, default_branch: str, now: datetime | None = None
+) -> RunBaseline:
+    """Snapshot remote branch heads and a second-precision UTC start timestamp."""
+    if now is None:
+        now = datetime.now(UTC)
+    elif now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError("now must be timezone-aware")
+    result = _run_git(["ls-remote", "--heads", "origin"], cwd=project_dir)
+    heads: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        sha, sep, ref = line.rstrip("\n").partition("\t")
+        if sep and sha and ref.startswith("refs/heads/"):
+            heads[ref.removeprefix("refs/heads/")] = sha
+    # GitHub timestamps are second-precision: floor, then back off one second.
+    started = now.astimezone(UTC).replace(microsecond=0) - timedelta(seconds=1)
+    return RunBaseline(
+        head_pairs=tuple(heads.items()),
+        started_at=started,
+        viewer=viewer,
+        default_branch=default_branch,
+    )
+
+
+def _render_project_contract(profile_name: str) -> str:
+    """Render the ``.hermes/pipeline.toml`` text for *profile_name* (raises on unknown profile)."""
+    from .contract import required_capabilities
+    from .phases import load_phases, resolve_profile_phases_path
+
+    capabilities = sorted(required_capabilities(load_phases(resolve_profile_phases_path(profile_name))))
+    capabilities_toml = ", ".join(f'"{item}"' for item in capabilities)
+    return (
+        "# Pipeline execution contract — read at tick start.\n"
+        "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
+        "schema_version = 2\n"
+        f'assignee = "{_HARNESS_ASSIGNEE}"\n'
+        f"capabilities = [{capabilities_toml}]\n"
+        f'profile = "{profile_name}"\n'
+    )
+
+
+def _write_project_contract_text(project_dir: Path, pipeline_toml: str) -> None:
+    hermes_dir = project_dir / ".hermes"
+    hermes_dir.mkdir(exist_ok=True)
+    (hermes_dir / "pipeline.toml").write_text(pipeline_toml)
+
+
+def write_project_contract(project_dir: Path, profile_name: str) -> None:
+    """Write the ``.hermes/pipeline.toml`` execution contract for *profile_name*.
+
+    Creates ``.hermes/`` if needed and overwrites any existing ``pipeline.toml``
+    (a cloned sandbox may already carry one).
+    """
+    _write_project_contract_text(project_dir, _render_project_contract(profile_name))
+
+
 def create_mock_project(
     path: Path, fixture_name: str, profile_name: str = "gstack"
 ) -> dict[str, Any]:
     """Create a mock project in *path* for integration testing."""
-    from .contract import required_capabilities
-    from .phases import load_phases, resolve_profile_phases_path
-
-    profile_path = resolve_profile_phases_path(profile_name)
-    profile_phases = load_phases(profile_path)
-    capabilities = sorted(required_capabilities(profile_phases))
+    # Resolve the profile first so an unknown profile fails before touching the filesystem.
+    pipeline_toml = _render_project_contract(profile_name)
 
     path.mkdir(parents=True, exist_ok=True)
 
@@ -275,20 +396,8 @@ def create_mock_project(
     plan_path.parent.mkdir(parents=True)
     plan_path.write_text(_HARNESS_PLAN)
 
-    hermes_dir = path / ".hermes"
-    hermes_dir.mkdir()
-
     # Create pipeline.toml contract for assignee configuration
-    capabilities_toml = ", ".join(f'"{item}"' for item in capabilities)
-    pipeline_toml = (
-        "# Pipeline execution contract — read at tick start.\n"
-        "# See docs/tutorial-getting-started.md and `tpo doctor --help`.\n"
-        "schema_version = 2\n"
-        f'assignee = "{_HARNESS_ASSIGNEE}"\n'
-        f"capabilities = [{capabilities_toml}]\n"
-        f'profile = "{profile_name}"\n'
-    )
-    (path / ".hermes" / "pipeline.toml").write_text(pipeline_toml)
+    _write_project_contract_text(path, pipeline_toml)
 
     # Offline GitHub Issues backend: an executable ``gh`` stand-in plus its
     # gitignored state file, seeded with the fixture's single eligible issue.

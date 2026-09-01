@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import os
 import subprocess
 import tomllib
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from hermes_pipeline.config import Config
+from hermes_pipeline.contract import ContractSchemaError
 from hermes_pipeline.github_issues import GitHubIssuesError
 from hermes_pipeline.harness import (
     ConvergenceDetector,
@@ -22,6 +25,7 @@ from hermes_pipeline.harness import (
     HarnessPreflightError,
     HarnessProfileError,
     HarnessResult,
+    RunBaseline,
     SandboxRepo,
     _build_harness_profile_data,
     _classify_error_class,
@@ -30,6 +34,7 @@ from hermes_pipeline.harness import (
     _prune_retained_state,
     _validate_profile_prerequisites,
     _with_offline_terminal_workflow,
+    clone_sandbox,
     create_mock_project,
     filter_phases,
     github_preflight,
@@ -38,7 +43,10 @@ from hermes_pipeline.harness import (
     preflight_check,
     resolve_sandbox_repo,
     run_harness,
+    sandbox_seed_check,
+    take_baseline,
     validate_live_profile,
+    write_project_contract,
 )
 from hermes_pipeline.phases import Phase, load_phases, resolve_profile_phases_path
 from tests.gh_fakes import API_ARGV, seed_project_issues, todo_payload
@@ -2626,3 +2634,282 @@ class TestGithubPreflight:
         with pytest.raises(GitHubIssuesError) as exc_info:
             github_preflight(tmp_path, SANDBOX)
         assert exc_info.value.code != "gh_invalid"
+
+
+def _seed_bare_remote(tmp_path: Path, *, seed_paths: tuple[str, ...]) -> tuple[Path, str]:
+    """Create a bare ``main`` remote seeded with *seed_paths*; return (bare, head sha)."""
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null"}
+
+    def git(*args: str, cwd: Path) -> str:
+        return subprocess.run(
+            ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=env
+        ).stdout.strip()
+
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    git("init", "--bare", "-b", "main", cwd=bare)
+    work = tmp_path / "seed"
+    work.mkdir()
+    git("init", "-b", "main", cwd=work)
+    git("config", "user.email", "seed@localhost", cwd=work)
+    git("config", "user.name", "Seed", cwd=work)
+    for rel in seed_paths:
+        target = work / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# {rel}\n")
+    git("add", ".", cwd=work)
+    git("commit", "-m", "seed sandbox", cwd=work)
+    git("remote", "add", "origin", f"file://{bare}", cwd=work)
+    git("push", "origin", "main", cwd=work)
+    return bare, git("rev-parse", "HEAD", cwd=work)
+
+
+_ALL_SEED_PATHS = ("pyproject.toml", "tests/__init__.py", "docs/harness/SANDBOX.md")
+
+
+class TestCloneSandbox:
+    sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
+
+    def test_clone_uses_seam_argv(self, tmp_path, monkeypatch):
+        calls: list[dict] = []
+
+        def fake_git(argv, **kwargs):
+            calls.append({"argv": argv, **kwargs})
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", fake_git)
+        project_dir = tmp_path / "sandbox"
+
+        clone_sandbox(self.sandbox, project_dir)
+
+        assert calls[0]["argv"] == ["git", "clone", "--", self.sandbox.url, str(project_dir)]
+        assert calls[0]["cwd"] == tmp_path
+        assert calls[0]["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert [c["argv"] for c in calls[1:]] == [
+            ["git", "config", "user.email", "test@localhost"],
+            ["git", "config", "user.name", "TPO Harness"],
+        ]
+        assert all(c["cwd"] == project_dir for c in calls[1:])
+
+    def test_clone_refuses_existing_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: pytest.fail("git must not run"),
+        )
+        project_dir = tmp_path / "sandbox"
+        project_dir.mkdir()
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            clone_sandbox(self.sandbox, project_dir)
+
+        assert exc_info.value.code == "workspace_exists"
+        assert exc_info.value.detail == str(project_dir)
+
+    def test_git_failure_raises_git_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 128, "", "fatal: repository not found\n"),
+        )
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            clone_sandbox(self.sandbox, tmp_path / "sandbox")
+
+        assert exc_info.value.code == "git_error"
+        assert "git clone failed" in exc_info.value.detail
+        assert "repository not found" in exc_info.value.detail
+
+    def test_clone_creates_missing_parent(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        )
+        project_dir = tmp_path / "deep" / "nested" / "sandbox"
+
+        clone_sandbox(self.sandbox, project_dir)
+
+        assert project_dir.parent.is_dir()
+
+    def test_seam_oserror_raises_git_error(self, tmp_path, monkeypatch):
+        def broken(argv, **kw):
+            raise FileNotFoundError(2, "No such file or directory", "git")
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", broken)
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            clone_sandbox(self.sandbox, tmp_path / "sandbox")
+
+        assert exc_info.value.code == "git_error"
+        assert exc_info.value.detail.startswith("git clone failed: ")
+        assert "No such file or directory" in exc_info.value.detail
+
+    def test_git_error_redacts_userinfo_and_disables_prompts(self, tmp_path, monkeypatch):
+        seen_env: list[dict] = []
+
+        def fake_git(argv, **kw):
+            seen_env.append(kw["env"])
+            return subprocess.CompletedProcess(
+                argv, 128, "", "fatal: Authentication failed for 'https://user:tok@github.com/x'\n"
+            )
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", fake_git)
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            clone_sandbox(self.sandbox, tmp_path / "sandbox")
+
+        assert "://***@github.com/x" in exc_info.value.detail
+        assert "tok" not in exc_info.value.detail
+        assert seen_env[0]["GIT_ASKPASS"] == ""
+        assert seen_env[0]["GCM_INTERACTIVE"] == "never"
+
+    def test_seed_check_treats_tree_as_missing(self, tmp_path, monkeypatch):
+        def fake_git(argv, **kw):
+            assert argv[:3] == ["git", "cat-file", "-t"]
+            kind = "tree" if argv[3] == "HEAD:tests/__init__.py" else "blob"
+            return subprocess.CompletedProcess(argv, 0, f"{kind}\n", "")
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", fake_git)
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            sandbox_seed_check(tmp_path, self.sandbox)
+
+        assert exc_info.value.code == "sandbox_not_seeded"
+        assert "missing: tests/__init__.py;" in exc_info.value.detail
+
+    @pytest.mark.real_git
+    def test_clone_from_local_bare_remote_and_seed_check(self, tmp_path):
+        bare, sha = _seed_bare_remote(tmp_path, seed_paths=_ALL_SEED_PATHS)
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        project_dir = tmp_path / "workspace" / "sandbox"
+        project_dir.parent.mkdir()
+
+        clone_sandbox(sandbox, project_dir)
+
+        assert (project_dir / ".git").is_dir()
+        assert (project_dir / "docs/harness/SANDBOX.md").is_file()
+        name = subprocess.run(
+            ["git", "config", "user.name"], cwd=project_dir, capture_output=True, text=True, check=True
+        ).stdout.strip()
+        assert name == "TPO Harness"
+
+        sandbox_seed_check(project_dir, sandbox)
+
+        baseline = take_baseline(project_dir, viewer="octocat", default_branch="main")
+        assert isinstance(baseline, RunBaseline)
+        assert dict(baseline.heads) == {"main": sha}
+        assert baseline.viewer == "octocat"
+        assert baseline.default_branch == "main"
+
+    @pytest.mark.real_git
+    def test_seed_check_reports_missing_paths(self, tmp_path):
+        bare, _sha = _seed_bare_remote(tmp_path, seed_paths=("pyproject.toml", "tests/__init__.py"))
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        project_dir = tmp_path / "sandbox"
+        clone_sandbox(sandbox, project_dir)
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            sandbox_seed_check(project_dir, sandbox)
+
+        assert exc_info.value.code == "sandbox_not_seeded"
+        assert "docs/harness/SANDBOX.md" in exc_info.value.detail
+        assert "pyproject.toml" not in exc_info.value.detail
+        assert "tpo test --repo acme/sandbox --init-sandbox" in exc_info.value.detail
+
+        # Present on disk but not tracked at HEAD must still count as missing.
+        on_disk = project_dir / "docs" / "harness" / "SANDBOX.md"
+        on_disk.parent.mkdir(parents=True)
+        on_disk.write_text("# uncommitted\n")
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            sandbox_seed_check(project_dir, sandbox)
+        assert exc_info.value.code == "sandbox_not_seeded"
+        assert "docs/harness/SANDBOX.md" in exc_info.value.detail
+
+    def test_take_baseline_floors_started_at(self, tmp_path, monkeypatch):
+        sha = "a" * 40
+        sha2 = "b" * 40
+        seen: list[list[str]] = []
+
+        stdout = (
+            f"ref: refs/heads/main\tHEAD\n"
+            f"{sha}\tHEAD\n"
+            f"{sha}\trefs/heads/main\n"
+            f"{sha2}\trefs/heads/feat/x\n"
+            f"{sha2}\trefs/tags/v1\n"
+            f"{sha}\trefs/tags/v1^{{}}\n"
+            f"{'c' * 40} refs/heads/space-separated\n"
+        )
+
+        def fake_git(argv, **kwargs):
+            seen.append(argv)
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", fake_git)
+        now = datetime(2026, 9, 1, 12, 0, 0, 750000, tzinfo=UTC)
+
+        baseline = take_baseline(tmp_path, viewer="octocat", default_branch="main", now=now)
+
+        assert seen == [["git", "ls-remote", "--heads", "origin"]]
+        assert baseline.started_at == datetime(2026, 9, 1, 11, 59, 59, tzinfo=UTC)
+        assert dict(baseline.heads) == {"main": sha, "feat/x": sha2}
+        with pytest.raises(TypeError):
+            baseline.heads["main"] = sha2  # type: ignore[index]
+        assert dataclasses.asdict(baseline)["head_pairs"] == (("main", sha), ("feat/x", sha2))
+
+    def test_take_baseline_normalizes_aware_now_to_utc(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""),
+        )
+        seoul = timezone(timedelta(hours=9))
+        now = datetime(2026, 9, 1, 21, 0, 0, 250000, tzinfo=seoul)
+
+        baseline = take_baseline(tmp_path, viewer="octocat", default_branch="main", now=now)
+
+        assert baseline.started_at == datetime(2026, 9, 1, 11, 59, 59, tzinfo=UTC)
+        assert baseline.started_at.tzinfo is UTC
+        assert dict(baseline.heads) == {}
+
+    def test_take_baseline_rejects_naive_now(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: pytest.fail("git must not run"),
+        )
+
+        with pytest.raises(ValueError, match="timezone-aware"):
+            take_baseline(tmp_path, viewer="octocat", default_branch="main", now=datetime(2026, 9, 1))
+
+
+class TestWriteProjectContract:
+    def test_write_project_contract_writes_expected_toml(self, tmp_path):
+        from hermes_pipeline.contract import required_capabilities
+
+        write_project_contract(tmp_path, "gstack")
+
+        text = (tmp_path / ".hermes" / "pipeline.toml").read_text()
+        assert text.splitlines()[:2] == [
+            "# Pipeline execution contract — read at tick start.",
+            "# See docs/tutorial-getting-started.md and `tpo doctor --help`.",
+        ]
+        expected = sorted(required_capabilities(load_phases(resolve_profile_phases_path("gstack"))))
+        assert tomllib.loads(text) == {
+            "schema_version": 2,
+            "assignee": "pipeline",
+            "capabilities": expected,
+            "profile": "gstack",
+        }
+
+    def test_write_project_contract_reuses_existing_hermes_dir(self, tmp_path):
+        (tmp_path / ".hermes").mkdir()
+        (tmp_path / ".hermes" / "keep").write_text("x")
+
+        write_project_contract(tmp_path, "gstack")
+
+        assert (tmp_path / ".hermes" / "keep").read_text() == "x"
+        assert (tmp_path / ".hermes" / "pipeline.toml").is_file()
+
+    def test_create_mock_project_unknown_profile_fails_before_touching_fs(self, tmp_path):
+        target = tmp_path / "mock"
+
+        with pytest.raises(ContractSchemaError):
+            create_mock_project(target, "simple", profile_name="no-such-profile")
+
+        assert not target.exists()
