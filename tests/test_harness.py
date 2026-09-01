@@ -13,13 +13,16 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from hermes_pipeline.config import Config
+from hermes_pipeline.github_issues import GitHubIssuesError
 from hermes_pipeline.harness import (
     ConvergenceDetector,
     ConvergenceHaltError,
+    GitHubPreflight,
     HarnessMonitor,
     HarnessPreflightError,
     HarnessProfileError,
     HarnessResult,
+    SandboxRepo,
     _build_harness_profile_data,
     _classify_error_class,
     _ConvergenceMonitor,
@@ -29,13 +32,16 @@ from hermes_pipeline.harness import (
     _with_offline_terminal_workflow,
     create_mock_project,
     filter_phases,
+    github_preflight,
     isolate_config,
+    other_ready_issues,
     preflight_check,
     resolve_sandbox_repo,
     run_harness,
     validate_live_profile,
 )
 from hermes_pipeline.phases import Phase, load_phases, resolve_profile_phases_path
+from tests.gh_fakes import API_ARGV, seed_project_issues, todo_payload
 
 
 class TestCreateMockProject:
@@ -2447,6 +2453,12 @@ class TestResolveSandboxRepo:
         assert exc_info.value.code == "invalid_repo"
         assert exc_info.value.detail == bad
 
+    def test_sandbox_repo_rejects_unsafe_repo_on_construction(self):
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            SandboxRepo("-x/y", "y", "https://github.com/-x/y.git")
+        assert exc_info.value.code == "invalid_repo"
+        assert exc_info.value.detail == "-x/y"
+
     def test_slug_is_repo_name(self):
         repo = resolve_sandbox_repo("acme/tpo-sandbox", {})
         assert repo.slug == "tpo-sandbox"
@@ -2497,3 +2509,120 @@ class TestValidateLiveProfile:
             validate_live_profile(phases, "gstack")
         assert exc_info.value.code == "invalid_terminal_topology"
         assert exc_info.value.detail == "expected exactly one terminal phase"
+
+
+SANDBOX = SandboxRepo(repo="acme/repo", slug="repo", url="https://github.com/acme/repo.git")
+_REPO_VIEW_JQ = '{permission: .viewerPermission, default_branch: (.defaultBranchRef.name // "")}'
+_REPO_VIEW_ARGV = (
+    "gh", "repo", "view", "acme/repo",
+    "--json", "viewerPermission,defaultBranchRef",
+    "--jq", _REPO_VIEW_JQ,
+)
+_USER_ARGV = (*API_ARGV, "user", "--jq", ".login")
+
+
+def _seed_github(fake, issues=(), *, permission="WRITE", default_branch="main", viewer="octo"):
+    """Serve a healthy sandbox: auth ok, viewer login, repo view, and ``issues`` as tpo:todo.
+
+    The repo-view and user rules are registered on the FULL argv so a silent change
+    to the production call (fields or jq) fails matching. The fake returns the
+    post-jq shape; the ``// ""`` fallback for ``defaultBranchRef: null`` itself is
+    verified by the live gate, not here.
+    """
+    fake.on("gh", "auth", "status")
+    fake.on(*_USER_ARGV, stdout=f"{viewer}\n")
+    fake.on(
+        *_REPO_VIEW_ARGV,
+        stdout=json.dumps({"permission": permission, "default_branch": default_branch}) + "\n",
+    )
+    seed_project_issues(fake, list(issues))
+    return fake
+
+
+class TestGithubPreflight:
+    """github_preflight: auth, viewer, push permission, and sandbox quiescence via the gh seam."""
+
+    def test_requires_gh_auth(self, fake_gh, tmp_path):
+        fake_gh.on("gh", "auth", "status", rc=1, stderr="You are not logged into any GitHub hosts. To log in, run: gh auth login\n")
+        with pytest.raises(GitHubIssuesError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code == "gh_auth"
+        assert fake_gh.gh_calls()[0][:2] == ["auth", "status"]
+
+    def test_rejects_read_permission(self, fake_gh, tmp_path):
+        _seed_github(fake_gh, permission="READ")
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code == "gh_permission"
+        assert exc_info.value.detail == "READ"
+
+    def test_null_permission_rejected_as_gh_permission(self, fake_gh, tmp_path):
+        _seed_github(fake_gh)
+        fake_gh.on(*_REPO_VIEW_ARGV, stdout='{"permission": null, "default_branch": "main"}\n')
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code == "gh_permission"
+        assert exc_info.value.detail == "unknown"
+
+    @pytest.mark.parametrize("permission", ["WRITE", "MAINTAIN", "ADMIN"])
+    def test_accepts_write_maintain_admin(self, fake_gh, tmp_path, permission):
+        _seed_github(fake_gh, permission=permission, default_branch="trunk", viewer="octo")
+        result = github_preflight(tmp_path, SANDBOX)
+        assert result == GitHubPreflight(viewer="octo", default_branch="trunk", permission=permission)
+        assert list(_REPO_VIEW_ARGV[1:]) in fake_gh.gh_calls()
+        assert list(_USER_ARGV[1:]) in fake_gh.gh_calls()
+        assert all(kw.get("cwd") == tmp_path for kw in fake_gh.kwargs)
+
+    def test_empty_repo_yields_blank_default_branch(self, fake_gh, tmp_path):
+        _seed_github(fake_gh, default_branch="")
+        assert github_preflight(tmp_path, SANDBOX).default_branch == ""
+
+    @pytest.mark.parametrize("stdout", ["not json\n", "[]\n", '{"permission": "ADMIN", "default_branch": null}\n'])
+    def test_malformed_repo_view_rejected(self, fake_gh, tmp_path, stdout):
+        _seed_github(fake_gh)
+        fake_gh.on(*_REPO_VIEW_ARGV, stdout=stdout)
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code == "gh_invalid"
+
+    def test_repo_view_error_propagates(self, fake_gh, tmp_path):
+        _seed_github(fake_gh)
+        fake_gh.on(*_REPO_VIEW_ARGV, rc=1, stderr="GraphQL: Could not resolve to a Repository with the name 'acme/repo'.\n")
+        with pytest.raises(GitHubIssuesError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code == "gh_not_found"
+
+    def test_fails_when_another_ready_todo_is_open(self, fake_gh, tmp_path):
+        _seed_github(fake_gh, [todo_payload(15), todo_payload(12)])
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code == "sandbox_not_quiescent"
+        assert exc_info.value.detail == "#12, #15"
+        list_call = next(call for call in fake_gh.gh_calls() if "--paginate" in call)
+        assert list_call[-1].startswith("repos/acme/repo/issues?state=open&labels=tpo%3Atodo")
+
+    def test_excludes_own_issue(self, fake_gh, tmp_path):
+        _seed_github(fake_gh, [todo_payload(12)])
+        assert other_ready_issues(tmp_path, SANDBOX, exclude_issue=12) == ()
+        assert github_preflight(tmp_path, SANDBOX, exclude_issue=12).viewer == "octo"
+
+    def test_ignores_open_todo_without_ready_label(self, fake_gh, tmp_path):
+        _seed_github(fake_gh, [todo_payload(12, labels=("tpo:todo",)), todo_payload(15)])
+        assert other_ready_issues(tmp_path, SANDBOX) == (15,)
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.detail == "#15"
+
+    @pytest.mark.parametrize("viewer", ["  ", "a\nb"])
+    def test_blank_viewer_rejected(self, fake_gh, tmp_path, viewer):
+        _seed_github(fake_gh, viewer=viewer)
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code == "gh_viewer_unknown"
+
+    def test_viewer_lookup_other_errors_propagate(self, fake_gh, tmp_path):
+        _seed_github(fake_gh)
+        fake_gh.on(*_USER_ARGV, rc=1, stderr="HTTP 403: API rate limit exceeded\n")
+        with pytest.raises(GitHubIssuesError) as exc_info:
+            github_preflight(tmp_path, SANDBOX)
+        assert exc_info.value.code != "gh_invalid"

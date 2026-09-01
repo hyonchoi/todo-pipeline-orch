@@ -122,6 +122,11 @@ class SandboxRepo:
     slug: str
     url: str
 
+    def __post_init__(self) -> None:
+        # Defence in depth: every instance is safe to interpolate into gh argv.
+        if _SANDBOX_REPO_RE.match(self.repo) is None:
+            raise HarnessPreflightError("invalid_repo", self.repo)
+
 
 def resolve_sandbox_repo(
     cli_value: str | None, env: Mapping[str, str] | None = None
@@ -155,6 +160,93 @@ def resolve_sandbox_repo(
     if not _validate_project_slug(name):
         raise HarnessPreflightError("invalid_slug", name)
     return SandboxRepo(repo=value, slug=name, url=f"https://github.com/{value}.git")
+
+
+_PUSH_PERMISSIONS = frozenset({"WRITE", "MAINTAIN", "ADMIN"})
+_REPO_VIEW_JQ = '{permission: .viewerPermission, default_branch: (.defaultBranchRef.name // "")}'
+
+
+@dataclass(frozen=True)
+class GitHubPreflight:
+    """Facts established about the sandbox before a live harness run starts."""
+
+    viewer: str
+    default_branch: str
+    permission: str
+
+
+def other_ready_issues(
+    project_dir: Path, sandbox: SandboxRepo, *, exclude_issue: int | None = None
+) -> tuple[int, ...]:
+    """Numbers of open ``tpo:todo`` issues in ``sandbox`` carrying ``ready-for-agent``.
+
+    ``exclude_issue`` (the harness's own issue) is skipped; the result is sorted.
+    """
+    from .github_issues import READY_LABEL, list_todo_issues
+
+    # list_todo_issues already returns issues sorted by number.
+    return tuple(
+        issue.number
+        for issue in list_todo_issues(project_dir, repo=sandbox.repo)
+        if READY_LABEL in issue.labels and issue.number != exclude_issue
+    )
+
+
+def github_preflight(
+    project_dir: Path, sandbox: SandboxRepo, *, exclude_issue: int | None = None
+) -> GitHubPreflight:
+    """Verify gh auth, the viewer login, push permission, and sandbox quiescence.
+
+    ``GitHubIssuesError`` from ``gh`` propagates unchanged (the CLI already maps
+    ``gh_auth`` and friends). Raises :class:`HarnessPreflightError`:
+
+    - ``gh_viewer_unknown`` when ``gh api user`` reports no usable login;
+    - ``gh_invalid`` when ``gh repo view`` returns malformed JSON;
+    - ``gh_permission`` (detail: the permission, or ``unknown`` when gh reports
+      ``null``) without WRITE/MAINTAIN/ADMIN;
+    - ``sandbox_not_quiescent`` (detail: ``#12, #15``) when another open
+      ``tpo:todo`` issue is still ``ready-for-agent``.
+    """
+    from .github_issues import GitHubIssuesError, _gh, check_auth, current_login
+
+    check_auth(project_dir)
+    try:
+        viewer = current_login(project_dir)
+    except GitHubIssuesError as exc:
+        if exc.code == "gh_invalid":
+            raise HarnessPreflightError("gh_viewer_unknown") from exc
+        raise
+    stdout = _gh(
+        project_dir,
+        [
+            "repo", "view", sandbox.repo,
+            "--json", "viewerPermission,defaultBranchRef",
+            "--jq", _REPO_VIEW_JQ,
+        ],
+    )
+
+    def _malformed() -> HarnessPreflightError:
+        return HarnessPreflightError("gh_invalid", "gh repo view returned malformed JSON")
+
+    try:
+        view = _json.loads(stdout)
+    except _json.JSONDecodeError as exc:
+        raise _malformed() from exc
+    if not isinstance(view, Mapping) or not isinstance(view.get("default_branch"), str):
+        raise _malformed()
+    default_branch = view["default_branch"]
+    permission = view.get("permission")
+    if not isinstance(permission, str):
+        # gh reports ``viewerPermission: null`` for accounts without push rights.
+        raise HarnessPreflightError("gh_permission", "unknown")
+    if permission not in _PUSH_PERMISSIONS:
+        raise HarnessPreflightError("gh_permission", permission)
+    ready = other_ready_issues(project_dir, sandbox, exclude_issue=exclude_issue)
+    if ready:
+        raise HarnessPreflightError(
+            "sandbox_not_quiescent", ", ".join(f"#{number}" for number in ready)
+        )
+    return GitHubPreflight(viewer=viewer, default_branch=default_branch, permission=permission)
 
 
 def create_mock_project(
