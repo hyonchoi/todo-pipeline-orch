@@ -17,6 +17,7 @@ from hermes_pipeline.harness import (
     ConvergenceDetector,
     ConvergenceHaltError,
     HarnessMonitor,
+    HarnessPreflightError,
     HarnessProfileError,
     HarnessResult,
     _build_harness_profile_data,
@@ -30,9 +31,11 @@ from hermes_pipeline.harness import (
     filter_phases,
     isolate_config,
     preflight_check,
+    resolve_sandbox_repo,
     run_harness,
+    validate_live_profile,
 )
-from hermes_pipeline.phases import Phase
+from hermes_pipeline.phases import Phase, load_phases, resolve_profile_phases_path
 
 
 class TestCreateMockProject:
@@ -2398,3 +2401,99 @@ class TestPollKanbanPhases:
 
         assert mock_register.call_args.kwargs["assignee"] == "default"
         assert "failed to load pipeline contract" in caplog.text
+
+
+class TestResolveSandboxRepo:
+    """resolve_sandbox_repo: CLI beats env, strict owner/name shape, slug validity."""
+
+    def test_cli_value_wins_over_env(self):
+        repo = resolve_sandbox_repo("cli-owner/cli-repo", {"TPO_HARNESS_REPO": "env-owner/env-repo"})
+        assert repo.repo == "cli-owner/cli-repo"
+
+    def test_env_fallback(self):
+        repo = resolve_sandbox_repo(None, {"TPO_HARNESS_REPO": "env-owner/env-repo"})
+        assert repo.repo == "env-owner/env-repo"
+
+    def test_env_none_reads_os_environ(self):
+        with patch.dict(os.environ, {"TPO_HARNESS_REPO": "os-owner/os-repo"}):
+            assert resolve_sandbox_repo(None).repo == "os-owner/os-repo"
+
+    @pytest.mark.parametrize("cli_value", [None, "", "   "])
+    def test_missing_raises_preflight_error(self, cli_value):
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            resolve_sandbox_repo(cli_value, {"TPO_HARNESS_REPO": "  "})
+        assert isinstance(exc_info.value, RuntimeError)
+        assert exc_info.value.code == "repo_missing"
+        assert "--repo" in exc_info.value.detail
+        assert "TPO_HARNESS_REPO" in exc_info.value.detail
+        assert HarnessPreflightError("x").detail == ""
+
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "nope",
+            "a/b/c",
+            "owner/name.git",
+            "owner/ na me",
+            "owner/dot.",
+            "-owner/name",
+            "acme-/repo",
+            "ac--me/repo",
+        ],
+    )
+    def test_rejects_invalid_repo(self, bad):
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            resolve_sandbox_repo(bad, {})
+        assert exc_info.value.code == "invalid_repo"
+        assert exc_info.value.detail == bad
+
+    def test_slug_is_repo_name(self):
+        repo = resolve_sandbox_repo("acme/tpo-sandbox", {})
+        assert repo.slug == "tpo-sandbox"
+        assert repo.url == "https://github.com/acme/tpo-sandbox.git"
+
+    @pytest.mark.parametrize(
+        ("value", "name"),
+        [("acme/x", "x"), ("acme/-x", "-x"), ("owner/.dot", ".dot"), ("owner/a..b", "a..b")],
+    )
+    def test_rejects_invalid_slug(self, value, name):
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            resolve_sandbox_repo(value, {})
+        assert exc_info.value.code == "invalid_slug"
+        assert exc_info.value.detail == name
+
+
+class TestValidateLiveProfile:
+    """validate_live_profile: one terminal phase and an allow-listed profile."""
+
+    @pytest.mark.parametrize("name", ["gstack", "agent-skills"])
+    def test_gstack_and_agent_skills_ok(self, name):
+        phases = load_phases(resolve_profile_phases_path(name))
+        validate_live_profile(phases, name)
+
+    def test_native_sdd_rejected_unsafe_terminal(self):
+        phases = load_phases(resolve_profile_phases_path("native-sdd"))
+        with pytest.raises(HarnessProfileError) as exc_info:
+            validate_live_profile(phases, "native-sdd")
+        assert exc_info.value.code == "unsafe_terminal"
+        assert exc_info.value.profile_name == "native-sdd"
+
+    def test_unknown_profile_rejected(self):
+        phases = [Phase(phase_key="p1", name="P1", terminal=True)]
+        with pytest.raises(HarnessProfileError) as exc_info:
+            validate_live_profile(phases, "custom-profile")
+        assert exc_info.value.code == "unsafe_terminal"
+
+    @pytest.mark.parametrize(
+        "phases",
+        [
+            [Phase(phase_key="p1", name="P1")],
+            [Phase(phase_key="p1", name="P1", terminal=True), Phase(phase_key="p2", name="P2", terminal=True)],
+        ],
+        ids=["zero_terminals", "two_terminals"],
+    )
+    def test_wrong_terminal_count_rejected(self, phases):
+        with pytest.raises(HarnessProfileError) as exc_info:
+            validate_live_profile(phases, "gstack")
+        assert exc_info.value.code == "invalid_terminal_topology"
+        assert exc_info.value.detail == "expected exactly one terminal phase"

@@ -5,11 +5,12 @@ from __future__ import annotations
 import json as _json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime
@@ -18,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from .config import PromptClient
+from .config import PromptClient, _validate_project_slug
 from .profile_prerequisites import (
     HERMES_SKILL_REGISTRY_ROOT,
     unverified_prerequisite_ids,
@@ -98,6 +99,62 @@ class HarnessProfileError(ValueError):
         self.code = code
         self.profile_name = profile_name
         self.detail = detail
+
+
+class HarnessPreflightError(RuntimeError):
+    """The live harness cannot start because a preflight requirement failed."""
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+
+_HARNESS_REPO_ENV = "TPO_HARNESS_REPO"
+_SANDBOX_REPO_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}/[A-Za-z0-9._-]{1,100}\Z")
+
+
+@dataclass(frozen=True)
+class SandboxRepo:
+    """A live GitHub sandbox repository selected for a harness run."""
+
+    repo: str
+    slug: str
+    url: str
+
+
+def resolve_sandbox_repo(
+    cli_value: str | None, env: Mapping[str, str] | None = None
+) -> SandboxRepo:
+    """Resolve the sandbox ``owner/name`` from ``--repo`` or ``TPO_HARNESS_REPO``.
+
+    ``cli_value`` wins over the environment. Raises :class:`HarnessPreflightError`:
+
+    - ``repo_missing`` when neither source provides a non-blank value;
+    - ``invalid_repo`` when the value is not ``owner/name`` shaped (bad owner,
+      extra path segments, whitespace, a ``.git`` suffix, or a trailing dot);
+    - ``invalid_slug`` when the name part is not a valid tpo project slug
+      (see :func:`hermes_pipeline.config._validate_project_slug`).
+    """
+    environ = os.environ if env is None else env
+    value = None
+    for candidate in (cli_value, environ.get(_HARNESS_REPO_ENV)):
+        if candidate is not None and candidate.strip():
+            value = candidate.strip()
+            break
+    if value is None:
+        raise HarnessPreflightError(
+            "repo_missing",
+            f"pass --repo owner/name or set {_HARNESS_REPO_ENV}",
+        )
+    if _SANDBOX_REPO_RE.match(value) is None:
+        raise HarnessPreflightError("invalid_repo", value)
+    name = value.split("/", 1)[1]
+    if name.endswith(".git") or name.endswith("."):
+        raise HarnessPreflightError("invalid_repo", value)
+    if not _validate_project_slug(name):
+        raise HarnessPreflightError("invalid_slug", name)
+    return SandboxRepo(repo=value, slug=name, url=f"https://github.com/{value}.git")
 
 
 def create_mock_project(
@@ -838,6 +895,26 @@ def _offline_terminal_phase_key(
         profile_name,
         "terminal gate has no executable predecessor",
     )
+
+
+_LIVE_SAFE_PROFILES = frozenset({"gstack", "agent-skills"})
+
+
+def validate_live_profile(phases: list[Phase], profile_name: str) -> None:
+    """Reject profiles whose terminal phase is unsafe to run against a live sandbox."""
+    terminal_count = sum(1 for phase in phases if phase.terminal)
+    if terminal_count != 1:
+        raise HarnessProfileError(
+            "invalid_terminal_topology",
+            profile_name,
+            "expected exactly one terminal phase",
+        )
+    if profile_name not in _LIVE_SAFE_PROFILES:
+        raise HarnessProfileError(
+            "unsafe_terminal",
+            profile_name,
+            "profile is not on the live-safe allow-list",
+        )
 
 
 def _with_offline_terminal_card(prepared: list) -> list:
