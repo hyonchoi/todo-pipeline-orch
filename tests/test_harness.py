@@ -14,6 +14,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from hermes_pipeline import harness as harness_mod
 from hermes_pipeline.config import Config
 from hermes_pipeline.contract import ContractSchemaError
 from hermes_pipeline.github_issues import GitHubIssuesError
@@ -38,6 +39,7 @@ from hermes_pipeline.harness import (
     create_mock_project,
     filter_phases,
     github_preflight,
+    init_sandbox,
     isolate_config,
     other_ready_issues,
     preflight_check,
@@ -2691,6 +2693,18 @@ class TestCloneSandbox:
         ]
         assert all(c["cwd"] == project_dir for c in calls[1:])
 
+    def test_clone_branch_keyword_adds_branch_flag(self, tmp_path, monkeypatch):
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: (calls.append(argv), subprocess.CompletedProcess(argv, 0, "", ""))[1],
+        )
+        project_dir = tmp_path / "sandbox"
+
+        clone_sandbox(self.sandbox, project_dir, branch="develop")
+
+        assert calls[0] == ["git", "clone", "--branch", "develop", "--", self.sandbox.url, str(project_dir)]
+
     def test_clone_refuses_existing_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             "hermes_pipeline.harness._git",
@@ -2913,3 +2927,477 @@ class TestWriteProjectContract:
             create_mock_project(target, "simple", profile_name="no-such-profile")
 
         assert not target.exists()
+
+
+_SANDBOX_VIEW_ARGV = (
+    "gh", "repo", "view", "acme/sandbox",
+    "--json", "defaultBranchRef",
+    "--jq", '.defaultBranchRef.name // ""',
+)
+_SANDBOX_PATCH_ARGV = ["api", "-X", "PATCH", "repos/acme/sandbox", "-f", "default_branch=main"]
+_SEED_SUBJECT = "chore(harness): seed sandbox"
+
+
+def _real_git(*args: str, cwd: Path) -> str:
+    # Env is read at call time so monkeypatched variables reach the helper; the
+    # global config is nulled so operator settings never leak into fixtures.
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null"}
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=env
+    ).stdout.strip()
+
+
+def _push_files(bare: Path, work: Path, files: dict[str, str], *, branch: str, subject: str = "seed") -> str:
+    """Init *work*, commit *files* on *branch*, push to *bare*; return the commit sha."""
+    work.mkdir()
+    _real_git("init", "-b", branch, cwd=work)
+    _real_git("config", "user.email", "seed@localhost", cwd=work)
+    _real_git("config", "user.name", "Seed", cwd=work)
+    for rel, content in files.items():
+        target = work / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    _real_git("add", ".", cwd=work)
+    _real_git("commit", "-m", subject, cwd=work)
+    _real_git("remote", "add", "origin", f"file://{bare}", cwd=work)
+    _real_git("push", "origin", branch, cwd=work)
+    return _real_git("rev-parse", "HEAD", cwd=work)
+
+
+def _make_bare_remote(tmp_path: Path, files: dict[str, str], *, branch: str = "main") -> Path:
+    """Bare remote on *branch* tracking *files*; no commits at all when *files* is empty."""
+    bare = tmp_path / "remote.git"
+    bare.mkdir()
+    _real_git("init", "--bare", "-b", branch, cwd=bare)
+    if files:
+        _push_files(bare, tmp_path / "seed", files, branch=branch)
+    return bare
+
+
+def _advance_remote(bare: Path, tmp_path: Path, branch: str) -> str:
+    """Add one commit on *branch* of *bare* from a fresh clone; return the new tip."""
+    work = tmp_path / "advance"
+    _real_git("clone", "-b", branch, f"file://{bare}", str(work), cwd=tmp_path)
+    _real_git("config", "user.email", "other@localhost", cwd=work)
+    _real_git("config", "user.name", "Other", cwd=work)
+    (work / "RACE.txt").write_text("racing commit\n")
+    _real_git("add", "RACE.txt", cwd=work)
+    _real_git("commit", "-m", "race", cwd=work)
+    _real_git("push", "origin", branch, cwd=work)
+    return _real_git("rev-parse", "HEAD", cwd=work)
+
+
+def _remote_branches(bare: Path) -> list[str]:
+    return _real_git("for-each-ref", "--format=%(refname:short)", "refs/heads", cwd=bare).splitlines()
+
+
+def _remote_tree(bare: Path, branch: str) -> dict[str, str]:
+    names = _real_git("ls-tree", "-r", "--name-only", branch, cwd=bare).splitlines()
+    return {n: _real_git("show", f"{branch}:{n}", cwd=bare) for n in names}
+
+
+def _assert_porcelain_clean_with_runtime_junk(clone: Path) -> None:
+    for rel in (
+        ".hermes/pipeline.toml",
+        ".hermes/outcomes/x.json",
+        "__pycache__/m.pyc",
+        ".venv/bin/python",
+        ".superpowers/scratch.md",
+        ".code-review-graph/graph.json",
+    ):
+        target = clone / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("x")
+    assert _real_git("status", "--porcelain", cwd=clone) == ""
+
+
+class TestInitSandbox:
+    # Offline url: a forgotten ``dataclasses.replace(url=...)`` fails fast instead of
+    # reaching GitHub.
+    sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="file:///nonexistent-sandbox")
+
+    def test_seed_paths_are_subset_of_seed_files(self):
+        assert set(harness_mod._SANDBOX_SEED_PATHS) <= set(harness_mod._SANDBOX_SEED_FILES)
+        assert set(harness_mod._SANDBOX_SEED_FILES) == {
+            "README.md", ".gitignore", "pyproject.toml", "tests/__init__.py", "docs/harness/SANDBOX.md"
+        }
+        assert ".hermes/\n" in harness_mod._SANDBOX_GITIGNORE
+
+    def _serve_gh(self, fake_gh, bare: Path | None, *, default_branch: str | None = None):
+        """Serve gh against the bare remote's real state.
+
+        With *default_branch* given, ``gh repo view`` always reports it. Otherwise it
+        reports ``main`` once ``refs/heads/main`` exists in *bare* and ``""`` before,
+        and PATCH fails (as GitHub does) while the repository has no branch at all.
+        """
+
+        def branches() -> list[str]:
+            return _remote_branches(bare) if bare is not None else []
+
+        def view(argv):
+            if default_branch is not None:
+                return 0, f"{default_branch}\n", ""
+            return 0, ("main\n" if "main" in branches() else "\n"), ""
+
+        def patch(argv):
+            if not branches():
+                return 1, "", "HTTP 422: Cannot update default branch for an empty repository\n"
+            return 0, "{}\n", ""
+
+        fake_gh.on("gh", "auth", "status")
+        fake_gh.on(*_SANDBOX_VIEW_ARGV, handler=view)
+        fake_gh.on("gh", *_SANDBOX_PATCH_ARGV, handler=patch)
+
+    # --- empty repository path -------------------------------------------------
+
+    @pytest.mark.real_git
+    def test_empty_remote_creates_main_and_seeds(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {})
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare)
+        workspace = tmp_path / "workspace"
+
+        assert init_sandbox(sandbox, workspace) == "seeded"
+
+        assert _remote_branches(bare) == ["main"]
+        tree = _remote_tree(bare, "refs/heads/main")
+        assert set(tree) == set(harness_mod._SANDBOX_SEED_FILES)
+        assert _real_git("log", "-1", "--format=%s", "main", cwd=bare) == _SEED_SUBJECT
+        assert "seed_version: 1" in tree["docs/harness/SANDBOX.md"]
+        assert 'testpaths = ["tests"]' in tree["pyproject.toml"]
+        assert "pytest>=8" in tree["pyproject.toml"]
+        assert "TPO harness sandbox" in tree["README.md"]
+        assert ".hermes/" in tree[".gitignore"].splitlines()
+        assert _SANDBOX_PATCH_ARGV in fake_gh.gh_calls()
+        _assert_porcelain_clean_with_runtime_junk(workspace / "sandbox")
+
+    @pytest.mark.real_git
+    def test_empty_path_commits_even_when_operator_config_requires_signing(
+        self, fake_gh, tmp_path, monkeypatch
+    ):
+        bare = _make_bare_remote(tmp_path, {})
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare)
+        gitconfig = tmp_path / "operator.gitconfig"
+        gitconfig.write_text("[commit]\n\tgpgsign = true\n[user]\n\tsigningkey = 0000DEAD\n")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+
+        assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
+
+        assert _remote_branches(bare) == ["main"]
+
+    def test_default_branch_not_set_after_patch_raises(self, fake_gh, tmp_path, monkeypatch):
+        # Defensive: the view handler ignores remote state and keeps answering "" even
+        # after a successful PATCH, which a real GitHub never does.
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git", self._seam([], ls_remote="", head="main", tracked="")
+        )
+        fake_gh.on("gh", "auth", "status")
+        fake_gh.on(*_SANDBOX_VIEW_ARGV, stdout="\n")
+        fake_gh.on("gh", *_SANDBOX_PATCH_ARGV, stdout="{}\n")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(self.sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "default_branch_unset"
+        assert _SANDBOX_PATCH_ARGV in fake_gh.gh_calls()
+
+    @pytest.mark.real_git
+    def test_refs_present_but_gh_reports_no_default_branch_is_refused(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {"README.md": "# x\n"}, branch="develop")
+        before = _real_git("rev-parse", "develop", cwd=bare)
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "default_branch_unknown"
+        assert "refs/heads/develop" in exc_info.value.detail
+        assert _remote_branches(bare) == ["develop"]
+        assert _real_git("rev-parse", "develop", cwd=bare) == before
+        assert _SANDBOX_PATCH_ARGV not in fake_gh.gh_calls()
+        assert not (tmp_path / "workspace" / "sandbox").exists()
+
+    @pytest.mark.real_git
+    def test_empty_path_refuses_existing_workspace_dir(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {})
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare)
+        project_dir = tmp_path / "workspace" / "sandbox"
+        project_dir.mkdir(parents=True)
+        (project_dir / "keep").write_text("x")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "workspace_exists"
+        assert (project_dir / "keep").is_file()
+        assert _remote_branches(bare) == []
+
+    @pytest.mark.real_git
+    def test_failed_patch_propagates_and_removes_project_dir(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {})
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare)
+        fake_gh.on("gh", *_SANDBOX_PATCH_ARGV, rc=1, stderr="HTTP 500: boom\n")
+        workspace = tmp_path / "workspace"
+
+        with pytest.raises(GitHubIssuesError):
+            init_sandbox(sandbox, workspace)
+
+        assert not (workspace / "sandbox").exists()
+
+    def test_creates_workspace_before_running_gh(self, fake_gh, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            self._seam([], ls_remote="abc\trefs/heads/main\n", head="main", tracked=""),
+        )
+        workspace = tmp_path / "deep" / "workspace"
+
+        def view(argv):
+            assert Path(fake_gh.kwargs[-1]["cwd"]).is_dir(), "gh ran before workspace existed"
+            return 0, "main\n", ""
+
+        fake_gh.on("gh", "auth", "status")
+        fake_gh.on(*_SANDBOX_VIEW_ARGV, handler=view)
+
+        init_sandbox(self.sandbox, workspace)
+
+        assert workspace.is_dir()
+        assert all(Path(kw["cwd"]).is_dir() for kw in fake_gh.kwargs)
+
+    # --- push argv pinning (seam) ----------------------------------------------
+
+    @staticmethod
+    def _seam(calls: list[list[str]], *, ls_remote: str, head: str, tracked: str):
+        def fake_git(argv, **kw):
+            calls.append(argv)
+            verb = argv[1]
+            out = ""
+            if verb == "ls-remote":
+                out = ls_remote
+            elif verb == "symbolic-ref":
+                out = f"{head}\n"
+            elif verb == "ls-tree":
+                out = tracked
+            elif verb == "cat-file":
+                out = "blob\n"
+            return subprocess.CompletedProcess(argv, 0, out, "")
+
+        return fake_git
+
+    def test_empty_path_push_argv_is_plain_fast_forward(self, fake_gh, tmp_path, monkeypatch):
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git", self._seam(calls, ls_remote="", head="main", tracked="")
+        )
+        fake_gh.on("gh", "auth", "status")
+        fake_gh.on("gh", *_SANDBOX_PATCH_ARGV, stdout="{}\n")
+        # First view must answer "" for the empty path: register a sequenced handler.
+        answers = iter(["\n", "main\n"])
+        fake_gh.on(*_SANDBOX_VIEW_ARGV, handler=lambda argv: (0, next(answers), ""))
+
+        assert init_sandbox(self.sandbox, tmp_path / "workspace") == "seeded"
+
+        pushes = [c for c in calls if c[1] == "push"]
+        assert pushes == [["git", "push", "origin", "HEAD:refs/heads/main"]]
+        assert calls[0][:4] == ["git", "ls-remote", "--heads", "--tags"]
+        assert ["git", "add", "-A"] not in calls
+
+    def test_non_empty_path_push_argv_targets_default_branch(self, fake_gh, tmp_path, monkeypatch):
+        calls: list[list[str]] = []
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            self._seam(calls, ls_remote="abc\trefs/heads/develop\n", head="develop", tracked=".github/x\n"),
+        )
+        self._serve_gh(fake_gh, None, default_branch="develop")
+
+        assert init_sandbox(self.sandbox, tmp_path / "workspace") == "seeded"
+
+        pushes = [c for c in calls if c[1] == "push"]
+        assert pushes == [["git", "push", "origin", "HEAD:refs/heads/develop"]]
+        clone = next(c for c in calls if c[1] == "clone")
+        assert clone[:4] == ["git", "clone", "--branch", "develop"]
+        adds = [c for c in calls if c[1] == "add"]
+        assert adds and all(c[2:4] == ["-f", "--"] for c in adds)
+        assert ["git", "add", "-A"] not in calls
+
+    # --- non-empty repository path -----------------------------------------------
+
+    @pytest.mark.real_git
+    def test_already_seeded_is_noop(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, dict(harness_mod._SANDBOX_SEED_FILES), branch="trunk")
+        before = _real_git("rev-parse", "trunk", cwd=bare)
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="trunk")
+
+        assert init_sandbox(sandbox, tmp_path / "workspace") == "already_seeded"
+
+        assert _real_git("rev-parse", "trunk", cwd=bare) == before
+        assert _SANDBOX_PATCH_ARGV not in fake_gh.gh_calls()
+
+    @pytest.mark.real_git
+    def test_refuses_repo_with_foreign_tracked_files(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {"src/app.py": "print(1)\n", "README.md": "# app\n"})
+        before = _real_git("rev-parse", "main", cwd=bare)
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "sandbox_not_empty"
+        assert "src/app.py" in exc_info.value.detail
+        assert "README.md" not in exc_info.value.detail
+        assert _real_git("rev-parse", "main", cwd=bare) == before
+        assert _SANDBOX_PATCH_ARGV not in fake_gh.gh_calls()
+        assert not (tmp_path / "workspace" / "sandbox").exists()
+
+    @pytest.mark.real_git
+    def test_fully_seeded_repo_with_foreign_files_is_still_refused(self, fake_gh, tmp_path):
+        files = {**harness_mod._SANDBOX_SEED_FILES, "src/app.py": "print(1)\n"}
+        bare = _make_bare_remote(tmp_path, files)
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "sandbox_not_empty"
+
+    @pytest.mark.real_git
+    def test_foreign_detail_truncates_with_count(self, fake_gh, tmp_path):
+        files = {f"src/m{i}.py": "x\n" for i in range(8)}
+        bare = _make_bare_remote(tmp_path, files)
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.detail.endswith(", +3 more")
+        assert exc_info.value.detail.count("src/") == 5
+
+    @pytest.mark.real_git
+    def test_allows_github_dir_and_seeds_missing_files(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(
+            tmp_path, {".github/workflows/ci.yml": "on: push\n", "README.md": "# custom readme\n"}
+        )
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+
+        assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
+
+        tree = _remote_tree(bare, "main")
+        assert set(tree) == set(harness_mod._SANDBOX_SEED_FILES) | {".github/workflows/ci.yml"}
+        assert tree["README.md"] == "# custom readme"
+        assert tree[".gitignore"] == harness_mod._SANDBOX_GITIGNORE.rstrip("\n")
+        assert _real_git("log", "-1", "--format=%s", "main", cwd=bare) == _SEED_SUBJECT
+        assert _SANDBOX_PATCH_ARGV not in fake_gh.gh_calls()
+
+    @pytest.mark.real_git
+    def test_partial_seed_pushes_to_non_main_default_branch(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {"pyproject.toml": "[project]\n"}, branch="develop")
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="develop")
+
+        assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
+
+        tree = _remote_tree(bare, "develop")
+        assert set(tree) == set(harness_mod._SANDBOX_SEED_FILES)
+        assert tree["pyproject.toml"] == "[project]"
+        assert _remote_branches(bare) == ["develop"]
+
+    @pytest.mark.real_git
+    def test_clones_gh_default_branch_not_remote_head(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {"NOTES.md": "dev\n"}, branch="develop")
+        _push_files(bare, tmp_path / "main-seed", {"README.md": "# main\n"}, branch="main")
+        develop_before = _real_git("rev-parse", "develop", cwd=bare)
+        assert _real_git("symbolic-ref", "HEAD", cwd=bare) == "refs/heads/develop"
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+        workspace = tmp_path / "workspace"
+
+        assert init_sandbox(sandbox, workspace) == "seeded"
+
+        assert _real_git("symbolic-ref", "--short", "HEAD", cwd=workspace / "sandbox") == "main"
+        assert set(_remote_tree(bare, "main")) == set(harness_mod._SANDBOX_SEED_FILES)
+        assert _real_git("rev-parse", "develop", cwd=bare) == develop_before
+
+    @pytest.mark.real_git
+    def test_tracked_gitignore_without_hermes_rule_is_replaced(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, {".gitignore": "*.log\n"})
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+        workspace = tmp_path / "workspace"
+
+        assert init_sandbox(sandbox, workspace) == "seeded"
+
+        assert ".hermes/" in _remote_tree(bare, "main")[".gitignore"].splitlines()
+        _assert_porcelain_clean_with_runtime_junk(workspace / "sandbox")
+
+    @pytest.mark.real_git
+    def test_tracked_gitignore_hiding_docs_does_not_block_seed(self, fake_gh, tmp_path):
+        # ``.hermes/`` is present so the .gitignore is kept as-is and ``docs/`` stays
+        # ignored: only ``add -f`` can land docs/harness/SANDBOX.md.
+        bare = _make_bare_remote(tmp_path, {".gitignore": ".hermes/\ndocs/\n"})
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+
+        assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
+
+        tree = _remote_tree(bare, "main")
+        assert "docs/harness/SANDBOX.md" in tree
+        assert tree[".gitignore"] == ".hermes/\ndocs/"
+
+    @pytest.mark.real_git
+    def test_non_empty_path_never_removes_preexisting_project_dir(self, fake_gh, tmp_path):
+        bare = _make_bare_remote(tmp_path, dict(harness_mod._SANDBOX_SEED_FILES))
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+        project_dir = tmp_path / "workspace" / "sandbox"
+        project_dir.mkdir(parents=True)
+        (project_dir / "keep.txt").write_text("x")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "workspace_exists"
+        assert (project_dir / "keep.txt").is_file()
+
+    def test_run_git_error_falls_back_to_stdout_when_stderr_blank(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 1, "nothing to commit, working tree clean\n", ""),
+        )
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            harness_mod._run_git(["-c", "commit.gpgsign=false", "commit", "-m", "x"], cwd=tmp_path)
+
+        assert exc_info.value.code == "git_error"
+        assert exc_info.value.detail.startswith("git commit failed: ")
+        assert "nothing to commit, working tree clean" in exc_info.value.detail
+
+    @pytest.mark.real_git
+    def test_non_fast_forward_push_fails_and_leaves_remote_unchanged(self, fake_gh, tmp_path, monkeypatch):
+        bare = _make_bare_remote(tmp_path, {"README.md": "# x\n"})
+        sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
+        self._serve_gh(fake_gh, bare, default_branch="main")
+        real_clone = harness_mod.clone_sandbox
+        raced: dict[str, str] = {}
+
+        def racing_clone(*args, **kwargs):
+            real_clone(*args, **kwargs)
+            raced["tip"] = _advance_remote(bare, tmp_path, "main")
+
+        monkeypatch.setattr(harness_mod, "clone_sandbox", racing_clone)
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "git_error"
+        assert exc_info.value.detail.startswith("git push failed")
+        assert _real_git("rev-parse", "main", cwd=bare) == raced["tip"]
+        assert "RACE.txt" in _remote_tree(bare, "main")
+        assert not (tmp_path / "workspace" / "sandbox").exists()

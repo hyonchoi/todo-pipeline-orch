@@ -261,7 +261,16 @@ _URL_USERINFO_RE = re.compile(r"://[^/@\s]+@")
 _GIT_NO_PROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "GCM_INTERACTIVE": "never"}
 
 
+def _git_verb(args: list[str]) -> str:
+    """The git subcommand in *args*, skipping leading ``-c KEY=VAL`` pairs."""
+    i = 0
+    while i + 1 < len(args) and args[i] == "-c":
+        i += 2
+    return args[i] if i < len(args) else "git"
+
+
 def _run_git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    verb = _git_verb(args)
     try:
         result = _git(
             ["git", *args],
@@ -272,35 +281,268 @@ def _run_git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.Co
             env={**os.environ, **_GIT_NO_PROMPT_ENV},
         )
     except OSError as exc:
-        raise HarnessPreflightError("git_error", f"git {args[0]} failed: {exc}") from exc
+        raise HarnessPreflightError("git_error", f"git {verb} failed: {exc}") from exc
     if check and result.returncode != 0:
-        stderr = _URL_USERINFO_RE.sub("://***@", (result.stderr or "").strip())[:200]
-        raise HarnessPreflightError("git_error", f"git {args[0]} failed: {stderr}")
+        # ``git commit`` reports "nothing to commit" on stdout with an empty stderr.
+        output = (result.stderr or "").strip() or (result.stdout or "").strip()[-200:]
+        detail = _URL_USERINFO_RE.sub("://***@", output)[:200]
+        raise HarnessPreflightError("git_error", f"git {verb} failed: {detail}")
     return result
 
 
-def clone_sandbox(sandbox: SandboxRepo, project_dir: Path) -> None:
-    """Clone *sandbox* into *project_dir* and set a local harness git identity."""
+def clone_sandbox(sandbox: SandboxRepo, project_dir: Path, *, branch: str | None = None) -> None:
+    """Clone *sandbox* into *project_dir* and set a local harness git identity.
+
+    With *branch*, ``--branch <branch>`` selects the checked-out branch instead of
+    the remote's HEAD.
+    """
     if project_dir.exists():
         raise HarnessPreflightError("workspace_exists", str(project_dir))
     project_dir.parent.mkdir(parents=True, exist_ok=True)
-    _run_git(["clone", "--", sandbox.url, str(project_dir)], cwd=project_dir.parent)
+    branch_args = ["--branch", branch] if branch is not None else []
+    _run_git(["clone", *branch_args, "--", sandbox.url, str(project_dir)], cwd=project_dir.parent)
     _run_git(["config", "user.email", _HARNESS_GIT_USER_EMAIL], cwd=project_dir)
     _run_git(["config", "user.name", _HARNESS_GIT_USER_NAME], cwd=project_dir)
 
 
-def sandbox_seed_check(project_dir: Path, sandbox: SandboxRepo) -> None:
-    """Require every sandbox seed path to be a tracked file (blob) at HEAD of the clone."""
+def _tracked_blobs_missing(project_dir: Path, paths: tuple[str, ...] | list[str]) -> list[str]:
+    """Return the *paths* that are not tracked files (blobs) at HEAD of *project_dir*."""
     missing = []
-    for rel in _SANDBOX_SEED_PATHS:
+    for rel in paths:
         result = _run_git(["cat-file", "-t", f"HEAD:{rel}"], cwd=project_dir, check=False)
         if result.returncode != 0 or result.stdout.strip() != "blob":
             missing.append(rel)
+    return missing
+
+
+def sandbox_seed_check(project_dir: Path, sandbox: SandboxRepo) -> None:
+    """Require every sandbox seed path to be a tracked file (blob) at HEAD of the clone."""
+    missing = _tracked_blobs_missing(project_dir, _SANDBOX_SEED_PATHS)
     if missing:
         raise HarnessPreflightError(
             "sandbox_not_seeded",
             f"missing: {', '.join(missing)}; run tpo test --repo {sandbox.repo} --init-sandbox",
         )
+
+
+_SANDBOX_GITIGNORE = """\
+# Harness runtime state: pipeline.toml, pipeline_branch.txt, outcomes, fake-gh
+# state. Written into the clone by every run; none of it may reach a PR.
+.hermes/
+
+# Agent scratch space
+.superpowers/
+.code-review-graph/
+
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+.venv/
+"""
+_SANDBOX_SEED_FILES: dict[str, str] = {
+    "README.md": (
+        "# TPO harness sandbox\n\n"
+        "Disposable repository driven by `tpo test`; see "
+        "docs/howto-live-integration-test-harness.md in todo-pipeline-orchestrator.\n"
+    ),
+    ".gitignore": _SANDBOX_GITIGNORE,
+    "pyproject.toml": (
+        "[project]\n"
+        'name = "tpo-harness-sandbox"\n'
+        'version = "0.0.0"\n'
+        'requires-python = ">=3.12"\n'
+        "\n"
+        "[dependency-groups]\n"
+        'dev = ["pytest>=8"]\n'
+        "\n"
+        "[tool.pytest.ini_options]\n"
+        'testpaths = ["tests"]\n'
+    ),
+    "tests/__init__.py": "",
+    "docs/harness/SANDBOX.md": (
+        "# TPO harness sandbox marker\n\n"
+        "seed_version: 1\n\n"
+        "Managed by `tpo test --init-sandbox`. Do not edit by hand.\n"
+    ),
+}
+# Tracked paths tolerated in a sandbox besides the seed files (e.g. workflows).
+_SANDBOX_ALLOWED_FOREIGN = (".github/",)
+_SANDBOX_SEED_COMMIT_MESSAGE = "chore(harness): seed sandbox"
+# Lines the sandbox ``.gitignore`` must carry; a tracked one lacking any is replaced.
+_SANDBOX_GITIGNORE_REQUIRED = (".hermes/",)
+_DEFAULT_BRANCH_JQ = '.defaultBranchRef.name // ""'
+_FOREIGN_DETAIL_LIMIT = 5
+
+
+def _sandbox_default_branch(workspace: Path, sandbox: SandboxRepo) -> str:
+    from .github_issues import _gh
+
+    stdout = _gh(
+        workspace,
+        ["repo", "view", sandbox.repo, "--json", "defaultBranchRef", "--jq", _DEFAULT_BRANCH_JQ],
+    )
+    return stdout.strip()
+
+
+def _remote_refs(workspace: Path, sandbox: SandboxRepo) -> list[str]:
+    """Ref names (``refs/heads/*``, ``refs/tags/*``) the remote advertises."""
+    result = _run_git(["ls-remote", "--heads", "--tags", "--", sandbox.url], cwd=workspace)
+    refs = []
+    for line in result.stdout.splitlines():
+        _sha, sep, ref = line.rstrip("\n").partition("\t")
+        if sep and ref:
+            refs.append(ref)
+    return refs
+
+
+def _write_seed_files(project_dir: Path, rels: list[str]) -> None:
+    try:
+        for rel in rels:
+            target = project_dir / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(_SANDBOX_SEED_FILES[rel])
+    except OSError as exc:
+        raise HarnessPreflightError("workspace_error", str(exc)) from exc
+
+
+def _commit_and_push_seed(
+    project_dir: Path, sandbox: SandboxRepo, branch: str, written: list[str], *, log: logging.Logger
+) -> None:
+    # ``add -f`` so a pre-existing tracked ``.gitignore`` cannot hide seed files;
+    # ``-c commit.gpgsign=false`` so operator signing config cannot block the commit.
+    _run_git(["add", "-f", "--", *written], cwd=project_dir)
+    _run_git(["-c", "commit.gpgsign=false", "commit", "-m", _SANDBOX_SEED_COMMIT_MESSAGE], cwd=project_dir)
+    incomplete = _tracked_blobs_missing(project_dir, tuple(_SANDBOX_SEED_FILES))
+    if incomplete:
+        raise HarnessPreflightError("seed_incomplete", ", ".join(incomplete))
+    log.info("init-sandbox: pushing seed to %s %s", sandbox.repo, branch)
+    _run_git(["push", "origin", f"HEAD:refs/heads/{branch}"], cwd=project_dir)
+
+
+def _gitignore_needs_replacing(project_dir: Path) -> bool:
+    result = _run_git(["show", "HEAD:.gitignore"], cwd=project_dir, check=False)
+    if result.returncode != 0:
+        # Defensive: callers only reach here when .gitignore is tracked at HEAD.
+        return True
+    lines = {line.strip() for line in result.stdout.splitlines()}
+    return any(required not in lines for required in _SANDBOX_GITIGNORE_REQUIRED)
+
+
+def _foreign_detail(foreign: list[str]) -> str:
+    detail = ", ".join(foreign[:_FOREIGN_DETAIL_LIMIT])
+    if len(foreign) > _FOREIGN_DETAIL_LIMIT:
+        detail += f", +{len(foreign) - _FOREIGN_DETAIL_LIMIT} more"
+    return detail
+
+
+def _init_empty_sandbox(
+    sandbox: SandboxRepo, workspace: Path, project_dir: Path, *, log: logging.Logger
+) -> None:
+    from .github_issues import _gh
+
+    log.info("init-sandbox: initialising empty repository %s at %s", sandbox.repo, project_dir)
+    _run_git(["init", "-b", "main"], cwd=project_dir)
+    _run_git(["remote", "add", "origin", sandbox.url], cwd=project_dir)
+    _run_git(["config", "user.email", _HARNESS_GIT_USER_EMAIL], cwd=project_dir)
+    _run_git(["config", "user.name", _HARNESS_GIT_USER_NAME], cwd=project_dir)
+    written = list(_SANDBOX_SEED_FILES)
+    log.info("init-sandbox: writing seed files %s", ", ".join(written))
+    _write_seed_files(project_dir, written)
+    _commit_and_push_seed(project_dir, sandbox, "main", written, log=log)
+    log.info("init-sandbox: setting default branch of %s to main", sandbox.repo)
+    _gh(workspace, ["api", "-X", "PATCH", f"repos/{sandbox.repo}", "-f", "default_branch=main"])
+    observed = _sandbox_default_branch(workspace, sandbox)
+    if observed != "main":
+        raise HarnessPreflightError("default_branch_unset", observed)
+
+
+def _seed_existing_sandbox(
+    sandbox: SandboxRepo, project_dir: Path, default_branch: str, *, log: logging.Logger
+) -> str:
+    log.info("init-sandbox: cloning %s (%s) into %s", sandbox.repo, default_branch, project_dir)
+    clone_sandbox(sandbox, project_dir, branch=default_branch)
+    checked_out = _run_git(["symbolic-ref", "--short", "HEAD"], cwd=project_dir).stdout.strip()
+    if checked_out != default_branch:
+        raise HarnessPreflightError("default_branch_mismatch", f"{checked_out} != {default_branch}")
+    tracked = _run_git(["ls-tree", "-r", "--name-only", "HEAD"], cwd=project_dir).stdout.splitlines()
+    foreign = [
+        path
+        for path in tracked
+        if path not in _SANDBOX_SEED_FILES and not path.startswith(_SANDBOX_ALLOWED_FOREIGN)
+    ]
+    if foreign:
+        raise HarnessPreflightError("sandbox_not_empty", _foreign_detail(foreign))
+    tracked_set = set(tracked)
+    to_write = [rel for rel in _SANDBOX_SEED_FILES if rel not in tracked_set]
+    if ".gitignore" not in to_write and _gitignore_needs_replacing(project_dir):
+        to_write.append(".gitignore")
+    if not to_write:
+        log.info("init-sandbox: %s already seeded on %s", sandbox.repo, default_branch)
+        return "already_seeded"
+    log.info("init-sandbox: %s tracks %s; writing %s", sandbox.repo, ", ".join(tracked) or "(nothing)", ", ".join(to_write))
+    _write_seed_files(project_dir, to_write)
+    _commit_and_push_seed(project_dir, sandbox, default_branch, to_write, log=log)
+    return "seeded"
+
+
+def init_sandbox(sandbox: SandboxRepo, workspace: Path, *, log: logging.Logger = log) -> str:
+    """Seed the live sandbox repository so ``sandbox_seed_check`` passes.
+
+    This is the ONLY code path in the harness allowed to push to the sandbox's
+    default branch; runs push feature branches only. Every push is a plain
+    fast-forward (never ``--force``). Returns ``"seeded"`` after pushing a seed
+    commit or ``"already_seeded"`` when every seed file is already tracked and
+    ``.gitignore`` carries the required rules (no writes, no push).
+
+    - Empty repository: taken only when ``gh`` reports no default branch AND
+      ``git ls-remote`` advertises no refs (``default_branch_unknown`` when they
+      disagree). ``git init -b main`` under ``workspace/<slug>``, commit every
+      seed file, push ``main``, set it as the GitHub default branch, and re-read
+      it (``default_branch_unset`` if the re-read does not report ``main``).
+    - Non-empty repository: clone the reported default branch, then refuse with
+      ``sandbox_not_empty`` when any tracked path is neither a seed file nor
+      under :data:`_SANDBOX_ALLOWED_FOREIGN`. The guard refuses any repository
+      tracking files outside the seed set and ``.github/**``; a README-only or
+      minimal-scaffold repository is treated as seedable by design. Otherwise
+      write the missing seed files (and replace a ``.gitignore`` lacking the
+      required rules), verify every seed file is a blob at HEAD
+      (``seed_incomplete``), and push to the default branch, whatever its name.
+
+    ``workspace/<slug>`` is removed again if seeding fails after creating it.
+    """
+    from .github_issues import check_auth
+
+    try:
+        workspace.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HarnessPreflightError("workspace_error", str(exc)) from exc
+    check_auth(workspace)
+    refs = _remote_refs(workspace, sandbox)
+    default_branch = _sandbox_default_branch(workspace, sandbox)
+    project_dir = workspace / sandbox.slug
+
+    if default_branch == "" and refs:
+        raise HarnessPreflightError("default_branch_unknown", ", ".join(refs[:_FOREIGN_DETAIL_LIMIT]))
+    if default_branch == "" and project_dir.exists():
+        raise HarnessPreflightError("workspace_exists", str(project_dir))
+
+    created_project_dir = False
+    try:
+        if default_branch == "":
+            try:
+                project_dir.mkdir(parents=True)
+            except OSError as exc:
+                raise HarnessPreflightError("workspace_error", str(exc)) from exc
+            created_project_dir = True
+            _init_empty_sandbox(sandbox, workspace, project_dir, log=log)
+            return "seeded"
+        # clone_sandbox raises workspace_exists before creating anything.
+        created_project_dir = not project_dir.exists()
+        return _seed_existing_sandbox(sandbox, project_dir, default_branch, log=log)
+    except BaseException:
+        if created_project_dir:
+            shutil.rmtree(project_dir, ignore_errors=True)
+        raise
 
 
 @dataclass(frozen=True)
