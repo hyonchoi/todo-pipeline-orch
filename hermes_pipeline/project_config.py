@@ -12,6 +12,7 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 PROJECT_TOML_PATH = ".hermes/project.toml"
+PIPELINE_TOML_PATH = ".hermes/pipeline.toml"
 DEFAULT_SLACK_CHANNEL = "#alert"
 
 # A valid Slack channel: optional #/@ sigil, then an alphanumeric first
@@ -24,6 +25,11 @@ _SLACK_CHANNEL_RE = re.compile(r'^[#@]?[A-Za-z0-9][A-Za-z0-9._-]*\Z')
 def _is_valid_slack_channel(channel: str) -> bool:
     """Return True if *channel* is safe to pass as a CLI argument."""
     return bool(channel) and bool(_SLACK_CHANNEL_RE.match(channel))
+
+
+def _get_project_state_dir(project_dir: Path) -> Path:
+    """Return the per-project .hermes directory for *project_dir*."""
+    return project_dir / ".hermes"
 
 
 def _read_project_toml(project_dir: Path) -> dict | None:
@@ -104,7 +110,7 @@ def _resolve_slack_channel(
 
 
 def _discover_projects(config) -> list[tuple[Path, dict | None]]:
-    """Scan projects_dir for active projects with TODOS.md.
+    """Scan projects_dir for active projects (marked by a ``.hermes/pipeline.toml`` file).
 
     The project slug is the directory name (d.name). Directories that fail
     _validate_project_slug are skipped with a warning. Projects with
@@ -138,7 +144,11 @@ def _discover_projects(config) -> list[tuple[Path, dict | None]]:
         if not _validate_project_slug(slug):
             log.warning("skipping invalid project slug: %r", slug)
             continue
-        if not (d / "TODOS.md").exists():
+        if not (d / PIPELINE_TOML_PATH).is_file():
+            if (d / ".hermes").is_dir() or (d / "TODOS.md").exists():
+                log.warning(
+                    "%s: skipped — no .hermes/pipeline.toml (run `tpo init %s`)", slug, slug
+                )
             continue
         toml_data = _read_project_toml(d)
         if not _is_enabled(d, toml_data=toml_data):

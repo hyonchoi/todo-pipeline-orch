@@ -29,7 +29,7 @@ class TestDeprecationShims:
         assert result == 0
 
     def test_pipeline_watch_forwards_args_unchanged(self, monkeypatch):
-        monkeypatch.setattr(sys, "argv", ["pipeline-watch", "recover-counter", "myproject"])
+        monkeypatch.setattr(sys, "argv", ["pipeline-watch", "doctor", "myproject"])
         # No config env set up -> _resolve_project_dir logs "project not found" and
         # returns exit code 2, proving the real subcommand ran (not a no-op).
         result = pipeline_watch_deprecated()

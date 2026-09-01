@@ -50,13 +50,16 @@ def test_decision_picked_none_is_valid():
 
 def test_selection_context_construct():
     ctx = SelectionContext(
-        todos_md="- TODO-1: do thing",
+        selection_markdown="- [ ] **TODO-1: do thing**",
+        candidate_ids=("TODO-1",),
         in_flight=[],
         recent_decisions=[],
         kanban_snapshot={"columns": []},
         project_slug="demo",
     )
     assert ctx.project_slug == "demo"
+    assert ctx.candidate_ids == ("TODO-1",)
+    assert not hasattr(ctx, "todos_md")
 
 
 # ---------------------------------------------------------------------------

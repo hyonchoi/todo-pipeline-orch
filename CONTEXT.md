@@ -4,6 +4,15 @@ Language for describing work items as they move from backlog definition to pipel
 
 ## Language
 
+**TODO**:
+An open GitHub issue on the project's github.com origin carrying the `tpo:todo` label. Its canonical ID is `TODO-<issue-number>`. A TODO becomes pipeline-actionable only through a Plan (see **Plan** below).
+
+**Legacy ID**:
+A pre-migration `TODO-<n>` identifier from the retired `TODOS.md`, preserved as a `legacy-id:TODO-<n>` label, a `### Legacy ID` body section, and in `docs/migration/todos-to-issues.md`. It is never a live issue number.
+
+**Issue Snapshot**:
+The identity-bound canonical text of a TODO (`tpo-issue-snapshot/1`: repository, number, title, normalized body) captured at selection and hashed into the run registration as the selected-TODO authority. Labels, assignees, state, and dependencies are live, not part of the snapshot.
+
 **Plan**:
 A repository document containing implementation-ready execution steps for a TODO. It is the execution authority and makes the TODO pipeline-actionable; design explorations, reviews, specifications, references, and test plans do not qualify unless they explicitly define executable implementation steps.
 

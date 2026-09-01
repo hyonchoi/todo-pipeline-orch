@@ -5,9 +5,9 @@ import json
 
 from hermes_pipeline.decision.context import (
     _extract_in_flight_ids,
-    _fetch_kanban_snapshot,
     _kanban_snapshot,
     build_in_flight,
+    fetch_kanban_snapshot,
 )
 
 
@@ -136,7 +136,7 @@ class TestExtractInFlightIds:
 
 
 class TestFetchKanbanSnapshot:
-    """Tests for _fetch_kanban_snapshot() — the CLI wrapper."""
+    """Tests for fetch_kanban_snapshot() — the CLI wrapper."""
 
     def test_success(self, mocker):
         """Successful fetch returns parsed JSON."""
@@ -145,20 +145,30 @@ class TestFetchKanbanSnapshot:
         mock_result.stdout = json.dumps({"tasks": []})
         mocker.patch("subprocess.run", return_value=mock_result)
 
-        result = _fetch_kanban_snapshot("demo")
+        result = fetch_kanban_snapshot("demo")
+        assert result == {"tasks": []}
+
+    def test_empty_stdout_is_an_empty_board_not_a_failure(self, mocker):
+        """rc 0 with blank stdout is an empty board, not an unavailable Kanban."""
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = "  \n"
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = fetch_kanban_snapshot("demo")
         assert result == {"tasks": []}
 
     def test_cli_failure_returns_none(self, mocker):
         """hermes not found -> None."""
         mocker.patch("subprocess.run", side_effect=FileNotFoundError("hermes not found"))
-        result = _fetch_kanban_snapshot("demo")
+        result = fetch_kanban_snapshot("demo")
         assert result is None
 
     def test_timeout_returns_none(self, mocker):
         """Subprocess timeout -> None."""
         import subprocess
         mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("hermes", 10))
-        result = _fetch_kanban_snapshot("demo")
+        result = fetch_kanban_snapshot("demo")
         assert result is None
 
     def test_json_error_returns_none(self, mocker):
@@ -168,7 +178,7 @@ class TestFetchKanbanSnapshot:
         mock_result.stdout = "not json"
         mocker.patch("subprocess.run", return_value=mock_result)
 
-        result = _fetch_kanban_snapshot("demo")
+        result = fetch_kanban_snapshot("demo")
         assert result is None
 
     def test_nonzero_returncode_returns_none(self, mocker):
@@ -179,7 +189,7 @@ class TestFetchKanbanSnapshot:
         mock_result.stderr = "error"
         mocker.patch("subprocess.run", return_value=mock_result)
 
-        result = _fetch_kanban_snapshot("demo")
+        result = fetch_kanban_snapshot("demo")
         assert result is None
 
 
@@ -189,7 +199,7 @@ class TestKanbanSnapshot:
     def test_success_delegates_to_fetch(self, mocker):
         """On success, returns the parsed snapshot."""
         mocker.patch(
-            "hermes_pipeline.decision.context._fetch_kanban_snapshot",
+            "hermes_pipeline.decision.context.fetch_kanban_snapshot",
             return_value={"tasks": [{"id": "t1"}]},
         )
         result = _kanban_snapshot("demo")
@@ -198,7 +208,7 @@ class TestKanbanSnapshot:
     def test_failure_returns_error_marker(self, mocker):
         """On failure, returns the error marker dict."""
         mocker.patch(
-            "hermes_pipeline.decision.context._fetch_kanban_snapshot",
+            "hermes_pipeline.decision.context.fetch_kanban_snapshot",
             return_value=None,
         )
         result = _kanban_snapshot("demo")

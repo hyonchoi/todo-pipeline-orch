@@ -5,7 +5,7 @@ Pipeline profiles let a project select an independent set of phases — the prom
 ## Prerequisites
 
 - `todo-pipeline-orchestrator` installed and `tpo` working
-- A project with a `TODOS.md` file under `tpo config get projects_dir`
+- A project with `.hermes/pipeline.toml` under `tpo config get projects_dir`
 - The `agent-skills` plugin's skills listed below available in the environment
   that runs the pipeline
 

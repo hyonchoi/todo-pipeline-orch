@@ -1,26 +1,15 @@
-from pathlib import Path
-
-# Map hyphenated directory to valid Python package name for imports.
-_skill_test_dir = Path(__file__).parent / "skill-test-environment"
-if _skill_test_dir.exists():
-    _alias = Path(__file__).parent / "skill_test_environment"
-    if not _alias.exists():
-        # Create a symlink so "import tests.skill_test_environment" works
-        try:
-            _alias.symlink_to("skill-test-environment")
-        except OSError:
-            pass  # symlink already exists or not permitted
-
 import pytest
 
 
 @pytest.fixture
 def tmp_project(tmp_path):
-    """A scratch project dir with TODOS.md + .hermes/."""
+    """A scratch project dir marked by its .hermes/pipeline.toml contract."""
     proj = tmp_path / "demo"
     (proj / ".hermes").mkdir(parents=True)
-    (proj / "TODOS.md").write_text("# TODOS\n\n")
-    (proj / ".hermes" / "todo_id_counter").write_text("0")
+    (proj / ".hermes" / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\n'
+        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+    )
     return proj
 
 @pytest.fixture
@@ -29,3 +18,18 @@ def state_dir(tmp_path, monkeypatch):
     sd = tmp_path / "state"
     (sd / "pipeline_locks").mkdir(parents=True)
     return sd
+
+
+@pytest.fixture
+def fake_gh(monkeypatch):
+    """Patch ``hermes_pipeline.github_issues._run`` (its subprocess seam) with a FakeGh recorder."""
+    from tests.gh_fakes import FakeGh
+
+    monkeypatch.delenv("TPO_GH_BIN", raising=False)
+    fake = FakeGh()
+    # ``check_auth`` verifies the gh version after auth; serve a supported one by default.
+    fake.on("gh", "--version", stdout="gh version 2.60.0 (2025-01-01)\nhttps://github.com/cli/cli/releases/tag/v2.60.0\n")
+    from hermes_pipeline import github_issues
+
+    monkeypatch.setattr(github_issues, "_run", fake)
+    return fake

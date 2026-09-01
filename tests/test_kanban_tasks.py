@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -483,7 +484,7 @@ def test_register_todo_phases_late_render_failure_is_atomic(tmp_path, mocker):
 
 def test_prepare_todo_phases_requires_plan_for_plan_gated_profile(tmp_path):
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
-    from hermes_pipeline.todos_md import TodoPlanValidationError
+    from hermes_pipeline.plan_manifest import TodoPlanValidationError
 
     phases_path = tmp_path / "phases.yaml"
     phases_path.write_text(
@@ -503,6 +504,15 @@ def test_prepare_todo_phases_requires_plan_for_plan_gated_profile(tmp_path):
             board_slug="demo",
             phases_path=phases_path,
         )
+    # A project_dir never re-resolves the Plan from disk; the caller must pass it.
+    with pytest.raises(TodoPlanValidationError, match="missing"):
+        prepare_todo_phases(
+            todo_id="TODO-41",
+            tick_id="01CLIENT",
+            board_slug="demo",
+            phases_path=phases_path,
+            project_dir=tmp_path,
+        )
 
 
 def test_register_todo_phases_resolves_plan_before_task_creation(tmp_path, mocker):
@@ -518,10 +528,6 @@ def test_register_todo_phases_resolves_plan_before_task_creation(tmp_path, mocke
         "    tools: Read\n"
         "    turns: 5\n"
     )
-    (tmp_path / "TODOS.md").write_text(
-        "- [ ] **TODO-41: Example** — work\n"
-        "  - **Plan:** docs/plan.md\n"
-    )
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "plan.md").write_text("# Plan\n")
     create = mocker.patch(
@@ -535,6 +541,7 @@ def test_register_todo_phases_resolves_plan_before_task_creation(tmp_path, mocke
         board_slug="demo",
         project_dir=tmp_path,
         phases_path=phases_path,
+        plan_path="docs/plan.md",
     ) == ["t_00000001"]
 
     prepared = create.call_args.kwargs["prepared"]
@@ -545,7 +552,7 @@ def test_register_todo_phases_rejects_missing_plan_before_task_creation(
     tmp_path, mocker
 ):
     from hermes_pipeline.kanban_tasks import register_todo_phases
-    from hermes_pipeline.todos_md import TodoPlanValidationError
+    from hermes_pipeline.plan_manifest import TodoPlanValidationError
 
     phases_path = tmp_path / "phases.yaml"
     phases_path.write_text(
@@ -557,7 +564,6 @@ def test_register_todo_phases_rejects_missing_plan_before_task_creation(
         "    tools: Read\n"
         "    turns: 5\n"
     )
-    (tmp_path / "TODOS.md").write_text("- [ ] **TODO-41: Example** — work\n")
     create = mocker.patch(
         "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
     )
@@ -607,9 +613,6 @@ def test_prepare_todo_phases_compiles_manifest_workers_and_controller_gates(
         "    kind: human_gate\n"
         "    gate: true\n"
     )
-    (tmp_path / "TODOS.md").write_text(
-        "- [ ] **TODO-41: Example** — work\n  - **Plan:** docs/plan.md\n"
-    )
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "plan.md").write_text(
         "```json tpo-plan\n"
@@ -631,6 +634,7 @@ def test_prepare_todo_phases_compiles_manifest_workers_and_controller_gates(
         board_slug="demo",
         phases_path=phases_path,
         prompt_client="codex",
+        plan_path="docs/plan.md",
         project_dir=tmp_path,
     )
 
@@ -718,9 +722,6 @@ def test_prepare_todo_phases_keeps_legacy_single_development_card_with_warning(
         "    turns: 20\n"
         "    compile_plan_tasks: true\n"
     )
-    (tmp_path / "TODOS.md").write_text(
-        "- [ ] **TODO-41: Example** — work\n  - **Plan:** docs/plan.md\n"
-    )
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "plan.md").write_text("# Legacy plan\n")
 
@@ -730,6 +731,7 @@ def test_prepare_todo_phases_keeps_legacy_single_development_card_with_warning(
             tick_id="01TICK",
             board_slug="demo",
             phases_path=phases_path,
+            plan_path="docs/plan.md",
             project_dir=tmp_path,
         )
 
@@ -2865,3 +2867,187 @@ def test_mark_gate_needs_input_uses_installed_hermes_positional_contract(mocker)
         "hermes", "kanban", "block", "--kind", "needs_input",
         "t_0000000a", "bounded reason",
     ]
+
+
+def test_reconcile_plan_task_results_surfaces_registration_code(tmp_path, caplog):
+    from hermes_pipeline.kanban_tasks import reconcile_plan_task_results
+    from hermes_pipeline.result_contract import ResultContractError
+
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text(
+        json.dumps({"schema_version": 1, "tick_id": "01TICK"})
+    )
+    caplog.set_level("WARNING", logger="hermes_pipeline.kanban_tasks")
+
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        reconcile_plan_task_results(
+            project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK"
+        )
+
+    assert any("registration_invalid" in record.getMessage() for record in caplog.records)
+
+
+def test_get_todo_kanban_tasks_warns_on_nonzero_exit(mocker, caplog):
+    from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(returncode=3, stdout="", stderr="boom"),
+    )
+    with caplog.at_level("WARNING", logger="hermes_pipeline.kanban_tasks"):
+        assert get_todo_kanban_tasks("demo", "01TICK") == {}
+    assert any("rc=3" in rec.getMessage() and "demo" in rec.getMessage() for rec in caplog.records)
+
+
+def _git_tracked_project(tmp_path, files):
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for name in files:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"# {name}\n")
+    for command in (
+        ("init", "-q", "-b", "main"),
+        ("config", "user.email", "t@example.com"),
+        ("config", "user.name", "T"),
+        ("add", "."),
+        ("commit", "-qm", "base"),
+    ):
+        subprocess.run(["git", *command], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+_TWO_PHASES = (
+    "phases:\n"
+    "  - phase_key: phase_1\n    name: One\n    prompt: first\n    tools: Read\n    turns: 5\n"
+    "  - phase_key: phase_2\n    name: Two\n    prompt: second\n    tools: Read\n    turns: 5\n"
+    "  - phase_key: gate\n    name: Gate\n    gate: true\n"
+)
+
+
+def test_prepare_todo_phases_requires_project_dir_for_spec_and_references(tmp_path):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(_TWO_PHASES)
+
+    with pytest.raises(ValueError, match="project_dir"):
+        prepare_todo_phases(
+            todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+            phases_path=phases_path, spec_path="docs/spec.md",
+        )
+    with pytest.raises(ValueError, match="project_dir"):
+        prepare_todo_phases(
+            todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+            phases_path=phases_path, reference_paths=("docs/ref.md",),
+        )
+
+
+def test_prepare_todo_phases_filters_spec_and_references_to_tracked_repository_files(
+    tmp_path, caplog
+):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    repo = _git_tracked_project(
+        tmp_path, ["docs/spec.md", *(f"docs/ref-{i}.md" for i in range(12))]
+    )
+    (repo / "docs" / "untracked.md").write_text("# not committed\n")
+    (repo / ".hidden").mkdir()
+    (repo / ".hidden" / "spec.md").write_text("# hidden\n")
+    (repo / "docs" / ".hidden").mkdir()
+    (repo / "docs" / ".hidden" / "x.md").write_text("# nested hidden\n")
+    subprocess.run(["git", "add", "docs/.hidden/x.md"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-qm", "hidden"], cwd=repo, check=True, capture_output=True)
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(_TWO_PHASES)
+    references = (
+        "docs/untracked.md", ".hidden/spec.md", "docs/.hidden/x.md", "../outside.md", "docs/ref-0.md",
+        "docs/ref-0.md", "docs//ref-1.md", *(f"docs/ref-{i}.md" for i in range(1, 12)),
+    )
+
+    with caplog.at_level("WARNING", logger="hermes_pipeline.kanban_tasks"):
+        prepared = prepare_todo_phases(
+            todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+            phases_path=phases_path, project_dir=repo,
+            spec_path=".hidden/spec.md", reference_paths=references,
+        )
+
+    body = prepared[0].body
+    assert "Spec (authoritative)" not in body
+    kept = [f"docs/ref-{i}.md" for i in range(10)]
+    assert f"Reference material: {', '.join(kept)}\n" in body
+    assert "untracked.md" not in body and "outside.md" not in body and ".hidden" not in body
+    messages = [rec.getMessage() for rec in caplog.records]
+    assert any("untracked" in m for m in messages)
+    assert any("truncat" in m.lower() for m in messages)
+
+
+def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles(tmp_path):
+    """Workers see Spec/Reference; controller and human gates never do (C9)."""
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.phases import resolve_profile_phases_path
+
+    repo = _git_tracked_project(tmp_path, ["docs/spec.md", "docs/ref.md", "docs/plan.md"])
+    (repo / "docs" / "plan.md").write_text(
+        "```json tpo-plan\n"
+        '{"schema_version":1,"todo_id":"TODO-41","tasks":['
+        '{"id":"task-1","title":"First","instructions":"Do.",'
+        '"acceptance_criteria":["ok"],"verification":["uv run pytest"],'
+        '"commit_message":"feat: first"}]}\n```\n'
+    )
+    marker = "Spec (authoritative): docs/spec.md\nReference material: docs/ref.md\n"
+    decisions_marker = "Decisions:\n- Effort: S\n- Security Review: not-required\n"
+
+    def render(profile):
+        return prepare_todo_phases(
+            todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+            phases_path=resolve_profile_phases_path(profile), project_dir=repo,
+            plan_path="docs/plan.md", spec_path="docs/spec.md", reference_paths=("docs/ref.md",),
+            decisions={"Effort": "S", "Security Review": "not-required"},
+        )
+
+    for profile in ("gstack", "agent-skills"):
+        for task in render(profile):
+            assert (marker in task.body) is (not task.gate), (profile, task.phase_key)
+            assert (decisions_marker in task.body) is (not task.gate), (profile, task.phase_key)
+
+    native = {task.phase_key: task for task in render("native-sdd")}
+    assert marker in native["plan:task-1"].body
+    assert decisions_marker in native["plan:task-1"].body
+    assert marker not in native["validate:task-1"].body
+    assert "Security Review:" not in native["validate:task-1"].body
+    assert native["validate:task-1"].gate and native["validate:task-1"].kind == "controller_gate"
+    assert not any(key.startswith(("phase_5", "phase_8", "phase_9")) for key in native)
+
+
+def test_reconcile_plan_task_results_forwards_repo_to_registration_loader(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import reconcile_plan_task_results
+
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text("{}")
+    load = mocker.patch(
+        "hermes_pipeline.result_contract.load_validated_registration",
+        return_value=SimpleNamespace(manifest=None),
+    )
+
+    assert reconcile_plan_task_results(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", repo="acme/repo"
+    )
+    assert load.call_args.kwargs["repo"] == "acme/repo"
+
+
+def test_contained_paths_drop_on_git_timeout(tmp_path, mocker, caplog):
+    from hermes_pipeline.kanban_tasks import _contained_paths
+
+    repo = _git_tracked_project(tmp_path, ["docs/spec.md"])
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        side_effect=subprocess.TimeoutExpired("git", 1),
+    )
+    with caplog.at_level("WARNING", logger="hermes_pipeline.kanban_tasks"):
+        assert _contained_paths(repo, "TODO-1", ["docs/spec.md"]) == []
+    assert any("TimeoutExpired" in r.getMessage() for r in caplog.records)

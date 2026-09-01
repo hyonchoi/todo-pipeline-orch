@@ -5,6 +5,8 @@ import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import pytest
+
 from hermes_pipeline.cli import (
     _cmd_tick,
     _load_toml_overlay,
@@ -12,6 +14,18 @@ from hermes_pipeline.cli import (
     _persist_tick_id,
 )
 from hermes_pipeline.config import Config
+from tests.gh_fakes import seed_project_issues, todo_payload
+
+PIPELINE_TOML = (
+    'schema_version = 2\nassignee = "default"\n'
+    'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+)
+
+
+@pytest.fixture(autouse=True)
+def _github_todo_10(fake_gh):
+    """Every tick reads TODOs from GitHub: serve #10 as the sole candidate."""
+    return seed_project_issues(fake_gh, [todo_payload(10, title="test")])
 
 
 def _make_decision(picked=None, **kwargs):
@@ -23,12 +37,13 @@ def _make_decision(picked=None, **kwargs):
     return decision
 
 
-def _create_project(projects_dir, name, todos=True):
-    """Helper to create a project directory with optional TODOS.md."""
+def _create_project(projects_dir, name, contract=True):
+    """Create a project directory, marked as a project by .hermes/pipeline.toml."""
     project_dir = projects_dir / name
     project_dir.mkdir(parents=True, exist_ok=True)
-    if todos:
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+    if contract:
+        (project_dir / ".hermes").mkdir(exist_ok=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(PIPELINE_TOML)
     return project_dir
 
 
@@ -236,7 +251,7 @@ class TestTickPicked:
 
         # Write prior tick_id in per-project state
         project_state = projects_dir / "demo" / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
@@ -496,9 +511,7 @@ class TestSecurityHardening:
         projects_dir.mkdir()
 
         # Real project
-        real_project = projects_dir / "real"
-        real_project.mkdir()
-        (real_project / "TODOS.md").write_text("# TODOS\n\nTODO-1 — test\n")
+        real_project = _create_project(projects_dir, "real")
 
         # Symlink pointing to the real project (escape attempt)
         symlink = projects_dir / "symlink-project"

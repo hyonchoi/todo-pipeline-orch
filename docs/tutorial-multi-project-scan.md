@@ -12,62 +12,37 @@ configures per-project Slack channels, and archives projects without deleting th
 - Python 3.12+ and uv package manager
 - The Hermes CLI on `PATH`, authenticated with `hermes login`, with an agent runtime/profile available when pipeline phases run
 - Hermes kanban configured for your project
+- `gh` >= 2.44 authenticated; each test project needs a github.com `origin`
+  remote with at least one open issue labelled `tpo:todo` + `ready-for-agent`
+  (see [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
+  [ADR-0003](adr/0003-github-issues-are-the-todo-backlog.md))
 
 ---
 
 ## Step 1: Create two test projects
 
-Create a directory for your projects and two project directories inside it:
+Create a directory for your projects and clone two GitHub repositories into it.
+Discovery keys on `.hermes/pipeline.toml`, so write the contract in each:
 
 ```bash
-mkdir -p ~/my-projects/demo-app ~/my-projects/second-app
+mkdir -p ~/my-projects
 tpo config set projects_dir ~/my-projects
 
-# Set up demo-app
-cd ~/my-projects/demo-app
-git init
-mkdir .hermes
-echo "0" > .hermes/todo_id_counter
+cd ~/my-projects
+git clone https://github.com/<you>/demo-app.git
+git clone https://github.com/<you>/second-app.git
 
-cat > TODOS.md << 'EOF'
-# TODOS
-
-## TODO-1: Add user authentication
-
-**What:** Implement basic JWT authentication.
-
-**Why:** Users need to log in securely.
-
-**Status:** `[→]` (in progress)
-EOF
-
-git add .
-git commit -m "init: create project with TODOS"
+tpo init demo-app
+tpo init second-app
 ```
 
-Now set up the second project:
+Then give each repository one selectable TODO: file an issue through the
+"TPO TODO" form (`gh issue create --web --template "TPO TODO"` from inside the
+clone) and label it `ready-for-agent`. The issue number becomes the TODO ID
+(`TODO-<issue-number>`).
 
-```bash
-cd ~/my-projects/second-app
-git init
-mkdir .hermes
-echo "0" > .hermes/todo_id_counter
-
-cat > TODOS.md << 'EOF'
-# TODOS
-
-## TODO-1: Add database connection pool
-
-**What:** Set up a connection pool for PostgreSQL.
-
-**Why:** Avoid opening a new connection on every request.
-
-**Status:** `[→]` (in progress)
-EOF
-
-git add .
-git commit -m "init: create project with TODOS"
-```
+A directory that has `.hermes/` or a legacy `TODOS.md` but no
+`.hermes/pipeline.toml` is skipped with a WARNING suggesting `tpo init`.
 
 You now have two projects that tpo can discover.
 
@@ -85,10 +60,10 @@ You'll see output like:
 
 ```
 discovered 2 active projects
-project demo-app: selection result: picked=TODO-1
-project demo-app: registered 4 kanban tasks for TODO-1
-project second-app: selection result: picked=TODO-1
-project second-app: registered 4 kanban tasks for TODO-1
+project demo-app: selection result: picked=TODO-12
+project demo-app: registered 4 kanban tasks for TODO-12
+project second-app: selection result: picked=TODO-3
+project second-app: registered 4 kanban tasks for TODO-3
 ```
 
 One tick, two projects, and a lock scoped to each project. No cron per project
@@ -148,8 +123,8 @@ discovered 1 active projects
 project demo-app: selection result: picked=...
 ```
 
-Second-app was skipped — no need to delete its `TODOS.md`. To re-enable it,
-set `enabled = true` or delete the `project.toml` file.
+Second-app was skipped — no need to delete its contract or close its issues.
+To re-enable it, set `enabled = true` or delete the `project.toml` file.
 
 ---
 
@@ -159,14 +134,14 @@ Each project now has its own state directory:
 
 ```bash
 ls ~/my-projects/demo-app/.hermes/
-# current_tick_id.txt  circuit.json  decisions/  outcomes/  phase_started/
+# pipeline.toml  current_tick_id.txt  circuit.json  decisions/  outcomes/  runs/  phase_started/
 
 ls ~/my-projects/second-app/.hermes/
-# project.toml  todo_id_counter
+# pipeline.toml  project.toml
 ```
 
 Notice: demo-app has tick state because it ran selection. Second-app is archived,
-so it has no tick state — only the `project.toml` and counter.
+so it has no tick state — only the contract and `project.toml`.
 
 ---
 
@@ -177,7 +152,7 @@ You now have a multi-project setup that:
 - Discovers active projects automatically via `_discover_projects`
 - Runs one selection per project under a per-project lock
 - Uses per-project Slack channels for notifications
-- Archives projects without deleting `TODOS.md`
+- Archives projects without deleting their contract
 - Shares one cron entry (`hermes cron set pipeline-tick */5 * * * *`)
 
 ### Next steps
@@ -194,8 +169,8 @@ See [Pipeline state machine](hermes-state-machine.md) for the tick lifecycle.
 
 - Read [How the multi-project scan loop works](explanation-multi-project-scan.md)
   for how per-project locks isolate overlapping ticks.
-- Read [How to troubleshoot state migration](howto-troubleshoot-state-migration.md) for
-  fixing migration issues when you have multiple projects.
+- Read [Issue tracker conventions](agents/issue-tracker.md) for the label
+  vocabulary that makes an issue eligible for selection.
 
 **Deep-dive:**
 

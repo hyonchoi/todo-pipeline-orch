@@ -146,3 +146,49 @@ def test_test_subcommand_timeout_default_is_86400():
     parser = build_parser()
     args = parser.parse_args(["test", "--fixture", "happy-path"])
     assert args.timeout == 86400
+
+
+class TestVerboseDebugFlags:
+    """--verbose/--debug are stripped before argparse and configure root logging."""
+
+    @pytest.mark.parametrize(
+        ("argv", "expected"),
+        [
+            (["--verbose", "doctor"], (True, False, ["doctor"])),
+            (["--debug", "doctor"], (False, True, ["doctor"])),
+            (["--verbose", "--debug", "doctor"], (True, True, ["doctor"])),
+            (["tick", "myproject", "--verbose"], (True, False, ["tick", "myproject"])),
+            (["doctor"], (False, False, ["doctor"])),
+        ],
+    )
+    def test_strip_global_flags(self, argv, expected):
+        from hermes_pipeline.cli import _strip_global_flags
+
+        assert _strip_global_flags(argv) == expected
+
+    @staticmethod
+    def _project(tmp_path, monkeypatch):
+        projects_dir = tmp_path / "projects"
+        (projects_dir / "test-proj").mkdir(parents=True)
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(f"projects_dir: {projects_dir!s}\n")
+        monkeypatch.setenv("TPO_CONFIG_FILE", str(config_file))
+
+    @pytest.mark.parametrize(
+        ("argv", "level"),
+        [
+            (["--verbose", "doctor", "test-proj"], logging.INFO),
+            (["doctor", "test-proj", "--verbose"], logging.INFO),
+            (["--debug", "doctor", "test-proj"], logging.DEBUG),
+            (["doctor", "test-proj", "--debug"], logging.DEBUG),
+        ],
+    )
+    def test_main_configures_logging_level_wherever_the_flag_sits(
+        self, tmp_path, monkeypatch, argv, level
+    ):
+        self._project(tmp_path, monkeypatch)
+
+        # The project has no pipeline contract, so doctor reports MISSING (2):
+        # the real subcommand ran after the flag was stripped.
+        assert main(argv) == 2
+        assert logging.getLogger().level == level

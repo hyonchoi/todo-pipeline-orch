@@ -36,6 +36,21 @@ firing and keep producing the same mismatch until you intervene.
 - Hermes CLI installed and authenticated (as of v0.3, selection routes through
   `hermes chat -q`).
 
+## After upgrading to the GitHub Issues backlog
+
+The bundled prompt changed when the backlog moved from `TODOS.md` to GitHub
+Issues ([ADR-0003](adr/0003-github-issues-are-the-todo-backlog.md)): the input
+fence is now `<candidate_todos>` (a compiled candidate list, not a file dump)
+and the rules refer to candidate entry headers. Its SHA-256 is:
+
+```
+11c04ee5cf7fb92e369cc3e095b9f62aef28f52ea815ffd09486ee818032bf6e
+```
+
+Operators who pin `selection.expected_prompt_sha` to the bundled prompt will see
+a mismatch on the first tick after upgrading. Follow Path A below with this
+value; nothing drifted unexpectedly.
+
 ## Decide which side is correct
 
 A mismatch means either the prompt file drifted (someone edited it without
@@ -178,8 +193,9 @@ or accept until the pin is corrected.
 **The SHA matches but selection still returns `picked=null`.**
 Not a mismatch — read the rationale. The agent surveyed the queue and chose
 not to act. This counts as no-progress and will trip the circuit breaker
-after `circuit_breaker.no_progress_threshold` consecutive ticks. Check
-TODOS.md for actually-pickable items.
+after `circuit_breaker.no_progress_threshold` consecutive ticks. Check that
+an open issue carries both `tpo:todo` and `ready-for-agent` (see
+[issue tracker](agents/issue-tracker.md#tpo-backlog-items)).
 
 ## Related
 

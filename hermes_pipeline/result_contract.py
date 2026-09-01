@@ -9,6 +9,16 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from . import github_issues
+from .github_issues import (
+    MAX_ISSUE_SNAPSHOT_CHARS,
+    REGISTRATION_SCHEMA_VERSION,
+    GitHubIssuesError,
+    SnapshotFormatError,
+    parse_issue_body,
+    snapshot_hash,
+    split_canonical_snapshot,
+)
 from .plan_manifest import PlanManifest, parse_plan_manifest
 
 MAX_METADATA_BYTES = 64 * 1024
@@ -19,7 +29,9 @@ MAX_LOCATION_LENGTH = 256
 MAX_FINDING_TEXT_LENGTH = 1000
 SCHEMA_VERSION = 1
 _SHA_RE = re.compile(r"[0-9a-f]{40}")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# C0/DEL controls plus Unicode line/paragraph separators and bidi overrides.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]")
+_LINE_BREAK_RE = re.compile(r"[\n\r\t\u2028\u2029]+")
 _SECRET_RE = re.compile(
     r"(?i)(?:gh[pousr]_[A-Za-z0-9_]{20,}|(?:authorization|token|password|secret)\s*[:=]\s*\S+)"
 )
@@ -92,6 +104,8 @@ class ValidatedRegistration:
     todo_id: str
     repository: Path
     base_sha: str
+    issue_number: int
+    issue_url: str
     plan_path: str
     branch: str
     worktree: Path
@@ -105,6 +119,7 @@ class ValidatedRegistration:
 def sanitize_result_text(value: object, *, maximum: int) -> str:
     """Return bounded, display-safe diagnostics without credential material."""
     text = _CONTROL_RE.sub("", str(value))
+    text = _LINE_BREAK_RE.sub(" ", text)
     text = _SECRET_RE.sub("[REDACTED]", text)
     return text[:maximum]
 
@@ -346,7 +361,9 @@ def _validate_delivery(value: object) -> DeliveryEvidence:
     delivery = _mapping(value, code="invalid_delivery")
     _exact_keys(delivery, {"pr_url", "branch", "head_sha", "checks"}, code="invalid_delivery")
     pr_url = _bounded_string(delivery["pr_url"], maximum=1000, code="invalid_delivery")
-    if not re.fullmatch(r"https://[^\s]+/pull/\d+", pr_url):
+    if not re.fullmatch(
+        r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/pull/\d+", pr_url
+    ):
         raise ResultContractError("invalid_delivery")
     _bounded_string(delivery["branch"], maximum=256, code="invalid_delivery")
     if not isinstance(delivery["head_sha"], str) or not _SHA_RE.fullmatch(
@@ -368,6 +385,9 @@ _REGISTRATION_KEYS = {
     "todo_id",
     "repository",
     "base_sha",
+    "issue_number",
+    "issue_url",
+    "issue_snapshot",
     "selected_entry_hash",
     "plan_path",
     "plan_hash",
@@ -382,25 +402,37 @@ _REGISTRATION_KEYS = {
 
 
 def load_validated_registration(
-    project_dir: Path, state_dir: Path, tick_id: str
+    project_dir: Path, state_dir: Path, tick_id: str, *, repo: str | None = None
 ) -> ValidatedRegistration:
-    """Load exact registration authority and verify it against pinned Git bytes."""
-    from .todos_md import parse_todo_entries
+    """Load exact registration authority and verify it against its pinned issue snapshot.
 
+    ``repo`` defaults to the live ``origin`` identity; tests inject it.
+    """
     path = state_dir / "runs" / tick_id / "registration.json"
     try:
         raw: Any = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ResultContractError("registration_invalid") from exc
     registration = _mapping(raw, code="registration_invalid")
+    if registration.get("schema_version") != REGISTRATION_SCHEMA_VERSION:
+        raise ResultContractError("registration_invalid", "unsupported schema_version")
     _exact_keys(registration, _REGISTRATION_KEYS, code="registration_invalid")
-    _reject_unsafe_strings(registration)
-    if registration["schema_version"] != 1 or registration["tick_id"] != tick_id:
+    # The issue snapshot is hash-pinned authority content, not agent metadata:
+    # bound its size instead of scanning it for secret-like text.
+    _reject_unsafe_strings({key: value for key, value in registration.items() if key != "issue_snapshot"})
+    if (
+        not isinstance(registration["issue_snapshot"], str)
+        or len(registration["issue_snapshot"]) > MAX_ISSUE_SNAPSHOT_CHARS
+    ):
+        raise ResultContractError("registration_invalid", "issue snapshot size")
+    if registration["tick_id"] != tick_id:
         raise ResultContractError("registration_invalid")
     string_keys = (
         "todo_id",
         "repository",
         "base_sha",
+        "issue_url",
+        "issue_snapshot",
         "selected_entry_hash",
         "plan_path",
         "plan_hash",
@@ -411,6 +443,9 @@ def load_validated_registration(
         "assignee",
     )
     if not all(isinstance(registration[key], str) and registration[key] for key in string_keys):
+        raise ResultContractError("registration_invalid")
+    issue_number = registration["issue_number"]
+    if type(issue_number) is not int or issue_number <= 0:
         raise ResultContractError("registration_invalid")
     if registration["review_assignee"] is not None and (
         not isinstance(registration["review_assignee"], str)
@@ -448,31 +483,43 @@ def load_validated_registration(
     plan_bytes = _git_bytes(repository, "show", f"{base_sha}:{plan_path}")
     if hashlib.sha256(plan_bytes).hexdigest() != registration["plan_hash"]:
         raise ResultContractError("registration_invalid")
-    todos_bytes = _git_bytes(repository, "show", f"{base_sha}:TODOS.md")
     try:
-        entries = parse_todo_entries(todos_bytes.decode("utf-8"))
         manifest = parse_plan_manifest(
             plan_bytes.decode("utf-8"), expected_todo_id=registration["todo_id"]
         )
     except (UnicodeError, ValueError) as exc:
         raise ResultContractError("registration_invalid") from exc
-    selected = next(
-        (entry for entry in entries if entry.todo_id == registration["todo_id"]), None
-    )
-    if selected is None or hashlib.sha256(selected.raw.encode()).hexdigest() != registration[
-        "selected_entry_hash"
-    ]:
-        raise ResultContractError("registration_invalid")
-    title_slug = re.sub(r"[^a-z0-9]+", "-", selected.title.lower()).strip("-")
+    snapshot = registration["issue_snapshot"]
+    if snapshot_hash(snapshot) != registration["selected_entry_hash"]:
+        raise ResultContractError("registration_invalid", "issue snapshot hash")
+    try:
+        snapshot_repo, number, title, body = split_canonical_snapshot(snapshot)
+    except SnapshotFormatError as exc:
+        raise ResultContractError("registration_invalid", "issue snapshot") from exc
+    if repo is None:
+        try:
+            repo = github_issues.repository_identity(project_dir)
+        except GitHubIssuesError as exc:
+            raise ResultContractError("git_verification_failed", "remote") from exc
+    if (
+        snapshot_repo.lower() != repo.lower()
+        or number != issue_number
+        or registration["todo_id"] != f"TODO-{number}"
+        or registration["issue_url"].lower()
+        != f"https://github.com/{snapshot_repo}/issues/{number}".lower()
+    ):
+        raise ResultContractError("registration_invalid", "issue identity")
+    sections = parse_issue_body(body)
+    title_slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     expected_worktree = (
-        repository / ".worktrees" / f"{selected.todo_id.lower()}-{title_slug}"[:100].rstrip("-")
+        repository / ".worktrees" / f"todo-{number}-{title_slug}"[:100].rstrip("-")
     ).resolve()
     if (
         worktree != expected_worktree
-        or selected.plan_values != (plan_path,)
-        or selected.branch_values != (registration["branch"],)
+        or github_issues.first_lines(sections.get("Plan", ())) != (plan_path,)
+        or github_issues.first_lines(sections.get("Branch", ())) != (registration["branch"],)
     ):
-        raise ResultContractError("registration_invalid")
+        raise ResultContractError("registration_invalid", "issue fields")
     if manifest is not None:
         required_steps = {
             key
@@ -485,6 +532,8 @@ def load_validated_registration(
         registration["todo_id"],
         repository,
         base_sha,
+        issue_number,
+        registration["issue_url"],
         plan_path,
         registration["branch"],
         worktree,

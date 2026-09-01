@@ -26,7 +26,7 @@ Build prompt → call agent → persist immutable decision → return.
 
 **Parameters:**
 - `tick_id` — Unique identifier for this tick (ulid-based)
-- `ctx` — Selection context (TODOS.md content, in-flight list, recent decisions, kanban snapshot)
+- `ctx` — Selection context (rendered candidate list, legal candidate ids, in-flight list, recent decisions, kanban snapshot)
 - `cfg` — Full config with selection model, prompt path, max tokens, expected prompt SHA
 - `timeout` — Hard ceiling in seconds for the agent call. When `None`, auto-derived from `max_tokens`. Pass an explicit value when bounded by a per-project tick budget.
 
@@ -37,21 +37,24 @@ Build prompt → call agent → persist immutable decision → return.
 - All error paths persist a decision record so the next tick's `recent_decisions` carries the cause.
 - Raw prompts, responses, subprocess output, and exception text are never persisted in error rationales. Malformed responses use `parse_error: invalid_response`.
 
-**Trust boundary:** Validates `picked` against server-parsed TODO IDs in `ctx.todos_md`, not the LLM-supplied `candidates_considered`. Rejects picks that are: wrong shape, not in TODOS.md, or already in-flight.
+**Trust boundary:** Validates `picked` against the server-compiled `ctx.candidate_ids`, not the LLM-supplied `candidates_considered`. Rejects picks that are: wrong shape, not in `candidate_ids` (rationale `pick_not_known: picked=... known=[...]`), or already in-flight. `ctx.selection_markdown` is shown to the model inside the `<candidate_todos>` prompt fence and is never re-parsed for authority.
+
+Tracker failures never reach `run_selection`: when `gh` or the `origin` remote is unusable the tick persists a `tracker_error: <code>` decision via `record_tracker_error()` instead (`gh_missing`, `gh_auth`, and `origin_identity_invalid` are config faults that do not count as no-progress).
 
 ### `SelectionContext`
 
 ```python
 @dataclass(frozen=True)
 class SelectionContext:
-    todos_md: str              # Full TODOS.md text content
+    selection_markdown: str    # Rendered candidate list (one `- [ ] **TODO-N: title**` header per eligible issue)
+    candidate_ids: tuple[str, ...]  # Server-compiled, ordered ids the model may legally pick
     in_flight: list[str]       # TODOs currently in pipeline (e.g. ["TODO-3", "TODO-5"])
     recent_decisions: list[dict]  # Last N decision records (for continuity)
     kanban_snapshot: dict      # Current kanban task statuses
     project_slug: str          # Project name
 ```
 
-Built by `decision/context.py` via `build_context()`.
+Built by `decision/context.py` via `build_context()`, which receives the already-compiled candidate list from the GitHub Issues backlog (`TODO-<issue-number>` ids) and never reads a backlog file itself.
 
 ### `HermesSelectionDecision`
 

@@ -1,0 +1,135 @@
+# GitHub issue form for todo-pipeline-orchestrator backlog items.
+# Field labels are a machine-consumed contract: they must equal the section names in
+# hermes_pipeline/github_issues.py KNOWN_SECTIONS (minus the migration-only "Legacy ID"),
+# in that order. GitHub renders each field as "### <Label>\n\n<value>" (or "_No response_"),
+# which parse_issue_body consumes. tests/test_issue_form_contract.py pins this coupling.
+name: TPO TODO
+description: Backlog item selectable by the todo-pipeline-orchestrator
+labels: ["tpo:todo", "needs-triage"]
+body:
+  - type: input
+    id: summary
+    attributes:
+      label: Summary
+      description: "One line"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What
+      description: What should change or be built.
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: The motivation and expected outcome.
+    validations:
+      required: true
+  - type: textarea
+    id: pros
+    attributes:
+      label: Pros
+  - type: textarea
+    id: cons
+    attributes:
+      label: Cons
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Background, related work, links.
+  - type: textarea
+    id: assumptions
+    attributes:
+      label: Assumptions
+  - type: input
+    id: plan
+    attributes:
+      label: Plan
+      description: "Repo-relative path to the execution-authority Plan (ADR-0001). Note: the Plan manifest's todo_id must equal TODO-<this issue's number>, so file the issue first."
+      placeholder: docs/pipeline/TODO-<n>-plan.md
+  - type: input
+    id: spec
+    attributes:
+      label: Spec
+      description: Repo-relative path to the specification, if any.
+  - type: input
+    id: reference
+    attributes:
+      label: Reference
+      description: "Comma-separated repo-relative paths"
+  - type: input
+    id: branch
+    attributes:
+      label: Branch
+      placeholder: feature/<slug>
+    validations:
+      required: true
+  - type: dropdown
+    id: priority
+    attributes:
+      label: Priority
+      options:
+        - P0
+        - P1
+        - P2
+        - P3
+    validations:
+      required: true
+  - type: dropdown
+    id: effort
+    attributes:
+      label: Effort
+      options:
+        - S
+        - M
+        - L
+    validations:
+      required: true
+  - type: dropdown
+    id: phase
+    attributes:
+      label: Phase
+      description: Pipeline phase the TODO starts from (gstack profile).
+      options:
+        # Aliases the profile's "Phase 2: Autoplan"; kept as "Design" for continuity with migrated TODOS.md entries.
+        - "2 (Design)"
+        - "3 (Writing Plan)"
+        - "4 (Development)"
+        - "5 (Code Review)"
+        - "6.1 (CSO Security Review)"
+        - "6.2 (QA)"
+        - "7 (Document Release)"
+        - "8 (Finish Branch)"
+    validations:
+      required: true
+  - type: dropdown
+    id: test_coverage
+    attributes:
+      label: Test Coverage
+      options:
+        - required
+        - not-required
+    validations:
+      required: true
+  - type: dropdown
+    id: security_review
+    attributes:
+      label: Security Review
+      options:
+        - required
+        - not-required
+    validations:
+      required: true
+  - type: dropdown
+    id: ui_review
+    attributes:
+      label: UI Review
+      options:
+        - required
+        - not-required
+    validations:
+      required: true

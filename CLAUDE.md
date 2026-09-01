@@ -4,9 +4,9 @@ Project-specific instructions for Claude Code in this repository.
 
 ## Project
 
-`todo-pipeline-orchestrator` — a uv-managed Python package modularizing `pipeline_watcher.py`,
-plus a TODOS.md management skill. See [docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md)
-for the full plan.
+`todo-pipeline-orchestrator` — a uv-managed Python package modularizing `pipeline_watcher.py`
+that runs pipeline ticks against a GitHub Issues backlog. See
+[docs/pipeline-modularization-plan.md](docs/pipeline-modularization-plan.md) for the historical plan.
 
 ## Tooling
 
@@ -23,12 +23,12 @@ Use `uv run python scripts/release_changesets.py add` to create a fragment and
 Packages pull request consumes fragments, selects the highest semantic-version
 bump, regenerates `uv.lock`, and updates `CHANGELOG.md`.
 
-## TODOS.md management
+## Backlog management
 
-- Use the `todos-manager` skill for all TODOS.md mutations (add, convert, audit, archive).
-- TODOS.md format is enforced — see `## Metadata`, `## Entry Schema`, and `## Entries` in TODOS.md for schema rules and tracked `NEXT_TODO_ID` state.
-- Skill source: `hermes_pipeline/data/skills/todos-manager/SKILL.md`. Install via `tpo skills install --target all` to copy to `~/.claude/skills/todos-manager/` and/or `~/.agents/skills/todos-manager/`.
-- Subcommands: `--add` (new entry), `--init` (new sectioned project), `--convert` (migrate to canonical sections + validate), `--audit` (format check + tracked ID reconciliation), `--archive` (move `[x]` to TODOS-archive.md), `--list` (show active entries, `--all` includes archived), `--revise` (fill missing or weak fields with AI-pre-filled suggestions).
+- The backlog is GitHub Issues carrying `tpo:todo` (ADR-0003). The issue number is the TODO ID (`TODO-<issue-number>`); there is no `TODOS.md`.
+- File TODOs through the "TPO TODO" issue form (`gh issue create --web --template "TPO TODO"`); scripted creation renders the body with `render_issue_body` and passes `--body-file`. See `docs/howto-github-issues-todos.md`.
+- Label vocabulary, body contract, and eligibility rules: `docs/agents/issue-tracker.md` (`## TPO backlog items`). Bootstrap labels with `tpo todos labels sync <project>`; decisions live in the body and labels are mirrors — normalize with `tpo todos audit <project> --fix`.
+- `Plan` is the execution authority (ADR-0001): never edit a TODO's Plan except through an explicitly approved, diff-confirmed change validated with `tpo plan validate <project> --todo N --require-manifest` (omit `--require-manifest` for a legacy manifest-free Plan).
 
 ## Document management for gstack and superpowers
 

@@ -1,10 +1,10 @@
 # todo-pipeline-orchestrator
 
-Pipeline watcher and TODOS manager orchestration toolkit, packaged as a uv-managed Python project. The installed CLI is `tpo`.
+Pipeline orchestration toolkit for a GitHub Issues backlog, packaged as a uv-managed Python project. The installed CLI is `tpo`.
 
 ## Overview
 
-`tpo` helps maintain schema-enforced `TODOS.md` files, install the bundled `todos-manager` skill, prepare pipeline contracts, and run pipeline ticks through PR handoff. Pipeline phases run through Hermes agent profiles and use kanban tasks for phase scheduling.
+`tpo` selects TODOs from GitHub Issues (`tpo:todo`; the issue number is the TODO ID), keeps their labels consistent, prepares pipeline contracts, and runs pipeline ticks through PR handoff and issue closeout. Pipeline phases run through Hermes agent profiles and use kanban tasks for phase scheduling.
 
 Use this README as the quick map. Detailed setup, reference, and recovery guides live in the documentation index below.
 
@@ -37,7 +37,7 @@ uv run tpo --version
 For pipeline execution, install **Hermes >= 0.19.0** on `PATH` and configure an
 agent runtime/profile. Provider authentication is model-specific and is not a
 baseline `tpo` prerequisite. `tpo doctor <project>` verifies the version floor,
-profile prerequisites, project-scoped `todos-manager` parity when installed,
+profile prerequisites, GitHub auth, the label vocabulary, run registrations,
 and Plan readiness for Plan-required profiles.
 
 Install the bundled pipeline profile when you want unattended pipeline phase execution:
@@ -46,25 +46,26 @@ Install the bundled pipeline profile when you want unattended pipeline phase exe
 tpo install-profile
 ```
 
-Install `todos-manager` for the agent that will edit TODOs:
+### Backlog lives in GitHub Issues
+
+The TODO backlog is the project's GitHub Issues (`gh` >= 2.44 must be on
+`PATH` and authenticated). A TODO is an open issue carrying `tpo:todo`; its ID
+is `TODO-<issue-number>`. Create the label vocabulary once per repository, then
+file TODOs through the "TPO TODO" issue form:
 
 ```bash
-tpo skills install --target all
+cd ~/my-projects/my-project
+tpo todos labels sync my-project
+gh issue create --web --template "TPO TODO"
 ```
 
-For project-local Codex/agents setup:
+The "TPO TODO" form is repository-local: copy `.github/ISSUE_TEMPLATE/tpo-todo.yml`
+from this repository into `<project>/.github/ISSUE_TEMPLATE/` and commit it (or
+use the scripted `render_issue_body` + `--body-file` path). `tpo todos audit`
+reads the project's copy for the allowed Phase options.
 
-```bash
-tpo skills install --scope project --target codex
-```
-
-Skill targets:
-
-| Target | Installs to |
-|---|---|
-| `codex` | `.agents/skills` convention |
-| `claude` | `.claude/skills` convention |
-| `all` | both conventions |
+See [Manage TODOs as GitHub Issues](docs/howto-github-issues-todos.md) for
+filing, triage, audit, dependencies, and completion.
 
 ### Client prerequisites
 
@@ -140,36 +141,24 @@ project roots for mixed Claude/Codex fleets. The settings have separate jobs:
 See the [CLI configuration reference](docs/reference-cli.md#config) for accepted
 values, source behavior, and installed-user commands.
 
-Start a new project with no `TODOS.md` by asking your agent to invoke the installed `todos-manager` skill with `--init`, then `--add`:
+Start a new project (a clone of a github.com repository under `projects_dir`):
 
 ```bash
 cd ~/my-projects/my-project
-```
-
-```text
-todos-manager --init
-todos-manager --add
-```
-
-Adopt an existing hand-written `TODOS.md` by invoking the `todos-manager` skill with `--convert`, then `--audit`:
-
-```bash
-cd ~/my-projects/my-project
-```
-
-```text
-todos-manager --convert
-todos-manager --audit
-```
-
-Invoke `todos-manager --revise` for individual entries that need stronger fields.
-
-Write or verify the pipeline contract for an existing project:
-
-```bash
 tpo init my-project
+tpo todos labels sync my-project
+# copy .github/ISSUE_TEMPLATE/tpo-todo.yml from this repository into the project and commit it
+gh issue create --web --template "TPO TODO"        # files TODO-<N> with tpo:todo + needs-triage
+gh issue edit <N> --remove-label needs-triage --add-label ready-for-agent
 tpo doctor my-project
 ```
+
+Adopt an existing project by creating one issue per backlog item through the
+same form (or scripted via `render_issue_body` + `--body-file`), triaging the
+ones that are ready, and running `tpo todos audit my-project --fix` to align
+the mirror labels. A legacy `TODOS.md` is not read by the pipeline; see the
+[migration notes](docs/migration/todos-to-issues.md) for how the previous
+backlog was converted and how `legacy-id:TODO-<n>` labels preserve old IDs.
 
 Run the pipeline:
 
@@ -185,10 +174,12 @@ tpo tick my-project
 | `tick` | Discover configured projects, select eligible TODOs, and register pipeline phases. |
 | `approve` | Legacy guarded merge helper for existing ship-gate sidecars. |
 | `init` | Write `.hermes/pipeline.toml` for an existing project. |
-| `doctor` | Verify a project's pipeline contract against the selected profile. |
-| `recover-counter` | Rebuild legacy TODO counter compatibility state from tracked TODO IDs. |
+| `doctor` | Verify a project's pipeline contract, GitHub backlog state, and run registrations. |
+| `todos complete` | Close a delivered TODO issue by hand after its pull request merged. |
+| `todos labels sync` | Create the missing pipeline label vocabulary in the project's repository. |
+| `todos audit` | Check TODO issue bodies against the backlog contract and normalize mirror labels. |
+| `plan validate` | Validate a TODO's Plan attachment and optional `tpo-plan` manifest. |
 | `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
-| `skills` | Install or remove the bundled `todos-manager` skill. |
 | `config` | Read and write global `tpo` configuration. |
 | `test` | Run the mock integration test harness. |
 
@@ -207,9 +198,9 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 
 | Doc | Type | When to read |
 |---|---|---|
-| [TODOS Manager skill](hermes_pipeline/data/skills/todos-manager/SKILL.md) | Reference | TODOS.md schema, ID assignment, and subcommands |
-| [Getting started with todos-manager](docs/tutorial-todos-manager.md) | Tutorial | Step-by-step TODO lifecycle walkthrough |
-| [Manage TODOS.md with todos-manager](docs/howto-todos-manager.md) | How-to | Using `--init`, `--add`, `--convert`, `--audit`, `--archive`, `--list`, `--revise` |
+| [Manage TODOs as GitHub Issues](docs/howto-github-issues-todos.md) | How-to | Bootstrapping labels, filing, Plan readiness, triage, audit, dependencies, completion |
+| [Issue tracker conventions](docs/agents/issue-tracker.md) | Reference | Label vocabulary, issue body contract, and eligibility rules |
+| [TODOS.md to GitHub Issues migration](docs/migration/todos-to-issues.md) | Reference | Legacy ID mapping and what the migration changed |
 
 ### Pipeline setup and operation
 
@@ -217,7 +208,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 |---|---|---|
 | [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `tpo tick` for iterative development |
 | [Set up the pipeline profile](docs/howto-pipeline-profile.md) | How-to | Installing the dedicated pipeline Hermes profile |
-| [Debug ticks and recover counters](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, and `recover-counter` |
+| [Debug ticks and recover runs](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, run markers, and issue-state recovery |
 | [Handle phase 5 review outcomes](docs/howto-review-outcomes.md) | How-to | Inspecting review artifacts and reverted/timed-out reviews |
 
 ### Multi-project configuration
@@ -228,7 +219,6 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | [Set up multiple projects](docs/howto-multi-project-setup.md) | How-to | Configuring per-project settings and the scan loop |
 | [Multi-project scan tutorial](docs/tutorial-multi-project-scan.md) | Tutorial | Setting up two projects and running the scan loop |
 | [How the scan loop works](docs/explanation-multi-project-scan.md) | Explanation | Global lock, migration decisions, and trade-offs |
-| [Troubleshoot state migration](docs/howto-troubleshoot-state-migration.md) | How-to | Migration failed or skipped with multiple projects |
 
 ### Contracts, profiles, and adapters
 
@@ -246,10 +236,6 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | Doc | Type | When to read |
 |---|---|---|
 | [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
-| [Skill test environment](tests/skill-test-environment/README.md) | How-to | Running structural unit tests for `todos-manager` |
-| [Skill test environment quickstart](docs/howto-skill-test-environment.md) | How-to | Adding and maintaining skill harness tests |
-| [Skill test harness API](docs/reference-skill-test-harness.md) | Reference | Complete API for the skill test environment |
-| [Why the skill test harness is pure-Python](docs/explanation-skill-test-harness-design.md) | Explanation | Golden-file harness design rationale |
 | [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `tpo test` against mock project data |
 | [Harness production-code coverage checklist](docs/checklist-harness-production-coverage.md) | Reference | Acceptance criteria for production-code path reuse |
 
@@ -261,7 +247,6 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | [Pipeline state machine](docs/hermes-state-machine.md) | Explanation | Understanding `.hermes/` file layout and transitions |
 | [Modularization plan](docs/pipeline-modularization-plan.md) | Explanation | Historical architecture and design plan |
 | [Kanban-as-Scheduler](docs/reference-kanban-as-scheduler.md) | Reference/Explanation | How `tpo tick` uses kanban for phase state and ordering |
-| [Counter recovery](docs/reference-counter.md) | Reference/Explanation | How `recover_counter()` works |
 | [Circuit breaker](docs/explanation-circuit-breaker.md) | Explanation | How no-progress tracking works and why it alerts |
 | [Decision module API](docs/reference-decision-api.md) | Reference | Selection schemas, outcome sidecars, and plan-gate types |
 

@@ -77,7 +77,8 @@ def _parse_fixture(p: Path) -> tuple[dict, str]:
 def test_selection_fixture(fixture_path):
     meta, body = _parse_fixture(fixture_path)
     ctx = SelectionContext(
-        todos_md=body,
+        selection_markdown=body,
+        candidate_ids=tuple(meta.get("candidate_ids", [])),
         in_flight=meta.get("in_flight", []),
         recent_decisions=meta.get("recent_decisions", []),
         kanban_snapshot={"columns": []},
@@ -98,6 +99,10 @@ def test_selection_fixture(fixture_path):
             timeout=120,
         )
     picked = r.parsed["picked"]
+    # Server-side contract: a pick outside the compiled candidate set is invalid.
+    assert picked is None or picked in meta["candidate_ids"], (
+        f"picked={picked!r} not in candidate_ids={meta['candidate_ids']!r}"
+    )
     if meta.get("expected_picked_is_none"):
         assert picked is None, f"expected None, got {picked!r}; rationale={r.parsed['rationale']!r}"
     else:

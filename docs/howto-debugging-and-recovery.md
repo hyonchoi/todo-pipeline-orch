@@ -1,15 +1,16 @@
-# How to debug pipeline ticks and recover TODO counters
+# How to debug pipeline ticks and recover runs
 
-This guide covers the three tools you use when a tick doesn't behave the way you expect or when the TODO ID counter is missing.
+This guide covers the tools you use when a tick doesn't behave the way you expect or when a run's issue registration needs operator attention.
 
 - **`--verbose`** — add informational details (selection results, lock state) without noise
 - **`--debug`** — surface internal state (agent call summaries, circuit breaker transitions, kanban payloads)
-- **`recover-counter`** — initialize the TODO ID counter by scanning TODOS.md
+- **Run recovery** — handle unsupported registrations, abandon a run, and clear stale issue labels
 
 ## Prerequisites
 
 - `tpo` installed and configured (see the [getting-started tutorial](tutorial-getting-started.md))
-- `tpo config get projects_dir` points at a directory containing projects with TODOS.md files
+- `tpo config get projects_dir` points at a directory containing projects with `.hermes/pipeline.toml`
+- `gh` >= 2.44 authenticated against each project's github.com `origin`
 
 ## Using `--verbose` for targeted log detail
 
@@ -59,68 +60,86 @@ remain truncated at 500 characters.
 
 **Common use:** Troubleshoot why a specific TODO was or wasn't selected, or why the circuit breaker tripped.
 
-## Recovering the TODO ID counter
+## Recovering runs and issue state
 
-When you start a project with hand-written TODOs in TODOS.md but no `.hermes/todo_id_counter` file, the pipeline may need to rebuild its compatibility cache. When `TODOS.md` has valid sectioned tracked metadata and the value equals the scan-derived next ID, `recover-counter` writes `NEXT_TODO_ID - 1` to `.hermes/todo_id_counter`. Legacy or invalid section placement falls back to scanning active plus archived IDs without decreasing a higher existing cache.
+The backlog is GitHub Issues (`tpo:todo`; see
+[issue tracker](agents/issue-tracker.md#tpo-backlog-items)). Run state
+lives in `<project>/.hermes/runs/<tick-id>/`; the issue is the mirror TPO keeps
+consistent. These are the operator-facing recovery paths.
+
+### `REGISTRATION UNSUPPORTED` from `tpo doctor`
+
+```
+REGISTRATION UNSUPPORTED: schema_version 1; finish or abandon this run before upgrading
+```
+
+The active run was registered under the retired `TODOS.md` schema (v1). TPO
+does not migrate it. Either let the run finish on the previous release, or
+abandon it (below) and let the next tick select from GitHub Issues.
+
+### Abandoning a run
+
+Touch the `abandoned` marker in the run directory. The registration is kept for
+audit but no longer pins its issue, so the next tick can select again:
 
 ```bash
-uv run tpo recover-counter my-project
+touch ~/projects/my-project/.hermes/runs/<tick-id>/abandoned
 ```
 
-Output:
-```
-Counter set to 5 for project my-project
-```
+Then remove the pinned worktree and branch, using the `worktree` and `branch`
+values from that run's `registration.json` (`tpo doctor` prints both commands
+on its `Fix (tick <id>):` line):
 
-### How it works
-
-1. Reads `TODOS.md` in the project directory and checks the tracked `NEXT_TODO_ID` value under `## Metadata`
-2. If tracked state is valid and consistent, writes `NEXT_TODO_ID - 1` to `.hermes/todo_id_counter`
-3. If tracked state is missing, malformed, misplaced, or stale, scans active IDs in TODOS.md plus archived IDs in TODOS-archive.md and writes `max(existing_counter, scanned_max)`
-
-### Key behaviors
-
-- **Never decreases the counter.** If the counter file says 8 and TODOS.md has TODO-4, the counter stays at 8. This prevents ID resurrection when completed TODOs were removed.
-- **Creates `.hermes/` if needed.** If the directory doesn't exist, it's created automatically.
-- **Atomic write.** Uses a same-directory temp file plus `os.replace()` so a crash before replacement leaves the prior counter intact.
-- **Corrupt counter recovery.** If the counter file contains non-integer text, it's treated as 0 and replaced with the scanned maximum.
-
-### Error cases
-
-- **TODOS.md missing:** Returns exit code 2 with `TODOS.md not found in <path>`
-- **No TODO-N entries found:** Writes 0 to the counter (valid state — no TODOs yet)
-- **Invalid project slug:** Returns exit code 2 (slug must be alphanumeric, dot, dash, underscore)
-
-### Example
-
-Before:
-```
-$ cat TODOS.md
-# TODOS
-
-- TODO-1: Set up project
-- TODO-3: Implement feature A
-- TODO-5: Add tests
-
-$ cat .hermes/todo_id_counter
-cat: .hermes/todo_id_counter: No such file or directory
+```bash
+git worktree remove --force <worktree>
+git branch -D <branch>
 ```
 
-After:
-```
-$ uv run tpo recover-counter my-project
-Counter set to 5 for project my-project
+The counterpart marker `issue-closed` is written by closeout when the PR merged
+and the issue was closed (`delivered`); never create it by hand.
 
-$ cat .hermes/todo_id_counter
-5
+### Stale `tpo:in-progress` label
+
+TPO adds `tpo:in-progress` to the pinned issue while a run is active and removes
+it at closeout. If a run was abandoned or its state directory was lost, the
+label can linger and block re-selection. Remove it manually:
+
+```bash
+gh issue edit <N> --remove-label tpo:in-progress
 ```
+
+Only do this once `tpo doctor <project>` reports no active run (no
+`current_tick_id.txt`) for that issue.
+
+### Pausing a TODO
+
+Add `tpo:on-hold` to the issue. It is excluded from selection, and if the issue
+is already registered the next tick flags `issue_on_hold` and the run stops at a
+`needs_input` boundary. Remove the label to resume.
+
+### Tracker error decisions
+
+When `gh` or the `origin` remote is unusable, the tick persists a decision whose
+rationale is `tracker_error: <code>` instead of calling the selection agent:
+
+| Code | Meaning | Counts as no-progress |
+|------|---------|-----------------------|
+| `gh_missing` | `gh` not on PATH (or `TPO_GH_BIN` invalid) | no (config fault) |
+| `gh_auth` | `gh auth status` failed | no (config fault) |
+| `origin_identity_invalid` | `origin` is not a github.com remote | no (config fault) |
+| other `gh` codes | transient API/network failure | yes |
+
+Registered-run drift is reported by `tpo doctor` as `ISSUE DRIFT: <code>` with
+`issue_drift`, `issue_closed`, `issue_on_hold`, or `issue_identity_mismatch`
+(each a manual `needs_input` boundary), or as
+`WARNING: issue check unavailable (<code>)` when the check itself could not run.
 
 ## Verification
 
 After using any of these tools, verify the result:
 
 - **`--verbose`/`--debug`:** Check the log output includes the expected detail level. Run `uv run tpo tick my-project` (no flag) and confirm no verbose or debug output appears.
-- **`recover-counter`:** Check `.hermes/todo_id_counter` contains the expected value.
+- **Run recovery:** `tpo doctor` does not read the `abandoned` marker. Run the next `tpo tick <project>`, then `tpo doctor <project>`; it should print `Issue authority: pinned` (or no active run) instead of `REGISTRATION UNSUPPORTED` / `ISSUE DRIFT`.
 
 ## Troubleshooting
 
@@ -147,7 +166,8 @@ also a manual `needs_input` boundary; automation does not create round six.
 - Same as `--verbose`: use `uv run tpo --debug tick my-project`
 - Debug logging is only available in the `tick` subcommand (the only subcommand that logs at DEBUG level)
 
-**"recover-counter returns error 2"**
+**"`tpo tick my-project` exits 2 before selecting"**
 
-- Run `tpo config get projects_dir`, then check that the reported directory contains `my-project/TODOS.md`
+- Run `tpo config get projects_dir`, then check that the reported directory contains `my-project/.hermes/pipeline.toml` (otherwise run `tpo init my-project`)
+- Check that `git remote get-url origin` is a github.com URL and `gh auth status` succeeds
 - Check that the project slug is valid (alphanumeric, dot, dash, underscore — no spaces or special characters)

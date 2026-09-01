@@ -7,8 +7,28 @@ import pytest
 from hermes_pipeline.plan_manifest import (
     MAX_PLAN_TASKS,
     PlanManifestValidationError,
+    TodoPlanValidationError,
     parse_plan_manifest,
+    validate_plan_path,
 )
+
+
+def test_validate_plan_path_rejects_directory(tmp_path):
+    (tmp_path / "docs").mkdir()
+    with pytest.raises(TodoPlanValidationError) as info:
+        validate_plan_path(tmp_path, "docs")
+    assert info.value.code == "not_regular_file"
+
+
+def test_validate_plan_path_rejects_symlink_escape(tmp_path):
+    project = tmp_path / "repo"
+    project.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# outside\n")
+    (project / "plan.md").symlink_to(outside)
+    with pytest.raises(TodoPlanValidationError) as info:
+        validate_plan_path(project, "plan.md")
+    assert info.value.code == "outside_repository"
 
 
 def _manifest(*, todo_id: str = "TODO-42", tasks: list[dict] | None = None, **extra):
@@ -143,3 +163,16 @@ def test_accepts_commonmark_fence_indentation(indent):
     document = f"{indent}```json tpo-plan\n{payload}\n{indent}```\n"
 
     assert parse_plan_manifest(document, expected_todo_id="TODO-42") is not None
+
+
+def test_todo_43_orchestration_plan_manifest_targets_issue_68():
+    from pathlib import Path
+
+    from hermes_pipeline.plan_manifest import validate_plan_candidate
+
+    root = Path(__file__).resolve().parents[1]
+    plan = "docs/superpowers/plans/2026-08-20-todo-43-production-orchestration-hotspots.md"
+
+    manifest = validate_plan_candidate(root, plan, expected_todo_id="TODO-68")
+
+    assert manifest is not None and manifest.todo_id == "TODO-68"

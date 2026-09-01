@@ -9,6 +9,18 @@ import pytest
 
 from hermes_pipeline.cli import _cmd_tick, build_parser
 from hermes_pipeline.config import Config
+from tests.gh_fakes import seed_project_issues, todo_payload
+
+PIPELINE_TOML = (
+    'schema_version = 2\nassignee = "default"\n'
+    'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+)
+
+
+@pytest.fixture(autouse=True)
+def _github_todo_10(fake_gh):
+    """Every tick reads TODOs from GitHub: serve #10 as the sole candidate."""
+    return seed_project_issues(fake_gh, [todo_payload(10, title="test")])
 
 
 def _make_decision(picked=None, **kwargs):
@@ -20,12 +32,13 @@ def _make_decision(picked=None, **kwargs):
     return decision
 
 
-def _create_project(projects_dir, name, todos=True):
-    """Helper to create a project directory with optional TODOS.md."""
+def _create_project(projects_dir, name, contract=True):
+    """Create a project directory, marked as a project by .hermes/pipeline.toml."""
     project_dir = projects_dir / name
     project_dir.mkdir(parents=True, exist_ok=True)
-    if todos:
-        (project_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10: test\n")
+    if contract:
+        (project_dir / ".hermes").mkdir(exist_ok=True)
+        (project_dir / ".hermes" / "pipeline.toml").write_text(PIPELINE_TOML)
     return project_dir
 
 
@@ -85,7 +98,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = projects_dir / "demo" / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
@@ -108,7 +121,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = projects_dir / "demo" / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
@@ -142,7 +155,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
@@ -178,7 +191,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         outcomes_dir = project_state / "outcomes"
         outcomes_dir.mkdir()
         (project_state / "pipeline.toml").write_text(
@@ -244,7 +257,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         outcomes_dir = project_state / "outcomes"
         outcomes_dir.mkdir()
         (project_state / "pipeline.toml").write_text(
@@ -308,7 +321,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
@@ -361,7 +374,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
@@ -404,7 +417,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
@@ -451,7 +464,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
@@ -491,7 +504,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
@@ -536,7 +549,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = project_dir / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "pipeline.toml").write_text(
             'schema_version = 2\nassignee = "pipeline"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\nprofile = "gstack"\n'
@@ -644,9 +657,7 @@ class TestTickSubcommand:
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         # Invalid slug directory
-        invalid_dir = projects_dir / "a;b"
-        invalid_dir.mkdir()
-        (invalid_dir / "TODOS.md").write_text("# TODOS\n\n- [ ] TODO-10\n")
+        _create_project(projects_dir, "a;b")
         # Valid project
         _create_project(projects_dir, "demo")
 
@@ -657,15 +668,15 @@ class TestTickSubcommand:
         result = _cmd_tick(FakeArgs(), config)
         assert result == 0
 
-    def test_tick_project_without_todos_skipped(self, tmp_path, mocker):
-        """Project without TODOS.md is skipped by discover."""
+    def test_tick_project_without_contract_skipped(self, tmp_path, mocker):
+        """Project without .hermes/pipeline.toml is skipped by discover."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
         mock_selection.return_value = _make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
-        # Project without TODOS.md
-        project_dir = projects_dir / "no-todos"
+        # Directory without a pipeline contract
+        project_dir = projects_dir / "no-contract"
         project_dir.mkdir()
         # Valid project
         _create_project(projects_dir, "demo")
@@ -735,7 +746,7 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         project_state = projects_dir / "demo" / ".hermes"
-        project_state.mkdir(parents=True)
+        project_state.mkdir(parents=True, exist_ok=True)
         (project_state / "current_tick_id.txt").write_text("01HA6PH2V0ZJ7GK0S39D243TQX")
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
@@ -801,7 +812,7 @@ class TestTickSubcommand:
             prompt_sha="abc123",
             candidates_considered=[],
             picked=None,
-            rationale="No real TODO-N entries are present in TODOS.md.",
+            rationale="No eligible issues are open.",
             blocked_reasons={},
             in_flight=[],
         )
@@ -818,7 +829,7 @@ class TestTickSubcommand:
             result = _cmd_tick(FakeArgs(), config)
 
         assert result == 0
-        assert "No real TODO-N entries are present in TODOS.md." in caplog.text
+        assert "No eligible issues are open." in caplog.text
 
     def test_tick_project_arg_help(self):
         """tick --help shows the optional project argument."""
@@ -852,19 +863,24 @@ class TestTickSubcommand:
         result = _cmd_tick(args, config)
         assert result == 2
 
-    def test_tick_project_no_todos(self, tmp_path, mocker):
-        """tick project-without-TODOS.md returns error code 2."""
+    def test_tick_project_without_github_origin(self, tmp_path, fake_gh, caplog):
+        """tick <project> whose origin is not a github.com remote returns 2."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
-        (projects_dir / "empty-project").mkdir()  # no TODOS.md
+        (projects_dir / "empty-project").mkdir()
+        fake_gh.on("git", "remote", "get-url", "origin", stdout="git@gitlab.com:a/b.git\n")
 
         state_dir = tmp_path / "state"
         state_dir.mkdir()
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
         args = FakeArgs(project="empty-project")
-        result = _cmd_tick(args, config)
+        with caplog.at_level("ERROR", logger="hermes_pipeline.cli"):
+            result = _cmd_tick(args, config)
         assert result == 2
+        assert "origin is not a github.com remote" in caplog.text
+        assert "origin_identity_invalid" in caplog.text
+        assert not fake_gh.gh_calls()
 
     def test_tick_project_scoped_tocks_one_project(self, tmp_path, mocker):
         """tick myproject ticks only myproject, not others."""
@@ -873,7 +889,7 @@ class TestTickSubcommand:
         )
         select_mock = mocker.patch(
             "hermes_pipeline.cli.run_selection",
-            return_value=_make_decision(picked="TODO-42"),
+            return_value=_make_decision(picked="TODO-10"),
         )
         mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
@@ -919,12 +935,11 @@ class TestCliHelpers:
         assert result is None
 
     def test_read_prior_tick_id_invalid_json(self, tmp_path):
-        """Returns None when file has invalid content."""
+        """A malformed id names no run directory: treated as a cold start."""
         from hermes_pipeline.cli import _read_prior_tick_id
 
         (tmp_path / "current_tick_id.txt").write_text("not json {")
-        result = _read_prior_tick_id(tmp_path)
-        assert result == "not json {"
+        assert _read_prior_tick_id(tmp_path) is None
 
     def test_generate_tick_id_format(self):
         """_generate_tick_id returns a non-empty string."""
@@ -967,3 +982,22 @@ class TestCliHelpers:
 
         with pytest.raises(OSError, match="disk full"):
             _persist_tick_id(tmp_path, "01HA6PH2V0ZJ7GK0S39D243TQX")
+
+
+class TestTickProjectContractWarning:
+    def test_tick_project_without_contract_warns_but_runs(self, tmp_path, mocker, caplog):
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", return_value=MagicMock(returncode=0))
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo", contract=False)
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level("WARNING", logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        assert any(
+            "demo" in r.getMessage() and ".hermes/pipeline.toml" in r.getMessage()
+            and "tpo init" in r.getMessage() and r.levelname == "WARNING"
+            for r in caplog.records
+        )

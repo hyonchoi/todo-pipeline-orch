@@ -132,10 +132,9 @@ class TestKanbanInFlight:
         assert result == {"TODO-10"}
 
 def test_build_context_assembles_all_fields(tmp_path, monkeypatch):
-    todos = tmp_path / "TODOS.md"
-    todos.write_text("- TODO-1: do thing\n")
+    # No TODOS.md exists on disk: the caller supplies the rendered candidates.
     monkeypatch.setattr(
-        "hermes_pipeline.decision.context._fetch_kanban_snapshot",
+        "hermes_pipeline.decision.context.fetch_kanban_snapshot",
         lambda slug: {"columns": ["doing"]},
     )
     monkeypatch.setattr(
@@ -145,11 +144,14 @@ def test_build_context_assembles_all_fields(tmp_path, monkeypatch):
     ctx = build_context(
         tick_id="01JT",
         state_dir=tmp_path,
-        todos_path=todos,
+        selection_markdown="- [ ] **TODO-1: do thing**\n",
+        candidate_ids=["TODO-1"],
         project_slug="demo",
         max_phase_timeout_min=120,
     )
-    assert ctx.todos_md == "- TODO-1: do thing\n"
+    assert not (tmp_path / "TODOS.md").exists()
+    assert ctx.selection_markdown == "- [ ] **TODO-1: do thing**\n"
+    assert ctx.candidate_ids == ("TODO-1",)
     assert ctx.project_slug == "demo"
     assert ctx.recent_decisions[0]["outcome"] == "merged"
     assert ctx.kanban_snapshot == {"columns": ["doing"]}

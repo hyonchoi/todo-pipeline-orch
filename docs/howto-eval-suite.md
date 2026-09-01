@@ -48,13 +48,16 @@ this before changing `decision/agent.py`, the prompt template
 
 ## Adding a fixture
 
-Each fixture is a markdown file with YAML frontmatter (assertions) and a body
-(TODOS.md content). The runner parses both and feeds the body in as
-`SelectionContext.todos_md`.
+Each fixture is a markdown file with YAML frontmatter (assertions plus the
+legal candidate set) and a body (the rendered candidate list the orchestrator
+would compile from `tpo:todo` issues). The runner builds
+`SelectionContext(selection_markdown=body, candidate_ids=...)`; the body is
+appended to the prompt inside the `<candidate_todos>` fence.
 
 ```markdown
 ---
 name: my_new_case
+candidate_ids: [TODO-1, TODO-2]
 in_flight: []
 recent_decisions:
   - tick_id: "prior"
@@ -67,7 +70,10 @@ expected_picked_not: ["TODO-2"]
 - TODO-2 [priority:high] fix the build
 ```
 
-Frontmatter keys the runner honors (`tests/eval/runner.py:14`):
+Frontmatter keys the runner honors (`tests/eval/runner.py`):
+- `candidate_ids` — ordered list of ids the model may legally pick, passed as
+  `SelectionContext.candidate_ids`; a pick outside it is rejected with
+  `pick_not_known`, and the runner asserts `picked` is in this list
 - `in_flight` — list of TODO ids passed as `SelectionContext.in_flight`
 - `recent_decisions` — list of `{tick_id, picked, outcome}` for the outcome sidecar context
 - `expected_picked_in` — assertion: model's `picked` must be one of these

@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,30 +26,31 @@ class AgentResult:
 def compute_prompt_sha(prompt_path: Path) -> str:
     return hashlib.sha256(Path(prompt_path).read_bytes()).hexdigest()
 
-_FENCE_TAGS = ("</todos_md_content>", "</recent_decisions>", "</in_flight>", "</kanban_snapshot>")
+_FENCE_CLOSE_RE = re.compile(
+    r"<(/\s*(?:candidate_todos|todos_md_content|recent_decisions|in_flight|kanban_snapshot)\s*>)",
+    re.IGNORECASE,
+)
 
 def _fence_safe(s: str) -> str:
     """Neutralize any closing fence tag inside untrusted content.
 
     The prompt template anchors LLM-untrusted regions inside `<tag>...</tag>`
-    fences. A TODOS.md containing the literal closing tag would let an
+    fences. Candidate content containing the literal closing tag would let an
     attacker break out of the fenced region and inject instructions. We
     inject a zero-width space after the leading `<` so the string is
     visibly identical but no longer matches the parser's closing tag.
+    Matching is case-insensitive and tolerates whitespace around the name.
     """
-    out = s
-    for tag in _FENCE_TAGS:
-        out = out.replace(tag, tag[0] + "​" + tag[1:])
-    return out
+    return _FENCE_CLOSE_RE.sub(lambda m: "<\u200b" + m.group(1), s)
 
 def build_prompt(prompt_path: Path, ctx: SelectionContext) -> str:
     body = Path(prompt_path).read_text()
     parts = [
         body,
         "",
-        "<todos_md_content>",
-        _fence_safe(ctx.todos_md),
-        "</todos_md_content>",
+        "<candidate_todos>",
+        _fence_safe(ctx.selection_markdown),
+        "</candidate_todos>",
         "",
         "<recent_decisions>",
         _fence_safe(json.dumps(ctx.recent_decisions, indent=2, sort_keys=True)),

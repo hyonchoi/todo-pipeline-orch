@@ -28,13 +28,12 @@ and iterate over them with a lock scoped to each project.
 ## The approach
 
 The scan loop lives in `_cmd_tick()` in `hermes_pipeline/cli.py`. It follows
-four phases:
+these phases:
 
 ```
 Tick:
   1. Discover active projects
-  2. One-time global state migration (if exactly one project)
-  3. For each project:
+  2. For each project:
      a. Acquire the project's TickLock (atomic mkdir)
      b. Run the project tick, or skip if already locked
      c. Release the project's lock
@@ -61,60 +60,52 @@ can still skip the busy project and progress other unlocked projects.
 `projects_dir` (default: `~/projects`) and returns a sorted list of project
 directories that pass three filters:
 
-1. **Has a `TODOS.md`** — the presence of `TODOS.md` is the canonical signal
-   that a directory is a pipeline-watched project.
+1. **Has a pipeline contract** — `<project>/.hermes/pipeline.toml` (written by
+   `tpo init <project>`) is the canonical signal that a directory is a
+   pipeline-watched project. A directory that has `.hermes/` or a legacy
+   `TODOS.md` but no contract is skipped with a WARNING suggesting
+   `tpo init <slug>`. The backlog itself lives in GitHub Issues (`tpo:todo`
+   label; canonical ID `TODO-<issue-number>`) — see
+   [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
+   [ADR-0003](adr/0003-github-issues-are-the-todo-backlog.md).
 2. **Valid slug** — the directory name must pass `_validate_project_slug()`.
    Rejects `..`, `.` and single-character names to prevent path traversal.
 3. **Not archived** — `enabled = true` (default if `project.toml` is missing).
    Setting `enabled = false` in `<project>/.hermes/project.toml` pauses
-   selection without deleting `TODOS.md`.
+   selection without deleting the contract.
 
 ```
 ~/projects/
-  demo-app/           ← discovered (TODOS.md, enabled=true)
-    TODOS.md
+  demo-app/           ← discovered (pipeline.toml, enabled=true)
     .hermes/
-  second-app/         ← discovered (TODOS.md, enabled=true)
-    TODOS.md
+      pipeline.toml
+  second-app/         ← discovered (pipeline.toml, enabled=true)
     .hermes/
+      pipeline.toml
       project.toml    ← slack_channel = "project__second-app"
   archived-project/   ← skipped (enabled=false)
+    .hermes/
+      pipeline.toml
+      project.toml    ← enabled = false
+  legacy-project/     ← skipped with WARNING (no pipeline.toml; run `tpo init`)
     TODOS.md
     .hermes/
-      project.toml    ← enabled = false
-  not-a-project/      ← skipped (no TODOS.md)
+  not-a-project/      ← skipped silently (no .hermes/)
 ```
 
 **Trade-off:** The project slug is the directory name. You cannot have two
 projects with the same name under different parents — the kanban board uses
 the slug as the tenant identifier.
 
-### Phase 3: State migration
+### Per-project state
 
-When the first tick runs without a project argument, global state files
-(`current_tick_id.txt`, `circuit.json`, `outcomes/`) in `~/.hermes/` need to
-move to `<project>/.hermes/`. The migration copies (not moves) the files so
-every project gets its own copy.
+Every project owns its state under `<project>/.hermes/`
+(`current_tick_id.txt`, `circuit.json`, `decisions/`, `outcomes/`, `runs/`).
+The legacy automatic copy of global `~/.hermes/` state into the first
+discovered project was removed as a hard cutover; `~/.hermes/` now holds only
+global configuration.
 
-**Key decision: migrate to the first project only.** With exactly one project,
-the migration is automatic. With multiple projects, it's skipped.
-
-Why? Imagine two projects share the global state. Project-a has tick_id `01HA`,
-project-b would inherit the same tick_id. The next tick for project-b sees
-"prior tick in-flight" and stalls permanently.
-
-The migration copies files only if the destination doesn't already exist. If
-the files are already there, the migration is a no-op.
-
-**Trade-off:** The operator needs to manually decide which project owned the
-global state when there are multiple projects. The tick warns:
-
-```
-global state exists at ~/.hermes/ but 3 projects were discovered —
-can't determine which project owns the old state. Migrate manually.
-```
-
-### Phase 4: Per-project tick
+### Phase 3: Per-project tick
 
 For each project, `_tick_project()` runs the same flow as the single-project
 tick:
@@ -123,12 +114,14 @@ tick:
    phases complete? If not, skip the project.
 2. **Observe outcomes** — if the prior tick completed, read the outcomes and
    update the circuit breaker.
-3. **Run selection** — the Hermes agent evaluates `TODOS.md` and picks a TODO
-   (or returns `picked=None`).
+3. **Run selection** — the orchestrator compiles the eligible `tpo:todo`
+   issues from the project's GitHub origin into a candidate list, and the
+   Hermes agent picks one (or returns `picked=None`).
 4. **Register kanban phases** — create kanban tasks with `--parent` dependency
    chains for the selected TODO.
 
-**Error isolation:** If project-a's selection fails (e.g., malformed TODOS.md),
+**Error isolation:** If project-a's selection fails (e.g., `gh` unavailable,
+recorded as a `tracker_error` decision),
 the error is logged and the scan continues to project-b. One project's failure
 does not block the others.
 
@@ -145,20 +138,14 @@ same-project exclusion without putting all projects in one failure and latency
 domain.
 
 **Global selection, per-project state.** One Hermes agent call evaluates all
-TODOS.md files together and picks one TODO across all projects. Pro: single
+projects' candidate issues together and picks one TODO across all projects. Pro: single
 LLM call. Con: the agent needs context from all projects at once, which
 increases token cost and makes the prompt harder to maintain. The current
 design calls the agent once per project — more calls, but each call is
 self-contained.
 
-**Migration with heuristic ownership.** Try to guess which project owned the
-global state (e.g., the oldest project directory, or the one with the matching
-circuit breaker state). Pro: less manual work. Con: the heuristic could be
-wrong, causing the wrong project to inherit stale state. The current design
-requires the operator to decide — explicit is better than implicit.
-
 ## Related
 
 - [How to set up multiple projects](howto-multi-project-setup.md) — configuring project.toml
-- [How to troubleshoot state migration](howto-troubleshoot-state-migration.md) — fixing migration issues
+- [Issue tracker conventions](agents/issue-tracker.md) — the GitHub Issues backlog the scan selects from
 - [Pipeline state machine](hermes-state-machine.md) — tick lifecycle and state transitions

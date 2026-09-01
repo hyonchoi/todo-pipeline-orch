@@ -41,16 +41,31 @@ class TestCreateMockProject:
     def test_create_mock_project_happy_path(self, tmp_path: Path):
         result = create_mock_project(tmp_path, "happy-path")
         assert (tmp_path / ".git").exists()
-        assert (tmp_path / "TODOS.md").exists()
-        assert "TODO-" in (tmp_path / "TODOS.md").read_text()
+        assert not (tmp_path / "TODOS.md").exists()
         assert "project_slug" in result
         assert "todo_id" in result
         assert "branch" in result
+        assert result["repo"] == "tpo-harness/mock-project"
 
-    def test_create_mock_project_happy_path_has_executable_todo(self, tmp_path: Path):
-        create_mock_project(tmp_path, "happy-path")
+    def test_create_mock_project_seeds_one_eligible_issue_via_fake_gh(self, tmp_path: Path):
+        from hermes_pipeline.github_issues import parse_issue_body
 
-        todos = (tmp_path / "TODOS.md").read_text()
+        result = create_mock_project(tmp_path, "happy-path")
+
+        gh = tmp_path / "bin" / "gh"
+        assert gh.is_file() and os.access(gh, os.X_OK)
+        assert result["gh_bin"] == str(gh)
+        state = json.loads(Path(result["gh_state"]).read_text())
+        assert state["repo"] == "tpo-harness/mock-project"
+        assert list(state["issues"]) == ["1"]
+        issue = state["issues"]["1"]
+        assert issue["title"] == "Implement mock name normalization"
+        assert {label["name"] for label in issue["labels"]} == {"tpo:todo", "ready-for-agent"}
+        assert issue["issue_dependencies_summary"]["blocked_by"] == 0
+        assert issue["html_url"] == "https://github.com/tpo-harness/mock-project/issues/1"
+        sections = parse_issue_body(issue["body"])
+        assert sections["Plan"] == ("docs/harness/TODO-1-plan.md",)
+        assert sections["Branch"] == ("feat/mock-happy-path",)
         required_contract = (
             "mock_transform.py",
             "normalize_names(names: list[str]) -> list[str]",
@@ -59,12 +74,48 @@ class TestCreateMockProject:
             "preserve input order",
             "Return an empty list",
             "standard library only",
-            "**Acceptance criteria:**",
             "uv run pytest",
         )
-
         for requirement in required_contract:
-            assert requirement in todos
+            assert requirement in issue["body"]
+
+    def test_create_mock_project_sets_placeholder_origin(self, tmp_path: Path):
+        from hermes_pipeline.github_issues import repository_identity
+
+        create_mock_project(tmp_path, "happy-path")
+
+        assert repository_identity(tmp_path) == "tpo-harness/mock-project"
+        push_url = subprocess.run(
+            ["git", "remote", "get-url", "--push", "origin"],
+            cwd=tmp_path, check=True, capture_output=True, text=True,
+        ).stdout.strip()
+        assert push_url == "no-push://tpo-harness/mock-project.git"
+        push = subprocess.run(
+            ["git", "push", "origin", "HEAD"],
+            cwd=tmp_path, capture_output=True, text=True, timeout=30,
+            env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
+        )
+        assert push.returncode != 0
+        helper = subprocess.run(
+            ["git", "config", "--local", "credential.helper"],
+            cwd=tmp_path, capture_output=True, text=True,
+        )
+        assert helper.stdout.strip() == ""
+        assert helper.returncode == 0
+
+    def test_fake_gh_lists_seeded_issue_through_client(self, tmp_path: Path, monkeypatch):
+        from hermes_pipeline.github_issues import list_todo_issues
+
+        result = create_mock_project(tmp_path, "happy-path")
+        monkeypatch.setenv("TPO_GH_BIN", result["gh_bin"])
+        monkeypatch.setenv("TPO_FAKE_GH_STATE", result["gh_state"])
+
+        issues = list_todo_issues(tmp_path)
+
+        assert [issue.number for issue in issues] == [1]
+        assert issues[0].plan_values == ("docs/harness/TODO-1-plan.md",)
+        assert issues[0].branch_values == ("feat/mock-happy-path",)
+        assert issues[0].blocked_by_open == 0
 
     def test_create_mock_project_unknown_fixture_raises(self, tmp_path: Path):
         with pytest.raises(ValueError, match="Unknown fixture"):
@@ -76,19 +127,115 @@ class TestCreateMockProject:
         assert result["todo_id"] == 1
         assert result["fixture_name"] == "happy-path"
 
-    @pytest.mark.parametrize("profile_name", ["gstack", "agent-skills"])
+    def test_native_sdd_mock_project_compiles_the_manifest_fan_out(self, tmp_path: Path):
+        """The fixture Plan carries a tpo-plan manifest, so native-sdd gets plan:/validate: cards."""
+        from hermes_pipeline.harness import _HARNESS_PLAN_PATH
+        from hermes_pipeline.kanban_tasks import prepare_todo_phases
+        from hermes_pipeline.phases import resolve_profile_phases_path
+
+        create_mock_project(tmp_path, "happy-path", "native-sdd")
+
+        prepared = prepare_todo_phases(
+            todo_id="TODO-1", tick_id="01HARNESS", board_slug="mock-project",
+            phases_path=resolve_profile_phases_path("native-sdd"), project_dir=tmp_path,
+            plan_path=_HARNESS_PLAN_PATH,
+        )
+        keys = [task.phase_key for task in prepared]
+        assert keys == ["plan:task-1", "validate:task-1"]
+        assert "phase_4_development" not in keys
+        assert "mock_transform.py" in prepared[0].body and "uv run pytest" in prepared[0].body
+
+        gstack = prepare_todo_phases(
+            todo_id="TODO-1", tick_id="01HARNESS", board_slug="mock-project",
+            phases_path=resolve_profile_phases_path("gstack"), project_dir=tmp_path,
+            plan_path=_HARNESS_PLAN_PATH,
+        )
+        assert [task.phase_key for task in gstack][0] == "phase_2_autoplan"
+
+    def test_poll_converges_on_manifest_cards_not_profile_phases(self, tmp_path: Path, mocker, monkeypatch):
+        """Expected/terminal/gate logic must follow the registered plan:/validate: cards."""
+        import threading
+
+        import yaml
+
+        from hermes_pipeline.harness import (
+            _build_harness_profile_data,
+            _offline_terminal_phase_key,
+            _poll_kanban_phases,
+            _with_offline_terminal_workflow,
+        )
+        from hermes_pipeline.kanban_tasks import KanbanTaskInfo
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+        create_mock_project(tmp_path, "happy-path", "native-sdd")
+        profile_path = resolve_profile_phases_path("native-sdd")
+        phases = load_phases(profile_path)
+        phases = _with_offline_terminal_workflow(phases, _offline_terminal_phase_key(phases))
+        harness_yaml = tmp_path / "harness-phases.yaml"
+        harness_yaml.write_text(yaml.safe_dump(_build_harness_profile_data(
+            yaml.safe_load(profile_path.read_text()), phases,
+        )))
+        monkeypatch.setattr("hermes_pipeline.harness.time.sleep", lambda *_a, **_k: None)
+        mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases", return_value=["t1", "t2"])
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        board = {"plan:task-1": "ready", "validate:task-1": "blocked"}
+        cancel = threading.Event()
+        snapshots = iter([
+            dict(board),
+            {"plan:task-1": "running", "validate:task-1": "blocked"},
+            {"plan:task-1": "done", "validate:task-1": "blocked"},
+        ])
+
+        def status(*_a, **_k):
+            try:
+                snap = next(snapshots)
+            except StopIteration:
+                snap = dict(board)
+                cancel.set()  # under a regression the loop would spin forever
+            board.update(snap)
+            return dict(board)
+
+        completed = []
+
+        def complete(_tenant, task_id):
+            completed.append(task_id)
+            board["validate:task-1"] = "done"
+            return True
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+            side_effect=lambda *_a: {
+                key: KanbanTaskInfo(task_id=f"t_{key}", phase_key=key, status=value, todo_id="TODO-1")
+                for key, value in board.items()
+            },
+        )
+        mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", side_effect=complete)
+        log_path = tmp_path / "events.jsonl"
+        detector = ConvergenceDetector(threshold=99)
+        monitor = _ConvergenceMonitor(HarnessMonitor(log_path), detector, {})
+
+        assert _poll_kanban_phases(
+            project_slug="mock-project", tick_id="01HARNESS", state_dir=tmp_path / ".hermes",
+            todo_id="TODO-1", project_dir=tmp_path, phases_path=harness_yaml,
+            monitor=monitor, detector=detector, phases=phases,
+            offline_terminal_phase_key="phase_8_finish_branch", cancel_event=cancel,
+        ) is True
+        assert completed == ["t_validate:task-1"]
+
+    @pytest.mark.parametrize("profile_name", ["gstack", "agent-skills", "native-sdd"])
     def test_create_mock_project_writes_selected_profile_and_plan(
         self, tmp_path: Path, profile_name: str
     ):
         result = create_mock_project(tmp_path, "happy-path", profile_name)
 
         contract = tomllib.loads((tmp_path / ".hermes" / "pipeline.toml").read_text())
-        todos = (tmp_path / "TODOS.md").read_text()
+        body = json.loads(Path(result["gh_state"]).read_text())["issues"]["1"]["body"]
         plan_path = tmp_path / "docs" / "harness" / "TODO-1-plan.md"
         assert result["profile"] == profile_name
         assert contract["profile"] == profile_name
         assert set(contract["capabilities"]) == {"Read", "Write", "Edit", "Bash"}
-        assert "**Plan:** docs/harness/TODO-1-plan.md" in todos
+        assert "### Plan\n\ndocs/harness/TODO-1-plan.md\n" in body
         assert plan_path.is_file()
         assert "confirm they fail" in plan_path.read_text().lower()
         assert subprocess.run(
@@ -125,6 +272,7 @@ class TestCreateMockProject:
 
         (tmp_path / "events.jsonl").write_text("{}\n")
         (tmp_path / ".hermes" / "tpo-config.yaml").write_text("state_dir: .hermes\n")
+        (tmp_path / ".hermes" / "fake-gh-state.json.tmp").write_text("{}\n")
         (tmp_path / ".hermes" / "outcomes").mkdir()
         (tmp_path / ".hermes" / "outcomes" / "expected-phases.json").write_text("{}\n")
         (tmp_path / ".superpowers").mkdir()
@@ -148,6 +296,8 @@ class TestCreateMockProject:
         assert "?? events.jsonl" in status
         assert "!! .hermes/outcomes/" in status
         assert "!! .hermes/tpo-config.yaml" in status
+        assert "!! .hermes/fake-gh-state.json" in status
+        assert "!! .hermes/fake-gh-state.json.tmp" in status
         assert "!! .superpowers/" in status
         assert "!! .code-review-graph/" in status
         assert "!! compiled.pyc" in status
@@ -156,7 +306,153 @@ class TestCreateMockProject:
         assert "!! src/" in status
 
 
+class TestFakeGhStub:
+    """Behavioural contract of the bundled offline ``gh`` stand-in."""
+
+    @pytest.fixture
+    def gh(self, tmp_path: Path):
+        from hermes_pipeline.harness import (
+            _fake_gh_state_for_fixture,
+            fake_gh_script_path,
+        )
+
+        state_path = tmp_path / "state.json"
+        state_path.write_text(json.dumps(_fake_gh_state_for_fixture("happy-path")))
+
+        def run(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [str(fake_gh_script_path()), *args],
+                capture_output=True,
+                text=True,
+                env={**os.environ, "TPO_FAKE_GH_STATE": str(state_path)},
+            )
+
+        run.state = lambda: json.loads(state_path.read_text())  # type: ignore[attr-defined]
+        return run
+
+    _API = ("api", "-H", "Accept: application/vnd.github+json")
+    _REPO = "tpo-harness/mock-project"
+
+    def test_auth_status_succeeds(self, gh):
+        assert gh("auth", "status", "--hostname", "github.com").returncode == 0
+
+    def test_list_returns_slurped_pages_and_filters(self, gh):
+        listed = gh(*self._API, "--paginate", "--slurp",
+                    f"repos/{self._REPO}/issues?state=open&labels=tpo%3Atodo&per_page=100")
+        assert listed.returncode == 0
+        pages = json.loads(listed.stdout)
+        assert [issue["number"] for page in pages for issue in page] == [1]
+
+        closed = gh(*self._API, "--paginate", "--slurp",
+                    f"repos/{self._REPO}/issues?state=closed&labels=tpo%3Atodo&per_page=100")
+        assert json.loads(closed.stdout) == [[]]
+        other_label = gh(*self._API, "--paginate", "--slurp",
+                         f"repos/{self._REPO}/issues?state=all&labels=tpo%3Aon-hold&per_page=100")
+        assert json.loads(other_label.stdout) == [[]]
+
+    def test_single_issue_and_comments(self, gh):
+        single = gh(*self._API, f"repos/{self._REPO}/issues/1")
+        assert json.loads(single.stdout)["number"] == 1
+        assert gh(*self._API, f"repos/{self._REPO}/issues/9").returncode == 1
+
+        comments = gh(*self._API, "--paginate", "--slurp", f"repos/{self._REPO}/issues/1/comments")
+        assert json.loads(comments.stdout) == [[]]
+
+    def test_label_edit_mutates_state(self, gh):
+        assert gh("issue", "edit", "1", "--repo", self._REPO, "--add-label", "tpo:in-progress").returncode == 0
+        assert "tpo:in-progress" in {label["name"] for label in gh.state()["issues"]["1"]["labels"]}
+        assert gh("issue", "edit", "1", "--repo", self._REPO, "--remove-label", "ready-for-agent").returncode == 0
+        assert "ready-for-agent" not in {label["name"] for label in gh.state()["issues"]["1"]["labels"]}
+
+    def test_label_edit_splits_comma_separated_labels(self, gh):
+        assert gh("issue", "edit", "1", "--repo", self._REPO, "--add-label", "a,b").returncode == 0
+        assert {"a", "b"} <= {label["name"] for label in gh.state()["issues"]["1"]["labels"]}
+
+    def test_concurrent_mutations_are_serialized(self, gh):
+        import threading
+
+        results = {}
+
+        def create(name: str) -> None:
+            results[name] = gh("label", "create", "--repo", self._REPO, "--color", "ededed",
+                               "--description", "d", "--", name)
+
+        threads = [threading.Thread(target=create, args=(f"label-{i}",)) for i in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert all(result.returncode == 0 for result in results.values())
+        assert {f"label-{i}" for i in range(6)} <= set(gh.state()["labels"])
+
+    def test_comment_appends_from_body_file(self, gh, tmp_path: Path):
+        body = tmp_path / "body.md"
+        body.write_text("first\n")
+        assert gh("issue", "comment", "1", "--repo", self._REPO, "--body-file", str(body)).returncode == 0
+        body.write_text("second\n")
+        assert gh("issue", "comment", "1", "--repo", self._REPO, "--body-file", str(body)).returncode == 0
+        assert [item["body"] for item in gh.state()["comments"]["1"]] == ["first\n", "second\n"]
+
+    def test_close_is_idempotent(self, gh):
+        first = gh("issue", "close", "1", "--repo", self._REPO, "--reason", "completed")
+        assert first.returncode == 0
+        assert gh.state()["issues"]["1"]["state"] == "closed"
+        again = gh("issue", "close", "1", "--repo", self._REPO, "--reason", "completed")
+        assert again.returncode == 0
+        assert "already closed" in again.stderr
+
+    def test_label_list_and_create(self, gh):
+        listed = gh("label", "list", "--repo", self._REPO, "--json", "name", "--limit", "1000")
+        assert {item["name"] for item in json.loads(listed.stdout)} == {"tpo:todo", "ready-for-agent"}
+        created = gh("label", "create", "--repo", self._REPO, "--color", "ededed",
+                     "--description", "d", "--force", "--", "--repo")
+        assert created.returncode == 0
+        assert "--repo" in gh.state()["labels"]
+
+    def test_create_assigns_next_number_and_prints_url(self, gh, tmp_path: Path):
+        body = tmp_path / "body.md"
+        body.write_text("### What\n\nNew\n")
+        created = gh("issue", "create", "--repo", self._REPO, "--title", "Second",
+                     "--body-file", str(body), "--label", "tpo:todo", "--label", "needs-triage")
+        assert created.returncode == 0
+        assert created.stdout.strip() == f"https://github.com/{self._REPO}/issues/2"
+        issue = gh.state()["issues"]["2"]
+        assert issue["title"] == "Second"
+        assert [label["name"] for label in issue["labels"]] == ["tpo:todo", "needs-triage"]
+
+    def test_dependency_post_rejects_duplicate_with_422(self, gh, tmp_path: Path):
+        body = tmp_path / "body.md"
+        body.write_text("x")
+        gh("issue", "create", "--repo", self._REPO, "--title", "Blocker", "--body-file", str(body))
+        blocker_id = json.loads(gh(*self._API, f"repos/{self._REPO}/issues/2").stdout)["id"]
+        post = (*self._API, "--method", "POST", f"repos/{self._REPO}/issues/1/dependencies/blocked_by",
+                "-F", f"issue_id={blocker_id}")
+        assert gh(*post).returncode == 0
+        assert json.loads(gh(*self._API, f"repos/{self._REPO}/issues/1").stdout)["issue_dependencies_summary"]["blocked_by"] == 1
+        duplicate = gh(*post)
+        assert duplicate.returncode == 1
+        assert "Validation Failed (HTTP 422)" in duplicate.stderr
+
+    def test_unsupported_argv_fails(self, gh):
+        result = gh("pr", "list")
+        assert result.returncode == 1
+        assert "fake gh: unsupported" in result.stderr
+
+
 class TestPreflightCheck:
+    def test_preflight_check_gh_not_found_unless_overridden(self, monkeypatch):
+        available = {"git", "hermes", "claude"}
+        monkeypatch.setattr(
+            "hermes_pipeline.harness.shutil.which",
+            lambda executable: f"/bin/{executable}" if executable in available else None,
+        )
+        monkeypatch.delenv("TPO_GH_BIN", raising=False)
+        with pytest.raises(RuntimeError, match="gh"):
+            preflight_check()
+
+        monkeypatch.setenv("TPO_GH_BIN", "/fixture/bin/gh")
+        preflight_check()
+
     def test_preflight_check_git_not_found(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("PATH", "")
         with pytest.raises(RuntimeError, match="[Gg]it"):
@@ -169,6 +465,7 @@ class TestPreflightCheck:
 
         git_dir = Path(shutil.which("git")).parent
         monkeypatch.setenv("PATH", str(git_dir))
+        monkeypatch.setenv("TPO_GH_BIN", "/fixture/bin/gh")
         with pytest.raises(HermesDependencyError, match="[Hh]ermes"):
             preflight_check()
 
@@ -183,7 +480,7 @@ class TestPreflightCheck:
         selected_executable,
         unselected_executable,
     ):
-        available = {"git", "hermes", selected_executable}
+        available = {"git", "gh", "hermes", selected_executable}
         monkeypatch.setattr(
             "hermes_pipeline.harness.shutil.which",
             lambda executable: f"/bin/{executable}" if executable in available else None,
@@ -413,6 +710,29 @@ class TestIsolateConfig:
             assert os.environ["TPO_CONFIG_FILE"] == "/tmp/tpo-config.yaml"
 
         assert os.environ["TPO_CONFIG_FILE"] == "/original/config.yaml"
+
+
+class TestFakeGhEnv:
+    def test_sets_and_restores_env(self, tmp_path: Path, monkeypatch):
+        import shutil
+
+        from hermes_pipeline.harness import fake_gh_env
+
+        monkeypatch.setenv("TPO_GH_BIN", "/real/gh")
+        monkeypatch.delenv("TPO_FAKE_GH_STATE", raising=False)
+        original_path = os.environ["PATH"]
+        stub = tmp_path / "bin" / "gh"
+        stub.parent.mkdir()
+        stub.write_text("#!/bin/sh\n")
+        stub.chmod(0o755)
+        with fake_gh_env(tmp_path):
+            assert os.environ["TPO_GH_BIN"] == str(stub)
+            assert os.environ["TPO_FAKE_GH_STATE"] == str(tmp_path / ".hermes" / "fake-gh-state.json")
+            assert os.environ["PATH"].split(os.pathsep)[0] == str(stub.parent)
+            assert shutil.which("gh") == str(stub)
+        assert os.environ["TPO_GH_BIN"] == "/real/gh"
+        assert "TPO_FAKE_GH_STATE" not in os.environ
+        assert os.environ["PATH"] == original_path
 
 
 def test_prune_retained_state_removes_only_safe_terminal_state(tmp_path):
@@ -1324,6 +1644,10 @@ class TestKanbanModeHermes:
         call_kwargs = mock_register.call_args
         assert call_kwargs.kwargs.get("phases_path") is not None
         assert call_kwargs.kwargs["prompt_client"] == "codex"
+        # The harness compiles without TODOS.md: the Plan is passed explicitly.
+        assert call_kwargs.kwargs["plan_path"] == "docs/harness/TODO-1-plan.md"
+        assert call_kwargs.kwargs["spec_path"] is None
+        assert call_kwargs.kwargs["reference_paths"] == ()
 
     @pytest.mark.parametrize(
         ("config", "expected"),

@@ -11,6 +11,7 @@ import logging
 import os
 import re
 import subprocess
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -667,6 +668,60 @@ def _complete_registration_barrier(task_id: str) -> None:
         )
 
 
+_MAX_REFERENCE_PATHS = 10
+
+
+def _tracked_at_head(project_dir: Path, relative_path: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"HEAD:{relative_path}"],
+        cwd=project_dir, capture_output=True, check=False, timeout=HERMES_COMMAND_TIMEOUT,
+    )
+    return result.returncode == 0
+
+
+def _contained_paths(
+    project_dir: Path | None, todo_id: str, paths: Sequence[str]
+) -> list[str]:
+    """Normalize Spec/Reference paths to repository-contained files tracked at HEAD.
+
+    Anything else (outside the repository, dot-prefixed, untracked, unreadable) is
+    dropped with a WARNING; duplicates collapse and the list is capped at
+    ``_MAX_REFERENCE_PATHS``. Validation needs the repository, so ``project_dir``
+    is mandatory whenever there is something to validate.
+    """
+    paths = [path for path in paths if path]
+    if not paths:
+        return []
+    if project_dir is None:
+        raise ValueError("project_dir is required to validate Spec/Reference paths")
+    from .plan_manifest import TodoPlanValidationError, validate_plan_path
+
+    kept: list[str] = []
+    for path in paths:
+        try:
+            normalized = validate_plan_path(Path(project_dir), path)
+            if any(segment.startswith(".") for segment in normalized.split("/")):
+                raise TodoPlanValidationError("hidden_path")
+            if not _tracked_at_head(Path(project_dir), normalized):
+                log.warning("%s: ignoring untracked Spec/Reference path %s", todo_id, normalized)
+                continue
+        except (
+            TodoPlanValidationError, OSError, ValueError, UnicodeError, subprocess.SubprocessError,
+        ) as exc:
+            code = getattr(exc, "code", type(exc).__name__)
+            log.warning("%s: ignoring Spec/Reference path (%s)", todo_id, code)
+            continue
+        if normalized not in kept:
+            kept.append(normalized)
+    if len(kept) > _MAX_REFERENCE_PATHS:
+        log.warning(
+            "%s: truncating Spec/Reference paths to %d (had %d)",
+            todo_id, _MAX_REFERENCE_PATHS, len(kept),
+        )
+        kept = kept[:_MAX_REFERENCE_PATHS]
+    return kept
+
+
 def prepare_todo_phases(
     *,
     todo_id: str,
@@ -675,32 +730,43 @@ def prepare_todo_phases(
     phases_path: str | Path | None = None,
     prompt_client: PromptClient = "claude",
     plan_path: str | None = None,
+    spec_path: str | None = None,
+    reference_paths: Sequence[str] = (),
     project_dir: str | Path | None = None,
+    decisions: Mapping[str, str] | None = None,
 ) -> list[PreparedPhaseTask]:
+    """Render every phase card for ``todo_id`` without touching Hermes.
+
+    ``plan_path``/``spec_path``/``reference_paths``/``decisions`` come from the
+    selected issue; nothing is resolved from TODOS.md. Every worker card carries
+    the ``Decisions:`` block (gates never do). When ``project_dir`` is given the Plan's
+    optional ``tpo-plan`` manifest is validated (and compiled) and Spec/Reference
+    paths are checked for repository containment.
+    """
     if not re.fullmatch(r"TODO-\d+", todo_id):
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
     profile = load_phase_profile(phases_path)
     manifest = None
     if profile.requires_plan:
+        if not plan_path:
+            from .plan_manifest import TodoPlanValidationError
+
+            raise TodoPlanValidationError("missing")
         if project_dir is not None:
             from .plan_manifest import validate_plan_candidate
-            from .todos_md import resolve_todo_plan
 
-            project_path = Path(project_dir)
-            plan_path = resolve_todo_plan(
-                project_path,
-                project_path / "TODOS.md",
-                todo_id,
-            )
             manifest = validate_plan_candidate(
-                project_path,
+                Path(project_dir),
                 plan_path,
                 expected_todo_id=todo_id,
             )
-        elif not plan_path:
-            from .todos_md import TodoPlanValidationError
-
-            raise TodoPlanValidationError("missing")
+    spec_paths = _contained_paths(
+        Path(project_dir) if project_dir is not None else None, todo_id,
+        [spec_path] if spec_path else [],
+    )
+    references = _contained_paths(
+        Path(project_dir) if project_dir is not None else None, todo_id, reference_paths
+    )
     phases = load_phases(phases_path)
     prepared: list[PreparedPhaseTask] = []
     for phase in phases:
@@ -734,8 +800,11 @@ def prepare_todo_phases(
                     tick_id=tick_id,
                     project_slug=board_slug,
                     plan_path=plan_path,
+                    spec_path=spec_paths[0] if spec_paths else None,
+                    reference_paths=references,
                     prompt_client=prompt_client,
                     template_source=f"manifest:{worker_key}",
+                    decisions=decisions,
                 ) + worker_prompt
                 prepared.append(
                     PreparedPhaseTask(
@@ -799,8 +868,12 @@ def prepare_todo_phases(
             tick_id=tick_id,
             project_slug=board_slug,
             plan_path=plan_path,
+            # Every worker sees the Spec/Reference context; gates never do.
+            spec_path=spec_paths[0] if spec_paths and not phase.gate else None,
+            reference_paths=None if phase.gate else references,
             prompt_client=prompt_client,
             template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
+            decisions=None if phase.gate else decisions,
         )
         if phase.gate:
             body_prompt = rendered_prompt
@@ -1204,17 +1277,32 @@ def register_todo_phases(
     phases_path: str | Path | None = None,
     assignee: str = "default",
     prompt_client: PromptClient = "claude",
+    plan_path: str | None = None,
+    spec_path: str | None = None,
+    reference_paths: Sequence[str] = (),
+    decisions: Mapping[str, str] | None = None,
     cancel_event: object | None = None,
+    transform_prepared: Callable[[list[PreparedPhaseTask]], list[PreparedPhaseTask]] | None = None,
 ) -> list[str]:
-    """Prepare and register phases as backward-compatible kanban tasks."""
+    """Prepare and register phases as backward-compatible kanban tasks.
+
+    ``transform_prepared`` lets a caller inspect or adjust the rendered cards
+    (the offline harness rewrites the last worker card) before they are created.
+    """
     prepared = prepare_todo_phases(
         todo_id=todo_id,
         tick_id=tick_id,
         board_slug=board_slug,
         phases_path=phases_path,
         prompt_client=prompt_client,
+        plan_path=plan_path,
+        spec_path=spec_path,
+        reference_paths=reference_paths,
         project_dir=project_dir,
+        decisions=decisions,
     )
+    if transform_prepared is not None:
+        prepared = transform_prepared(prepared)
     return create_prepared_todo_phases(
         prepared=prepared,
         tick_id=tick_id,
@@ -1387,7 +1475,8 @@ def _mark_gate_needs_input(task_id: str, reason: str) -> bool:
 
 
 def reconcile_plan_task_results(
-    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str
+    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str,
+    repo: str | None = None,
 ) -> bool:
     """Validate completed manifest workers and advance their controller gates.
 
@@ -1407,7 +1496,14 @@ def reconcile_plan_task_results(
     if not (state_dir / "runs" / tick_id / "registration.json").exists():
         return True  # Legacy and pre-registration runs have nothing to reconcile.
     try:
-        registration = load_validated_registration(project_dir, state_dir, tick_id)
+        registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
+    except ResultContractError as exc:
+        log.warning(
+            "cannot reconcile plan results for tick %s: %s",
+            tick_id,
+            sanitize_result_text(str(exc), maximum=1000),
+        )
+        raise
     except (
         OSError,
         UnicodeError,
@@ -1415,7 +1511,6 @@ def reconcile_plan_task_results(
         KeyError,
         TypeError,
         ValueError,
-        ResultContractError,
     ) as exc:
         log.warning(
             "cannot reconcile plan results for tick %s: %s",
@@ -1542,6 +1637,9 @@ def get_todo_kanban_tasks(tenant: str, tick_id: str) -> dict[str, KanbanTaskInfo
             timeout=HERMES_COMMAND_TIMEOUT,
         )
         if result.returncode != 0:
+            log.warning(
+                "kanban list failed for tenant=%s (rc=%d)", tenant, result.returncode
+            )
             return {}
         snapshot = json.loads(result.stdout)
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):

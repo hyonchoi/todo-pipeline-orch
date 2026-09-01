@@ -1,5 +1,7 @@
 ---
 name: mid_drift_freeform
+note: "model-robustness fixture; not production-shaped"
+candidate_ids: [TODO-2, TODO-3, TODO-4]
 in_flight: []
 recent_decisions: []
 expected_picked_in: ["TODO-2", "TODO-4"]

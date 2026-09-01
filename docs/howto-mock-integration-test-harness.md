@@ -99,11 +99,12 @@ The temp directory contains:
 ```
 harness-xxxxxxxx/
   project/
-    .git/
-    TODOS.md
+    .git/                # origin = placeholder github.com URL; push URL is no-push://
+    bin/gh               # bundled fake gh (TPO_GH_BIN)
     README.md
     .hermes/
       pipeline.toml
+      fake-gh-state.json # seeded TODO-1 issue (tpo:todo + ready-for-agent); TPO_FAKE_GH_STATE
   artifacts/
     events.jsonl         # Per-phase event log (raw)
     reports/
@@ -214,7 +215,10 @@ kanban board and polls for transitions rather than dispatching phases directly.
 Key flow:
 1. `preflight_check(prompt_client=...)` verifies git, Hermes, and the selected
    Claude/Codex executable on PATH
-2. `create_mock_project()` initializes a temp git repo with TODOS.md + .hermes config
+2. `create_mock_project()` initializes a temp git repo with `.hermes` config, a placeholder
+   github.com `origin` (push URL `no-push://…` so nothing can leave the machine), and a
+   bundled fake `gh` seeded with one `tpo:todo` issue; `fake_gh_env()` exports `TPO_GH_BIN`
+   and `TPO_FAKE_GH_STATE` so every `gh` call — TPO's and the agents' — is served offline
 3. `isolate_config()` writes a temporary config file and points `TPO_CONFIG_FILE` at it
 4. `register_todo_phases()` creates kanban tasks for all pipeline phases
 5. Initial phase status is printed via `log.info()` to console
@@ -285,8 +289,5 @@ feature.
 
 ## Related
 
-- [Explanation: Skill Test Harness Design](explanation-skill-test-harness-design.md) — Design rationale, phase 2 plans
-- [Reference: Skill Test Harness API](reference-skill-test-harness.md) — Complete function signatures
-- [How to: Skill Test Environment](howto-skill-test-environment.md) — Unit tests for TODOS.md skill logic
 - [How to: Eval Suite](howto-eval-suite.md) — Live API selection agent tests
 - [Implementation Plan](superpowers/plans/2026-07-14-mock-integration-test-harness.md) — Full task breakdown
