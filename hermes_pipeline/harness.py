@@ -177,12 +177,11 @@ class GitHubPreflight:
     permission: str
 
 
-def other_ready_issues(
-    project_dir: Path, sandbox: SandboxRepo, *, exclude_issue: int | None = None
-) -> tuple[int, ...]:
+def ready_issue_numbers(project_dir: Path, sandbox: SandboxRepo) -> tuple[int, ...]:
     """Numbers of open ``tpo:todo`` issues in ``sandbox`` carrying ``ready-for-agent``.
 
-    ``exclude_issue`` (the harness's own issue) is skipped; the result is sorted.
+    This is the same listing the production tick compiles its candidates from, so
+    it is the authority for "what the tick will see".
     """
     from .github_issues import READY_LABEL, list_todo_issues
 
@@ -190,8 +189,61 @@ def other_ready_issues(
     return tuple(
         issue.number
         for issue in list_todo_issues(project_dir, repo=sandbox.repo)
-        if READY_LABEL in issue.labels and issue.number != exclude_issue
+        if READY_LABEL in issue.labels
     )
+
+
+def other_ready_issues(
+    project_dir: Path, sandbox: SandboxRepo, *, exclude_issue: int | None = None
+) -> tuple[int, ...]:
+    """Ready issue numbers other than ``exclude_issue`` (the harness's own issue)."""
+    return tuple(n for n in ready_issue_numbers(project_dir, sandbox) if n != exclude_issue)
+
+
+_ISSUE_VISIBILITY_TIMEOUT = 60.0
+
+
+def wait_for_issue_visible(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    issue_number: int,
+    timeout: float = _ISSUE_VISIBILITY_TIMEOUT,
+    poll_interval: float = 2.0,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
+) -> None:
+    """Block until the run's issue is the only ready ``tpo:todo`` issue the tick will see.
+
+    GitHub's label-filtered issue listing lags a fresh ``gh issue create`` by seconds
+    (observed live: the production tick listed nothing two seconds after the create
+    and picked no candidate). The barrier polls the exact listing the tick uses and
+    returns once ``issue_number`` is present. Raises :class:`HarnessPreflightError`:
+
+    - ``sandbox_not_quiescent`` (detail ``#12, #15``) as soon as another ready
+      issue is visible alongside ours;
+    - ``issue_not_visible`` when ``timeout`` elapses without our issue appearing.
+    """
+    if not (math.isfinite(poll_interval) and poll_interval > 0):
+        raise ValueError("poll_interval must be a finite positive number")
+    if not (math.isfinite(timeout) and timeout >= 0):
+        raise ValueError("timeout must be a finite non-negative number")
+    deadline = now() + timeout
+    while True:
+        ready = ready_issue_numbers(project_dir, sandbox)
+        others = [n for n in ready if n != issue_number]
+        if others:
+            raise HarnessPreflightError("sandbox_not_quiescent", ", ".join(f"#{n}" for n in others))
+        if issue_number in ready:
+            return
+        remaining = deadline - now()
+        if remaining <= 0:
+            raise HarnessPreflightError(
+                "issue_not_visible",
+                f"issue #{issue_number} in {sandbox.repo} not listed as ready after {timeout:g}s; "
+                f"check: gh issue view {issue_number} --repo {sandbox.repo}",
+            )
+        sleep(min(poll_interval, remaining))
 
 
 def github_preflight(
@@ -3071,11 +3123,10 @@ def run_harness(
                         "run_token": run_token,
                     },
                 )
-                ready = other_ready_issues(project_dir, sandbox, exclude_issue=issue.number)
-                if ready:
-                    raise HarnessPreflightError(
-                        "sandbox_not_quiescent", ", ".join(f"#{number}" for number in ready)
-                    )
+                # Visibility barrier: GitHub's label-filtered listing lags the create, and the
+                # production tick compiles its candidates from that listing. Wait until exactly
+                # our issue is ready before running the tick (also the quiescence re-check).
+                wait_for_issue_visible(project_dir, sandbox, issue_number=issue.number)
 
                 try:
                     previous_tick_id = read_current_tick_id(project_state)

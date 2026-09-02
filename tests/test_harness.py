@@ -71,6 +71,7 @@ from hermes_pipeline.harness import (
     preflight_check,
     read_current_tick_id,
     read_recorded_branch,
+    ready_issue_numbers,
     reconcile_created_issue,
     recover_tick_registration,
     resolve_sandbox_repo,
@@ -81,6 +82,7 @@ from hermes_pipeline.harness import (
     take_baseline,
     validate_live_profile,
     verify_pull_request,
+    wait_for_issue_visible,
     write_project_contract,
 )
 from hermes_pipeline.phases import Phase, load_phases, resolve_profile_phases_path
@@ -1020,7 +1022,7 @@ class _LiveRunStubs:
         self.status_map: dict[str, str] = {}
         # Overridable steps.
         self.clone = lambda sandbox, project_dir, branch=None: (project_dir / ".hermes").mkdir(parents=True)
-        self.other_ready = lambda *_a, **_k: ()
+        self.wait_visible = lambda *_a, **_k: None
         self.recover = lambda *_a, **_k: self.registration
         self.tick = lambda *_a, **_k: 0
         self.current_tick_id: str | None = None
@@ -1061,7 +1063,7 @@ class _LiveRunStubs:
         self._stub(monkeypatch, "write_project_contract", lambda *_a, **_k: None)
         self._stub(monkeypatch, "create_harness_issue", lambda *_a, **_k: self.issue)
         self._stub(monkeypatch, "commit_plan", lambda *_a, **_k: "a" * 40)
-        self._stub(monkeypatch, "other_ready_issues", lambda *a, **k: self.other_ready(*a, **k))
+        self._stub(monkeypatch, "wait_for_issue_visible", lambda *a, **k: self.wait_visible(*a, **k))
         self._stub(monkeypatch, "read_current_tick_id", lambda *_a, **_k: self.current_tick_id)
         self._stub(monkeypatch, "run_tick", lambda *a, **k: self.tick(*a, **k))
         self._stub(monkeypatch, "recover_tick_registration", lambda *a, **k: self.recover(*a, **k))
@@ -1097,7 +1099,7 @@ class _LiveRunStubs:
 _LIVE_HAPPY_ORDER = [
     "resolve_sandbox_repo", "_run_token", "preflight_check", "github_preflight", "_kanban_preflight",
     "clone_sandbox", "sandbox_seed_check", "take_baseline", "write_project_contract",
-    "create_harness_issue", "commit_plan", "other_ready_issues", "read_current_tick_id", "run_tick",
+    "create_harness_issue", "commit_plan", "wait_for_issue_visible", "read_current_tick_id", "run_tick",
     "recover_tick_registration", "poll_registered_phases", "discover_remote_artifacts",
     "verify_pull_request", "shutdown_run",
 ]
@@ -1125,12 +1127,11 @@ class TestRunHarness:
     def test_happy_path_orders_live_steps_and_reports(self, live, capsys):
         seen_at_recheck: dict[str, list] = {}
 
-        def other_ready(project_dir, sandbox, *, exclude_issue):
+        def wait_visible(project_dir, sandbox, *, issue_number, **_kwargs):
             seen_at_recheck["events"] = live.events()
-            seen_at_recheck["exclude"] = exclude_issue
-            return ()
+            seen_at_recheck["exclude"] = issue_number
 
-        live.other_ready = other_ready
+        live.wait_visible = wait_visible
         live.status_map = dict.fromkeys(_LIVE_KEYS, "done")
 
         result = live.run()
@@ -1291,7 +1292,10 @@ class TestRunHarness:
             preflight_check()
 
     def test_other_ready_issue_at_recheck_shuts_down_without_tick(self, live):
-        live.other_ready = lambda *_a, **_k: (12, 15)
+        def wait_visible(*_a, **_k):
+            raise HarnessPreflightError("sandbox_not_quiescent", "#12, #15")
+
+        live.wait_visible = wait_visible
 
         with pytest.raises(HarnessPreflightError) as exc_info:
             live.run()
@@ -5693,3 +5697,82 @@ class TestShutdownRun:
         assert report.kanban_quiescent is False
         assert sleeps == []
         assert stubs.snapshot.call_count == 1
+
+
+class TestWaitForIssueVisible:
+    """wait_for_issue_visible: the run's issue must appear in the ready listing before the tick.
+
+    GitHub's label-filtered issue listing lags a fresh create by seconds (observed live:
+    the tick saw an empty listing two seconds after ``gh issue create``), so the barrier
+    polls the same listing the production tick uses until exactly our issue is ready.
+    """
+
+    def _clock(self):
+        state = {"t": 0.0, "sleeps": []}
+
+        def sleep(seconds):
+            state["sleeps"].append(seconds)
+            state["t"] += seconds
+
+        return state, sleep, lambda: state["t"]
+
+    def test_returns_once_the_issue_is_listed(self, monkeypatch, tmp_path):
+        listings = iter([(), (), (7,)])
+        calls = []
+
+        def ready(project_dir, sandbox):
+            calls.append((project_dir, sandbox))
+            return next(listings)
+
+        monkeypatch.setattr(harness_mod, "ready_issue_numbers", ready)
+        state, sleep, now = self._clock()
+
+        wait_for_issue_visible(tmp_path, SANDBOX, issue_number=7, timeout=60.0, poll_interval=2.0, sleep=sleep, now=now)
+
+        assert state["sleeps"] == [2.0, 2.0]
+        assert calls == [(tmp_path, SANDBOX)] * 3
+
+    def test_times_out_when_the_issue_never_appears(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(harness_mod, "ready_issue_numbers", lambda *_a, **_k: ())
+        state, sleep, now = self._clock()
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            wait_for_issue_visible(tmp_path, SANDBOX, issue_number=7, timeout=6.0, poll_interval=2.0, sleep=sleep, now=now)
+
+        assert exc_info.value.code == "issue_not_visible"
+        assert "#7" in exc_info.value.detail and SANDBOX.repo in exc_info.value.detail
+        assert state["sleeps"] == [2.0, 2.0, 2.0]
+
+    def test_another_ready_issue_alongside_ours_is_not_quiescent(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(harness_mod, "ready_issue_numbers", lambda *_a, **_k: (7, 15))
+        state, sleep, now = self._clock()
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            wait_for_issue_visible(tmp_path, SANDBOX, issue_number=7, timeout=60.0, poll_interval=2.0, sleep=sleep, now=now)
+
+        assert exc_info.value.code == "sandbox_not_quiescent"
+        assert exc_info.value.detail == "#15"
+        assert state["sleeps"] == []
+
+    def test_sleep_is_clamped_to_the_deadline(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(harness_mod, "ready_issue_numbers", lambda *_a, **_k: ())
+        state, sleep, now = self._clock()
+
+        with pytest.raises(HarnessPreflightError):
+            wait_for_issue_visible(tmp_path, SANDBOX, issue_number=7, timeout=30.0, poll_interval=60.0, sleep=sleep, now=now)
+
+        assert state["sleeps"] == [30.0]
+
+    @pytest.mark.parametrize("kwargs", [{"poll_interval": 0.0}, {"poll_interval": -1.0}, {"timeout": -1.0}])
+    def test_invalid_timing_is_rejected_before_listing(self, monkeypatch, tmp_path, kwargs):
+        monkeypatch.setattr(harness_mod, "ready_issue_numbers", lambda *_a, **_k: pytest.fail("listed"))
+        params = {"timeout": 10.0, "poll_interval": 1.0, **kwargs}
+
+        with pytest.raises(ValueError):
+            wait_for_issue_visible(tmp_path, SANDBOX, issue_number=7, sleep=lambda _s: None, now=lambda: 0.0, **params)
+
+    def test_ready_issue_numbers_uses_the_production_listing(self, fake_gh, tmp_path):
+        _seed_github(fake_gh, [todo_payload(12, labels=["tpo:todo", "ready-for-agent"]), todo_payload(15, labels=["tpo:todo"])])
+
+        assert ready_issue_numbers(tmp_path, SANDBOX) == (12,)
+        assert other_ready_issues(tmp_path, SANDBOX, exclude_issue=12) == ()
