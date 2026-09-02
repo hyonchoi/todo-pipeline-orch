@@ -546,7 +546,9 @@ def test_compile_eligible_issues_accepts_embedded_manifest(tmp_path):
     assert result.candidates[0].plan_source.kind == "embedded"
 
 
-def test_tick_filter_defers_embedded_plan_until_artifact_support(tmp_path, monkeypatch):
+def test_tick_filter_defers_embedded_plan_until_runtime_consumers_support_artifact(
+    tmp_path, monkeypatch
+):
     from unittest.mock import MagicMock
 
     from hermes_pipeline.cli import _block_untracked_plans

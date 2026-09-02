@@ -90,7 +90,7 @@ def _doctor_github_checks(
     from collections.abc import Mapping
 
     from . import github_issues
-    from .github_issues import REGISTRATION_SCHEMA_VERSION, GitHubIssuesError
+    from .github_issues import SUPPORTED_REGISTRATION_SCHEMA_VERSIONS, GitHubIssuesError
     from .run_registration import (
         _registration_issue_number,
         active_registration_issue_numbers,
@@ -177,7 +177,7 @@ def _doctor_github_checks(
             number = _registration_issue_number(payload)
             if (
                 not isinstance(payload, Mapping)
-                or payload.get("schema_version") != REGISTRATION_SCHEMA_VERSION
+                or payload.get("schema_version") not in SUPPORTED_REGISTRATION_SCHEMA_VERSIONS
                 or number is None
             ):
                 unsupported.append(tick_id)
@@ -246,9 +246,9 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
     fix = f"Fix (tick {tick_id}):"
     try:
         registration = json.loads(registration_path.read_text(encoding="utf-8"))
-        from .github_issues import REGISTRATION_SCHEMA_VERSION
+        from .github_issues import SUPPORTED_REGISTRATION_SCHEMA_VERSIONS
 
-        if registration.get("schema_version") != REGISTRATION_SCHEMA_VERSION:
+        if registration.get("schema_version") not in SUPPORTED_REGISTRATION_SCHEMA_VERSIONS:
             print(
                 f"REGISTRATION UNSUPPORTED: schema_version {registration.get('schema_version')}; "
                 "finish or abandon this run before upgrading"
@@ -1391,9 +1391,6 @@ def _block_untracked_plans(project_dir: Path, eligibility):
     blocked = dict(eligibility.blocked_reasons)
     for candidate in eligibility.candidates:
         if candidate.plan_source is not None and candidate.plan_source.kind == "embedded":
-            # Schema-v3 registration will materialize the snapshot-pinned Plan artifact.
-            # Until that writer lands, fail closed before selection instead of sending a
-            # pathless authority into path-only phase/registration consumers.
             blocked[candidate.entry.todo_id] = "plan_invalid:artifact_pending"
         elif candidate.plan_path and not _plan_tracked_at_head(project_dir, candidate.plan_path):
             blocked[candidate.entry.todo_id] = "plan_invalid:untracked"

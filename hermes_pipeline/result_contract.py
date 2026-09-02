@@ -13,6 +13,7 @@ from . import github_issues
 from .github_issues import (
     MAX_ISSUE_SNAPSHOT_CHARS,
     REGISTRATION_SCHEMA_VERSION,
+    SUPPORTED_REGISTRATION_SCHEMA_VERSIONS,
     GitHubIssuesError,
     SnapshotFormatError,
     parse_issue_body,
@@ -399,6 +400,7 @@ _REGISTRATION_KEYS = {
     "review_assignee",
     "step_keys",
 }
+_REGISTRATION_V3_KEYS = _REGISTRATION_KEYS | {"plan_source_kind", "plan_artifact"}
 
 
 def load_validated_registration(
@@ -414,9 +416,14 @@ def load_validated_registration(
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise ResultContractError("registration_invalid") from exc
     registration = _mapping(raw, code="registration_invalid")
-    if registration.get("schema_version") != REGISTRATION_SCHEMA_VERSION:
+    schema_version = registration.get("schema_version")
+    if schema_version not in SUPPORTED_REGISTRATION_SCHEMA_VERSIONS:
         raise ResultContractError("registration_invalid", "unsupported schema_version")
-    _exact_keys(registration, _REGISTRATION_KEYS, code="registration_invalid")
+    _exact_keys(
+        registration,
+        _REGISTRATION_V3_KEYS if schema_version == REGISTRATION_SCHEMA_VERSION else _REGISTRATION_KEYS,
+        code="registration_invalid",
+    )
     # The issue snapshot is hash-pinned authority content, not agent metadata:
     # bound its size instead of scanning it for secret-like text.
     _reject_unsafe_strings({key: value for key, value in registration.items() if key != "issue_snapshot"})
@@ -434,7 +441,6 @@ def load_validated_registration(
         "issue_url",
         "issue_snapshot",
         "selected_entry_hash",
-        "plan_path",
         "plan_hash",
         "branch",
         "worktree",
@@ -444,6 +450,23 @@ def load_validated_registration(
     )
     if not all(isinstance(registration[key], str) and registration[key] for key in string_keys):
         raise ResultContractError("registration_invalid")
+    if schema_version == 2:
+        if not isinstance(registration["plan_path"], str) or not registration["plan_path"]:
+            raise ResultContractError("registration_invalid")
+        plan_source_kind = "legacy_path"
+    else:
+        plan_source_kind = registration["plan_source_kind"]
+        if plan_source_kind not in ("embedded", "legacy_path"):
+            raise ResultContractError("registration_invalid")
+        if plan_source_kind == "legacy_path" and (
+            not isinstance(registration["plan_path"], str)
+            or not registration["plan_path"]
+        ):
+            raise ResultContractError("registration_invalid")
+        expected_path = None if plan_source_kind == "embedded" else registration["plan_path"]
+        expected_artifact = "plan.md" if plan_source_kind == "embedded" else None
+        if registration["plan_path"] != expected_path or registration["plan_artifact"] != expected_artifact:
+            raise ResultContractError("registration_invalid")
     issue_number = registration["issue_number"]
     if type(issue_number) is not int or issue_number <= 0:
         raise ResultContractError("registration_invalid")
@@ -476,11 +499,27 @@ def load_validated_registration(
         raise ResultContractError("registration_invalid")
 
     plan_path = registration["plan_path"]
-    relative = PurePosixPath(plan_path)
-    if relative.is_absolute() or ".." in relative.parts or "\\" in plan_path:
-        raise ResultContractError("registration_invalid")
+    if plan_source_kind == "embedded":
+        # Runtime consumers switch to this verified artifact in Task 3.  The
+        # reader nevertheless validates v3 authority now so mixed-version
+        # active runs remain inspectable.
+        from .run_registration import RunRegistrationError, _read_verified_artifact
+
+        try:
+            plan_bytes = _read_verified_artifact(
+                path.parent / "plan.md", registration["plan_hash"]
+            )
+        except RunRegistrationError as exc:
+            raise ResultContractError("registration_invalid", "plan artifact") from exc
+        plan_path = "plan.md"
+    else:
+        assert isinstance(plan_path, str)
+        relative = PurePosixPath(plan_path)
+        if relative.is_absolute() or ".." in relative.parts or "\\" in plan_path:
+            raise ResultContractError("registration_invalid")
+        base_sha = registration["base_sha"]
+        plan_bytes = _git_bytes(repository, "show", f"{base_sha}:{plan_path}")
     base_sha = registration["base_sha"]
-    plan_bytes = _git_bytes(repository, "show", f"{base_sha}:{plan_path}")
     if hashlib.sha256(plan_bytes).hexdigest() != registration["plan_hash"]:
         raise ResultContractError("registration_invalid")
     try:
@@ -509,6 +548,19 @@ def load_validated_registration(
         != f"https://github.com/{snapshot_repo}/issues/{number}".lower()
     ):
         raise ResultContractError("registration_invalid", "issue identity")
+    if plan_source_kind == "embedded":
+        try:
+            pinned_source = github_issues.embedded_plan_source(
+                body + "\n", expected_todo_id=registration["todo_id"]
+            )
+        except ValueError as exc:
+            raise ResultContractError("registration_invalid", "embedded Plan") from exc
+        if (
+            pinned_source is None
+            or pinned_source.plan_hash != registration["plan_hash"]
+            or pinned_source.document.encode("utf-8") != plan_bytes
+        ):
+            raise ResultContractError("registration_invalid", "embedded Plan authority")
     sections = parse_issue_body(body)
     title_slug = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")
     expected_worktree = (
@@ -516,7 +568,10 @@ def load_validated_registration(
     ).resolve()
     if (
         worktree != expected_worktree
-        or github_issues.first_lines(sections.get("Plan", ())) != (plan_path,)
+        or (
+            plan_source_kind == "legacy_path"
+            and github_issues.first_lines(sections.get("Plan", ())) != (plan_path,)
+        )
         or github_issues.first_lines(sections.get("Branch", ())) != (registration["branch"],)
     ):
         raise ResultContractError("registration_invalid", "issue fields")
