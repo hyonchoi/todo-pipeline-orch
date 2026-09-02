@@ -6,6 +6,7 @@ import dataclasses
 import json
 import logging
 import os
+import shlex
 import subprocess
 import sys
 import tomllib
@@ -23,6 +24,7 @@ from hermes_pipeline.github_issues import (
     LABEL_VOCABULARY,
     GitHubIssuesError,
     compile_eligible_issues,
+    gh_bin,
     issue_from_api,
     parse_issue_body,
     render_issue_body,
@@ -53,6 +55,7 @@ from hermes_pipeline.harness import (
     _with_offline_terminal_workflow,
     branch_has_run_provenance,
     cards_for_registered_keys,
+    cleanup_remote,
     clone_sandbox,
     commit_plan,
     create_harness_issue,
@@ -3121,12 +3124,14 @@ class TestCloneSandbox:
 
         clone_sandbox(self.sandbox, project_dir)
 
-        assert calls[0]["argv"] == ["git", "clone", "--", self.sandbox.url, str(project_dir)]
+        assert _split_git_argv(calls[0]["argv"]) == (
+            str(project_dir.parent.resolve()), True, ["clone", "--", self.sandbox.url, str(project_dir)]
+        )
         assert calls[0]["cwd"] == tmp_path
         assert calls[0]["env"]["GIT_TERMINAL_PROMPT"] == "0"
-        assert [c["argv"] for c in calls[1:]] == [
-            ["git", "config", "user.email", "test@localhost"],
-            ["git", "config", "user.name", "TPO Harness"],
+        assert [_split_git_argv(c["argv"]) for c in calls[1:]] == [
+            (str(project_dir.resolve()), False, ["config", "user.email", "test@localhost"]),
+            (str(project_dir.resolve()), False, ["config", "user.name", "TPO Harness"]),
         ]
         assert all(c["cwd"] == project_dir for c in calls[1:])
 
@@ -3140,7 +3145,10 @@ class TestCloneSandbox:
 
         clone_sandbox(self.sandbox, project_dir, branch="develop")
 
-        assert calls[0] == ["git", "clone", "--branch", "develop", "--", self.sandbox.url, str(project_dir)]
+        assert _split_git_argv(calls[0]) == (
+            str(project_dir.parent.resolve()), True,
+            ["clone", "--branch", "develop", "--", self.sandbox.url, str(project_dir)],
+        )
 
     def test_clone_refuses_existing_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -3214,8 +3222,9 @@ class TestCloneSandbox:
 
     def test_seed_check_treats_tree_as_missing(self, tmp_path, monkeypatch):
         def fake_git(argv, **kw):
-            assert argv[:3] == ["git", "cat-file", "-t"]
-            kind = "tree" if argv[3] == "HEAD:tests/__init__.py" else "blob"
+            rest = _split_git_argv(argv)[2]
+            assert rest[:2] == ["cat-file", "-t"]
+            kind = "tree" if rest[2] == "HEAD:tests/__init__.py" else "blob"
             return subprocess.CompletedProcess(argv, 0, f"{kind}\n", "")
 
         monkeypatch.setattr("hermes_pipeline.harness._git", fake_git)
@@ -3298,7 +3307,9 @@ class TestCloneSandbox:
         baseline = take_baseline(tmp_path, self.sandbox, viewer="octocat", default_branch="main", now=now)
 
         # Enumeration targets the sandbox URL, never the clone's agent-mutable ``origin``.
-        assert seen == [["git", "ls-remote", "--heads", "--", "https://github.com/acme/sandbox.git"]]
+        assert [_split_git_argv(argv)[1:] for argv in seen] == [
+            (True, ["ls-remote", "--heads", "--", "https://github.com/acme/sandbox.git"])
+        ]
         assert baseline.started_at == datetime(2026, 9, 1, 11, 59, 59, tzinfo=UTC)
         assert dict(baseline.heads) == {"main": sha, "feat/x": sha2}
         with pytest.raises(TypeError):
@@ -3534,15 +3545,22 @@ class TestInitSandbox:
         _assert_porcelain_clean_with_runtime_junk(workspace / "sandbox")
 
     @pytest.mark.real_git
-    def test_empty_path_commits_even_when_operator_config_requires_signing(
-        self, fake_gh, tmp_path, monkeypatch
-    ):
+    def test_empty_path_commits_even_when_clone_config_requires_signing(self, fake_gh, tmp_path, monkeypatch):
+        # Global config is disabled by ``_git_env``; repo-LOCAL config still applies, so the
+        # ``-c commit.gpgsign=false`` pin is what keeps the seed commit unsigned.
         bare = _make_bare_remote(tmp_path, {})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare)
-        gitconfig = tmp_path / "operator.gitconfig"
-        gitconfig.write_text("[commit]\n\tgpgsign = true\n[user]\n\tsigningkey = 0000DEAD\n")
-        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
+        real_git = harness_mod._git
+
+        def signing_clone_git(argv, **kwargs):
+            result = real_git(argv, **kwargs)
+            if harness_mod._git_verb(argv[1:]) == "clone":
+                _real_git("config", "--local", "commit.gpgsign", "true", cwd=Path(argv[-1]))
+                _real_git("config", "--local", "user.signingkey", "0000DEAD", cwd=Path(argv[-1]))
+            return result
+
+        monkeypatch.setattr(harness_mod, "_git", signing_clone_git)
 
         assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
 
@@ -3635,7 +3653,7 @@ class TestInitSandbox:
     def _seam(calls: list[list[str]], *, ls_remote: str, head: str, tracked: str):
         def fake_git(argv, **kw):
             calls.append(argv)
-            verb = argv[1]
+            verb = harness_mod._git_verb(argv[1:])
             out = ""
             if verb == "ls-remote":
                 out = ls_remote
@@ -3662,10 +3680,11 @@ class TestInitSandbox:
 
         assert init_sandbox(self.sandbox, tmp_path / "workspace") == "seeded"
 
-        pushes = [c for c in calls if c[1] == "push"]
-        assert pushes == [["git", "push", "origin", "HEAD:refs/heads/main"]]
-        assert calls[0][:4] == ["git", "ls-remote", "--heads", "--tags"]
-        assert ["git", "add", "-A"] not in calls
+        pushes = [c for c in calls if harness_mod._git_verb(c[1:]) == "push"]
+        assert [_split_git_argv(c)[1:] for c in pushes] == [(True, ["push", "origin", "HEAD:refs/heads/main"])]
+        first = _split_git_argv(calls[0])
+        assert first[1] is True and first[2][:3] == ["ls-remote", "--heads", "--tags"]
+        assert all(_split_git_argv(c)[2][:2] != ["add", "-A"] for c in calls)
 
     def test_non_empty_path_push_argv_targets_default_branch(self, fake_gh, tmp_path, monkeypatch):
         calls: list[list[str]] = []
@@ -3677,13 +3696,14 @@ class TestInitSandbox:
 
         assert init_sandbox(self.sandbox, tmp_path / "workspace") == "seeded"
 
-        pushes = [c for c in calls if c[1] == "push"]
-        assert pushes == [["git", "push", "origin", "HEAD:refs/heads/develop"]]
-        clone = next(c for c in calls if c[1] == "clone")
-        assert clone[:4] == ["git", "clone", "--branch", "develop"]
-        adds = [c for c in calls if c[1] == "add"]
-        assert adds and all(c[2:4] == ["-f", "--"] for c in adds)
-        assert ["git", "add", "-A"] not in calls
+        pushes = [c for c in calls if harness_mod._git_verb(c[1:]) == "push"]
+        assert [_split_git_argv(c)[1:] for c in pushes] == [(True, ["push", "origin", "HEAD:refs/heads/develop"])]
+        clone = next(c for c in calls if harness_mod._git_verb(c[1:]) == "clone")
+        credentialed, rest = _split_git_argv(clone)[1:]
+        assert credentialed is True and rest[:3] == ["clone", "--branch", "develop"]
+        adds = [_split_git_argv(c)[2] for c in calls if harness_mod._git_verb(c[1:]) == "add"]
+        assert adds and all(c[1:3] == ["-f", "--"] for c in adds)
+        assert ["add", "-A"] not in adds
 
     # --- non-empty repository path -----------------------------------------------
 
@@ -4324,6 +4344,17 @@ class TestHarnessIssue:
 
 class TestCommitPlan:
     @pytest.mark.real_git
+    def test_commit_plan_commits_when_clone_config_requires_signing(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        _real_git("config", "--local", "commit.gpgsign", "true", cwd=project_dir)
+        _real_git("config", "--local", "user.signingkey", "0000DEAD", cwd=project_dir)
+
+        sha = commit_plan(project_dir, _harness_issue(42))
+
+        assert sha == _real_git("rev-parse", "HEAD", cwd=project_dir)
+        assert _real_git("log", "-1", "--format=%G?", cwd=project_dir) == "N"
+
+    @pytest.mark.real_git
     def test_commit_plan_document_validates_for_issue_number(self, tmp_path):
         project_dir, _ = _seeded_clone(tmp_path)
         issue = _harness_issue(42)
@@ -4359,7 +4390,7 @@ class TestCommitPlan:
         assert "push" not in verbs
         (commit_argv,) = [argv for argv in recorded if harness_mod._git_verb(argv[1:]) == "commit"]
         assert "--no-verify" in commit_argv
-        assert commit_argv[1:3] == ["-c", "commit.gpgsign=false"]
+        assert _split_git_argv(commit_argv)[2][:2] == ["-c", "commit.gpgsign=false"]
         assert commit_argv[-2:] == ["--", "docs/harness/tok00000-plan.md"]
         assert _real_git("rev-parse", "origin/main", cwd=project_dir) != _real_git("rev-parse", "HEAD", cwd=project_dir)
 
@@ -4891,7 +4922,7 @@ class TestBranchProvenance:
         assert all(d.parent == provenance_dir and d.name.startswith("prov-") for d in init_dirs)
         # Every ancestry query runs with replace refs disabled.
         ancestry = [argv for argv in seen if "merge-base" in argv]
-        assert ancestry and all(argv[1:3] == ["-c", "core.useReplaceRefs=false"] for argv in ancestry)
+        assert ancestry and all(_split_git_argv(argv)[2][:2] == ["-c", "core.useReplaceRefs=false"] for argv in ancestry)
 
     def test_preseeded_grafts_and_alternates_are_discarded(self, fake_gh, tmp_path: Path):
         # Plan commit exists only in the clone; a forger plants a bare repo in the provenance ROOT
@@ -5291,6 +5322,21 @@ class TestDiscoverRemoteArtifacts:
             _RECORDED_PULLS_ARGV[-1], _ISSUE_BRANCH_PULLS_ARGV[-1], _PULLS_ARGV[-1], _SEARCH_ARGV[-1],
         ]
 
+    def test_clone_local_insteadof_cannot_hide_heads_from_discovery(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/harness-abcd1234")
+        # The agent plants a clone-local rewrite of the sandbox URL to an empty decoy remote.
+        decoy = tmp_path / "decoy.git"
+        decoy.mkdir()
+        _real_git("init", "-q", "--bare", cwd=decoy)
+        _real_git("config", "--local", f"url.file://{decoy}.insteadOf", sandbox.url, cwd=project_dir)
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
+
+        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+
+        assert artifacts.deletable_branches == (("feat/harness-abcd1234", feat_sha),)
+
     def test_issue_branch_query_used_without_recorded_branch(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
         plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/harness-abcd1234")
@@ -5445,3 +5491,503 @@ class TestVerifyPullRequest:
             issue_number=7, pr_numbers=(5,), cleanup_leftovers=("branch feat/z",),
         )
         assert (full.issue_number, full.pr_numbers, full.cleanup_leftovers) == (7, (5,), ("branch feat/z",))
+
+
+def _remote_has_branch(sandbox: SandboxRepo, name: str) -> bool:
+    bare = Path(sandbox.url.removeprefix("file://"))
+    return bool(_real_git("ls-remote", "--heads", str(bare), name, cwd=bare))
+
+
+def _delete_remote_branch(sandbox: SandboxRepo, name: str) -> None:
+    bare = Path(sandbox.url.removeprefix("file://"))
+    _real_git("update-ref", "-d", f"refs/heads/{name}", cwd=bare)
+
+
+_ISSUE_CLOSE_ARGV = ("gh", "issue", "close", "7", "--repo", "acme/sandbox", "--reason", "completed")
+_PR_CLOSE_ARGV = ("gh", "pr", "close", "5", "--repo", "acme/sandbox", "--comment", "Closed by tpo test cleanup.")
+
+
+def _credential_argv() -> list[str]:
+    """The gh credential-helper pair ``_run_git`` injects, evaluated at assertion time."""
+    return ["-c", "credential.helper=", "-c", f"credential.helper=!{shlex.quote(gh_bin())} auth git-credential"]
+
+
+def _split_git_argv(argv: list[str]) -> tuple[str, bool, list[str]]:
+    """``(safe_directory, credentialed, rest)`` for a recorded ``_run_git`` argv."""
+    assert argv[:2] == ["git", "-c"] and argv[2].startswith("safe.directory="), argv
+    safe_dir = argv[2].removeprefix("safe.directory=")
+    rest = argv[3:]
+    credentialed = rest[:4] == _credential_argv()
+    if credentialed:
+        rest = rest[4:]
+    return safe_dir, credentialed, rest
+
+
+def _lease_delete_rest(url: str, name: str, sha: str) -> list[str]:
+    return [
+        "-c", f"core.hooksPath={os.devnull}",
+        "push", f"--force-with-lease=refs/heads/{name}:{sha}", "--", url, f":refs/heads/{name}",
+    ]
+
+
+def _assert_lease_refusal(leftover: str, url: str, name: str, sha: str) -> None:
+    """The leftover names the stale lease and prescribes only lease-preserving commands."""
+    assert leftover.startswith(f"branch {name} ({sha[:7]}): delete refused (git_error: git push failed: ")
+    assert "[rejected]" in leftover and "stale info" in leftover
+    assert leftover.endswith(
+        f"); inspect: git ls-remote --heads -- {url} {name}; then if safe:"
+        f" git push --force-with-lease=refs/heads/{name}:{sha} -- {url} :refs/heads/{name}"
+    )
+    assert "--delete" not in leftover
+
+
+class _GitRecorder:
+    """``_git`` seam that records argv + kwargs and (optionally) a shared timeline, then runs git."""
+
+    def __init__(self, timeline: list[str] | None = None) -> None:
+        self.calls: list[tuple[list[str], dict]] = []
+        self.timeline = timeline
+
+    def __call__(self, argv, **kwargs):
+        argv = list(argv)
+        self.calls.append((argv, kwargs))
+        if self.timeline is not None:
+            self.timeline.append(f"git {harness_mod._git_verb(argv[1:])}")
+        return subprocess.run(argv, **kwargs)
+
+    def by_verb(self, verb: str) -> list[tuple[list[str], dict]]:
+        return [(argv, kw) for argv, kw in self.calls if harness_mod._git_verb(argv[1:]) == verb]
+
+
+@pytest.mark.real_git
+class TestCleanupRemote:
+    def _setup(self, tmp_path: Path, fake_gh, *branches: str) -> tuple[Path, SandboxRepo, dict[str, str]]:
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        foreign = _foreign_clone(tmp_path, sandbox)
+        shas = {name: _push_new_branch(foreign, name) for name in (branches or ("feat/x",))}
+        fake_gh.on(*_ISSUE_CLOSE_ARGV)
+        fake_gh.on(*_PR_CLOSE_ARGV)
+        return project_dir, sandbox, shas
+
+    def _cleanup(self, project_dir: Path, sandbox: SandboxRepo, artifacts: RemoteArtifacts, staging_root: Path):
+        return cleanup_remote(project_dir, sandbox, artifacts, staging_root=staging_root)
+
+    def test_happy_path_closes_issue_and_pr_and_deletes_branch(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(_pr(5),), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        result = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert result == (True, ())
+        assert fake_gh.gh_calls() == [list(_ISSUE_CLOSE_ARGV[1:]), list(_PR_CLOSE_ARGV[1:])]
+        assert not _remote_has_branch(sandbox, "feat/x")
+        assert not any((tmp_path / "staging").iterdir())
+
+    def test_operations_run_issue_then_prs_then_branches(self, fake_gh, tmp_path: Path, monkeypatch):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        timeline: list[str] = []
+
+        def gh_handler(argv):
+            timeline.append(" ".join(argv[1:3]))
+            return 0, "", ""
+
+        fake_gh.on(*_ISSUE_CLOSE_ARGV, handler=gh_handler)
+        fake_gh.on(*_PR_CLOSE_ARGV, handler=gh_handler)
+        monkeypatch.setattr(harness_mod, "_git", _GitRecorder(timeline))
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(_pr(5),), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        assert self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging") == (True, ())
+
+        assert timeline == ["git init", "issue close", "pr close", "git push"]
+
+    def test_multiple_artifacts_are_each_handled_independently(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh, "feat/x", "feat/y")
+        fake_gh.on("gh", "pr", "close", "6", "--repo", "acme/sandbox", "--comment", "Closed by tpo test cleanup.")
+        bare = Path(sandbox.url.removeprefix("file://"))
+        _advance_remote(bare, tmp_path, "feat/y")
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(_pr(5), _pr(6, head_ref="feat/y")),
+            deletable_branches=(("feat/x", shas["feat/x"]), ("feat/y", shas["feat/y"])), leftovers=(),
+        )
+
+        all_ok, leftovers = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert all_ok is False
+        assert len(leftovers) == 1
+        _assert_lease_refusal(leftovers[0], sandbox.url, "feat/y", shas["feat/y"])
+        assert [argv[:3] for argv in fake_gh.gh_calls()] == [
+            ["issue", "close", "7"], ["pr", "close", "5"], ["pr", "close", "6"],
+        ]
+        assert not _remote_has_branch(sandbox, "feat/x")
+        assert _remote_has_branch(sandbox, "feat/y")
+
+    def test_lease_refuses_delete_when_remote_tip_moved(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        sha = shas["feat/x"]
+        bare = Path(sandbox.url.removeprefix("file://"))
+        _advance_remote(bare, tmp_path, "feat/x")
+        artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(("feat/x", sha),), leftovers=())
+
+        all_ok, leftovers = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert all_ok is False
+        assert len(leftovers) == 1
+        _assert_lease_refusal(leftovers[0], sandbox.url, "feat/x", sha)
+        assert _remote_has_branch(sandbox, "feat/x")
+
+    def test_already_deleted_branch_is_success(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        _delete_remote_branch(sandbox, "feat/x")
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        assert self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging") == (True, ())
+
+    def test_leftover_url_userinfo_is_scrubbed(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        sha = shas["feat/x"]
+        bare = Path(sandbox.url.removeprefix("file://"))
+        _advance_remote(bare, tmp_path, "feat/x")
+        # Pretend the URL carried a token; the push still fails (stale) and the leftover must not echo it.
+        tainted = dataclasses.replace(sandbox, url=f"file://x-access-token:ghs_SECRET@localhost{bare}")
+        artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(("feat/x", sha),), leftovers=())
+
+        all_ok, leftovers = self._cleanup(project_dir, tainted, artifacts, tmp_path / "staging")
+
+        assert all_ok is False
+        assert "ghs_SECRET" not in leftovers[0]
+        assert f"file://***@localhost{bare}" in leftovers[0]
+
+    def test_issue_close_failure_is_a_leftover_and_other_steps_run(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        fake_gh.on(*_ISSUE_CLOSE_ARGV, rc=1, stderr="HTTP 500")
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(_pr(5),), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        all_ok, leftovers = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert all_ok is False
+        assert leftovers == ("issue #7: close failed (gh_unavailable); run: gh issue close 7 --repo acme/sandbox",)
+        assert list(_PR_CLOSE_ARGV[1:]) in fake_gh.gh_calls()
+        assert not _remote_has_branch(sandbox, "feat/x")
+
+    def test_pr_close_failure_is_a_leftover_and_branch_still_deleted(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        fake_gh.on(*_PR_CLOSE_ARGV, rc=1, stderr="gh: Must have admin rights to Repository. (HTTP 403)")
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(_pr(5),), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        all_ok, leftovers = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert all_ok is False
+        assert leftovers == ("pr #5: close failed (gh_auth); run: gh pr close 5 --repo acme/sandbox",)
+        assert not _remote_has_branch(sandbox, "feat/x")
+
+    def test_closed_and_merged_prs_are_not_closed_again(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, _ = self._setup(tmp_path, fake_gh)
+        prs = (
+            dataclasses.replace(_pr(5), state="CLOSED"),
+            dataclasses.replace(_pr(6), state="MERGED", merged=True),
+            dataclasses.replace(_pr(8), merged=True),
+        )
+        artifacts = RemoteArtifacts(issue_number=7, prs=prs, deletable_branches=(), leftovers=())
+
+        result = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert result == (True, ())
+        assert not any(argv[:2] == ["pr", "close"] for argv in fake_gh.gh_calls())
+
+    def test_discovery_leftovers_pass_through_without_flipping_all_ok(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, _ = self._setup(tmp_path, fake_gh)
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(), deletable_branches=(),
+            leftovers=("pr #9: not attributable", "branch ops (abc1234): no run provenance"),
+        )
+
+        result = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert result == (True, ("branch ops (abc1234): no run provenance", "pr #9: not attributable"))
+
+    def test_staging_root_failure_raises_before_any_remote_change(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        staging_root = tmp_path / "staging"
+        staging_root.write_text("not a directory\n")
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(_pr(5),), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._cleanup(project_dir, sandbox, artifacts, staging_root)
+
+        assert exc_info.value.code == "cleanup_staging_failed"
+        assert fake_gh.gh_calls() == []
+        assert _remote_has_branch(sandbox, "feat/x")
+
+    def test_staging_root_inside_clone_is_rejected_before_any_remote_change(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(_pr(5),), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._cleanup(project_dir, sandbox, artifacts, project_dir / "staging")
+
+        assert exc_info.value.code == "cleanup_staging_failed"
+        assert fake_gh.gh_calls() == []
+        assert _remote_has_branch(sandbox, "feat/x")
+
+    def test_delete_push_argv_and_cwd_are_pinned(self, fake_gh, tmp_path: Path, monkeypatch):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        sha = shas["feat/x"]
+        recorder = _GitRecorder()
+        monkeypatch.setattr(harness_mod, "_git", recorder)
+        artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(("feat/x", sha),), leftovers=())
+
+        assert self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging") == (True, ())
+
+        ((push_argv, push_kwargs),) = recorder.by_verb("push")
+        cwd = Path(push_kwargs["cwd"])
+        assert _split_git_argv(push_argv) == (str(cwd.resolve()), True, _lease_delete_rest(sandbox.url, "feat/x", sha))
+        assert cwd.parent == tmp_path / "staging" and cwd.name.startswith("prov-")
+        assert cwd.resolve() != project_dir.resolve()
+
+    def test_non_lease_push_failure_is_reported_even_when_branch_is_gone(self, fake_gh, tmp_path: Path, monkeypatch):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        _delete_remote_branch(sandbox, "feat/x")
+        real_git = harness_mod._git
+
+        def unreachable_push(argv, **kwargs):
+            if harness_mod._git_verb(argv[1:]) == "push":
+                return subprocess.CompletedProcess(argv, 128, "", "fatal: unable to access 'x': Could not resolve host")
+            return real_git(argv, **kwargs)
+
+        monkeypatch.setattr(harness_mod, "_git", unreachable_push)
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        all_ok, leftovers = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        assert all_ok is False
+        assert len(leftovers) == 1
+        assert leftovers[0].startswith(
+            f"branch feat/x ({shas['feat/x'][:7]}): delete refused (git_error: git push failed: fatal: unable to access"
+        )
+
+    def test_push_env_ignores_ambient_git_config(self, fake_gh, tmp_path: Path, monkeypatch):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "0")
+        monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.hooksPath=/nope'")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "operator.gitconfig"))
+        monkeypatch.setenv("GIT_TEMPLATE_DIR", str(tmp_path / "tpl"))
+        monkeypatch.setenv("GIT_SSH_COMMAND", "ssh -o ProxyCommand=evil")
+        monkeypatch.setenv("GIT_SSH", "/tmp/evil-ssh")
+        monkeypatch.setenv("LC_ALL", "de_DE.UTF-8")
+        recorder = _GitRecorder()
+        monkeypatch.setattr(harness_mod, "_git", recorder)
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
+
+        ((_, push_kwargs),) = recorder.by_verb("push")
+        env = push_kwargs["env"]
+        assert {key for key in env if key.startswith("GIT_CONFIG")} == {"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM"}
+        assert env["GIT_CONFIG_GLOBAL"] == os.devnull
+        assert env["GIT_CONFIG_NOSYSTEM"] == "1"
+        assert env["LC_ALL"] == "C"
+        assert not {"GIT_TEMPLATE_DIR", "GIT_SSH_COMMAND", "GIT_SSH"} & env.keys()
+        assert not _remote_has_branch(sandbox, "feat/x")
+
+    def test_ambient_insteadof_cannot_redirect_delete_to_a_decoy(self, fake_gh, tmp_path: Path, monkeypatch):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        bare = Path(sandbox.url.removeprefix("file://"))
+        decoy = tmp_path / "decoy.git"
+        _real_git("clone", "-q", "--bare", str(bare), str(decoy), cwd=tmp_path)
+        decoy_url = f"file://{decoy}"
+        assert _real_git("ls-remote", "--heads", decoy_url, "feat/x", cwd=tmp_path)
+        monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+        monkeypatch.setenv("GIT_CONFIG_KEY_0", f"url.{decoy_url}.insteadOf")
+        monkeypatch.setenv("GIT_CONFIG_VALUE_0", sandbox.url)
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        assert self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging") == (True, ())
+
+        assert not _remote_has_branch(sandbox, "feat/x")
+        assert _real_git("ls-remote", "--heads", decoy_url, "feat/x", cwd=tmp_path).endswith("refs/heads/feat/x")
+
+    def test_ambient_template_hooks_do_not_run_in_staging_repo(self, fake_gh, tmp_path: Path, monkeypatch):
+        project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
+        sentinel = tmp_path / "hook-ran"
+        hooks = tmp_path / "tpl" / "hooks"
+        hooks.mkdir(parents=True)
+        hook = hooks / "pre-push"
+        hook.write_text(f"#!/bin/sh\ntouch {sentinel}\nexit 1\n")
+        hook.chmod(0o755)
+        monkeypatch.setenv("GIT_TEMPLATE_DIR", str(tmp_path / "tpl"))
+        artifacts = RemoteArtifacts(
+            issue_number=7, prs=(), deletable_branches=(("feat/x", shas["feat/x"]),), leftovers=()
+        )
+
+        assert self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging") == (True, ())
+
+        assert not sentinel.exists()
+        assert not _remote_has_branch(sandbox, "feat/x")
+
+
+class TestRemoteArtifactsValidation:
+    def test_valid_shape_is_accepted(self):
+        RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(("feat/x", "a" * 40),), leftovers=())
+
+    @pytest.mark.parametrize("number", [0, -1, True, "7"])
+    def test_issue_number_must_be_a_positive_int(self, number):
+        with pytest.raises(ValueError):
+            RemoteArtifacts(issue_number=number, prs=(), deletable_branches=(), leftovers=())
+
+    @pytest.mark.parametrize("sha", ["abc", "A" * 40, "g" * 40, " " + "a" * 39])
+    def test_sha_must_be_forty_hex(self, sha):
+        with pytest.raises(ValueError):
+            RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(("feat/x", sha),), leftovers=())
+
+    @pytest.mark.parametrize(
+        "name",
+        ["master", "Main", "MASTER", "feat x", "a:b", "a*b", "a..b", "-x", "refs/heads/x", "x/refs/y", "",
+         "--force-with-lease=refs/heads/main:0000"],
+    )
+    def test_branch_name_is_syntactically_screened(self, name):
+        with pytest.raises(ValueError):
+            RemoteArtifacts(issue_number=7, prs=(), deletable_branches=((name, "a" * 40),), leftovers=())
+
+
+class TestRunGitHardening:
+    @pytest.mark.real_git
+    def test_network_verbs_get_gh_credential_helper_and_a_config_reset(self, tmp_path: Path, monkeypatch):
+        recorder = _GitRecorder()
+        monkeypatch.setattr(harness_mod, "_git", recorder)
+        project_dir, _ = _seeded_clone(tmp_path)
+
+        ((clone_argv, clone_kwargs),) = recorder.by_verb("clone")
+        safe_dir, credentialed, rest = _split_git_argv(clone_argv)
+        assert (safe_dir, credentialed, rest[0]) == (str(Path(clone_kwargs["cwd"]).resolve()), True, "clone")
+        ((config_argv, config_kwargs), *_) = recorder.by_verb("config")
+        safe_dir, credentialed, rest = _split_git_argv(config_argv)
+        assert (safe_dir, credentialed, rest[0]) == (str(Path(config_kwargs["cwd"]).resolve()), False, "config")
+        assert (project_dir / "pyproject.toml").exists()
+
+    @pytest.mark.real_git
+    def test_credential_helper_quotes_gh_bin_with_spaces(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setenv("TPO_GH_BIN", "/opt/g h/gh")
+        recorder = _GitRecorder()
+        monkeypatch.setattr(harness_mod, "_git", recorder)
+        _seeded_clone(tmp_path)
+
+        ((clone_argv, _),) = recorder.by_verb("clone")
+        assert "credential.helper=!'/opt/g h/gh' auth git-credential" in clone_argv
+        assert _split_git_argv(clone_argv)[1] is True
+
+    def test_git_verb_skips_injected_config_pairs(self):
+        argv = ["-c", "safe.directory=/x", *_credential_argv(), "-c", "core.hooksPath=/dev/null", "push", "x"]
+        assert harness_mod._git_verb(argv) == "push"
+
+    def test_timeout_is_a_git_error(self, tmp_path: Path, monkeypatch):
+        def hanging_git(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs.get("timeout", 300.0))
+
+        monkeypatch.setattr(harness_mod, "_git", hanging_git)
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            harness_mod._run_git(["ls-remote", "--heads", "--", "file:///nowhere"], cwd=tmp_path, timeout=1.5)
+        assert exc_info.value.code == "git_error"
+        assert exc_info.value.detail == "git ls-remote timed out after 1.5s"
+
+    @pytest.mark.real_git
+    def test_safe_directory_is_the_resolved_cwd(self, tmp_path: Path, monkeypatch):
+        target = tmp_path / "real"
+        target.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(target, target_is_directory=True)
+        recorder = _GitRecorder()
+        monkeypatch.setattr(harness_mod, "_git", recorder)
+
+        harness_mod._run_git(["init", "-q", "--bare"], cwd=link)
+
+        ((argv, _),) = recorder.by_verb("init")
+        assert _split_git_argv(argv)[0] == str(target.resolve())
+
+    @pytest.mark.real_git
+    def test_seam_receives_timeout(self, tmp_path: Path, monkeypatch):
+        recorder = _GitRecorder()
+        monkeypatch.setattr(harness_mod, "_git", recorder)
+        harness_mod._run_git(["init", "-q", "--bare"], cwd=tmp_path)
+        ((_, kwargs),) = recorder.by_verb("init")
+        assert kwargs["timeout"] == 300.0
+
+    @pytest.mark.real_git
+    def test_provenance_dir_uses_empty_template_and_screens_hooks_and_config(self, tmp_path: Path, monkeypatch):
+        hooks = tmp_path / "tpl" / "hooks"
+        hooks.mkdir(parents=True)
+        (hooks / "pre-push").write_text("#!/bin/sh\nexit 1\n")
+        (hooks / "pre-push").chmod(0o755)
+        monkeypatch.setenv("GIT_TEMPLATE_DIR", str(tmp_path / "tpl"))
+        recorder = _GitRecorder()
+        monkeypatch.setattr(harness_mod, "_git", recorder)
+
+        work = harness_mod._ensure_provenance_dir(tmp_path / "prov")
+
+        ((init_argv, _),) = recorder.by_verb("init")
+        assert "--template=" in init_argv
+        assert not (work / "hooks" / "pre-push").exists()
+        config = (work / "config").read_text()
+        assert not any(token in config.lower() for token in ("include", "hookspath", "insteadof"))
+
+    def test_provenance_dir_rejects_planted_hook_or_config(self, tmp_path: Path, monkeypatch):
+        def planting_git(argv, **kwargs):
+            work = Path(kwargs["cwd"])
+            (work / "hooks").mkdir(parents=True)
+            hook = work / "hooks" / "pre-push"
+            hook.write_text("#!/bin/sh\n")
+            hook.chmod(0o755)
+            (work / "config").write_text("[core]\n\tbare = true\n[url \"file:///decoy\"]\n\tinsteadOf = x\n")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(harness_mod, "_git", planting_git)
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            harness_mod._ensure_provenance_dir(tmp_path / "prov")
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert "hooks/pre-push" in exc_info.value.detail
+        assert "config:insteadof" in exc_info.value.detail
+        assert list((tmp_path / "prov").iterdir()) == []
+
+    @pytest.mark.parametrize("line", ["[include]\n\tpath = /x\n", "[core]\n\thooksPath = /x\n"])
+    def test_provenance_dir_rejects_include_and_hookspath_config(self, tmp_path: Path, monkeypatch, line):
+        def planting_git(argv, **kwargs):
+            (Path(kwargs["cwd"]) / "config").write_text("[core]\n\tbare = true\n" + line)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+
+        monkeypatch.setattr(harness_mod, "_git", planting_git)
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            harness_mod._ensure_provenance_dir(tmp_path / "prov")
+        assert exc_info.value.detail.startswith("fresh provenance dir carries config:")
+
+
+class TestListRunIssuesNumberScreening:
+    def test_bool_and_non_positive_numbers_are_skipped(self, fake_gh, tmp_path: Path):
+        page = [
+            {"number": True, "title": _HARNESS_TITLE},
+            {"number": 0, "title": _HARNESS_TITLE},
+            {"number": -3, "title": _HARNESS_TITLE},
+            {"number": 12, "title": _HARNESS_TITLE},
+        ]
+        fake_gh.on(*_LIST_ARGV, stdout=json.dumps([page]))
+        sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
+
+        assert harness_mod._list_run_issues(tmp_path, sandbox, run_token=_RUN_TOKEN, baseline=_baseline()) == [12]

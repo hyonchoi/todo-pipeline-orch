@@ -6,6 +6,7 @@ import json as _json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -283,13 +284,42 @@ _GIT_SCRUBBED_ENV = frozenset(
         "GIT_GRAFT_FILE",
         "GIT_NAMESPACE",
         "GIT_COMMON_DIR",
+        # An inherited SSH wrapper could observe or redirect a network call.
+        "GIT_SSH_COMMAND",
+        "GIT_SSH",
     }
 )
 
 
+# Verbs that talk to a remote and therefore need credentials.
+_GIT_NETWORK_VERBS = frozenset({"clone", "fetch", "ls-remote", "push"})
+
+
 def _git_env() -> dict[str, str]:
-    env = {key: value for key, value in os.environ.items() if key not in _GIT_SCRUBBED_ENV}
+    """Environment for every harness git call: no inherited repo location, no ambient config.
+
+    Every ``GIT_CONFIG*`` variable and ``GIT_TEMPLATE_DIR`` is dropped and the system
+    and global config files are disabled (``GIT_CONFIG_NOSYSTEM=1``,
+    ``GIT_CONFIG_GLOBAL=os.devnull``): an ambient ``url.<decoy>.insteadOf`` would
+    otherwise redirect a lease-protected delete to another repository with rc 0, and
+    a template could plant hooks in the staging repo. ``LC_ALL=C`` keeps git's
+    messages stable for classification. Accepted cost: operator git config is not
+    read at all, so ``http.*`` (proxy, custom CA), ``safe.directory`` (re-supplied
+    per call by :func:`_run_git`), ``credential.*`` (replaced by
+    ``gh auth git-credential``, injected per call) and ``url.*.insteadOf`` (for
+    example an SSH rewrite) do not apply; the ``https_proxy`` and ``GIT_SSL_CAINFO``
+    environment variables still work. ``GIT_CONFIG_GLOBAL``/``GIT_CONFIG_NOSYSTEM``
+    need git >= 2.32; on older git the global file is still read.
+    """
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in _GIT_SCRUBBED_ENV and not key.startswith("GIT_CONFIG") and key != "GIT_TEMPLATE_DIR"
+    }
     env.update(_GIT_NO_PROMPT_ENV)
+    env["GIT_CONFIG_NOSYSTEM"] = "1"
+    env["GIT_CONFIG_GLOBAL"] = os.devnull
+    env["LC_ALL"] = "C"
     return env
 
 
@@ -301,17 +331,36 @@ def _git_verb(args: list[str]) -> str:
     return args[i] if i < len(args) else "git"
 
 
-def _run_git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+def _run_git(
+    args: list[str], *, cwd: Path, check: bool = True, timeout: float = 300.0
+) -> subprocess.CompletedProcess[str]:
+    """Run ``git *args`` with the scrubbed environment (see :func:`_git_env`).
+
+    Every call gets ``-c safe.directory=<cwd>`` because the protected-scope config
+    that would normally mark the directory safe is disabled. Network verbs also get
+    ``-c credential.helper=`` (reset any configured helpers) followed by
+    ``-c credential.helper=!<gh> auth git-credential`` so the gh token is used even
+    though the global config is ignored. The order matters: the empty value clears the
+    list, the second entry is the only helper left.
+    """
+    from .github_issues import gh_bin
+
     verb = _git_verb(args)
+    prefix = ["-c", f"safe.directory={Path(cwd).resolve()}"]
+    if verb in _GIT_NETWORK_VERBS:
+        prefix += ["-c", "credential.helper=", "-c", f"credential.helper=!{shlex.quote(gh_bin())} auth git-credential"]
     try:
         result = _git(
-            ["git", *args],
+            ["git", *prefix, *args],
             cwd=cwd,
             capture_output=True,
             text=True,
             check=False,
+            timeout=timeout,
             env=_git_env(),
         )
+    except subprocess.TimeoutExpired as exc:
+        raise HarnessPreflightError("git_error", f"git {verb} timed out after {timeout:g}s") from exc
     except OSError as exc:
         raise HarnessPreflightError("git_error", f"git {verb} failed: {exc}") from exc
     if check and result.returncode != 0:
@@ -595,13 +644,16 @@ class RunBaseline:
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 
-def _ls_remote_heads(project_dir: Path, url: str) -> dict[str, str]:
+def _ls_remote_heads(project_dir: Path, url: str, *, cwd: Path | None = None) -> dict[str, str]:
     """``{branch: sha}`` for every ``refs/heads/*`` at *url* (never the clone's mutable ``origin``).
 
-    Any line that is not ``<sha>\t<ref>`` raises ``git_error``: a partial listing
-    must never be mistaken for the remote's full head set.
+    Runs in *cwd* (default *project_dir*). Once the agent has run, callers pass a
+    harness-owned directory instead: a clone-local ``url.<decoy>.insteadOf`` would
+    otherwise redirect the listing. Any line that is not ``<sha>\t<ref>`` raises
+    ``git_error``: a partial listing must never be mistaken for the remote's full
+    head set.
     """
-    result = _run_git(["ls-remote", "--heads", "--", url], cwd=project_dir)
+    result = _run_git(["ls-remote", "--heads", "--", url], cwd=project_dir if cwd is None else cwd)
     heads: dict[str, str] = {}
     for line in result.stdout.splitlines():
         sha, sep, ref = line.rstrip("\n").partition("\t")
@@ -969,7 +1021,13 @@ def _list_run_issues(
             continue
         title = payload.get("title")
         number = payload.get("number")
-        if isinstance(title, str) and title.startswith(prefix) and isinstance(number, int):
+        if (
+            isinstance(title, str)
+            and title.startswith(prefix)
+            and isinstance(number, int)
+            and not isinstance(number, bool)
+            and number > 0
+        ):
             numbers.append(number)
     return sorted(numbers)
 
@@ -1258,6 +1316,23 @@ def _is_ancestor(git_dir: Path, ancestor: str, descendant: str) -> bool:
 _PROVENANCE_FORBIDDEN = ("info/grafts", "objects/info/alternates", "shallow")
 
 
+def _planted_hooks_and_config(work: Path) -> list[str]:
+    """Executable non-sample hooks and ``url.``/``hooksPath`` config lines in bare repo *work*."""
+    found: list[str] = []
+    hooks = work / "hooks"
+    if hooks.is_dir():
+        for hook in sorted(hooks.iterdir()):
+            if hook.name.endswith(".sample") or not hook.is_file():
+                continue
+            if os.access(hook, os.X_OK):
+                found.append(f"hooks/{hook.name}")
+    config = work / "config"
+    if config.is_file():
+        text = config.read_text(errors="replace").lower()
+        found.extend(f"config:{token}" for token in ("include", "hookspath", "insteadof") if token in text)
+    return found
+
+
 def _ensure_provenance_dir(root: Path) -> Path:
     """Create a FRESH bare repository under harness-owned *root* for one ancestry check.
 
@@ -1270,9 +1345,12 @@ def _ensure_provenance_dir(root: Path) -> Path:
     """
     root.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="prov-", dir=root))
-    _run_git(["init", "-q", "--bare"], cwd=work)
+    # Empty template: nothing (hooks, config, info/exclude) is copied into the repo.
+    _run_git(["init", "-q", "--bare", "--template="], cwd=work)
     leftover = [rel for rel in _PROVENANCE_FORBIDDEN if (work / rel).exists()]
+    leftover.extend(_planted_hooks_and_config(work))
     if leftover:
+        shutil.rmtree(work, ignore_errors=True)
         raise HarnessRemoteCleanupError(
             "pr_discovery_incomplete", f"fresh provenance dir carries {', '.join(leftover)}"
         )
@@ -1437,6 +1515,31 @@ class RemoteArtifacts:
     """``(name, verified tip sha)`` pairs so the deleter can compare-and-swap."""
     leftovers: tuple[str, ...]
 
+    def __post_init__(self) -> None:
+        number = self.issue_number
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise ValueError(f"issue_number must be a positive int, got {number!r}")
+        for name, sha in self.deletable_branches:
+            if not isinstance(sha, str) or _SHA_RE.match(sha) is None:
+                raise ValueError(f"branch {name!r}: sha must be 40 lowercase hex, got {sha!r}")
+            _screen_branch_name(name)
+
+
+def _screen_branch_name(name: str) -> None:
+    """Cheap syntactic screen for a branch name about to be interpolated into a refspec.
+
+    Rejects whitespace, ``:``, ``*``, ``..``, a leading ``-`` (option injection), an
+    empty name, any ``refs`` path segment, and the protected default branches.
+    """
+    if not isinstance(name, str) or not name or name.startswith("-"):
+        raise ValueError(f"invalid branch name {name!r}")
+    if any(ch.isspace() for ch in name) or ":" in name or "*" in name or ".." in name:
+        raise ValueError(f"invalid branch name {name!r}")
+    if "refs" in name.split("/"):
+        raise ValueError(f"invalid branch name {name!r}")
+    if name.casefold() in _PROTECTED_BRANCHES:
+        raise ValueError(f"protected branch {name!r}")
+
 
 class PullRequestInvariantError(RuntimeError):
     """The live run did not leave exactly one open, attributable pull request."""
@@ -1465,6 +1568,117 @@ def verify_pull_request(artifacts: RemoteArtifacts) -> PullRequest:
 def pr_invariant_event(exc: PullRequestInvariantError) -> tuple[str, dict]:
     """Monitor event ``(name, payload)`` describing a failed PR invariant."""
     return ("pr_invariant_failed", {"code": exc.code, "detail": exc.detail})
+
+
+_PR_CLOSE_COMMENT = "Closed by tpo test cleanup."
+
+
+def _scrub_url(url: str) -> str:
+    return _URL_USERINFO_RE.sub("://***@", url)
+
+
+_LEASE_REFUSAL_TOKENS = ("stale info", "remote ref does not exist", "[rejected]")
+
+
+def _branch_gone(url: str, name: str, *, cwd: Path) -> bool:
+    """True when ``git ls-remote --heads`` lists no ``refs/heads/<name>`` on *url*."""
+    result = _run_git(["ls-remote", "--heads", "--", url, name], cwd=cwd)
+    return not any(line.endswith(f"\trefs/heads/{name}") for line in result.stdout.splitlines())
+
+
+def cleanup_remote(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    artifacts: RemoteArtifacts,
+    *,
+    staging_root: Path,
+    log: logging.Logger = log,
+) -> tuple[bool, tuple[str, ...]]:
+    """Close the run's issue and open PRs and lease-delete its branches; never raise per operation.
+
+    Returns ``(all_ok, leftovers)``. ``leftovers`` merges every failed operation
+    (each with the manual command to finish it) with ``artifacts.leftovers``,
+    sorted. ``all_ok`` is False only when an operation attempted here failed;
+    discovery leftovers are already-reported non-artifacts and do not flip it.
+
+    Branch deletion is a compare-and-swap: ``git push --force-with-lease=<ref>:<sha>
+    :<ref>`` from a fresh bare staging repo refuses (``stale info``) when the
+    remote tip no longer equals the sha recorded at discovery, so a branch that
+    moved after discovery is reported, not deleted. A refusal is re-probed with
+    ``ls-remote``: a branch that is already gone counts as deleted (idempotent).
+    REST ref deletion has no such precondition and is deliberately not used; the
+    manual command in a leftover keeps the lease too.
+
+    Raises :class:`HarnessRemoteCleanupError` before anything remote is touched when
+    *staging_root* overlaps the clone or the staging repo cannot be created (both
+    ``cleanup_staging_failed``).
+    """
+    from .github_issues import GitHubIssuesError, _gh, close_issue
+
+    try:
+        _reject_nested_provenance_dir(project_dir, staging_root)
+        work = _ensure_provenance_dir(staging_root)
+    except (OSError, HarnessPreflightError, HarnessRemoteCleanupError) as exc:
+        raise HarnessRemoteCleanupError("cleanup_staging_failed", f"{staging_root}: {exc}") from exc
+
+    url = sandbox.url
+    shown_url = _scrub_url(url)
+    failures: list[str] = []
+    try:
+        issue = artifacts.issue_number
+        log.info("harness cleanup: closing issue #%d in %s", issue, sandbox.repo)
+        try:
+            close_issue(project_dir, issue, repo=sandbox.repo)
+        except (GitHubIssuesError, ValueError) as exc:
+            code = getattr(exc, "code", "invalid")
+            failures.append(f"issue #{issue}: close failed ({code}); run: gh issue close {issue} --repo {sandbox.repo}")
+
+        for pr in artifacts.prs:
+            if pr.merged or pr.state != "OPEN":
+                continue
+            log.info("harness cleanup: closing PR #%d in %s", pr.number, sandbox.repo)
+            try:
+                _gh(
+                    project_dir,
+                    ["pr", "close", str(pr.number), "--repo", sandbox.repo, "--comment", _PR_CLOSE_COMMENT],
+                )
+            except (GitHubIssuesError, ValueError) as exc:
+                code = getattr(exc, "code", "invalid")
+                failures.append(
+                    f"pr #{pr.number}: close failed ({code}); run: gh pr close {pr.number} --repo {sandbox.repo}"
+                )
+
+        for name, sha in artifacts.deletable_branches:
+            log.info("harness cleanup: deleting branch %s at %s from %s", name, sha[:7], sandbox.repo)
+            try:
+                _run_git(
+                    [
+                        "-c", f"core.hooksPath={os.devnull}",
+                        "push", f"--force-with-lease=refs/heads/{name}:{sha}", "--", url, f":refs/heads/{name}",
+                    ],
+                    cwd=work,
+                )
+            except HarnessPreflightError as exc:
+                # Only a ref-level refusal can mean "someone else already deleted it";
+                # a transport or auth failure proves nothing about the remote ref.
+                gone = False
+                if any(token in exc.detail for token in _LEASE_REFUSAL_TOKENS):
+                    try:
+                        gone = _branch_gone(url, name, cwd=work)
+                    except HarnessPreflightError:
+                        gone = False
+                if gone:
+                    log.info("harness cleanup: branch %s already gone from %s", name, sandbox.repo)
+                    continue
+                failures.append(
+                    f"branch {name} ({sha[:7]}): delete refused ({_preflight_detail(exc)});"
+                    f" inspect: git ls-remote --heads -- {shown_url} {name}; then if safe:"
+                    f" git push --force-with-lease=refs/heads/{name}:{sha} -- {shown_url} :refs/heads/{name}"
+                )
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+    return not failures, tuple(sorted((*failures, *artifacts.leftovers)))
 
 
 def discover_remote_artifacts(
@@ -1517,7 +1731,8 @@ def _discover_remote_artifacts(
 ) -> RemoteArtifacts:
     _reject_nested_provenance_dir(project_dir, provenance_dir)
     recorded = read_recorded_branch(project_dir)
-    current = _ls_remote_heads(project_dir, sandbox.url)
+    provenance_dir.mkdir(parents=True, exist_ok=True)
+    current = _ls_remote_heads(project_dir, sandbox.url, cwd=provenance_dir)  # never from the agent's clone
     new_heads = {name: sha for name, sha in sorted(current.items()) if name not in baseline.heads}
     failures: dict[str, str | None] = {}
     for name, sha in new_heads.items():
