@@ -1438,6 +1438,35 @@ class RemoteArtifacts:
     leftovers: tuple[str, ...]
 
 
+class PullRequestInvariantError(RuntimeError):
+    """The live run did not leave exactly one open, attributable pull request."""
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+
+def verify_pull_request(artifacts: RemoteArtifacts) -> PullRequest:
+    """Return the single open, unmerged PR attributed to the run, or raise the violated invariant."""
+    prs = artifacts.prs
+    if not prs:
+        raise PullRequestInvariantError("pr_missing", f"issue #{artifacts.issue_number} produced no attributable PR")
+    if len(prs) != 1:
+        raise PullRequestInvariantError("pr_ambiguous", ", ".join(f"#{pr.number}" for pr in prs))
+    pr = prs[0]
+    if pr.merged or pr.state == "MERGED":
+        raise PullRequestInvariantError("pr_merged", f"#{pr.number}")
+    if pr.state != "OPEN":
+        raise PullRequestInvariantError("pr_closed", f"#{pr.number}")
+    return pr
+
+
+def pr_invariant_event(exc: PullRequestInvariantError) -> tuple[str, dict]:
+    """Monitor event ``(name, payload)`` describing a failed PR invariant."""
+    return ("pr_invariant_failed", {"code": exc.code, "detail": exc.detail})
+
+
 def discover_remote_artifacts(
     project_dir: Path,
     sandbox: SandboxRepo,
@@ -2597,6 +2626,9 @@ class HarnessResult:
     report_path: Path | None
     temp_dir: Path | None
     summary: str
+    issue_number: int | None = None
+    pr_numbers: tuple[int, ...] = ()
+    cleanup_leftovers: tuple[str, ...] = ()
 
 
 def _prune_retained_state(state_dir: Path) -> None:

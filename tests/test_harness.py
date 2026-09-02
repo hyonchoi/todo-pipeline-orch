@@ -39,6 +39,7 @@ from hermes_pipeline.harness import (
     HarnessResult,
     HarnessTickError,
     PullRequest,
+    PullRequestInvariantError,
     RemoteArtifacts,
     RunBaseline,
     SandboxRepo,
@@ -66,6 +67,7 @@ from hermes_pipeline.harness import (
     is_deletable_branch,
     isolate_config,
     other_ready_issues,
+    pr_invariant_event,
     preflight_check,
     read_current_tick_id,
     read_recorded_branch,
@@ -77,6 +79,7 @@ from hermes_pipeline.harness import (
     sandbox_seed_check,
     take_baseline,
     validate_live_profile,
+    verify_pull_request,
     write_project_contract,
 )
 from hermes_pipeline.phases import Phase, load_phases, resolve_profile_phases_path
@@ -5387,3 +5390,58 @@ class TestDiscoverRemoteArtifacts:
         assert exc_info.value.detail == "provenance_dir must not contain the clone"
         assert (project_dir / ".git" / "HEAD").is_file()
         assert fake_gh.gh_calls() == []
+
+
+def _artifacts(*prs: PullRequest) -> RemoteArtifacts:
+    return RemoteArtifacts(issue_number=7, prs=prs, deletable_branches=(), leftovers=())
+
+
+class TestVerifyPullRequest:
+    def test_single_open_pr_is_returned(self):
+        pr = _pr(5)
+        assert verify_pull_request(_artifacts(pr)) is pr
+
+    def test_no_pr_is_pr_missing(self):
+        with pytest.raises(PullRequestInvariantError) as exc_info:
+            verify_pull_request(_artifacts())
+        assert exc_info.value.code == "pr_missing"
+
+    def test_two_prs_is_pr_ambiguous(self):
+        with pytest.raises(PullRequestInvariantError) as exc_info:
+            verify_pull_request(_artifacts(_pr(5), _pr(7, head_ref="feat/y")))
+        assert exc_info.value.code == "pr_ambiguous"
+        assert exc_info.value.detail == "#5, #7"
+
+    def test_closed_pr_is_pr_closed(self):
+        pr = dataclasses.replace(_pr(5), state="CLOSED")
+        with pytest.raises(PullRequestInvariantError) as exc_info:
+            verify_pull_request(_artifacts(pr))
+        assert exc_info.value.code == "pr_closed"
+        assert exc_info.value.detail == "#5"
+
+    def test_merged_state_is_pr_merged(self):
+        pr = dataclasses.replace(_pr(5), state="MERGED", merged=True)
+        with pytest.raises(PullRequestInvariantError) as exc_info:
+            verify_pull_request(_artifacts(pr))
+        assert exc_info.value.code == "pr_merged"
+
+    def test_merged_flag_with_open_state_is_pr_merged(self):
+        pr = dataclasses.replace(_pr(5), merged=True)
+        with pytest.raises(PullRequestInvariantError) as exc_info:
+            verify_pull_request(_artifacts(pr))
+        assert exc_info.value.code == "pr_merged"
+
+    def test_pr_invariant_event_shape(self):
+        exc = PullRequestInvariantError("pr_ambiguous", "#5, #7")
+        assert pr_invariant_event(exc) == ("pr_invariant_failed", {"code": "pr_ambiguous", "detail": "#5, #7"})
+        assert isinstance(exc, RuntimeError)
+        assert str(exc) == "pr_ambiguous"
+
+    def test_harness_result_remote_fields_default_and_accept_values(self):
+        default = HarnessResult(exit_code=0, report_path=None, temp_dir=None, summary="ok")
+        assert (default.issue_number, default.pr_numbers, default.cleanup_leftovers) == (None, (), ())
+        full = HarnessResult(
+            exit_code=0, report_path=None, temp_dir=None, summary="ok",
+            issue_number=7, pr_numbers=(5,), cleanup_leftovers=("branch feat/z",),
+        )
+        assert (full.issue_number, full.pr_numbers, full.cleanup_leftovers) == (7, (5,), ("branch feat/z",))
