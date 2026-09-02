@@ -11,6 +11,7 @@ import sys
 import tomllib
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,8 +37,10 @@ from hermes_pipeline.harness import (
     HarnessProfileError,
     HarnessRemoteCleanupError,
     HarnessResult,
+    HarnessTickError,
     RunBaseline,
     SandboxRepo,
+    TickRegistration,
     _build_harness_profile_data,
     _classify_error_class,
     _ConvergenceMonitor,
@@ -45,6 +48,7 @@ from hermes_pipeline.harness import (
     _prune_retained_state,
     _validate_profile_prerequisites,
     _with_offline_terminal_workflow,
+    cards_for_registered_keys,
     clone_sandbox,
     commit_plan,
     create_harness_issue,
@@ -55,9 +59,12 @@ from hermes_pipeline.harness import (
     isolate_config,
     other_ready_issues,
     preflight_check,
+    read_current_tick_id,
     reconcile_created_issue,
+    recover_tick_registration,
     resolve_sandbox_repo,
     run_harness,
+    run_tick,
     sandbox_seed_check,
     take_baseline,
     validate_live_profile,
@@ -727,22 +734,426 @@ class TestHarnessProfileTopology:
 
 
 class TestIsolateConfig:
-    def test_sets_env_vars(self, tmp_path: Path):
+    def test_sets_env_vars(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.delenv("TPO_CONFIG_FILE", raising=False)
         state_dir = tmp_path / "state"
         state_dir.mkdir()
 
-        with isolate_config(state_dir=state_dir):
+        with isolate_config(state_dir=state_dir, projects_dir=tmp_path / "projects"):
             assert os.environ.get("TPO_CONFIG_FILE") == str(state_dir / "tpo-config.yaml")
 
         assert "TPO_CONFIG_FILE" not in os.environ
 
-    def test_saves_and_restores(self, monkeypatch: pytest.MonkeyPatch):
+    def test_saves_and_restores(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         monkeypatch.setenv("TPO_CONFIG_FILE", "/original/config.yaml")
+        state_dir = tmp_path / "state"
 
-        with isolate_config(state_dir=Path("/tmp")):
-            assert os.environ["TPO_CONFIG_FILE"] == "/tmp/tpo-config.yaml"
+        with isolate_config(state_dir=state_dir, projects_dir=tmp_path / "projects"):
+            assert os.environ["TPO_CONFIG_FILE"] == str(state_dir / "tpo-config.yaml")
 
         assert os.environ["TPO_CONFIG_FILE"] == "/original/config.yaml"
+
+    def test_writes_full_config_and_creates_dirs(self, tmp_path: Path):
+        import yaml
+
+        state_dir = tmp_path / "state"
+        projects_dir = tmp_path / "nested" / "projects"
+
+        with isolate_config(state_dir=state_dir, projects_dir=projects_dir, prompt_client="hermes"):
+            data = yaml.safe_load(Path(os.environ["TPO_CONFIG_FILE"]).read_text())
+            assert data == {
+                "state_dir": str(state_dir),
+                "projects_dir": str(projects_dir),
+                "prompt_client": "hermes",
+            }
+            assert state_dir.is_dir()
+            assert projects_dir.is_dir()
+
+    def test_prompt_client_defaults_to_claude(self, tmp_path: Path):
+        import yaml
+
+        with isolate_config(state_dir=tmp_path / "s", projects_dir=tmp_path / "p"):
+            data = yaml.safe_load(Path(os.environ["TPO_CONFIG_FILE"]).read_text())
+        assert data["prompt_client"] == "claude"
+
+
+class TestRunTick:
+    def test_invokes_cli_main_via_sys_executable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "tpo-config.yaml"))
+        calls: list[dict] = []
+
+        def recorder(argv, **kwargs):
+            calls.append({"argv": argv, **kwargs})
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(harness_mod, "_tick_runner", recorder)
+        cwd = tmp_path / "projects"
+        cwd.mkdir()
+
+        rc = run_tick("sandbox", cwd=cwd, log_path=tmp_path / "logs" / "tick.log", timeout=42.0)
+
+        assert rc == 0
+        assert len(calls) == 1
+        call = calls[0]
+        argv = call["argv"]
+        assert argv[0] == sys.executable
+        assert argv[1] == "-c"
+        assert argv[2] == harness_mod._TICK_ENTRYPOINT
+        assert argv[3:] == ["tick", "sandbox"]
+        assert call["cwd"] == cwd
+        assert call["timeout"] == 42.0
+        assert call["capture_output"] is True
+        assert call["text"] is True
+        assert call["encoding"] == "utf-8"
+        assert call["errors"] == "replace"
+        assert call["env"]["TPO_CONFIG_FILE"] == str(tmp_path / "tpo-config.yaml")
+
+    def test_entrypoint_smoke_runs_cli_help(self, tmp_path: Path):
+        result = subprocess.run(
+            [sys.executable, "-c", harness_mod._TICK_ENTRYPOINT, "--help"],
+            cwd=tmp_path,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "tick" in result.stdout
+
+    def test_env_overrides_merge_over_os_environ(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        monkeypatch.setenv("TPO_CONFIG_FILE", "/iso/config.yaml")
+        seen: dict = {}
+
+        def recorder(argv, **kwargs):
+            seen.update(kwargs["env"])
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+        monkeypatch.setattr(harness_mod, "_tick_runner", recorder)
+
+        run_tick(
+            "sandbox", cwd=tmp_path, log_path=tmp_path / "tick.log", timeout=1.0, env={"EXTRA": "1"}
+        )
+
+        assert seen["TPO_CONFIG_FILE"] == "/iso/config.yaml"
+        assert seen["EXTRA"] == "1"
+
+    def test_appends_output_and_header_to_log(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(argv, 3, stdout="out line\n", stderr="err line\n")
+
+        monkeypatch.setattr(harness_mod, "_tick_runner", fake)
+        log_path = tmp_path / "logs" / "tick.log"
+        log_path.parent.mkdir()
+        log_path.write_text("previous\n")
+
+        rc = run_tick("sandbox", cwd=tmp_path, log_path=log_path, timeout=5.0)
+
+        assert rc == 3
+        text = log_path.read_text()
+        assert text.startswith("previous\n")
+        header = text.splitlines()[1]
+        assert header.startswith("# tpo tick sandbox rc=3 ")
+        assert header.endswith("+00:00")
+        assert "out line\n" in text
+        assert "err line\n" in text
+
+    @pytest.mark.parametrize(
+        ("output", "stderr"),
+        [
+            ("partial", None),
+            (b"partial", None),
+            ("partial", "err-partial"),
+            (b"partial", b"err-partial"),
+        ],
+        ids=["str-out", "bytes-out", "str-both", "bytes-both"],
+    )
+    def test_timeout_writes_partial_and_raises(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, output, stderr
+    ):
+        def fake(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 5, output=output, stderr=stderr)
+
+        monkeypatch.setattr(harness_mod, "_tick_runner", fake)
+        log_path = tmp_path / "deep" / "logs" / "tick.log"
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            run_tick("sandbox", cwd=tmp_path, log_path=log_path, timeout=5.0)
+
+        assert excinfo.value.code == "tick_timeout"
+        assert excinfo.value.detail == "5.0s"
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+        assert lines[0].startswith("# tpo tick sandbox rc=timeout ")
+        assert "partial" in lines
+        if stderr is not None:
+            assert "err-partial" in lines
+        assert lines[-1] == "# timeout after 5.0s"
+
+
+def _write_tick_state(
+    project_state: Path,
+    *,
+    tick_id: str = "01TICK",
+    phases_outcome: str | None = "tick_started",
+    expected_phases: object = ("plan", "implement"),
+    spawn_outcome: dict | None = None,
+) -> None:
+    outcomes = project_state / "outcomes"
+    outcomes.mkdir(parents=True, exist_ok=True)
+    (project_state / "current_tick_id.txt").write_text(tick_id + "\n")
+    if phases_outcome is not None:
+        (outcomes / f"{tick_id}-phases.json").write_text(
+            json.dumps({"outcome": phases_outcome}) + "\n"
+        )
+    if expected_phases is not None:
+        (outcomes / "expected-phases.json").write_text(json.dumps(expected_phases))
+    if spawn_outcome is not None:
+        (outcomes / f"{tick_id}.json").write_text(json.dumps(spawn_outcome) + "\n")
+
+
+_SPAWN_FAILURE_DETAIL = {"todo_id": "TODO-1", "reason": "phase_spawn", "error_type": "OSError"}
+
+
+class TestReadCurrentTickId:
+    def test_missing_returns_none(self, tmp_path: Path):
+        assert read_current_tick_id(tmp_path) is None
+
+    def test_blank_returns_none(self, tmp_path: Path):
+        (tmp_path / "current_tick_id.txt").write_text(" \n")
+        assert read_current_tick_id(tmp_path) is None
+
+    def test_returns_stripped_id(self, tmp_path: Path):
+        (tmp_path / "current_tick_id.txt").write_text("01TICK\n")
+        assert read_current_tick_id(tmp_path) == "01TICK"
+
+
+class TestRecoverTickRegistration:
+    def test_happy_path(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, expected_phases=["plan", "implement", "review"])
+
+        reg = recover_tick_registration(state, expected_issue=17)
+
+        assert reg == TickRegistration(
+            tick_id="01TICK", todo_id="TODO-17", phase_keys=("plan", "implement", "review")
+        )
+
+    def test_changed_tick_id_is_recovered(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, tick_id="02TICK")
+
+        reg = recover_tick_registration(state, expected_issue=1, previous_tick_id="01TICK")
+
+        assert reg.tick_id == "02TICK"
+
+    def test_unchanged_tick_id_is_stale(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, tick_id="01TICK")
+        log = tmp_path / "tick.log"
+        log.write_text("boom\n")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(
+                state, expected_issue=1, previous_tick_id="01TICK", tick_log=log
+            )
+
+        assert excinfo.value.code == "tick_not_persisted"
+        assert "boom" in excinfo.value.detail
+
+    def test_phases_file_may_have_appended_entries(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state)
+        with (state / "outcomes" / "01TICK-phases.json").open("a") as fh:
+            fh.write(json.dumps({"phase_key": "plan", "outcome": "done"}) + "\n")
+
+        reg = recover_tick_registration(state, expected_issue=1)
+
+        assert reg.tick_id == "01TICK"
+
+    def test_missing_tick_id_includes_log_tail(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        log = tmp_path / "tick.log"
+        log.write_text("\n".join(f"line {i}" for i in range(30)) + "\n")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1, tick_log=log)
+
+        assert excinfo.value.code == "tick_not_persisted"
+        assert "line 29" in excinfo.value.detail
+        assert "line 10" in excinfo.value.detail
+        assert "line 9" not in excinfo.value.detail
+
+    def test_blank_tick_id(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        state.mkdir()
+        (state / "current_tick_id.txt").write_text("  \n")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+
+        assert excinfo.value.code == "tick_not_persisted"
+        assert excinfo.value.detail == ""
+
+    def test_pre_persist_spawn_failure_is_reported(self, tmp_path: Path):
+        # The tick id file still holds the previous run's id (or is absent) but a
+        # fresh <tick>.json records failed_to_spawn -> surface that instead.
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, tick_id="01TICK")
+        (state / "outcomes" / "02TICK.json").write_text(
+            json.dumps(
+                {"tick_id": "02TICK", "outcome": "failed_to_spawn", "detail": _SPAWN_FAILURE_DETAIL}
+            )
+            + "\n"
+        )
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1, previous_tick_id="01TICK")
+
+        assert excinfo.value.code == "failed_to_spawn"
+        assert json.loads(excinfo.value.detail) == _SPAWN_FAILURE_DETAIL
+
+    def test_pre_persist_spawn_failure_without_tick_id_file(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        outcomes = state / "outcomes"
+        outcomes.mkdir(parents=True)
+        (outcomes / "02TICK.json").write_text(
+            json.dumps(
+                {"tick_id": "02TICK", "outcome": "failed_to_spawn", "detail": _SPAWN_FAILURE_DETAIL}
+            )
+        )
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+
+        assert excinfo.value.code == "failed_to_spawn"
+
+    def test_stale_spawn_failure_from_previous_tick_is_ignored(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(
+            state,
+            tick_id="01TICK",
+            spawn_outcome={
+                "tick_id": "01TICK",
+                "outcome": "failed_to_spawn",
+                "detail": _SPAWN_FAILURE_DETAIL,
+            },
+        )
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1, previous_tick_id="01TICK")
+
+        assert excinfo.value.code == "tick_not_persisted"
+
+    def test_picked_none(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, phases_outcome="picked_none")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+
+        assert (excinfo.value.code, excinfo.value.detail) == ("picked_none", "01TICK")
+
+    def test_tick_not_started_when_phases_file_missing(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, phases_outcome=None)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+
+        assert (excinfo.value.code, excinfo.value.detail) == ("tick_not_started", "01TICK")
+
+    def test_tick_not_started_when_outcome_unknown(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, phases_outcome="something_else")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+
+        assert excinfo.value.code == "tick_not_started"
+
+    def test_failed_to_spawn(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(
+            state,
+            spawn_outcome={
+                "tick_id": "01TICK",
+                "outcome": "failed_to_spawn",
+                "detail": _SPAWN_FAILURE_DETAIL,
+            },
+        )
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+
+        assert excinfo.value.code == "failed_to_spawn"
+        assert excinfo.value.detail == json.dumps(
+            _SPAWN_FAILURE_DETAIL, separators=(",", ":"), sort_keys=True
+        )
+
+    def test_other_outcome_file_does_not_block(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        _write_tick_state(
+            state, spawn_outcome={"tick_id": "01TICK", "outcome": "spawned", "detail": {}}
+        )
+
+        reg = recover_tick_registration(state, expected_issue=1)
+
+        assert reg.phase_keys == ("plan", "implement")
+
+    @pytest.mark.parametrize(
+        "expected",
+        [None, [], {"a": 1}, ["plan", 3]],
+        ids=["missing", "empty", "not-list", "non-str-item"],
+    )
+    def test_expected_phases_invalid(self, tmp_path: Path, expected):
+        state = tmp_path / ".hermes"
+        _write_tick_state(state, expected_phases=expected)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+
+        assert (excinfo.value.code, excinfo.value.detail) == (
+            "expected_phases_missing",
+            "01TICK",
+        )
+
+
+class TestCardsForRegisteredKeys:
+    PHASES: ClassVar[list[Phase]] = [
+        Phase(phase_key="plan", name="Plan"),
+        Phase(phase_key="gate", name="Gate", gate=True),
+        Phase(phase_key="implement", name="Implement"),
+        Phase(phase_key="done", name="Done", terminal=True),
+    ]
+
+    def test_preserves_registration_order_with_flags(self):
+        cards = cards_for_registered_keys(self.PHASES, ["implement", "gate", "done"])
+
+        assert [c.phase_key for c in cards] == ["implement", "gate", "done"]
+        assert [c.gate for c in cards] == [False, True, False]
+        assert cards[2].terminal is True
+        assert cards[1] is self.PHASES[1]
+
+    def test_unknown_key(self):
+        with pytest.raises(HarnessTickError) as excinfo:
+            cards_for_registered_keys(self.PHASES, ["plan", "nope"])
+
+        assert (excinfo.value.code, excinfo.value.detail) == ("unexpected_registration", "nope")
+
+    def test_duplicate_key(self):
+        with pytest.raises(HarnessTickError) as excinfo:
+            cards_for_registered_keys(self.PHASES, ["plan", "gate", "plan"])
+
+        assert (excinfo.value.code, excinfo.value.detail) == ("unexpected_registration", "plan")
+
+    def test_empty_keys(self):
+        assert cards_for_registered_keys(self.PHASES, []) == []
 
 
 class TestFakeGhEnv:

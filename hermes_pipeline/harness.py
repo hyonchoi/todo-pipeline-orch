@@ -8,9 +8,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -104,6 +105,15 @@ class HarnessProfileError(ValueError):
 
 class HarnessPreflightError(RuntimeError):
     """The live harness cannot start because a preflight requirement failed."""
+
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(code)
+        self.code = code
+        self.detail = detail
+
+
+class HarnessTickError(RuntimeError):
+    """The production ``tpo tick`` subprocess did not register a runnable tick."""
 
     def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(code)
@@ -1700,8 +1710,12 @@ def _validate_profile_prerequisites(
 
 
 @contextmanager
-def isolate_config(*, state_dir: Path):
+def isolate_config(*, state_dir: Path, projects_dir: Path, prompt_client: str = "claude"):
     """Context manager that points tpo at an isolated config file.
+
+    Writes ``state_dir``/``projects_dir``/``prompt_client`` to
+    ``<state_dir>/tpo-config.yaml`` and exports ``TPO_CONFIG_FILE`` so the
+    production CLI (in-process or as a subprocess) reads only that file.
 
     HOME is left untouched — the harness invokes real hermes/claude CLI
     subprocesses, which need the real $HOME to read auth credentials.
@@ -1712,8 +1726,18 @@ def isolate_config(*, state_dir: Path):
             saved[key] = os.environ[key]
 
     state_dir.mkdir(parents=True, exist_ok=True)
+    projects_dir.mkdir(parents=True, exist_ok=True)
     config_path = state_dir / "tpo-config.yaml"
-    config_path.write_text(f"state_dir: {state_dir}\n")
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "state_dir": str(state_dir),
+                "projects_dir": str(projects_dir),
+                "prompt_client": prompt_client,
+            },
+            sort_keys=False,
+        )
+    )
     os.environ["TPO_CONFIG_FILE"] = str(config_path)
 
     try:
@@ -1724,6 +1748,232 @@ def isolate_config(*, state_dir: Path):
                 os.environ[key] = saved[key]
             else:
                 os.environ.pop(key, None)
+
+
+# Seam for tests: ``hermes_pipeline.harness._tick_runner`` is monkeypatched to a recorder.
+_tick_runner = subprocess.run
+_TICK_ENTRYPOINT = "import sys; from hermes_pipeline.cli import main; sys.exit(main(sys.argv[1:]))"
+
+
+def run_tick(
+    slug: str,
+    *,
+    cwd: Path,
+    log_path: Path,
+    timeout: float,
+    env: Mapping[str, str] | None = None,
+) -> int:
+    """Run the production ``tpo tick <slug>`` as a subprocess and append its output to *log_path*.
+
+    The subprocess runs in *cwd* and inherits ``os.environ`` (including
+    ``TPO_CONFIG_FILE`` exported by :func:`isolate_config`) merged with *env*.
+    The return code is informational only: ``tpo tick`` swallows per-project
+    failures and returns 0, so callers must inspect the persisted tick state via
+    :func:`recover_tick_registration`.
+
+    On timeout the partial output is logged and ``HarnessTickError("tick_timeout")``
+    is raised. The tick may already have spawned detached workers by then; the
+    caller must run the quiescence check before treating the sandbox as idle.
+    """
+    argv = [sys.executable, "-c", _TICK_ENTRYPOINT, "tick", slug]
+    merged_env = {**os.environ, **(env or {})}
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    try:
+        result = _tick_runner(
+            argv,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            env=merged_env,
+        )
+    except subprocess.TimeoutExpired as exc:
+        with log_path.open("a", encoding="utf-8") as fh:
+            fh.write(f"# tpo tick {slug} rc=timeout {stamp}\n")
+            fh.write(_decode_output(exc.output))
+            fh.write(_decode_output(exc.stderr))
+            fh.write(f"# timeout after {timeout}s\n")
+        raise HarnessTickError("tick_timeout", f"{timeout}s") from exc
+    with log_path.open("a", encoding="utf-8") as fh:
+        fh.write(f"# tpo tick {slug} rc={result.returncode} {stamp}\n")
+        fh.write(_decode_output(result.stdout))
+        fh.write(_decode_output(result.stderr))
+    return result.returncode
+
+
+def _decode_output(chunk: str | bytes | None) -> str:
+    """Normalize a captured stream chunk to text ending in exactly one newline (or empty)."""
+    if chunk is None:
+        return ""
+    if isinstance(chunk, bytes):
+        chunk = chunk.decode("utf-8", errors="replace")
+    if not chunk:
+        return ""
+    return chunk if chunk.endswith("\n") else chunk + "\n"
+
+
+@dataclass(frozen=True)
+class TickRegistration:
+    """What the production tick persisted under ``<project>/.hermes/`` before spawning."""
+
+    tick_id: str
+    todo_id: str
+    phase_keys: tuple[str, ...]
+
+
+def _read_json_file(path: Path) -> Any:
+    try:
+        return _json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _log_tail(tick_log: Path | None, lines: int = 20) -> str:
+    if tick_log is None:
+        return ""
+    try:
+        text = tick_log.read_text()
+    except OSError:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
+
+def read_current_tick_id(project_state: Path) -> str | None:
+    """The tick id persisted in ``<project_state>/current_tick_id.txt``, or ``None``.
+
+    Callers snapshot this before :func:`run_tick` and pass it as
+    ``previous_tick_id`` to :func:`recover_tick_registration` so a stale id from
+    an earlier tick is not mistaken for the new registration.
+    """
+    try:
+        tick_id = (project_state / "current_tick_id.txt").read_text().strip()
+    except OSError:
+        return None
+    return tick_id or None
+
+
+def _compact_detail(payload: Mapping[str, Any]) -> str:
+    return _json.dumps(payload.get("detail"), separators=(",", ":"), sort_keys=True)
+
+
+def _find_new_spawn_failure(outcomes_dir: Path, previous_tick_id: str | None) -> str | None:
+    """Compact detail of the newest ``failed_to_spawn`` record not belonging to *previous_tick_id*.
+
+    ``cli._record_failed_to_spawn`` may run before ``current_tick_id.txt`` is
+    updated, so a spawn failure can exist for a tick that never persisted its id.
+    """
+    if not outcomes_dir.is_dir():
+        return None
+    candidates = [
+        path
+        for path in outcomes_dir.glob("*.json")
+        if path.name != "expected-phases.json" and not path.name.endswith("-phases.json")
+    ]
+
+    def _mtime(path: Path) -> float:
+        try:
+            return path.stat().st_mtime
+        except OSError:
+            return 0.0
+
+    candidates.sort(key=_mtime, reverse=True)
+    for path in candidates:
+        payload = _read_json_file(path)
+        if (
+            isinstance(payload, dict)
+            and payload.get("outcome") == "failed_to_spawn"
+            and payload.get("tick_id") != previous_tick_id
+        ):
+            return _compact_detail(payload)
+    return None
+
+
+def recover_tick_registration(
+    project_state: Path,
+    *,
+    expected_issue: int,
+    tick_log: Path | None = None,
+    previous_tick_id: str | None = None,
+) -> TickRegistration:
+    """Reconstruct the tick the production CLI registered from its state files.
+
+    Reads, in order: ``current_tick_id.txt`` (must be present and differ from
+    *previous_tick_id*), ``outcomes/<tick_id>-phases.json`` (first line:
+    ``tick_started`` or ``picked_none``), ``outcomes/<tick_id>.json``
+    (``failed_to_spawn``), and ``outcomes/expected-phases.json``.
+
+    When no new tick id was persisted, ``outcomes/*.json`` is scanned for a
+    ``failed_to_spawn`` record from a tick other than *previous_tick_id* so a
+    pre-persist spawn failure is reported as ``failed_to_spawn`` rather than
+    ``tick_not_persisted``. The ``tick_not_persisted`` detail is the tail of
+    *tick_log* and may contain sensitive tool output; redact before sharing.
+
+    Caveats: none of these files record which issue was picked for non-plan
+    profiles, so the caller must guarantee via preflight that *expected_issue* is
+    the only eligible issue; ``todo_id`` is derived from it. For
+    ``requires_plan`` profiles the sentinel is written under the run worktree
+    (``<worktree>/.hermes/outcomes/``), not *project_state*; pass the worktree's
+    ``.hermes`` directory.
+    """
+    tick_id = read_current_tick_id(project_state)
+    outcomes_dir = project_state / "outcomes"
+    if tick_id is None or tick_id == previous_tick_id:
+        spawn_detail = _find_new_spawn_failure(outcomes_dir, previous_tick_id)
+        if spawn_detail is not None:
+            raise HarnessTickError("failed_to_spawn", spawn_detail)
+        raise HarnessTickError("tick_not_persisted", _log_tail(tick_log))
+
+    phases_path = outcomes_dir / f"{tick_id}-phases.json"
+    first_entry: Any = None
+    try:
+        for line in phases_path.read_text().splitlines():
+            if line.strip():
+                first_entry = _json.loads(line)
+                break
+    except (OSError, ValueError):
+        first_entry = None
+    outcome = first_entry.get("outcome") if isinstance(first_entry, dict) else None
+    if outcome == "picked_none":
+        raise HarnessTickError("picked_none", tick_id)
+    if outcome != "tick_started":
+        raise HarnessTickError("tick_not_started", tick_id)
+
+    spawn_record = _read_json_file(outcomes_dir / f"{tick_id}.json")
+    if isinstance(spawn_record, dict) and spawn_record.get("outcome") == "failed_to_spawn":
+        raise HarnessTickError("failed_to_spawn", _compact_detail(spawn_record))
+
+    expected = _read_json_file(outcomes_dir / "expected-phases.json")
+    if (
+        not isinstance(expected, list)
+        or not expected
+        or not all(isinstance(key, str) for key in expected)
+    ):
+        raise HarnessTickError("expected_phases_missing", tick_id)
+
+    return TickRegistration(
+        tick_id=tick_id,
+        todo_id=f"TODO-{expected_issue}",
+        phase_keys=tuple(expected),
+    )
+
+
+def cards_for_registered_keys(phases: Sequence[Phase], keys: Sequence[str]) -> list[Phase]:
+    """Map registered phase keys back to profile ``Phase`` cards, preserving order.
+
+    Unknown or duplicate keys raise ``HarnessTickError("unexpected_registration", key)``.
+    """
+    by_key = {phase.phase_key: phase for phase in phases}
+    seen: set[str] = set()
+    cards: list[Phase] = []
+    for key in keys:
+        if key in seen or key not in by_key:
+            raise HarnessTickError("unexpected_registration", key)
+        seen.add(key)
+        cards.append(by_key[key])
+    return cards
 
 
 @dataclass
@@ -1929,7 +2179,7 @@ def run_harness(
 
             timed_out = False
             timed_out_phase: str | None = None
-            with isolate_config(state_dir=state_dir):
+            with isolate_config(state_dir=state_dir, projects_dir=workspace_dir / "projects"):
                 # Emit initial event so the events log file exists for report generation
                 base_monitor(
                     "run_started",
