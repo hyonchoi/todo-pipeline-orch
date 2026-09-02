@@ -742,15 +742,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_profile_parser.set_defaults(func=_cmd_install_profile)
 
-    # test: Mock integration test harness
+    # test: Live integration test harness
     test_parser = subparsers.add_parser(
         "test",
-        help="Run mock integration test harness against mock project data",
+        help="Run the live integration test harness against a sandbox GitHub repository",
+        description="Live integration test harness against a sandbox GitHub repository.",
     )
     test_parser.add_argument(
         "--fixture",
-        required=True,
-        help="Fixture name to use (e.g., happy-path)",
+        default="happy-path",
+        help="Fixture name to use (default: happy-path)",
+    )
+    test_parser.add_argument(
+        "--repo",
+        default=None,
+        metavar="OWNER/NAME",
+        help="Sandbox GitHub repository (default: TPO_HARNESS_REPO)",
+    )
+    test_parser.add_argument(
+        "--init-sandbox",
+        action="store_true",
+        help="Seed the sandbox default branch once and exit (no harness run)",
     )
     test_parser.add_argument(
         "--profile",
@@ -766,14 +778,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     test_parser.add_argument(
-        "--phase",
-        default=None,
-        help="Run only a single phase by key (e.g., phase_2_autoplan)",
-    )
-    test_parser.add_argument(
         "--keep",
         action="store_true",
-        help="Keep temp directory after run for inspection",
+        help="Keep the workspace and the sandbox issue/PR/branch after the run for inspection",
     )
     test_parser.add_argument(
         "--timeout",
@@ -3116,13 +3123,47 @@ def _atomic_write_config(path: Path, text: str) -> None:
 
 
 def _cmd_test(args, config: Config) -> int:
-    """Handle 'test' subcommand — mock integration test harness."""
-    from .harness import HarnessProfileError, run_harness
+    """Handle 'test' subcommand — live integration test harness against a sandbox repo."""
+    from . import harness
+    from .github_issues import GitHubIssuesError
+    from .harness import (
+        HarnessCleanupError,
+        HarnessPreflightError,
+        HarnessProfileError,
+        HarnessRemoteCleanupError,
+    )
+
+    if getattr(args, "init_sandbox", False):
+        try:
+            sandbox = harness.resolve_sandbox_repo(args.repo)
+            root = harness._harness_tmp_root()
+            root.mkdir(parents=True, exist_ok=True)
+            workspace = Path(tempfile.mkdtemp(prefix="harness-init-", dir=root))
+            try:
+                outcome = harness.init_sandbox(sandbox, workspace)
+            finally:
+                shutil.rmtree(workspace, ignore_errors=True)
+            print(f"sandbox {sandbox.repo}: {outcome}")
+            return 0
+        except HarnessPreflightError as e:
+            log.error("sandbox init preflight failed: code=%s detail=%s", e.code, e.detail)
+            return 2
+        except HarnessRemoteCleanupError as e:
+            log.error("sandbox init failed: code=%s detail=%s", e.code, e.detail)
+            return 2
+        except GitHubIssuesError as e:
+            log.error("sandbox init failed: gh error: %s", e)
+            return 2
+        except Exception as e:
+            log.error(
+                "sandbox init failed: error_type=%s message=%s", type(e).__name__, e
+            )
+            return 2
 
     try:
-        result = run_harness(
+        result = harness.run_harness(
             fixture_name=args.fixture,
-            repo=getattr(args, "repo", None),
+            repo=args.repo,
             loop=args.loop,
             keep_dir=args.keep,
             timeout=args.timeout,
@@ -3130,19 +3171,33 @@ def _cmd_test(args, config: Config) -> int:
             config=config,
             profile_name=args.profile,
         )
-        if result.exit_code != 0:
-            return result.exit_code
-        return 0
     except HarnessProfileError as e:
         log.error(
-            "test harness profile setup failed: code=%s profile=%s",
+            "test harness profile setup failed: code=%s profile=%s detail=%s",
             e.code,
             e.profile_name,
+            e.detail,
         )
         return 2
-    except Exception as e:
-        log.error("test harness failed: error_type=%s", type(e).__name__)
+    except HarnessPreflightError as e:
+        log.error("test harness preflight failed: code=%s detail=%s", e.code, e.detail)
         return 2
+    except HarnessRemoteCleanupError as e:
+        log.error("test harness cleanup incomplete: code=%s detail=%s", e.code, e.detail)
+        return 2
+    except HarnessCleanupError as e:
+        log.error("test harness cleanup failed: %s", e)
+        for note in getattr(e, "__notes__", ()):
+            log.error("test harness cleanup: %s", note)
+        return 2
+    except Exception as e:
+        log.error("test harness failed: error_type=%s message=%s", type(e).__name__, e)
+        return 2
+
+    print(result.summary)
+    for leftover in result.cleanup_leftovers:
+        print(f"leftover: {leftover}")
+    return result.exit_code
 
 
 def main(argv: list[str] | None = None) -> int:
