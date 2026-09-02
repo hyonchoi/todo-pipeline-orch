@@ -38,6 +38,8 @@ from hermes_pipeline.harness import (
     HarnessRemoteCleanupError,
     HarnessResult,
     HarnessTickError,
+    PullRequest,
+    RemoteArtifacts,
     RunBaseline,
     SandboxRepo,
     TickRegistration,
@@ -48,18 +50,25 @@ from hermes_pipeline.harness import (
     _prune_retained_state,
     _validate_profile_prerequisites,
     _with_offline_terminal_workflow,
+    branch_has_run_provenance,
     cards_for_registered_keys,
     clone_sandbox,
     commit_plan,
     create_harness_issue,
     create_mock_project,
+    discover_candidate_prs,
+    discover_remote_artifacts,
+    fetch_pull_request,
     filter_phases,
     github_preflight,
     init_sandbox,
+    is_attributable_pr,
+    is_deletable_branch,
     isolate_config,
     other_ready_issues,
     preflight_check,
     read_current_tick_id,
+    read_recorded_branch,
     reconcile_created_issue,
     recover_tick_registration,
     resolve_sandbox_repo,
@@ -3232,7 +3241,7 @@ class TestCloneSandbox:
 
         sandbox_seed_check(project_dir, sandbox)
 
-        baseline = take_baseline(project_dir, viewer="octocat", default_branch="main")
+        baseline = take_baseline(project_dir, sandbox, viewer="octocat", default_branch="main")
         assert isinstance(baseline, RunBaseline)
         assert dict(baseline.heads) == {"main": sha}
         assert baseline.viewer == "octocat"
@@ -3274,7 +3283,6 @@ class TestCloneSandbox:
             f"{sha2}\trefs/heads/feat/x\n"
             f"{sha2}\trefs/tags/v1\n"
             f"{sha}\trefs/tags/v1^{{}}\n"
-            f"{'c' * 40} refs/heads/space-separated\n"
         )
 
         def fake_git(argv, **kwargs):
@@ -3284,9 +3292,10 @@ class TestCloneSandbox:
         monkeypatch.setattr("hermes_pipeline.harness._git", fake_git)
         now = datetime(2026, 9, 1, 12, 0, 0, 750000, tzinfo=UTC)
 
-        baseline = take_baseline(tmp_path, viewer="octocat", default_branch="main", now=now)
+        baseline = take_baseline(tmp_path, self.sandbox, viewer="octocat", default_branch="main", now=now)
 
-        assert seen == [["git", "ls-remote", "--heads", "origin"]]
+        # Enumeration targets the sandbox URL, never the clone's agent-mutable ``origin``.
+        assert seen == [["git", "ls-remote", "--heads", "--", "https://github.com/acme/sandbox.git"]]
         assert baseline.started_at == datetime(2026, 9, 1, 11, 59, 59, tzinfo=UTC)
         assert dict(baseline.heads) == {"main": sha, "feat/x": sha2}
         with pytest.raises(TypeError):
@@ -3301,11 +3310,36 @@ class TestCloneSandbox:
         seoul = timezone(timedelta(hours=9))
         now = datetime(2026, 9, 1, 21, 0, 0, 250000, tzinfo=seoul)
 
-        baseline = take_baseline(tmp_path, viewer="octocat", default_branch="main", now=now)
+        baseline = take_baseline(tmp_path, self.sandbox, viewer="octocat", default_branch="main", now=now)
 
         assert baseline.started_at == datetime(2026, 9, 1, 11, 59, 59, tzinfo=UTC)
         assert baseline.started_at.tzinfo is UTC
         assert dict(baseline.heads) == {}
+
+    def test_take_baseline_rejects_unparseable_ls_remote_line(self, tmp_path, monkeypatch):
+        stdout = f"{'a' * 40}\trefs/heads/main\n{'c' * 40} refs/heads/space-separated\n"
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout, ""),
+        )
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            take_baseline(tmp_path, self.sandbox, viewer="octocat", default_branch="main")
+
+        assert exc_info.value.code == "git_error"
+        assert "space-separated" in exc_info.value.detail
+
+    def test_take_baseline_rejects_non_hex_sha(self, tmp_path, monkeypatch):
+        stdout = f"{'a' * 40}\trefs/heads/main\n{'z' * 40}\trefs/heads/feat/x\n"
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git",
+            lambda argv, **kw: subprocess.CompletedProcess(argv, 0, stdout, ""),
+        )
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            take_baseline(tmp_path, self.sandbox, viewer="octocat", default_branch="main")
+
+        assert exc_info.value.code == "git_error"
 
     def test_take_baseline_rejects_naive_now(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -3314,7 +3348,7 @@ class TestCloneSandbox:
         )
 
         with pytest.raises(ValueError, match="timezone-aware"):
-            take_baseline(tmp_path, viewer="octocat", default_branch="main", now=datetime(2026, 9, 1))
+            take_baseline(tmp_path, self.sandbox, viewer="octocat", default_branch="main", now=datetime(2026, 9, 1))
 
 
 class TestWriteProjectContract:
@@ -4534,3 +4568,822 @@ class TestPollRegisteredPhases:
         assert kwargs["detector"] is detector
         assert kwargs["poll_interval"] == 0.25
         assert kwargs["max_poll_interval"] == 7.0
+
+
+# ---------------------------------------------------------------------------
+# Remote artifact discovery (Task 8): which PRs/branches belong to a live run.
+# ---------------------------------------------------------------------------
+
+_PR_VIEW_FIELDS = "number,state,mergedAt,headRefName,baseRefName,author,createdAt,isCrossRepository,title,body"
+_PULLS_ARGV = (
+    *API_ARGV, "--paginate", "--slurp",
+    "repos/acme/sandbox/pulls?state=all&head=acme:feat%2Fx&per_page=100",
+)
+_ISSUE_BRANCH_PULLS_ARGV = (
+    *API_ARGV, "--paginate", "--slurp",
+    "repos/acme/sandbox/pulls?state=all&head=acme:feat%2Fharness-abcd1234&per_page=100",
+)
+_RECORDED_PULLS_ARGV = (
+    *API_ARGV, "--paginate", "--slurp",
+    "repos/acme/sandbox/pulls?state=all&head=acme:recorded%2Fx&per_page=100",
+)
+_SEARCH_ARGV = (
+    *API_ARGV, "--paginate", "--slurp",
+    "search/issues?q=repo%3Aacme%2Fsandbox%20is%3Apr%20%22%5Bharness%20abcd1234%5D%22&per_page=100",
+)
+_SANDBOX = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
+_T0 = datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)
+
+
+def _pr_view_argv(number: int) -> tuple[str, ...]:
+    return ("gh", "pr", "view", str(number), "--repo", "acme/sandbox", "--json", _PR_VIEW_FIELDS)
+
+
+def _pr_view_payload(
+    number: int = 5,
+    *,
+    head: str = "feat/x",
+    author: str = "octocat",
+    created_at: str = "2026-09-01T12:00:05Z",
+    cross: bool = False,
+    title: str = "Implement widget",
+    body: str = "",
+    merged_at: str | None = None,
+    state: str = "OPEN",
+) -> dict:
+    return {
+        "number": number,
+        "state": state,
+        "mergedAt": merged_at,
+        "headRefName": head,
+        "baseRefName": "main",
+        "author": {"login": author},
+        "createdAt": created_at,
+        "isCrossRepository": cross,
+        "title": title,
+        "body": body,
+    }
+
+
+def _search_page(*numbers: int, incomplete: bool = False) -> str:
+    page = {"total_count": len(numbers), "incomplete_results": incomplete, "items": [{"number": n} for n in numbers]}
+    return json.dumps([page])
+
+
+def _pr(
+    number: int = 5,
+    *,
+    head_ref: str = "feat/x",
+    author: str = "octocat",
+    created_at: datetime = datetime(2026, 9, 1, 12, 0, 5, tzinfo=UTC),
+    cross_repository: bool = False,
+    title: str = "Implement widget",
+    body: str = "",
+) -> PullRequest:
+    return PullRequest(
+        number=number,
+        state="OPEN",
+        merged=False,
+        head_ref=head_ref,
+        base_ref="main",
+        author=author,
+        created_at=created_at,
+        cross_repository=cross_repository,
+        title=title,
+        body=body,
+    )
+
+
+# Default branch deliberately absent from head_pairs so its clause is load-bearing.
+_PREDICATE_BASELINE = RunBaseline(
+    head_pairs=(("feat/old", "1" * 40),),
+    started_at=_T0,
+    viewer="octocat",
+    default_branch="trunk",
+)
+
+
+class TestReadRecordedBranch:
+    def _write(self, tmp_path: Path, text: str) -> Path:
+        (tmp_path / ".hermes").mkdir(exist_ok=True)
+        (tmp_path / ".hermes" / "pipeline_branch.txt").write_text(text)
+        return tmp_path
+
+    def test_valid_single_line_is_stripped(self, tmp_path: Path):
+        assert read_recorded_branch(self._write(tmp_path, "feat/x\n")) == "feat/x"
+
+    def test_missing_file_is_none(self, tmp_path: Path):
+        assert read_recorded_branch(tmp_path) is None
+
+    def test_blank_file_is_none(self, tmp_path: Path):
+        assert read_recorded_branch(self._write(tmp_path, "  \n")) is None
+
+    def test_multi_line_is_none(self, tmp_path: Path, caplog):
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            assert read_recorded_branch(self._write(tmp_path, "feat/x\nfeat/y\n")) is None
+        assert "pipeline_branch.txt" in caplog.text
+
+    def test_invalid_ref_is_rejected_via_check_ref_format(self, tmp_path: Path, caplog):
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            assert read_recorded_branch(self._write(tmp_path, "main..x\n")) is None
+        assert "main..x" in caplog.text
+
+
+class TestPrFromPayload:
+    def test_maps_gh_pr_view_shape(self):
+        pr = harness_mod._pr_from_payload(
+            _pr_view_payload(5, merged_at="2026-09-01T13:00:00Z", state="MERGED", body="b")
+        )
+        assert pr == PullRequest(
+            number=5, state="MERGED", merged=True, head_ref="feat/x", base_ref="main",
+            author="octocat", created_at=datetime(2026, 9, 1, 12, 0, 5, tzinfo=UTC),
+            cross_repository=False, title="Implement widget", body="b",
+        )
+
+    def test_null_merged_at_and_null_body(self):
+        pr = harness_mod._pr_from_payload(_pr_view_payload(5) | {"body": None})
+        assert pr.merged is False
+        assert pr.body == ""
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"number": True},
+            {"createdAt": "2026-09-01T12:00:05"},
+            {"createdAt": "yesterday"},
+            {"isCrossRepository": "false"},
+            {"author": {"login": ""}},
+            {"author": None},
+            {"headRefName": ""},
+            {"state": "open"},
+            {"state": "DRAFT"},
+        ],
+    )
+    def test_malformed_fields_raise(self, override: dict):
+        with pytest.raises((ValueError, TypeError, KeyError)):
+            harness_mod._pr_from_payload(_pr_view_payload(5) | override)
+
+
+class TestAttributablePr:
+    issue = HarnessIssue(
+        number=7, todo_id="TODO-7", branch="feat/harness-abcd1234",
+        plan_path="docs/harness/abcd1234-plan.md",
+        title="[harness abcd1234] Implement mock name normalization", run_token="abcd1234",
+    )
+
+    def _ok(self, pr: PullRequest, provenance: bool = True) -> bool:
+        return is_attributable_pr(
+            pr, baseline=_PREDICATE_BASELINE, issue=self.issue, provenance_of_head=provenance
+        )
+
+    def test_happy_with_run_provenance(self):
+        assert self._ok(_pr(head_ref="feat/x")) is True
+
+    def test_without_provenance_rejected_even_with_token_and_todo_id(self):
+        pr = _pr(title="TODO-7 [harness abcd1234]", body="[harness abcd1234] TODO-7")
+        assert self._ok(pr, provenance=False) is False
+
+    def test_fork_head_rejected(self):
+        assert self._ok(_pr(cross_repository=True)) is False
+
+    def test_other_author_rejected(self):
+        assert self._ok(_pr(author="mallory")) is False
+
+    def test_created_before_baseline_rejected(self):
+        assert self._ok(_pr(created_at=_T0 - timedelta(seconds=1))) is False
+
+    def test_created_same_second_as_baseline_accepted(self):
+        assert self._ok(_pr(created_at=_T0)) is True
+
+    def test_head_in_baseline_rejected(self):
+        assert self._ok(_pr(head_ref="feat/old")) is False
+
+    @pytest.mark.parametrize("head", ["trunk", "Trunk", "TRUNK"])
+    def test_head_equal_default_branch_rejected_casefold(self, head: str):
+        assert self._ok(_pr(head_ref=head)) is False
+
+
+class TestDeletableBranch:
+    def _ok(self, tmp_path: Path, name: str, *, provenance: bool = True) -> bool:
+        return is_deletable_branch(
+            name, baseline=_PREDICATE_BASELINE, project_dir=tmp_path, provenance=provenance
+        )
+
+    def test_deletable_with_run_provenance(self, tmp_path: Path):
+        assert self._ok(tmp_path, "feat/x") is True
+
+    def test_without_provenance_rejected(self, tmp_path: Path):
+        assert self._ok(tmp_path, "feat/x", provenance=False) is False
+
+    @pytest.mark.parametrize("name", ["main", "Main", "master", "MASTER", "trunk", "Trunk"])
+    def test_protected_and_default_rejected_casefold(self, tmp_path: Path, name: str):
+        assert self._ok(tmp_path, name) is False
+
+    @pytest.mark.parametrize("name", ["refs/heads/main", "refs/x", "feat/refs/x", "x/refs"])
+    def test_refs_namespace_rejected(self, tmp_path: Path, name: str):
+        assert self._ok(tmp_path, name) is False
+
+    def test_baseline_head_rejected(self, tmp_path: Path):
+        assert self._ok(tmp_path, "feat/old") is False
+
+    def test_bad_ref_rejected(self, tmp_path: Path):
+        assert self._ok(tmp_path, "a..b") is False
+
+
+def _issue7() -> HarnessIssue:
+    return _harness_issue(7, "abcd1234")
+
+
+def _push_new_branch(
+    work: Path, name: str, *, base: str = "main", email: str = "other@localhost", subject: str = "work"
+) -> str:
+    """Commit one file on new branch *name* (from *base*) in *work* and push it; return the tip."""
+    _real_git("checkout", "-q", "-b", name, base, cwd=work)
+    (work / f"{name.replace('/', '_')}.txt").write_text(f"{subject}\n")
+    _real_git("add", ".", cwd=work)
+    _real_git(
+        "-c", f"user.email={email}", "-c", "user.name=Someone", "-c", "commit.gpgsign=false",
+        "commit", "-q", "-m", subject, cwd=work,
+    )
+    _real_git("push", "-q", "origin", name, cwd=work)
+    return _real_git("rev-parse", "HEAD", cwd=work)
+
+
+def _foreign_clone(tmp_path: Path, sandbox: SandboxRepo, name: str = "foreign") -> Path:
+    work = tmp_path / name
+    _real_git("clone", "-q", sandbox.url, str(work), cwd=tmp_path)
+    _real_git("config", "user.email", "mallory@example.com", cwd=work)
+    _real_git("config", "user.name", "Mallory", cwd=work)
+    return work
+
+
+def _run_branch(project_dir: Path, issue: HarnessIssue, name: str = "feat/x") -> tuple[str, str]:
+    """The legitimate flow: plan commit on a new branch, agent commit on top, pushed. (plan_sha, tip)."""
+    _real_git("checkout", "-q", "-b", name, "main", cwd=project_dir)
+    plan_sha = commit_plan(project_dir, issue)
+    (project_dir / "agent.txt").write_text("agent work\n")
+    _real_git("add", ".", cwd=project_dir)
+    _real_git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "agent work", cwd=project_dir)
+    _real_git("push", "-q", "origin", name, cwd=project_dir)
+    tip = _real_git("rev-parse", "HEAD", cwd=project_dir)
+    _real_git("checkout", "-q", "main", cwd=project_dir)
+    return plan_sha, tip
+
+
+def _provenance_dir(project_dir: Path) -> Path:
+    """Harness-owned location outside the clone's parent tree (workspace/artifacts/provenance)."""
+    return project_dir.parent.parent / "artifacts" / "provenance"
+
+
+@pytest.mark.real_git
+class TestBranchProvenance:
+    def _check(
+        self, project_dir: Path, sandbox: SandboxRepo, name: str, tip: str, plan_sha: str, default: str = "main"
+    ) -> bool:
+        return branch_has_run_provenance(
+            project_dir, sandbox, name=name, tip_sha=tip, plan_sha=plan_sha, default_branch=default,
+            provenance_dir=_provenance_dir(project_dir),
+        )
+
+    def test_graft_in_agent_clone_does_not_forge_provenance(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7())
+        ops_tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
+        _real_git("fetch", "-q", "origin", "ops", cwd=project_dir)
+        _real_git("replace", "--graft", ops_tip, plan_sha, cwd=project_dir)
+        # The forgery works inside the clone: ancestry there now claims ops descends from the plan.
+        assert _real_git("merge-base", "--is-ancestor", plan_sha, ops_tip, cwd=project_dir) == ""
+
+        assert self._check(project_dir, sandbox, "ops", ops_tip, plan_sha) is False
+
+    def test_provenance_dir_is_recreated_fresh_on_every_check(self, tmp_path: Path, monkeypatch):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, tip = _run_branch(project_dir, _issue7())
+        provenance_dir = _provenance_dir(project_dir)
+        assert not provenance_dir.exists()
+        seen: list[list[str]] = []
+        seen_kw: list[dict] = []
+        real = harness_mod._git
+
+        def spy(argv, **kw):
+            seen.append(argv)
+            seen_kw.append(kw)
+            return real(argv, **kw)
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", spy)
+
+        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is True
+        # The root is harness-owned and persists; each check ran in a fresh ``prov-*`` subdir
+        # that was removed afterwards, and unrelated files in the root are left alone.
+        assert provenance_dir.is_dir()
+        assert not (provenance_dir / "HEAD").exists()
+        keep = provenance_dir / "keep.txt"
+        keep.write_text("operator file\n")
+        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is True
+        assert keep.read_text() == "operator file\n"
+        assert list(provenance_dir.glob("prov-*")) == []
+        assert sum(1 for argv in seen if "init" in argv) == 2
+        init_dirs = {Path(kw["cwd"]) for argv, kw in zip(seen, seen_kw, strict=True) if "init" in argv}
+        assert len(init_dirs) == 2
+        assert all(d.parent == provenance_dir and d.name.startswith("prov-") for d in init_dirs)
+        # Every ancestry query runs with replace refs disabled.
+        ancestry = [argv for argv in seen if "merge-base" in argv]
+        assert ancestry and all(argv[1:3] == ["-c", "core.useReplaceRefs=false"] for argv in ancestry)
+
+    def test_preseeded_grafts_and_alternates_are_discarded(self, fake_gh, tmp_path: Path):
+        # Plan commit exists only in the clone; a forger plants a bare repo in the provenance ROOT
+        # pointing at the clone's objects (alternates) and grafting the operator tip onto the plan.
+        # The check runs in a fresh ``prov-*`` subdir, so the planted files cannot shape ancestry.
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        baseline = take_baseline(project_dir, sandbox, viewer="octocat", default_branch="main")
+        _real_git("checkout", "-q", "-b", "plan-only", "main", cwd=project_dir)
+        plan_sha = commit_plan(project_dir, _issue7())
+        _real_git("checkout", "-q", "main", cwd=project_dir)
+        ops_tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
+        provenance_dir = _provenance_dir(project_dir)
+        _real_git("init", "-q", "--bare", str(provenance_dir), cwd=tmp_path)
+        (provenance_dir / "info").mkdir(exist_ok=True)
+        (provenance_dir / "info" / "grafts").write_text(f"{ops_tip} {plan_sha}\n")
+        (provenance_dir / "objects" / "info").mkdir(parents=True, exist_ok=True)
+        (provenance_dir / "objects" / "info" / "alternates").write_text(f"{project_dir / '.git' / 'objects'}\n")
+        sentinel = provenance_dir / "SENTINEL"
+        sentinel.write_text("seeded\n")
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
+
+        artifacts = discover_remote_artifacts(
+            project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+            provenance_dir=provenance_dir,
+        )
+
+        assert artifacts.deletable_branches == ()
+        assert artifacts.leftovers == (f"branch ops ({ops_tip[:7]}): no run provenance",)
+        # Root contents are the caller's: never deleted, and never consulted.
+        assert sentinel.read_text() == "seeded\n"
+        assert (provenance_dir / "info" / "grafts").is_file()
+        assert list(provenance_dir.glob("prov-*")) == []
+
+    def test_provenance_root_containing_clone_is_rejected_before_any_deletion(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, tip = _run_branch(project_dir, _issue7())
+        before = sorted(str(p.relative_to(project_dir)) for p in project_dir.rglob("*"))
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            branch_has_run_provenance(
+                project_dir, sandbox, name="feat/x", tip_sha=tip, plan_sha=plan_sha, default_branch="main",
+                provenance_dir=project_dir.parent,
+            )
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert exc_info.value.detail == "provenance_dir must not contain the clone"
+        assert (project_dir / ".git" / "HEAD").is_file()
+        assert sorted(str(p.relative_to(project_dir)) for p in project_dir.rglob("*")) == before
+
+    def test_inherited_git_dir_does_not_redirect_provenance(self, tmp_path: Path, monkeypatch):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7())
+        ops_tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
+        _real_git("fetch", "-q", "origin", "ops", cwd=project_dir)
+        _real_git("replace", "--graft", ops_tip, plan_sha, cwd=project_dir)
+        monkeypatch.setenv("GIT_DIR", str(project_dir / ".git"))
+        monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(project_dir / ".git" / "objects"))
+        envs: list[dict] = []
+        real = harness_mod._git
+
+        def spy(argv, **kw):
+            envs.append(kw["env"])
+            return real(argv, **kw)
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", spy)
+
+        assert self._check(project_dir, sandbox, "ops", ops_tip, plan_sha) is False
+        assert envs and all("GIT_DIR" not in env and "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env for env in envs)
+        assert _provenance_dir(project_dir).is_dir()
+        assert list(_provenance_dir(project_dir).glob("prov-*")) == []
+
+    @pytest.mark.parametrize("bad", ["abc", "g" * 40, "", "0" * 39, "HEAD"])
+    def test_malformed_tip_sha_fails_closed(self, tmp_path: Path, bad: str):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7())
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._check(project_dir, sandbox, "feat/x", bad, plan_sha)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+    @pytest.mark.parametrize("bad", ["abc", "g" * 40, "", "refs/harness/default"])
+    def test_malformed_plan_sha_fails_closed(self, tmp_path: Path, bad: str):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        _, tip = _run_branch(project_dir, _issue7())
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._check(project_dir, sandbox, "feat/x", tip, bad)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+    def test_plan_absent_from_remote_lacks_provenance(self, tmp_path: Path):
+        # The plan commit exists only in the clone (never pushed): no remote branch can be the run's.
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        _real_git("checkout", "-q", "-b", "plan-only", "main", cwd=project_dir)
+        plan_sha = commit_plan(project_dir, _issue7())
+        _real_git("checkout", "-q", "main", cwd=project_dir)
+        tip = _push_new_branch(project_dir, "feat/x", email="test@localhost")
+
+        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is False
+
+    def test_invalid_default_branch_name_lacks_provenance(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, tip = _run_branch(project_dir, _issue7())
+
+        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha, default="a..b") is False
+
+    def test_default_branch_missing_on_remote_fails_closed(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, tip = _run_branch(project_dir, _issue7())
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._check(project_dir, sandbox, "feat/x", tip, plan_sha, default="trunk")
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+    def test_is_ancestor_raises_on_unknown_object(self, tmp_path: Path):
+        project_dir, _ = _seeded_clone(tmp_path)
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            harness_mod._is_ancestor(project_dir, "0" * 40, "HEAD")
+
+        assert exc_info.value.code == "git_error"
+
+    def test_legit_run_branch_has_provenance(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, tip = _run_branch(project_dir, _issue7())
+
+        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is True
+
+    def test_foreign_branch_after_baseline_lacks_provenance(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7())
+        tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
+
+        assert self._check(project_dir, sandbox, "ops", tip, plan_sha) is False
+
+    def test_foreign_branch_merging_plan_commit_lacks_provenance(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7())
+        foreign = _foreign_clone(tmp_path, sandbox)
+        _push_new_branch(foreign, "ops", email="mallory@example.com")
+        _real_git("fetch", "-q", "origin", "feat/x", cwd=foreign)
+        _real_git("-c", "commit.gpgsign=false", "merge", "-q", "--no-ff", "-m", "absorb plan", "origin/feat/x", cwd=foreign)
+        _real_git("push", "-q", "origin", "ops", cwd=foreign)
+        tip = _real_git("rev-parse", "HEAD", cwd=foreign)
+        assert _real_git("merge-base", "--is-ancestor", plan_sha, tip, cwd=foreign) == ""  # plan IS an ancestor
+
+        assert self._check(project_dir, sandbox, "ops", tip, plan_sha) is False
+
+    def test_fast_forwarded_foreign_branch_lacks_provenance(self, tmp_path: Path):
+        # ops = foreign commit, then run branch rebased on top: plan is ancestor of tip, foreign commit is not below plan.
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        foreign = _foreign_clone(tmp_path, sandbox)
+        _push_new_branch(foreign, "ops", email="mallory@example.com")
+        _real_git("fetch", "-q", "origin", cwd=project_dir)
+        _real_git("checkout", "-q", "-b", "feat/x", "origin/ops", cwd=project_dir)
+        plan_sha = commit_plan(project_dir, _issue7())
+        _real_git("push", "-q", "origin", "feat/x:ops", cwd=project_dir)
+        _real_git("checkout", "-q", "main", cwd=project_dir)
+
+        assert self._check(project_dir, sandbox, "ops", plan_sha, plan_sha) is False
+
+    def test_tip_moved_between_discovery_and_check(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, stale_tip = _run_branch(project_dir, _issue7())
+        foreign = _foreign_clone(tmp_path, sandbox)
+        _real_git("checkout", "-q", "-b", "feat/x", "origin/feat/x", cwd=foreign)
+        (foreign / "more.txt").write_text("more\n")
+        _real_git("add", ".", cwd=foreign)
+        _real_git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "more", cwd=foreign)
+        _real_git("push", "-q", "origin", "feat/x", cwd=foreign)
+
+        assert self._check(project_dir, sandbox, "feat/x", stale_tip, plan_sha) is False
+
+    def test_plan_reachable_from_default_is_vacuous(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha = commit_plan(project_dir, _issue7())
+        _real_git("push", "-q", "origin", "main", cwd=project_dir)
+        tip = _push_new_branch(project_dir, "feat/x", email="test@localhost")
+
+        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is False
+
+    def test_fetch_failure_fails_closed(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, tip = _run_branch(project_dir, _issue7())
+        broken = dataclasses.replace(sandbox, url=f"file://{tmp_path / 'missing.git'}")
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._check(project_dir, broken, "feat/x", tip, plan_sha)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        # The git failure detail (not just the ``git_error`` code) reaches the operator.
+        assert "git fetch failed" in exc_info.value.detail
+
+    def test_provenance_dir_inside_clone_is_rejected(self, tmp_path: Path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        plan_sha, tip = _run_branch(project_dir, _issue7())
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            branch_has_run_provenance(
+                project_dir, sandbox, name="feat/x", tip_sha=tip, plan_sha=plan_sha, default_branch="main",
+                provenance_dir=project_dir / ".hermes" / "provenance",
+            )
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert exc_info.value.detail == "provenance_dir must not be inside the clone"
+
+    def test_invalid_name_never_fetched(self, tmp_path: Path, monkeypatch):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        seen: list[list[str]] = []
+        real = harness_mod._git
+
+        def spy(argv, **kw):
+            seen.append(argv)
+            return real(argv, **kw)
+
+        monkeypatch.setattr("hermes_pipeline.harness._git", spy)
+
+        assert self._check(project_dir, sandbox, "a..b", "0" * 40, "0" * 40) is False
+        assert not any("fetch" in argv for argv in seen)
+
+
+class TestDiscoverCandidatePrs:
+    def _discover(self, tmp_path: Path, head_refs=("feat/x",)) -> tuple[int, ...]:
+        return discover_candidate_prs(tmp_path, _SANDBOX, head_refs=head_refs, run_token="abcd1234")
+
+    def test_unions_paginated_pulls_with_search_results_sorted_unique(self, fake_gh, tmp_path: Path):
+        # Sparse, descending numbers so ``sorted`` is load-bearing; the qualifying PR sits on page 3.
+        pages = [
+            [{"number": n} for n in range(900, 700, -2)],
+            [{"number": n} for n in range(700, 500, -2)],
+            [{"number": n} for n in range(500, 300, -2)] + [{"number": 7}],
+        ]
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps(pages))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page(7, 9, 900, 301))
+
+        numbers = self._discover(tmp_path)
+
+        assert numbers == (7, 9, 301, *range(302, 901, 2))
+        assert len(numbers) == len(set(numbers))
+        assert [argv[-1] for argv in fake_gh.gh_calls()] == [_PULLS_ARGV[-1], _SEARCH_ARGV[-1]]
+        assert all(kw["timeout"] == 180.0 for kw in fake_gh.kwargs)
+
+    def test_queries_each_head_ref_once(self, fake_gh, tmp_path: Path):
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[{"number": 5}]]))
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[{"number": 6}]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
+
+        numbers = self._discover(tmp_path, head_refs=("feat/x", "feat/harness-abcd1234", "feat/x"))
+
+        assert numbers == (5, 6)
+        assert [argv[-1] for argv in fake_gh.gh_calls()] == [
+            _PULLS_ARGV[-1], _ISSUE_BRANCH_PULLS_ARGV[-1], _SEARCH_ARGV[-1],
+        ]
+
+    def test_no_head_refs_skips_pulls_query(self, fake_gh, tmp_path: Path):
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page(9))
+
+        assert self._discover(tmp_path, head_refs=()) == (9,)
+        assert [argv[-1] for argv in fake_gh.gh_calls()] == [_SEARCH_ARGV[-1]]
+
+    def test_listing_failure_fails_closed(self, fake_gh, tmp_path: Path):
+        fake_gh.on(*_PULLS_ARGV, rc=1, stderr="HTTP 502")
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._discover(tmp_path)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+    def test_search_failure_fails_closed(self, fake_gh, tmp_path: Path):
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, rc=1, stderr="HTTP 422")
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._discover(tmp_path)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+    def test_incomplete_search_results_fail_closed(self, fake_gh, tmp_path: Path):
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page(9, incomplete=True))
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._discover(tmp_path)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert "incomplete" in exc_info.value.detail
+
+    @pytest.mark.parametrize(
+        ("pulls", "search"),
+        [
+            ('[[{"number": 1}], "oops"]', '[{"total_count": 0, "items": []}]'),
+            ('[[{"number": "1"}]]', '[{"total_count": 0, "items": []}]'),
+            ("[[]]", '[{"total_count": 1}]'),
+            ("[[]]", '[{"items": "nope"}]'),
+            ("[[]]", '[{"items": [{"number": null}]}]'),
+            ("[[]]", "not json"),
+        ],
+    )
+    def test_malformed_page_fails_closed(self, fake_gh, tmp_path: Path, pulls: str, search: str):
+        fake_gh.on(*_PULLS_ARGV, stdout=pulls)
+        fake_gh.on(*_SEARCH_ARGV, stdout=search)
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._discover(tmp_path)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+
+class TestFetchPullRequest:
+    def test_views_pr_with_json_fields(self, fake_gh, tmp_path: Path):
+        fake_gh.on(*_pr_view_argv(5), stdout=json.dumps(_pr_view_payload(5)))
+
+        pr = fetch_pull_request(tmp_path, _SANDBOX, 5)
+
+        assert pr.number == 5 and pr.head_ref == "feat/x" and pr.author == "octocat"
+        assert fake_gh.gh_calls() == [list(_pr_view_argv(5))[1:]]
+
+    def test_failure_fails_closed(self, fake_gh, tmp_path: Path):
+        fake_gh.on(*_pr_view_argv(5), rc=1, stderr="not found")
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            fetch_pull_request(tmp_path, _SANDBOX, 5)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+    @pytest.mark.parametrize(
+        "override",
+        [
+            {"number": True},
+            {"createdAt": "2026-09-01T12:00:05"},
+            {"isCrossRepository": "false"},
+            {"author": {"login": ""}},
+            {"headRefName": ""},
+            {"state": "weird"},
+        ],
+    )
+    def test_malformed_payload_fails_closed(self, fake_gh, tmp_path: Path, override: dict):
+        fake_gh.on(*_pr_view_argv(5), stdout=json.dumps(_pr_view_payload(5) | override))
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            fetch_pull_request(tmp_path, _SANDBOX, 5)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+
+@pytest.mark.real_git
+class TestDiscoverRemoteArtifacts:
+    def _setup(self, tmp_path: Path) -> tuple[Path, SandboxRepo, RunBaseline]:
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        baseline = take_baseline(
+            project_dir, sandbox, viewer="octocat", default_branch="main",
+            now=datetime(2026, 9, 1, 12, 0, 1, tzinfo=UTC),
+        )
+        return project_dir, sandbox, baseline
+
+    def _discover(self, project_dir, sandbox, baseline, plan_sha) -> RemoteArtifacts:
+        return discover_remote_artifacts(
+            project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+            provenance_dir=_provenance_dir(project_dir),
+        )
+
+    def test_classifies_branches_and_prs_by_run_provenance(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/x")
+        (project_dir / ".hermes").mkdir(exist_ok=True)
+        (project_dir / ".hermes" / "pipeline_branch.txt").write_text("recorded/x\n")
+        foreign = _foreign_clone(tmp_path, sandbox)
+        ops_sha = _push_new_branch(foreign, "ops")
+        stray_sha = _push_new_branch(foreign, "stray")
+
+        fake_gh.on(*_RECORDED_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[{"number": 5}]]))
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page(9, 11))
+        fake_gh.on(*_pr_view_argv(5), stdout=json.dumps(_pr_view_payload(5, head="feat/x")))
+        # The agent (authenticated as the viewer) opened a PR from the operator's branch with the token in the title.
+        fake_gh.on(*_pr_view_argv(9), stdout=json.dumps(_pr_view_payload(9, head="ops", title="[harness abcd1234] TODO-7")))
+        fake_gh.on(*_pr_view_argv(11), stdout=json.dumps(_pr_view_payload(11, head="main", title="[harness abcd1234]")))
+
+        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+
+        assert artifacts.issue_number == 7
+        assert [pr.number for pr in artifacts.prs] == [5]
+        assert artifacts.deletable_branches == (("feat/x", feat_sha),)
+        assert artifacts.leftovers == (
+            f"branch ops ({ops_sha[:7]}): no run provenance",
+            f"branch stray ({stray_sha[:7]}): no run provenance",
+            "pr #9: not attributable",
+            "pr #11: head main pre-existing (not created by this run)",
+        )
+        # Discovery queries the recorded branch, the issue branch, and every provenance head.
+        assert [argv[-1] for argv in fake_gh.gh_calls()[:4]] == [
+            _RECORDED_PULLS_ARGV[-1], _ISSUE_BRANCH_PULLS_ARGV[-1], _PULLS_ARGV[-1], _SEARCH_ARGV[-1],
+        ]
+
+    def test_issue_branch_query_used_without_recorded_branch(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/harness-abcd1234")
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[{"number": 5}]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
+        fake_gh.on(
+            *_pr_view_argv(5), stdout=json.dumps(_pr_view_payload(5, head="feat/harness-abcd1234"))
+        )
+
+        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+
+        # issue.branch is also the provenance head: queried once.
+        assert [argv[-1] for argv in fake_gh.gh_calls()[:2]] == [_ISSUE_BRANCH_PULLS_ARGV[-1], _SEARCH_ARGV[-1]]
+        assert artifacts.deletable_branches == (("feat/harness-abcd1234", _real_git("rev-parse", "feat/harness-abcd1234", cwd=project_dir)),)
+        assert [pr.number for pr in artifacts.prs] == [5]
+        assert artifacts.leftovers == ()
+
+    def test_protected_named_new_head_is_leftover(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/x")
+        _real_git("push", "-q", "origin", "feat/x:refs/heads/Master", cwd=project_dir)
+        master_sha = _real_git("rev-parse", "feat/x", cwd=project_dir)
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
+
+        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+
+        assert artifacts.deletable_branches == (("feat/x", feat_sha),)
+        assert artifacts.leftovers == (f"branch Master ({master_sha[:7]}): protected",)
+
+    def test_incomplete_search_results_propagate(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page(5, incomplete=True))
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._discover(project_dir, sandbox, baseline, plan_sha)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
+    def test_origin_swap_does_not_widen_enumeration(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+        other = tmp_path / "other"
+        other.mkdir()
+        other_bare = _make_bare_remote(other, {"README.md": "other\n"})
+        _real_git("clone", "-q", f"file://{other_bare}", str(other / "work"), cwd=other)
+        _push_new_branch(other / "work", "X", email="test@localhost")
+        _real_git("remote", "set-url", "origin", f"file://{other_bare}", cwd=project_dir)
+        fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
+
+        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+
+        assert [name for name, _ in artifacts.deletable_branches] == ["feat/x"]
+        assert not any(" X " in line for line in artifacts.leftovers)
+        assert artifacts.leftovers == ()
+
+    def test_ls_remote_failure_fails_closed(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        broken = dataclasses.replace(sandbox, url=f"file://{tmp_path / 'missing.git'}")
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._discover(project_dir, broken, baseline, "0" * 40)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert "git ls-remote failed" in exc_info.value.detail
+
+    def test_provenance_dir_inside_clone_is_rejected(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            discover_remote_artifacts(
+                project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+                provenance_dir=project_dir / "provenance",
+            )
+
+        assert exc_info.value.detail == "provenance_dir must not be inside the clone"
+        assert fake_gh.gh_calls() == []
+
+    def test_provenance_root_containing_clone_is_rejected(self, fake_gh, tmp_path: Path):
+        project_dir, sandbox, baseline = self._setup(tmp_path)
+        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            discover_remote_artifacts(
+                project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+                provenance_dir=project_dir.parent,
+            )
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert exc_info.value.detail == "provenance_dir must not contain the clone"
+        assert (project_dir / ".git" / "HEAD").is_file()
+        assert fake_gh.gh_calls() == []

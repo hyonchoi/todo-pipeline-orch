@@ -269,6 +269,28 @@ _HARNESS_GIT_USER_NAME = "TPO Harness"
 
 _URL_USERINFO_RE = re.compile(r"://[^/@\s]+@")
 _GIT_NO_PROMPT_ENV = {"GIT_TERMINAL_PROMPT": "0", "GIT_ASKPASS": "", "GCM_INTERACTIVE": "never"}
+# Inherited repo-location variables could redirect a harness git call (notably the
+# provenance checks) into the agent-owned clone; every ``_run_git`` drops them.
+_GIT_SCRUBBED_ENV = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_INDEX_FILE",
+        "GIT_CEILING_DIRECTORIES",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_GRAFT_FILE",
+        "GIT_NAMESPACE",
+        "GIT_COMMON_DIR",
+    }
+)
+
+
+def _git_env() -> dict[str, str]:
+    env = {key: value for key, value in os.environ.items() if key not in _GIT_SCRUBBED_ENV}
+    env.update(_GIT_NO_PROMPT_ENV)
+    return env
 
 
 def _git_verb(args: list[str]) -> str:
@@ -288,7 +310,7 @@ def _run_git(args: list[str], *, cwd: Path, check: bool = True) -> subprocess.Co
             capture_output=True,
             text=True,
             check=False,
-            env={**os.environ, **_GIT_NO_PROMPT_ENV},
+            env=_git_env(),
         )
     except OSError as exc:
         raise HarnessPreflightError("git_error", f"git {verb} failed: {exc}") from exc
@@ -570,20 +592,46 @@ class RunBaseline:
         return MappingProxyType(dict(self.head_pairs))
 
 
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def _ls_remote_heads(project_dir: Path, url: str) -> dict[str, str]:
+    """``{branch: sha}`` for every ``refs/heads/*`` at *url* (never the clone's mutable ``origin``).
+
+    Any line that is not ``<sha>\t<ref>`` raises ``git_error``: a partial listing
+    must never be mistaken for the remote's full head set.
+    """
+    result = _run_git(["ls-remote", "--heads", "--", url], cwd=project_dir)
+    heads: dict[str, str] = {}
+    for line in result.stdout.splitlines():
+        sha, sep, ref = line.rstrip("\n").partition("\t")
+        if not sep or not sha or not ref:
+            raise HarnessPreflightError("git_error", f"git ls-remote: unparseable line {line[:120]!r}")
+        if sha.startswith("ref: "):
+            continue  # symref advertisement (``ref: refs/heads/main\tHEAD``)
+        if _SHA_RE.match(sha) is None:
+            raise HarnessPreflightError(
+                "git_error", f"git ls-remote: non-hex object id in line {line[:120]!r}"
+            )
+        if ref.startswith("refs/heads/"):
+            heads[ref.removeprefix("refs/heads/")] = sha
+    return heads
+
+
 def take_baseline(
-    project_dir: Path, *, viewer: str, default_branch: str, now: datetime | None = None
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    viewer: str,
+    default_branch: str,
+    now: datetime | None = None,
 ) -> RunBaseline:
-    """Snapshot remote branch heads and a second-precision UTC start timestamp."""
+    """Snapshot the sandbox's branch heads and a second-precision UTC start timestamp."""
     if now is None:
         now = datetime.now(UTC)
     elif now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("now must be timezone-aware")
-    result = _run_git(["ls-remote", "--heads", "origin"], cwd=project_dir)
-    heads: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        sha, sep, ref = line.rstrip("\n").partition("\t")
-        if sep and sha and ref.startswith("refs/heads/"):
-            heads[ref.removeprefix("refs/heads/")] = sha
+    heads = _ls_remote_heads(project_dir, sandbox.url)
     # GitHub timestamps are second-precision: floor, then back off one second.
     started = now.astimezone(UTC).replace(microsecond=0) - timedelta(seconds=1)
     return RunBaseline(
@@ -999,6 +1047,491 @@ def commit_plan(project_dir: Path, issue: HarnessIssue) -> str:
         cwd=project_dir,
     )
     return _run_git(["rev-parse", "HEAD"], cwd=project_dir).stdout.strip()
+
+
+_RECORDED_BRANCH_RELPATH = Path(".hermes") / "pipeline_branch.txt"
+_PR_VIEW_FIELDS = (
+    "number,state,mergedAt,headRefName,baseRefName,author,createdAt,isCrossRepository,title,body"
+)
+_PR_STATES = frozenset({"OPEN", "CLOSED", "MERGED"})
+_PROTECTED_BRANCHES = frozenset({"main", "master"})
+_CANDIDATE_REF = "refs/harness/candidate"
+_DEFAULT_REF = "refs/harness/default"
+_PROVENANCE_OK = None
+
+
+def _valid_branch_name(project_dir: Path, name: str) -> bool:
+    """True when git accepts *name* as a branch name (``git check-ref-format --branch``)."""
+    if not name or name.startswith("-"):
+        return False
+    result = _run_git(["check-ref-format", "--branch", name], cwd=project_dir, check=False)
+    return result.returncode == 0
+
+
+def read_recorded_branch(project_dir: Path) -> str | None:
+    """The branch the pipeline recorded in ``.hermes/pipeline_branch.txt``, or None.
+
+    Agent-written and therefore untrusted: it only widens PR *discovery* (an extra
+    ``pulls?head=`` query) and never contributes to attribution or deletability.
+    None when the file is missing, blank, multi-line, or not a valid branch name;
+    a present-but-rejected value is logged at WARNING so an operator can inspect it.
+    """
+    path = project_dir / _RECORDED_BRANCH_RELPATH
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        return None
+    except (OSError, UnicodeDecodeError) as exc:
+        log.warning("harness: cannot read %s: %s", _RECORDED_BRANCH_RELPATH, exc)
+        return None
+    if not text.strip():
+        return None
+    lines = text.strip().splitlines()
+    if len(lines) != 1:
+        log.warning("harness: %s has %d lines; expected one branch name", _RECORDED_BRANCH_RELPATH, len(lines))
+        return None
+    value = lines[0].strip()
+    if not _valid_branch_name(project_dir, value):
+        log.warning("harness: %s names an invalid branch %r; ignoring", _RECORDED_BRANCH_RELPATH, value)
+        return None
+    return value
+
+
+@dataclass(frozen=True)
+class PullRequest:
+    """One pull request in the sandbox, as reported by ``gh pr view --json``."""
+
+    number: int
+    state: str
+    merged: bool
+    head_ref: str
+    base_ref: str
+    author: str
+    created_at: datetime
+    cross_repository: bool
+    title: str
+    body: str
+
+
+def _parse_github_timestamp(value: object) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"invalid timestamp: {value!r}")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"naive timestamp: {value!r}")
+    return parsed.astimezone(UTC)
+
+
+def _pr_from_payload(payload: Mapping[str, Any]) -> PullRequest:
+    """Build a :class:`PullRequest` from the ``gh pr view --json`` shape; raises ValueError/TypeError/KeyError."""
+    number = payload["number"]
+    if not isinstance(number, int) or isinstance(number, bool):
+        raise TypeError(f"invalid pr number: {number!r}")
+    author = payload["author"]
+    login = author.get("login") if isinstance(author, Mapping) else None
+    if not isinstance(login, str) or not login:
+        raise TypeError(f"invalid pr author: {author!r}")
+    head_ref, base_ref, state = payload["headRefName"], payload["baseRefName"], payload["state"]
+    for name, value in (("headRefName", head_ref), ("baseRefName", base_ref), ("state", state)):
+        if not isinstance(value, str) or not value:
+            raise TypeError(f"invalid pr {name}: {value!r}")
+    if state not in _PR_STATES:
+        raise ValueError(f"invalid pr state: {state!r}")
+    cross = payload.get("isCrossRepository", False)
+    if not isinstance(cross, bool):
+        raise TypeError(f"invalid pr isCrossRepository: {cross!r}")
+    title = payload.get("title") or ""
+    body = payload.get("body") or ""
+    if not isinstance(title, str) or not isinstance(body, str):
+        raise TypeError("invalid pr title/body")
+    return PullRequest(
+        number=number,
+        state=state,
+        merged=payload.get("mergedAt") is not None,
+        head_ref=head_ref,
+        base_ref=base_ref,
+        author=login,
+        created_at=_parse_github_timestamp(payload["createdAt"]),
+        cross_repository=cross,
+        title=title,
+        body=body,
+    )
+
+
+def _pr_numbers(items: object, verb: str) -> list[int]:
+    """Integer ``number`` of every item in a REST list page; malformed input raises."""
+    if not isinstance(items, list):
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"{verb}: page is not a list")
+    numbers: list[int] = []
+    for item in items:
+        number = item.get("number") if isinstance(item, Mapping) else None
+        if not isinstance(number, int) or isinstance(number, bool):
+            raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"{verb}: item without a pr number")
+        numbers.append(number)
+    return numbers
+
+
+def discover_candidate_prs(
+    project_dir: Path, sandbox: SandboxRepo, *, head_refs: Sequence[str], run_token: str
+) -> tuple[int, ...]:
+    """Sorted unique PR numbers that *might* belong to the run (a superset; never a deletion decision).
+
+    Union of every PR whose head is one of *head_refs* and every PR the search API
+    matches on the phrase-quoted issue prefix. Any listing failure, malformed page,
+    or ``incomplete_results`` search page raises
+    ``HarnessRemoteCleanupError("pr_discovery_incomplete")`` so callers fail closed
+    and delete nothing.
+    """
+    from urllib.parse import quote
+
+    from .github_issues import (
+        _LIST_TIMEOUT,
+        GitHubIssuesError,
+        _decode_json,
+        _flatten_pages,
+        _gh_api,
+    )
+
+    owner = sandbox.repo.split("/", 1)[0]
+    numbers: set[int] = set()
+    try:
+        for head_ref in dict.fromkeys(head_refs):
+            head = quote(head_ref, safe="")
+            stdout = _gh_api(
+                project_dir,
+                ["--paginate", "--slurp", f"repos/{sandbox.repo}/pulls?state=all&head={owner}:{head}&per_page=100"],
+                timeout=_LIST_TIMEOUT,
+            )
+            numbers.update(_pr_numbers(_flatten_pages(_decode_json(stdout, "api", empty=[]), "api"), "pulls"))
+        query = quote(f'repo:{sandbox.repo} is:pr "{_issue_prefix(run_token)}"', safe="")
+        stdout = _gh_api(
+            project_dir,
+            ["--paginate", "--slurp", f"search/issues?q={query}&per_page=100"],
+            timeout=_LIST_TIMEOUT,
+        )
+        pages = _decode_json(stdout, "api", empty=[])
+        if not isinstance(pages, list):
+            raise HarnessRemoteCleanupError("pr_discovery_incomplete", "search: response is not a page list")
+        for page in pages:
+            if not isinstance(page, Mapping) or "items" not in page:
+                raise HarnessRemoteCleanupError("pr_discovery_incomplete", "search: page without items")
+            if page.get("incomplete_results") is True:
+                raise HarnessRemoteCleanupError("pr_discovery_incomplete", "search: incomplete_results")
+            numbers.update(_pr_numbers(page["items"], "search"))
+    except GitHubIssuesError as exc:
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"listing pull requests failed: {exc}") from exc
+    return tuple(sorted(numbers))
+
+
+def fetch_pull_request(project_dir: Path, sandbox: SandboxRepo, number: int) -> PullRequest:
+    """``gh pr view`` for PR *number*; failures raise ``pr_discovery_incomplete``."""
+    from .github_issues import GitHubIssuesError, _decode_json, _gh
+
+    try:
+        stdout = _gh(
+            project_dir,
+            ["pr", "view", str(number), "--repo", sandbox.repo, "--json", _PR_VIEW_FIELDS],
+        )
+        payload = _decode_json(stdout, "pr view")
+        if not isinstance(payload, Mapping):
+            raise TypeError("pr view payload is not an object")
+        return _pr_from_payload(payload)
+    except (GitHubIssuesError, ValueError, TypeError, KeyError) as exc:
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"pr #{number}: {exc}") from exc
+
+
+def _is_ancestor(git_dir: Path, ancestor: str, descendant: str) -> bool:
+    """``git merge-base --is-ancestor`` with replace refs disabled; exit codes other than 0/1 raise."""
+    result = _run_git(
+        ["-c", "core.useReplaceRefs=false", "merge-base", "--is-ancestor", ancestor, descendant],
+        cwd=git_dir,
+        check=False,
+    )
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    detail = _URL_USERINFO_RE.sub("://***@", (result.stderr or "").strip())[:200]
+    raise HarnessPreflightError("git_error", f"git merge-base failed ({result.returncode}): {detail}")
+
+
+_PROVENANCE_FORBIDDEN = ("info/grafts", "objects/info/alternates", "shallow")
+
+
+def _ensure_provenance_dir(root: Path) -> Path:
+    """Create a FRESH bare repository under harness-owned *root* for one ancestry check.
+
+    *root* is never deleted or reused as a repository: each check gets its own
+    ``prov-*`` subdirectory (returned) so nothing left behind (grafts, alternates, a
+    shallow file, stale refs) can shape ancestry, and the forgery vectors are asserted
+    absent afterwards. Callers must place *root* outside the clone's parent tree (for
+    example ``workspace/artifacts/provenance``) so the agent cannot reach it through
+    the clone; the caller removes the returned subdirectory when the check ends.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    work = Path(tempfile.mkdtemp(prefix="prov-", dir=root))
+    _run_git(["init", "-q", "--bare"], cwd=work)
+    leftover = [rel for rel in _PROVENANCE_FORBIDDEN if (work / rel).exists()]
+    if leftover:
+        raise HarnessRemoteCleanupError(
+            "pr_discovery_incomplete", f"fresh provenance dir carries {', '.join(leftover)}"
+        )
+    return work
+
+
+def _branch_provenance_failure(
+    sandbox: SandboxRepo,
+    *,
+    name: str,
+    tip_sha: str,
+    plan_sha: str,
+    default_branch: str,
+    provenance_dir: Path,
+) -> str | None:
+    """Why remote branch *name*@*tip_sha* is NOT provably this run's work, or None when it is.
+
+    Run-scoped provenance (ruling R-8.1): the plan commit *plan_sha* (made by the
+    harness itself) must be a non-vacuous ancestor of every commit the branch adds
+    over the default branch. Everything is fetched from ``sandbox.url`` into
+    a fresh bare repository created under *provenance_dir* for every check and removed
+    afterwards (place the root outside the clone's parent tree, e.g.
+    ``workspace/artifacts/provenance``), and
+    ancestry is computed there with replace refs disabled: the agent-owned clone
+    (``git replace --graft``, ``info/grafts``) can forge ancestry and is never
+    consulted. The plan commit must therefore be reachable from the candidate tip
+    on the remote; when it is absent after the fetch the branch cannot be the run's.
+    Text, author identity, and agent-written files are never consulted either.
+    """
+    for label, value in (("tip", tip_sha), ("plan", plan_sha)):
+        if _SHA_RE.match(value) is None:
+            raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"branch {name}: malformed {label} sha {value!r}")
+    work: Path | None = None
+    try:
+        work = _ensure_provenance_dir(provenance_dir)
+        if not _valid_branch_name(work, name) or not _valid_branch_name(work, default_branch):
+            return "no run provenance"
+        _run_git(
+            [
+                "fetch", "--no-tags", "--", sandbox.url,
+                f"+refs/heads/{name}:{_CANDIDATE_REF}",
+                f"+refs/heads/{default_branch}:{_DEFAULT_REF}",
+            ],
+            cwd=work,
+        )
+        fetched = _run_git(
+            ["rev-parse", "--verify", "--quiet", f"{_CANDIDATE_REF}^{{commit}}"], cwd=work, check=False
+        )
+        if fetched.returncode != 0 or fetched.stdout.strip() != tip_sha:
+            return "tip moved"
+        present = _run_git(["cat-file", "-e", f"{plan_sha}^{{commit}}"], cwd=work, check=False)
+        if present.returncode != 0:
+            return "no run provenance"  # the plan commit was never pushed under this branch
+        if _is_ancestor(work, plan_sha, _DEFAULT_REF):
+            return "no run provenance"  # vacuous: the plan is already on the default branch
+        if not _is_ancestor(work, plan_sha, tip_sha):
+            return "no run provenance"
+        added = _run_git(
+            ["-c", "core.useReplaceRefs=false", "rev-list", tip_sha, f"^{_DEFAULT_REF}"], cwd=work
+        )
+        commits = added.stdout.split()
+        if not commits or not all(_is_ancestor(work, plan_sha, commit) for commit in commits):
+            return "no run provenance"
+    except HarnessPreflightError as exc:
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"branch {name}: {_preflight_detail(exc)}") from exc
+    finally:
+        if work is not None:
+            shutil.rmtree(work, ignore_errors=True)
+    return _PROVENANCE_OK
+
+
+def _preflight_detail(exc: HarnessPreflightError) -> str:
+    return f"{exc.code}: {exc.detail}" if exc.detail else exc.code
+
+
+def _reject_nested_provenance_dir(project_dir: Path, provenance_dir: Path) -> None:
+    """The provenance root must be disjoint from the agent-owned clone.
+
+    Inside the clone, the agent could reach it; containing the clone (e.g. the
+    workspace root), a harness-owned directory would overlap agent-owned files.
+    """
+    clone, root = project_dir.resolve(), provenance_dir.resolve()
+    if root.is_relative_to(clone):
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", "provenance_dir must not be inside the clone")
+    if clone.is_relative_to(root):
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", "provenance_dir must not contain the clone")
+
+
+def branch_has_run_provenance(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    name: str,
+    tip_sha: str,
+    plan_sha: str,
+    default_branch: str,
+    provenance_dir: Path,
+) -> bool:
+    """True when every commit branch *name* adds over *default_branch* descends from *plan_sha*.
+
+    Fetches the branch and the default branch from ``sandbox.url`` into the
+    harness-owned *provenance_dir* (never *project_dir*, which the agent controls);
+    a fetch failure raises ``pr_discovery_incomplete``. False when the tip no longer
+    equals *tip_sha*, when *plan_sha* is not reachable on the remote, when it is
+    already reachable from the default branch (vacuous), or when any added commit
+    does not descend from the plan commit.
+    """
+    _reject_nested_provenance_dir(project_dir, provenance_dir)  # ancestry is never computed in the clone
+    failure = _branch_provenance_failure(
+        sandbox, name=name, tip_sha=tip_sha, plan_sha=plan_sha, default_branch=default_branch,
+        provenance_dir=provenance_dir,
+    )
+    return failure is _PROVENANCE_OK
+
+
+def _is_protected_branch(name: str, baseline: RunBaseline) -> bool:
+    protected = {branch.casefold() for branch in _PROTECTED_BRANCHES | {baseline.default_branch}}
+    return name.casefold() in protected or "refs" in name.split("/")
+
+
+def is_attributable_pr(
+    pr: PullRequest, *, baseline: RunBaseline, issue: HarnessIssue, provenance_of_head: bool
+) -> bool:
+    """The single predicate deciding whether *pr* was opened by this live run.
+
+    Every condition must hold: same-repository head, authored by the baseline viewer,
+    created no earlier than the baseline, head branch neither pre-existing nor the
+    default branch, and the head branch carries run provenance
+    (:func:`branch_has_run_provenance`). PR text is never consulted: the agent writes it.
+    """
+    del issue  # attribution is provenance-based; the issue is kept for call-site symmetry
+    if pr.cross_repository or pr.author != baseline.viewer or pr.created_at < baseline.started_at:
+        return False
+    if pr.head_ref in baseline.heads or pr.head_ref.casefold() == baseline.default_branch.casefold():
+        return False
+    return provenance_of_head is True
+
+
+def is_deletable_branch(
+    name: str, *, baseline: RunBaseline, project_dir: Path, provenance: bool
+) -> bool:
+    """Whether remote branch *name* may be deleted as an artifact of this run.
+
+    Never a baseline head, the default branch or ``main``/``master`` (case-insensitive),
+    anything in a ``refs`` namespace, or an invalid ref; and the branch must carry
+    run provenance.
+    """
+    if _is_protected_branch(name, baseline) or name in baseline.heads:
+        return False
+    if not _valid_branch_name(project_dir, name):
+        return False
+    return provenance is True
+
+
+@dataclass(frozen=True)
+class RemoteArtifacts:
+    """Remote state attributed to one live run, plus what was found but not attributable."""
+
+    issue_number: int
+    prs: tuple[PullRequest, ...]
+    deletable_branches: tuple[tuple[str, str], ...]
+    """``(name, verified tip sha)`` pairs so the deleter can compare-and-swap."""
+    leftovers: tuple[str, ...]
+
+
+def discover_remote_artifacts(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    issue: HarnessIssue,
+    baseline: RunBaseline,
+    plan_sha: str,
+    provenance_dir: Path,
+) -> RemoteArtifacts:
+    """Classify the sandbox's post-run PRs and new branches into attributable and leftover.
+
+    Heads are enumerated at ``sandbox.url`` (not the clone's ``origin``); each new
+    head's run provenance is checked once against *plan_sha* (the harness's own plan
+    commit, see :func:`commit_plan`) inside *provenance_dir*, a harness-owned
+    directory recreated fresh per check that callers must place outside the clone's
+    parent tree (e.g. ``workspace/artifacts/provenance``). PR discovery queries the recorded branch, the
+    issue branch, and every provenance head, so it is a superset of what deletion may
+    touch. Raises ``HarnessRemoteCleanupError("pr_discovery_incomplete")`` when
+    enumeration, fetch, ancestry, or PR discovery cannot be completed; callers must
+    then delete nothing.
+
+    Accepted residuals (coordinator rulings):
+
+    (a) A branch an operator cuts from the default branch DURING a run and the agent
+        then fast-forwards onto the run's commits is indistinguishable from a
+        run-created branch. The sandbox is dedicated; operators must not create
+        branches during an active run.
+    (b) Once a run's PR is merged into the default branch, the vacuity guard
+        (plan commit reachable from the default branch) disables deletion of that
+        run's branch. This fails closed; the operator deletes the branch manually.
+    """
+    try:
+        return _discover_remote_artifacts(
+            project_dir, sandbox, issue=issue, baseline=baseline, plan_sha=plan_sha, provenance_dir=provenance_dir
+        )
+    except HarnessPreflightError as exc:
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", _preflight_detail(exc)) from exc
+
+
+def _discover_remote_artifacts(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    issue: HarnessIssue,
+    baseline: RunBaseline,
+    plan_sha: str,
+    provenance_dir: Path,
+) -> RemoteArtifacts:
+    _reject_nested_provenance_dir(project_dir, provenance_dir)
+    recorded = read_recorded_branch(project_dir)
+    current = _ls_remote_heads(project_dir, sandbox.url)
+    new_heads = {name: sha for name, sha in sorted(current.items()) if name not in baseline.heads}
+    failures: dict[str, str | None] = {}
+    for name, sha in new_heads.items():
+        if _is_protected_branch(name, baseline):
+            failures[name] = "protected"
+            continue
+        failures[name] = _branch_provenance_failure(
+            sandbox, name=name, tip_sha=sha, plan_sha=plan_sha,
+            default_branch=baseline.default_branch, provenance_dir=provenance_dir,
+        )
+    provenance = {name: failure is _PROVENANCE_OK for name, failure in failures.items()}
+    provenance_heads = [name for name, ok in provenance.items() if ok]
+    head_refs = [ref for ref in (recorded, issue.branch, *provenance_heads) if ref is not None]
+
+    prs: list[PullRequest] = []
+    pr_leftovers: list[str] = []
+    numbers = discover_candidate_prs(project_dir, sandbox, head_refs=head_refs, run_token=issue.run_token)
+    for number in numbers:
+        pr = fetch_pull_request(project_dir, sandbox, number)
+        head = pr.head_ref
+        if head in baseline.heads or head.casefold() == baseline.default_branch.casefold():
+            pr_leftovers.append(f"pr #{number}: head {head} pre-existing (not created by this run)")
+        elif head not in new_heads:
+            pr_leftovers.append(f"pr #{number}: head {head} lacks run provenance")
+        elif is_attributable_pr(pr, baseline=baseline, issue=issue, provenance_of_head=provenance[head]):
+            prs.append(pr)
+        else:
+            pr_leftovers.append(f"pr #{number}: not attributable")
+
+    deletable: list[tuple[str, str]] = []
+    branch_leftovers: list[str] = []
+    for name, sha in new_heads.items():
+        if is_deletable_branch(name, baseline=baseline, project_dir=provenance_dir, provenance=provenance[name]):
+            deletable.append((name, sha))
+        else:
+            reason = failures[name] if failures[name] is not None else "invalid ref name"
+            branch_leftovers.append(f"branch {name} ({sha[:7]}): {reason}")
+    return RemoteArtifacts(
+        issue_number=issue.number,
+        prs=tuple(prs),
+        deletable_branches=tuple(deletable),
+        leftovers=tuple(branch_leftovers + pr_leftovers),
+    )
 
 
 def _fake_gh_state_for_fixture(fixture_name: str) -> dict[str, Any]:
