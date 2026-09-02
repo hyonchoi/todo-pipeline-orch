@@ -89,7 +89,13 @@ def _serve_github(fake_gh, *, title: str) -> None:
         stdout=json.dumps([{"name": name} for name, _, _ in LABEL_VOCABULARY]),
     )
     fake_gh.on("gh", "label", "create", "--repo", _REPO)
-    fake_gh.on("gh", "issue", "create", stdout=f"https://github.com/{_REPO}/issues/{_ISSUE}\n")
+    listing_state = {"created": False, "lag": 1}
+
+    def create_issue(argv):
+        listing_state["created"] = True
+        return 0, f"https://github.com/{_REPO}/issues/{_ISSUE}\n", ""
+
+    fake_gh.on("gh", "issue", "create", handler=create_issue)
     fake_gh.on(
         *API_ARGV, f"repos/{_REPO}/issues/{_ISSUE}",
         stdout=json.dumps(issue_payload(_ISSUE, title=title)),
@@ -99,7 +105,14 @@ def _serve_github(fake_gh, *, title: str) -> None:
     def paginated(argv):
         path = argv[-1]
         if path.startswith(f"repos/{_REPO}/issues?"):
-            return 0, json.dumps([[]]), ""
+            # GitHub's label-filtered listing lags a fresh create: empty before the
+            # create, empty once more right after it, then the issue appears as ready.
+            if not listing_state["created"] or listing_state["lag"] > 0:
+                if listing_state["created"]:
+                    listing_state["lag"] -= 1
+                return 0, json.dumps([[]]), ""
+            ready = issue_payload(_ISSUE, title=title, labels=["tpo:todo", "ready-for-agent"])
+            return 0, json.dumps([[ready]]), ""
         if path.startswith(f"repos/{_REPO}/pulls?"):
             numbers = [{"number": _PR}] if f"head=acme:{pr_head}&" in path else []
             return 0, json.dumps([numbers]), ""
