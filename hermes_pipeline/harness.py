@@ -1315,26 +1315,18 @@ def _poll_kanban_phases(
     registration_event: Any = None,
     offline_terminal_phase_key: str | None = None,
 ) -> bool:
-    """Poll kanban-as-scheduler phases to completion.
+    """Legacy offline path: register kanban phases, then poll them to completion.
 
-    1. Registers all phases as kanban tasks. With a written harness profile the
-       cards are pre-rendered (a tpo-plan manifest fans the development phase
-       out into ``plan:``/``validate:`` cards) and created directly; every loop
-       decision below is keyed on that registered card set, not the profile.
-    2. Auto-completes gate tasks so child phases become ready.
-    3. Polls get_todo_kanban_status() until all phases terminal.
-    4. Emits JSONL events via monitor.
-    5. Calls observe_outcomes() to write decision store.
+    Registers all phases as kanban tasks. With a written harness profile the
+    cards are pre-rendered (a tpo-plan manifest fans the development phase out
+    into ``plan:``/``validate:`` cards) and created directly. Polling is then
+    delegated to :func:`poll_registered_phases`, keyed on that registered card
+    set rather than the profile.
 
     Returns True if all phases completed successfully (all done), False otherwise.
     """
     from .contract import load_contract as _load_contract
-    from .kanban_tasks import (
-        TERMINAL_STATUSES,
-        get_todo_kanban_status,
-        observe_outcomes,
-        register_todo_phases,
-    )
+    from .kanban_tasks import register_todo_phases
     from .phases import Phase as _Phase
 
     # Resolve assignee from project contract (same path as tpo tick)
@@ -1383,8 +1375,97 @@ def _poll_kanban_phases(
     )
     # Callers that stub registration never render cards: fall back to the profile.
     cards: list[_Phase] | None = registered_cards or phases
-    # Intentionally unguarded — fail fast before polling begins, matching
-    # register_todo_phases()'s unguarded call above.
+    if not cards:
+        # Bare legacy callers with neither rendered cards nor a profile keep the
+        # card-less polling rule until Task 12 removes this path.
+        return _poll_cards(
+            project_slug=project_slug, tick_id=tick_id, state_dir=state_dir,
+            todo_id=todo_id, cards=cards, monitor=monitor, detector=detector,
+            poll_interval=poll_interval, max_poll_interval=max_poll_interval,
+            cancel_event=cancel_event,
+        )
+    return poll_registered_phases(
+        project_slug=project_slug,
+        tick_id=tick_id,
+        state_dir=state_dir,
+        todo_id=todo_id,
+        project_dir=project_dir,
+        cards=cards,
+        monitor=monitor,
+        detector=detector,
+        poll_interval=poll_interval,
+        max_poll_interval=max_poll_interval,
+        cancel_event=cancel_event,
+    )
+
+
+def poll_registered_phases(
+    *,
+    project_slug: str,
+    tick_id: str,
+    state_dir: Path,
+    todo_id: str,
+    project_dir: Path,
+    cards: list[Phase],
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    poll_interval: float = 5.0,
+    max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
+    cancel_event: Any = None,
+) -> bool:
+    """Poll already-registered kanban cards to completion.
+
+    Registration is the caller's job (the production ``tpo tick`` path); this
+    function never creates cards. ``cards`` is the registered card set and keys
+    every loop decision: completion, gate terminality, and gate auto-completion.
+
+    1. Polls get_todo_kanban_status() until every card is terminal.
+    2. Auto-completes gate tasks whose predecessor just finished.
+    3. Emits JSONL events via monitor.
+    4. Calls observe_outcomes() to write the decision store.
+
+    Returns True if all cards completed successfully (all done), False otherwise.
+    Raises ValueError when ``cards`` is empty.
+    """
+    del project_dir  # reserved for parity with the registration signature
+    if not cards:
+        raise ValueError("poll_registered_phases requires a non-empty registered cards list")
+    return _poll_cards(
+        project_slug=project_slug,
+        tick_id=tick_id,
+        state_dir=state_dir,
+        todo_id=todo_id,
+        cards=cards,
+        monitor=monitor,
+        detector=detector,
+        poll_interval=poll_interval,
+        max_poll_interval=max_poll_interval,
+        cancel_event=cancel_event,
+    )
+
+
+def _poll_cards(
+    *,
+    project_slug: str,
+    tick_id: str,
+    state_dir: Path,
+    todo_id: str,
+    cards: list[Phase] | None,
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    poll_interval: float,
+    max_poll_interval: float,
+    cancel_event: Any,
+) -> bool:
+    """Shared polling loop; ``cards=None`` is the legacy card-less rule."""
+    from .kanban_tasks import (
+        TERMINAL_STATUSES,
+        get_todo_kanban_status,
+        observe_outcomes,
+    )
+
+    # Intentionally unguarded — fail fast before polling begins, matching the
+    # caller's unguarded registration call.
     initial_status = get_todo_kanban_status(project_slug, tick_id)
     log.info(
         "initial phase status: %s",

@@ -4361,3 +4361,176 @@ class TestCommitPlan:
 
         assert second != first
         assert (project_dir / issue.plan_path).read_text() == harness_mod._plan_document("TODO-3")
+
+
+class TestPollRegisteredPhases:
+    """Tests for poll_registered_phases(): polling without registration."""
+
+    @staticmethod
+    def _monitor(tmp_path):
+        from hermes_pipeline.harness import (
+            ConvergenceDetector,
+            HarnessMonitor,
+            _ConvergenceMonitor,
+        )
+
+        detector = ConvergenceDetector(threshold=99)
+        monitor = _ConvergenceMonitor(HarnessMonitor(tmp_path / "events.jsonl"), detector, {})
+        return monitor, detector
+
+    def test_poll_does_not_register(self, tmp_path, mocker):
+        from hermes_pipeline.harness import poll_registered_phases
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            side_effect=lambda **_kw: pytest.fail("poll_registered_phases must not register"),
+        )
+        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        mocker.patch("time.sleep")
+        observe = mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        status = mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            side_effect=[
+                {"p1": "ready", "p2": "ready"},
+                {"p1": "running", "p2": "ready"},
+                {"p1": "done", "p2": "running"},
+                {"p1": "done", "p2": "done"},
+                {"p1": "done", "p2": "done"},
+            ],
+        )
+        monitor, detector = self._monitor(tmp_path)
+        cards = [Phase(phase_key="p1", name="P1"), Phase(phase_key="p2", name="P2")]
+
+        result = poll_registered_phases(
+            project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
+            todo_id="TODO-1", project_dir=tmp_path, cards=cards,
+            monitor=monitor, detector=detector, poll_interval=0.0, max_poll_interval=0.0,
+        )
+
+        assert result is True
+        assert status.call_count == 5
+        observe.assert_called_once_with(
+            state_dir=tmp_path / ".hermes", tick_id="01TICK",
+            status_map={"p1": "done", "p2": "done"},
+        )
+        events = [json.loads(l)["event_type"] for l in (tmp_path / "events.jsonl").read_text().splitlines() if l.strip()]
+        assert events.count("phase_started") == 2
+        assert events.count("phase_completed") == 2
+
+    def test_poll_uses_supplied_cards_for_gate_terminality(self, tmp_path, mocker):
+        from hermes_pipeline.harness import poll_registered_phases
+        from hermes_pipeline.kanban_tasks import KanbanTaskInfo
+
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            side_effect=lambda **_kw: pytest.fail("poll_registered_phases must not register"),
+        )
+        mocker.patch("time.sleep")
+        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
+        board = {"a": "ready", "b": "blocked"}
+        snapshots = iter([{"a": "running", "b": "blocked"}, {"a": "done", "b": "blocked"}])
+
+        def status(*_a, **_k):
+            try:
+                board.update(next(snapshots))
+            except StopIteration:
+                pass
+            return dict(board)
+
+        class _TrippingCancel:
+            """Cancels after a bounded number of poll waits so a regression that
+            never auto-completes gate B fails (returns False) instead of hanging.
+            A raising status stub would not do: the poll loop swallows it."""
+
+            def __init__(self, budget):
+                self.budget = budget
+
+            def wait(self, _timeout):
+                self.budget -= 1
+                return self.budget < 0
+
+        def complete(_tenant, task_id):
+            board["b"] = "done"
+            return True
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+            side_effect=lambda *_a: {
+                key: KanbanTaskInfo(task_id=f"t_{key}", phase_key=key, status=value, todo_id="TODO-1")
+                for key, value in board.items()
+            },
+        )
+        completed = mocker.patch(
+            "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", side_effect=complete
+        )
+        monitor, detector = self._monitor(tmp_path)
+        cards = [Phase(phase_key="a", name="A"), Phase(phase_key="b", name="B", gate=True)]
+
+        result = poll_registered_phases(
+            project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
+            todo_id="TODO-1", project_dir=tmp_path, cards=cards,
+            monitor=monitor, detector=detector, poll_interval=0.0, max_poll_interval=0.0,
+            cancel_event=_TrippingCancel(budget=5),
+        )
+
+        assert result is True
+        completed.assert_called_once_with("demo", "t_b")
+
+    def test_poll_rejects_empty_cards(self, tmp_path, mocker):
+        from hermes_pipeline.harness import poll_registered_phases
+
+        status = mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status")
+        monitor, detector = self._monitor(tmp_path)
+
+        with pytest.raises(ValueError, match="cards"):
+            poll_registered_phases(
+                project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
+                todo_id="TODO-1", project_dir=tmp_path, cards=[],
+                monitor=monitor, detector=detector,
+            )
+        status.assert_not_called()
+
+    def test_legacy_wrapper_delegates(self, tmp_path, mocker):
+        import threading
+
+        from hermes_pipeline.harness import _poll_kanban_phases
+        from hermes_pipeline.kanban_tasks import PreparedPhaseTask
+
+        prepared = [
+            PreparedPhaseTask(phase_key="a", name="A", body="", turns=1, gate=False),
+            PreparedPhaseTask(phase_key="b", name="B", body="", turns=0, gate=True),
+        ]
+
+        def register(**kwargs):
+            kwargs["transform_prepared"](list(prepared))
+            return ["t_a", "t_b"]
+
+        mocker.patch("hermes_pipeline.kanban_tasks.register_todo_phases", side_effect=register)
+        poll = mocker.patch("hermes_pipeline.harness.poll_registered_phases", return_value=True)
+        monitor, detector = self._monitor(tmp_path)
+        registration_event = threading.Event()
+
+        assert _poll_kanban_phases(
+            project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
+            todo_id="TODO-1", project_dir=tmp_path, phases_path=None,
+            monitor=monitor, detector=detector, poll_interval=0.25, max_poll_interval=7.0,
+            registration_event=registration_event,
+        ) is True
+
+        assert registration_event.is_set()
+        poll.assert_called_once()
+        kwargs = poll.call_args.kwargs
+        assert kwargs["cards"] == [
+            Phase(phase_key="a", name="A", gate=False, kind="worker"),
+            Phase(phase_key="b", name="B", gate=True, kind="controller_gate"),
+        ]
+        assert kwargs["project_slug"] == "demo"
+        assert kwargs["tick_id"] == "01TICK"
+        assert kwargs["state_dir"] == tmp_path / ".hermes"
+        assert kwargs["todo_id"] == "TODO-1"
+        assert kwargs["project_dir"] == tmp_path
+        assert kwargs["monitor"] is monitor
+        assert kwargs["detector"] is detector
+        assert kwargs["poll_interval"] == 0.25
+        assert kwargs["max_poll_interval"] == 7.0
