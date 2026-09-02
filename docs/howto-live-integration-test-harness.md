@@ -111,9 +111,12 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    it lands in the PR branch, never on the default branch. The issue names the
    branch `feat/harness-<token>`, but the agent may choose another name; in a
    kept workspace the actual branch is in `projects/<slug>/.hermes/pipeline_branch.txt`.
-4. **Tick** — run the production `tpo tick` as a subprocess with an isolated
-   `TPO_CONFIG_FILE` (log at `artifacts/tick.log`), then recover its
-   registration (`tick_id`, expected phase keys).
+4. **Tick** — wait until GitHub's label-filtered listing shows the run's issue
+   as the only ready `tpo:todo` issue (the listing lags a fresh create by
+   seconds; `issue_not_visible` after 60 s), then run the production `tpo tick`
+   as a subprocess with an isolated `TPO_CONFIG_FILE` (log at
+   `artifacts/tick.log`) and recover its registration (`tick_id`, expected
+   phase keys).
 5. **Poll** — follow the registered kanban cards until every card is terminal,
    auto-completing gate cards behind their predecessors.
 6. **PR invariant** — exactly one open, unmerged pull request attributable to
@@ -220,6 +223,7 @@ numbers, and no leftovers.
 | `default_branch_mismatch` | `--init-sandbox`: the cloned branch differs from the reported default branch |
 | `workspace_exists` | `--init-sandbox`: `<workspace>/<slug>` already exists; remove it and retry |
 | `sandbox_not_quiescent` | Another open `tpo:todo` + `ready-for-agent` issue exists (detail lists the numbers); close it |
+| `issue_not_visible` | GitHub's label-filtered listing did not show the run's issue as ready within 60 s of creation; check `gh issue view <N> --repo <owner/name>` (labels present?) and re-run |
 | `unknown_fixture` | Only `happy-path` exists |
 | `unsafe_terminal` | Profile is not live-safe; `native-sdd` is excluded because it is multi-tick |
 | `picked_none` | The tick selected no issue; re-run with `--keep`, then read `artifacts/tick.log` and check the issue labels |
