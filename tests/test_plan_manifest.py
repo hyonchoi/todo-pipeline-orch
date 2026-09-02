@@ -5,10 +5,14 @@ import json
 import pytest
 
 from hermes_pipeline.plan_manifest import (
+    EMBEDDED_PLAN_CLOSE,
+    EMBEDDED_PLAN_OPEN,
     MAX_PLAN_TASKS,
     PlanManifestValidationError,
     TodoPlanValidationError,
+    extract_embedded_plan,
     parse_plan_manifest,
+    render_embedded_plan,
     validate_plan_path,
 )
 
@@ -48,6 +52,90 @@ def _manifest(*, todo_id: str = "TODO-42", tasks: list[dict] | None = None, **ex
 
 def _document(data: dict) -> str:
     return f"# Plan\n\n```json tpo-plan\n{json.dumps(data)}\n```\n"
+
+
+def test_embedded_plan_golden_round_trip_normalizes_bytes():
+    document = _document(_manifest()).replace("\n", "\r\n")
+
+    block = render_embedded_plan(document, expected_todo_id="TODO-42")
+
+    assert block == (
+        "<details>\n<summary>Implementation Plan</summary>\n---\n"
+        + _document(_manifest())
+        + "---\n</details>\n"
+    )
+    assert extract_embedded_plan("### What\n\nBuild it\n\n" + block) == _document(_manifest())
+
+
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        ("<details>\n<summary>Implementation Plan</summary>\n---\n# Empty\n---\n</details>\n", "manifest_required"),
+        ("<details>\n<summary>Implementation Plan</summary>\n---\n\n---\n</details>\n", "empty_embedded_plan"),
+        ("<details>\n<summary>Implementation Plan</summary>\n---\n# Plan\n", "malformed_embedded_plan"),
+        (render_embedded_plan(_document(_manifest()), expected_todo_id="TODO-42") + "trailing\n", "misplaced_embedded_plan"),
+        (render_embedded_plan(_document(_manifest()), expected_todo_id="TODO-42") * 2, "duplicate_embedded_plan"),
+    ],
+)
+def test_embedded_plan_rejects_malformed_duplicate_or_misplaced_blocks(body, code):
+    with pytest.raises(TodoPlanValidationError, match=code):
+        extract_embedded_plan(body)
+
+
+def test_embedded_plan_requires_top_level_line_boundary():
+    body = "prefix " + EMBEDDED_PLAN_OPEN + _document(_manifest()) + EMBEDDED_PLAN_CLOSE
+    with pytest.raises(TodoPlanValidationError, match="malformed_embedded_plan"):
+        extract_embedded_plan(body)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```md\n" + EMBEDDED_PLAN_OPEN + _document(_manifest()) + EMBEDDED_PLAN_CLOSE + "```\n",
+        "<!--\n" + EMBEDDED_PLAN_OPEN + _document(_manifest()) + EMBEDDED_PLAN_CLOSE + "-->\n",
+    ],
+)
+def test_embedded_like_content_inside_fence_or_comment_is_not_a_plan(body):
+    assert extract_embedded_plan(body) is None
+
+
+def test_matching_summary_inside_fence_and_comment_does_not_count_as_duplicate():
+    prefix = (
+        "```html\n<summary>Implementation Plan</summary>\n```\n"
+        "<!-- <summary>Implementation Plan</summary> -->\n"
+    )
+    body = prefix + render_embedded_plan(
+        _document(_manifest()), expected_todo_id="TODO-42"
+    )
+    assert extract_embedded_plan(body) == _document(_manifest())
+
+
+def test_embedded_plan_allows_unrelated_earlier_details():
+    body = "<details>\n<summary>Notes</summary>\ntext\n</details>\n\n" + render_embedded_plan(
+        _document(_manifest()), expected_todo_id="TODO-42"
+    )
+    assert extract_embedded_plan(body) == _document(_manifest())
+
+
+@pytest.mark.parametrize(
+    ("document", "code"),
+    [
+        ("# no manifest\n", "manifest_required"),
+        (_document(_manifest(todo_id="TODO-9")), "todo_id_mismatch"),
+        (_document(_manifest()) + "<details>\n", "forbidden_plan_structure"),
+        (_document(_manifest()) + "text <details> inline\n", "forbidden_plan_structure"),
+        (_document(_manifest()) + "text </details> inline\n", "forbidden_plan_structure"),
+        (
+            _document(_manifest())
+            + "text <summary>Implementation Plan</summary> inline\n",
+            "forbidden_plan_structure",
+        ),
+        (_document(_manifest()) + "<proposed_plan>draft</proposed_plan>\n", "forbidden_plan_structure"),
+    ],
+)
+def test_renderer_rejects_invalid_or_structural_plan_content(document, code):
+    with pytest.raises(TodoPlanValidationError, match=code):
+        render_embedded_plan(document, expected_todo_id="TODO-42")
 
 
 def test_parse_valid_manifest_returns_immutable_types():

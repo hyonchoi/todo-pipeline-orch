@@ -14,6 +14,7 @@ from hermes_pipeline.github_issues import (
     SnapshotFormatError,
     canonical_issue_snapshot,
     compile_eligible_issues,
+    issue_decisions,
     issue_from_api,
     legacy_id_label,
     parse_issue_body,
@@ -143,6 +144,78 @@ def test_issue_from_api_ignores_fenced_plan_and_branch():
     assert issue.plan_values == () and issue.branch_values == ()
 
 
+def test_issue_from_api_strips_embedded_plan_before_parsing_hostile_headings():
+    from hermes_pipeline.plan_manifest import render_embedded_plan
+
+    plan = _document = (
+        '# Implementation Plan\n\n### Branch\n\nevil\n\n```json tpo-plan\n'
+        '{"schema_version":1,"todo_id":"TODO-1","tasks":[{"id":"task-1",'
+        '"title":"Do","instructions":"Do it","acceptance_criteria":["Works"],'
+        '"verification":["uv run pytest"],"commit_message":"feat: do"}]}\n```\n'
+    )
+    issue = _issue(
+        1,
+        body="### Branch\n\nfeature/good\n\n"
+        + render_embedded_plan(plan, expected_todo_id="TODO-1"),
+    )
+
+    assert issue.branch_values == ("feature/good",)
+    assert issue.plan_source is not None and issue.plan_source.kind == "embedded"
+    assert issue.plan_source.document == plan
+
+
+def test_issue_from_api_preserves_dual_source_diagnostic():
+    from hermes_pipeline.plan_manifest import (
+        render_embedded_plan,
+    )
+
+    plan = (
+        '# Plan\n\n```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-1","tasks":['
+        '{"id":"task-1","title":"Do","instructions":"Do it",'
+        '"acceptance_criteria":["Works"],"verification":["pytest"],'
+        '"commit_message":"feat: do"}]}\n```\n'
+    )
+    issue = _issue(
+        1,
+        body=_body(plan="docs/manifest.md")
+        + render_embedded_plan(plan, expected_todo_id="TODO-1"),
+    )
+    assert issue.plan_error == "dual_plan_source"
+
+
+def test_issue_from_api_preserves_malformed_embedded_plan_diagnostic():
+    issue = _issue(
+        1,
+        labels=READY,
+        body=(
+            "### Branch\n\nfeature/x\n\n<details>\n"
+            "<summary>Implementation Plan</summary>\nnot canonical\n</details>\n"
+        ),
+    )
+
+    assert issue.plan_error == "malformed_embedded_plan"
+    result = compile_eligible_issues(
+        Path.cwd(), [issue], in_flight=set(), requires_plan=True
+    )
+    assert result.blocked_reasons == {"TODO-1": "plan_invalid:malformed_embedded_plan"}
+
+
+def test_malformed_embedded_candidate_cannot_forge_audit_fields():
+    issue = _issue(
+        1,
+        labels=READY,
+        body=(
+            "### Branch\n\nfeature/good\n\n"
+            "<details>\n<summary>Implementation Plan</summary>\n---\n"
+            "# Plan\n\n### Branch\n\nevil\n\n### Priority\n\nP0\n"
+        ),
+    )
+
+    assert issue.plan_error == "malformed_embedded_plan"
+    assert issue.branch_values == ("feature/good",)
+    assert issue_decisions(issue) == {}
+
+
 # --- render_issue_body ------------------------------------------------------
 
 
@@ -161,7 +234,7 @@ def test_render_issue_body_round_trips_through_parser(fields):
 
     assert parse_issue_body(rendered) == expected
     assert rendered.endswith("\n") and not rendered.endswith("\n\n")
-    assert rendered.count("### ") == len(KNOWN_SECTIONS)
+    assert rendered.count("### ") == len(KNOWN_SECTIONS) - ("Plan" not in fields)
 
 
 def test_render_issue_body_omits_empty_sections_when_requested():
@@ -392,8 +465,6 @@ def _body(plan: str | list[str] | None = "docs/manifest.md", branch: str | list[
         ({"labels": READY, "body": _body(plan="../outside.md")}, {}, "plan_invalid:non_canonical"),
         ({"labels": READY, "body": _body(plan="docs/wrong.md")}, {}, "plan_invalid:todo_id_mismatch"),
         ({"labels": READY, "body": _body(plan="docs/binary.md")}, {}, "plan_invalid:unreadable"),
-        # native-sdd closeout needs a manifest: manifest-free Plans are only for non-plan profiles.
-        ({"labels": READY, "body": _body(plan="docs/legacy.md")}, {}, "plan_invalid:manifest_required"),
         ({"labels": READY, "body": _body(branch=None)}, {}, "branch_invalid"),
         ({"labels": READY, "body": _body(branch=["a", "b"])}, {}, "branch_invalid"),
         ({"labels": READY, "body": _body(branch=None)}, {"requires_plan": False}, "branch_invalid"),
@@ -450,12 +521,55 @@ def test_compile_eligible_issues_orders_candidates_and_classifies_plans(tmp_path
 
     assert [(c.entry.number, c.plan_path, c.plan_kind) for c in result.candidates] == [
         (1, "docs/manifest.md", "manifest"),
+        (5, "docs/legacy.md", "legacy"),
     ]
-    assert result.todo_ids == frozenset({"TODO-1"})
-    assert result.blocked_reasons == {
-        "TODO-3": "dependency_incomplete:1", "TODO-5": "plan_invalid:manifest_required",
-    }
+    assert result.todo_ids == frozenset({"TODO-1", "TODO-5"})
+    assert result.blocked_reasons == {"TODO-3": "dependency_incomplete:1"}
     assert result.selection_markdown == render_selection_markdown(result.candidates)
+
+
+def test_compile_eligible_issues_accepts_embedded_manifest(tmp_path):
+    from hermes_pipeline.plan_manifest import render_embedded_plan
+
+    body = _body(plan=None) + render_embedded_plan(
+        '# Plan\n\n```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-1","tasks":['
+        '{"id":"task-1","title":"Do","instructions":"Do it",'
+        '"acceptance_criteria":["Works"],"verification":["pytest"],'
+        '"commit_message":"feat: do"}]}\n```\n',
+        expected_todo_id="TODO-1",
+    )
+    issue = _issue(1, labels=READY, body=body)
+
+    result = compile_eligible_issues(tmp_path, [issue], in_flight=set(), requires_plan=True)
+
+    assert result.blocked_reasons == {}
+    assert result.candidates[0].plan_source.kind == "embedded"
+
+
+def test_tick_filter_defers_embedded_plan_until_artifact_support(tmp_path, monkeypatch):
+    from unittest.mock import MagicMock
+
+    from hermes_pipeline.cli import _block_untracked_plans
+    from hermes_pipeline.plan_manifest import render_embedded_plan
+
+    body = _body(plan=None) + render_embedded_plan(
+        '# Plan\n\n```json tpo-plan\n{"schema_version":1,"todo_id":"TODO-1","tasks":['
+        '{"id":"task-1","title":"Do","instructions":"Do it",'
+        '"acceptance_criteria":["Works"],"verification":["pytest"],'
+        '"commit_message":"feat: do"}]}\n```\n',
+        expected_todo_id="TODO-1",
+    )
+    eligibility = compile_eligible_issues(
+        tmp_path, [_issue(1, labels=READY, body=body)], in_flight=set(), requires_plan=True
+    )
+    monkeypatch.setattr(
+        "hermes_pipeline.cli._cli_sp.run", MagicMock(return_value=MagicMock(returncode=0))
+    )
+
+    filtered = _block_untracked_plans(tmp_path, eligibility)
+
+    assert filtered.candidates == ()
+    assert filtered.blocked_reasons == {"TODO-1": "plan_invalid:artifact_pending"}
 
 
 def test_compile_eligible_issues_without_plan_requirement_skips_plan_only(tmp_path):

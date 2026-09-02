@@ -893,9 +893,11 @@ class TestTickPlanRequirement:
         assert "TODO-10" in context.selection_markdown
         assert "TODO-11" not in context.selection_markdown
         assert "TODO-12" not in context.selection_markdown
-        assert "TODO-13" not in context.selection_markdown
-        assert context.candidate_ids == ("TODO-10",)
-        assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset({"TODO-10"})
+        assert "TODO-13" in context.selection_markdown
+        assert context.candidate_ids == ("TODO-10", "TODO-13")
+        assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset(
+            {"TODO-10", "TODO-13"}
+        )
 
     def test_requires_plan_with_zero_candidates_skips_selection_call(
         self, tmp_path, mocker, fake_gh

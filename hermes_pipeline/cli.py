@@ -1390,7 +1390,12 @@ def _block_untracked_plans(project_dir: Path, eligibility):
     kept = []
     blocked = dict(eligibility.blocked_reasons)
     for candidate in eligibility.candidates:
-        if candidate.plan_path and not _plan_tracked_at_head(project_dir, candidate.plan_path):
+        if candidate.plan_source is not None and candidate.plan_source.kind == "embedded":
+            # Schema-v3 registration will materialize the snapshot-pinned Plan artifact.
+            # Until that writer lands, fail closed before selection instead of sending a
+            # pathless authority into path-only phase/registration consumers.
+            blocked[candidate.entry.todo_id] = "plan_invalid:artifact_pending"
+        elif candidate.plan_path and not _plan_tracked_at_head(project_dir, candidate.plan_path):
             blocked[candidate.entry.todo_id] = "plan_invalid:untracked"
         else:
             kept.append(candidate)
@@ -2220,7 +2225,7 @@ _AUDIT_MIRROR_PREFIXES: dict[str, str] = {
     "Security Review": "security-review",
     "UI Review": "ui-review",
 }
-_AUDIT_INFORMATIONAL = frozenset({"plan:missing", "state:closed"})
+_AUDIT_INFORMATIONAL = frozenset({"plan:missing", "plan:legacy_path", "state:closed"})
 _AUDIT_FRAGMENT_MAX = 120
 
 
@@ -2328,11 +2333,16 @@ def _audit_issue(
         f"duplicate-section:{name}" for name in KNOWN_SECTIONS if len(sections.get(name, ())) > 1
     )
 
-    if not issue.plan_values:
+    if issue.plan_error is not None:
+        findings.append(f"plan:invalid:{issue.plan_error}")
+    elif issue.plan_source is not None:
+        pass
+    elif not issue.plan_values:
         findings.append("plan:missing")
     elif len(issue.plan_values) > 1:
         findings.append("plan:duplicate")
     else:
+        findings.append("plan:legacy_path")
         try:
             validate_plan_candidate(
                 project_dir, issue.plan_values[0], expected_todo_id=issue.todo_id
@@ -2564,7 +2574,12 @@ def _cmd_plan_validate(args, config: Config) -> int:
     if project_dir is None:
         return 2
     todo_id = f"TODO-{args.todo}"
-    from .github_issues import GitHubIssuesError, fetch_issue, repository_identity
+    from .github_issues import (
+        GitHubIssuesError,
+        fetch_issue,
+        repository_identity,
+        resolve_plan_source,
+    )
     from .plan_manifest import (
         PlanManifestValidationError,
         TodoPlanValidationError,
@@ -2581,21 +2596,25 @@ def _cmd_plan_validate(args, config: Config) -> int:
             todo_id = issue.todo_id
             if issue.state != "open":
                 closed_note = f"; warning: issue is closed ({issue.state_reason or 'unknown'})"
-            if len(issue.plan_values) != 1:
-                reason = "missing" if len(issue.plan_values) < 2 else "duplicate"
-                print(f"Plan validation failed for {todo_id}: plan_invalid:{reason}{closed_note}")
-                return 1
-            relative_plan = issue.plan_values[0]
-        manifest = validate_plan_candidate(
-            project_dir,
-            relative_plan,
-            expected_todo_id=todo_id,
-        )
+            source = resolve_plan_source(project_dir, issue)
+            manifest = source.manifest
+        else:
+            # ``--plan`` intentionally remains the legacy filesystem-candidate path.
+            manifest = validate_plan_candidate(
+                project_dir,
+                relative_plan,
+                expected_todo_id=todo_id,
+            )
     except GitHubIssuesError as exc:
         print(f"Plan validation failed for {todo_id}: {exc.code}")
         return 1
     except TodoPlanValidationError as exc:
-        print(f"Plan validation failed for {todo_id}: attachment_{exc.code}{closed_note}")
+        prefix = (
+            "plan_invalid:"
+            if getattr(args, "plan", None) is None and exc.code in {"missing", "duplicate"}
+            else "attachment_"
+        )
+        print(f"Plan validation failed for {todo_id}: {prefix}{exc.code}{closed_note}")
         return 1
     except PlanManifestValidationError as exc:
         print(f"Plan validation failed for {todo_id}: {exc.code}{closed_note}")

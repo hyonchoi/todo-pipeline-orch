@@ -46,12 +46,6 @@ body:
     attributes:
       label: Assumptions
   - type: input
-    id: plan
-    attributes:
-      label: Plan
-      description: "Repo-relative path to the execution-authority Plan (ADR-0001). Note: the Plan manifest's todo_id must equal TODO-<this issue's number>, so file the issue first."
-      placeholder: docs/pipeline/TODO-<n>-plan.md
-  - type: input
     id: spec
     attributes:
       label: Spec
