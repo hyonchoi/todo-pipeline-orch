@@ -439,31 +439,13 @@ known parents are not archived until that task is resolved. If cleanup cannot be
 confirmed from an archived-inclusive snapshot, the durable pending marker
 remains and later ticks skip the project until cleanup finishes.
 
-### `register_todo_phases`
+### Preparation and creation are always split
 
-Backward-compatible convenience wrapper for callers that do not need to
-persist state between preparation and task creation. It calls
-`prepare_todo_phases`, then `create_prepared_todo_phases`.
+There is no combined prepare-and-create wrapper. Production `_tick_project`
+calls the two functions separately so its exact sequence is:
 
-```python
-register_todo_phases(
-    *,
-    todo_id: str,
-    tick_id: str,
-    board_slug: str,
-    project_dir: str | Path,
-    phases_path: str | Path | None = None,
-    assignee: str = "default",
-    prompt_client: PromptClient = "claude",
-) -> list[str]
-```
-
-The wrapper accepts the union of the preparation and creation parameters and
-returns the created task IDs. A render failure occurs before the creation call,
-including when a later phase is malformed. Production `_tick_project` uses the
-two functions separately so its exact sequence is:
-
-1. prepare every rendered body;
+1. prepare every rendered body (a render failure, including a malformed later
+   phase, happens here, before any task exists);
 2. persist `current_tick_id.txt` and the `tick_started` outcome;
 3. create the prepared Hermes tasks.
 

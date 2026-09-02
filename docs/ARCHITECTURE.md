@@ -123,10 +123,8 @@ cli._tick_project(config, contract)
             `-- complete barrier, making the first executable runnable
 ```
 
-`register_todo_phases` remains a compatibility wrapper that performs the prepare
-and create calls back-to-back for harnesses and direct callers. Production uses
-the split API so tick persistence stays immediately before the first external
-mutation.
+There is no combined prepare-and-create wrapper: every caller uses the split
+API so tick persistence stays immediately before the first external mutation.
 
 Profiles may set top-level `requires_plan: true`. After normal TODO selection
 and before phase rendering or tick persistence, `_tick_project` resolves the

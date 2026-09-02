@@ -751,15 +751,6 @@ def test_prune_retained_state_removes_only_safe_terminal_state(tmp_path):
     assert (evidence_dir / "failure.json").exists()
 
 
-class TestHarnessResult:
-    def test_dataclass_fields(self):
-        result = HarnessResult(exit_code=0, report_path=Path("/tmp/report.json"), temp_dir=None, summary="1/1 passed")
-        assert result.exit_code == 0
-        assert str(result.report_path) == "/tmp/report.json"
-        assert result.temp_dir is None
-        assert "passed" in result.summary
-
-
 class TestClassifyErrorClass:
     def test_dependency_errors(self):
         from hermes_pipeline.hermes_adapter import (
@@ -856,7 +847,6 @@ class TestPollKanbanPhasesConsoleOutput:
             tick_id="tick-1",
             state_dir=tmp_path,
             todo_id="TODO-30",
-            project_dir=tmp_path,
             cards=cards,
             monitor=monitor,
             detector=detector,
@@ -1077,7 +1067,7 @@ class _LiveRunStubs:
         self._stub(monkeypatch, "recover_tick_registration", lambda *a, **k: self.recover(*a, **k))
         self._stub(monkeypatch, "poll_registered_phases", lambda **k: self.poll(**k))
         self._stub(monkeypatch, "discover_remote_artifacts", lambda *_a, **_k: self.artifacts)
-        self._stub(monkeypatch, "verify_pull_request", lambda artifacts: self.verify(artifacts))
+        self._stub(monkeypatch, "verify_pull_request", lambda artifacts, **_k: self.verify(artifacts))
         self._stub(monkeypatch, "shutdown_run", lambda *_a, **_k: self.shutdown_report)
 
     def _stub(self, monkeypatch, name: str, fn) -> None:
@@ -1186,13 +1176,13 @@ class TestRunHarness:
         assert poll["tick_id"] == "tick-1"
         assert poll["todo_id"] == "TODO-42"
         assert poll["state_dir"] == live.project_dir / ".hermes"
-        assert poll["project_dir"] == live.project_dir
         assert poll["cards"] == list(_GSTACK_PHASES[:2])
         assert live.kwargs["discover_remote_artifacts"] == {
             "issue": live.issue, "baseline": live.baseline, "plan_sha": "a" * 40,
             "provenance_dir": live.artifacts_dir / "provenance",
         }
         assert live.args["verify_pull_request"] == (live.artifacts,)
+        assert live.kwargs["verify_pull_request"] == {"default_branch": "main"}
         assert live.args["shutdown_run"] == (live.project_dir, live.SANDBOX)
         assert live.kwargs["shutdown_run"] == {
             "issue": live.issue, "baseline": live.baseline, "plan_sha": "a" * 40,
@@ -1249,6 +1239,22 @@ class TestRunHarness:
         assert "TPO_GH_BIN" in exc_info.value.detail
         assert live.order == []
         assert not live.workspace.exists()
+
+    def test_tick_not_persisted_log_tail_is_debug_only(self, live, caplog):
+        def recover(*_a, **_k):
+            raise HarnessTickError("tick_not_persisted", "SECRET-TOKEN-IN-TAIL")
+
+        live.recover = recover
+
+        with caplog.at_level(logging.DEBUG, logger="hermes_pipeline.harness"):
+            result = live.run()
+
+        assert result.exit_code == 1
+        errors = [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR]
+        assert any("tick_not_persisted" in m and "artifacts/tick.log" in m for m in errors)
+        assert not any("SECRET-TOKEN-IN-TAIL" in m for m in errors)
+        debug = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+        assert any("SECRET-TOKEN-IN-TAIL" in m for m in debug)
 
     def test_unexpected_registration_after_recovery_shuts_down_the_recovered_tick(self, live, monkeypatch):
         def cards(*_a, **_k):
@@ -1402,6 +1408,7 @@ class TestRunHarness:
 
         assert exc_info.value.code == "cleanup_incomplete"
         assert "pr #11: close failed" in exc_info.value.detail
+        assert f"workspace retained at {live.workspace}" in exc_info.value.detail
         assert live.workspace.exists()
 
     def test_keep_dir_keeps_remote_and_workspace(self, live):
@@ -1873,7 +1880,7 @@ class TestPollRegisteredPhaseTransitions:
         kwargs = dict(
             project_slug="demo", tick_id="01TICK",
             state_dir=tmp_path / ".hermes", todo_id="TODO-1",
-            project_dir=tmp_path, cards=cards,
+            cards=cards,
             monitor=monitor, detector=detector, poll_interval=0.1,
         )
         kwargs.update(overrides)
@@ -2090,6 +2097,14 @@ class TestResolveSandboxRepo:
             resolve_sandbox_repo(bad, {})
         assert exc_info.value.code == "invalid_repo"
         assert exc_info.value.detail == bad
+
+    def test_rejects_owner_longer_than_39_chars_even_with_hyphens(self):
+        owner = "a" + "-a" * 38  # 77 chars: alternating hyphens must not defeat the 39-char cap
+        assert len(owner) == 77
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            resolve_sandbox_repo(f"{owner}/repo", {})
+        assert exc_info.value.code == "invalid_repo"
+        assert resolve_sandbox_repo(f"{'a' + '-a' * 19}/repo", {}).repo.startswith("a-a")
 
     def test_sandbox_repo_rejects_unsafe_repo_on_construction(self):
         with pytest.raises(HarnessPreflightError) as exc_info:
@@ -2319,7 +2334,7 @@ class TestCloneSandbox:
         clone_sandbox(self.sandbox, project_dir)
 
         assert _split_git_argv(calls[0]["argv"]) == (
-            str(project_dir.parent.resolve()), True, ["clone", "--", self.sandbox.url, str(project_dir)]
+            str(project_dir.parent.resolve()), True, ["clone", "--template=", "--", self.sandbox.url, str(project_dir)]
         )
         assert calls[0]["cwd"] == tmp_path
         assert calls[0]["env"]["GIT_TERMINAL_PROMPT"] == "0"
@@ -2341,8 +2356,21 @@ class TestCloneSandbox:
 
         assert _split_git_argv(calls[0]) == (
             str(project_dir.parent.resolve()), True,
-            ["clone", "--branch", "develop", "--", self.sandbox.url, str(project_dir)],
+            ["clone", "--branch", "develop", "--template=", "--", self.sandbox.url, str(project_dir)],
         )
+
+    def test_clone_parent_mkdir_failure_is_git_error(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "hermes_pipeline.harness._git", lambda argv, **kw: pytest.fail("git must not run")
+        )
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory\n")
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            clone_sandbox(self.sandbox, blocker / "sandbox")
+
+        assert exc_info.value.code == "git_error"
+        assert "blocker" in exc_info.value.detail
 
     def test_clone_refuses_existing_dir(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
@@ -2740,6 +2768,20 @@ class TestInitSandbox:
         fake_gh.on(*_SANDBOX_VIEW_ARGV, handler=view)
         fake_gh.on("gh", *_SANDBOX_PATCH_ARGV, handler=patch)
 
+    def test_gh_override_is_forbidden_before_any_step(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TPO_GH_BIN", "/opt/fake/gh")
+        monkeypatch.setattr("hermes_pipeline.harness._git", lambda *a, **k: pytest.fail("git must not run"))
+        monkeypatch.setattr(
+            "hermes_pipeline.github_issues.check_auth", lambda *a, **k: pytest.fail("gh must not run")
+        )
+
+        with pytest.raises(HarnessPreflightError) as exc_info:
+            init_sandbox(self.sandbox, tmp_path / "workspace")
+
+        assert exc_info.value.code == "gh_override_forbidden"
+        assert "TPO_GH_BIN" in exc_info.value.detail
+        assert not (tmp_path / "workspace").exists()
+
     # --- empty repository path -------------------------------------------------
 
     @pytest.mark.real_git
@@ -2899,6 +2941,8 @@ class TestInitSandbox:
 
         assert init_sandbox(self.sandbox, tmp_path / "workspace") == "seeded"
 
+        (init_argv,) = [c for c in calls if harness_mod._git_verb(c[1:]) == "init"]
+        assert _split_git_argv(init_argv)[2] == ["init", "-q", "-b", "main", "--template="]
         pushes = [c for c in calls if harness_mod._git_verb(c[1:]) == "push"]
         assert [_split_git_argv(c)[1:] for c in pushes] == [(True, ["push", "origin", "HEAD:refs/heads/main"])]
         first = _split_git_argv(calls[0])
@@ -3542,6 +3586,14 @@ class TestCreateHarnessIssue:
 
 
 class TestHarnessIssue:
+    @pytest.mark.parametrize("number", [0, -1, True])
+    def test_non_positive_number_rejected(self, number):
+        with pytest.raises(ValueError):
+            HarnessIssue(
+                number=number, todo_id="TODO-1", branch="feat/harness-tok00000",
+                plan_path="docs/harness/tok00000-plan.md", title="[harness tok00000] x", run_token="tok00000",
+            )
+
     @pytest.mark.parametrize(
         "plan_path",
         [
@@ -3669,7 +3721,7 @@ class TestPollRegisteredPhases:
         from hermes_pipeline.harness import poll_registered_phases
 
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             side_effect=lambda **_kw: pytest.fail("poll_registered_phases must not register"),
         )
         mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
@@ -3690,7 +3742,7 @@ class TestPollRegisteredPhases:
 
         result = poll_registered_phases(
             project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
-            todo_id="TODO-1", project_dir=tmp_path, cards=cards,
+            todo_id="TODO-1", cards=cards,
             monitor=monitor, detector=detector, poll_interval=0.0, max_poll_interval=0.0,
         )
 
@@ -3709,7 +3761,7 @@ class TestPollRegisteredPhases:
         from hermes_pipeline.kanban_tasks import KanbanTaskInfo
 
         mocker.patch(
-            "hermes_pipeline.kanban_tasks.register_todo_phases",
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             side_effect=lambda **_kw: pytest.fail("poll_registered_phases must not register"),
         )
         mocker.patch("time.sleep")
@@ -3756,7 +3808,7 @@ class TestPollRegisteredPhases:
 
         result = poll_registered_phases(
             project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
-            todo_id="TODO-1", project_dir=tmp_path, cards=cards,
+            todo_id="TODO-1", cards=cards,
             monitor=monitor, detector=detector, poll_interval=0.0, max_poll_interval=0.0,
             cancel_event=_TrippingCancel(budget=5),
         )
@@ -3773,7 +3825,7 @@ class TestPollRegisteredPhases:
         with pytest.raises(ValueError, match="cards"):
             poll_registered_phases(
                 project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
-                todo_id="TODO-1", project_dir=tmp_path, cards=[],
+                todo_id="TODO-1", cards=[],
                 monitor=monitor, detector=detector,
             )
         status.assert_not_called()
@@ -3933,15 +3985,9 @@ class TestPrFromPayload:
 
 
 class TestAttributablePr:
-    issue = HarnessIssue(
-        number=7, todo_id="TODO-7", branch="feat/harness-abcd1234",
-        plan_path="docs/harness/abcd1234-plan.md",
-        title="[harness abcd1234] Implement mock name normalization", run_token="abcd1234",
-    )
-
     def _ok(self, pr: PullRequest, provenance: bool = True) -> bool:
         return is_attributable_pr(
-            pr, baseline=_PREDICATE_BASELINE, issue=self.issue, provenance_of_head=provenance
+            pr, baseline=_PREDICATE_BASELINE, provenance_of_head=provenance
         )
 
     def test_happy_with_run_provenance(self):
@@ -4378,6 +4424,16 @@ class TestDiscoverCandidatePrs:
 
         assert exc_info.value.code == "pr_discovery_incomplete"
 
+    @pytest.mark.parametrize("silent", ["pulls", "search"])
+    def test_empty_listing_output_fails_closed(self, fake_gh, tmp_path: Path, silent):
+        fake_gh.on(*_PULLS_ARGV, stdout="" if silent == "pulls" else json.dumps([[]]))
+        fake_gh.on(*_SEARCH_ARGV, stdout="" if silent == "search" else _search_page())
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._discover(tmp_path)
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+
     def test_incomplete_search_results_fail_closed(self, fake_gh, tmp_path: Path):
         fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
         fake_gh.on(*_SEARCH_ARGV, stdout=_search_page(9, incomplete=True))
@@ -4619,37 +4675,51 @@ def _artifacts(*prs: PullRequest) -> RemoteArtifacts:
 class TestVerifyPullRequest:
     def test_single_open_pr_is_returned(self):
         pr = _pr(5)
-        assert verify_pull_request(_artifacts(pr)) is pr
+        assert verify_pull_request(_artifacts(pr), default_branch="main") is pr
 
     def test_no_pr_is_pr_missing(self):
         with pytest.raises(PullRequestInvariantError) as exc_info:
-            verify_pull_request(_artifacts())
+            verify_pull_request(_artifacts(), default_branch="main")
         assert exc_info.value.code == "pr_missing"
 
     def test_two_prs_is_pr_ambiguous(self):
         with pytest.raises(PullRequestInvariantError) as exc_info:
-            verify_pull_request(_artifacts(_pr(5), _pr(7, head_ref="feat/y")))
+            verify_pull_request(_artifacts(_pr(5), _pr(7, head_ref="feat/y")), default_branch="main")
         assert exc_info.value.code == "pr_ambiguous"
         assert exc_info.value.detail == "#5, #7"
 
     def test_closed_pr_is_pr_closed(self):
         pr = dataclasses.replace(_pr(5), state="CLOSED")
         with pytest.raises(PullRequestInvariantError) as exc_info:
-            verify_pull_request(_artifacts(pr))
+            verify_pull_request(_artifacts(pr), default_branch="main")
         assert exc_info.value.code == "pr_closed"
         assert exc_info.value.detail == "#5"
 
     def test_merged_state_is_pr_merged(self):
         pr = dataclasses.replace(_pr(5), state="MERGED", merged=True)
         with pytest.raises(PullRequestInvariantError) as exc_info:
-            verify_pull_request(_artifacts(pr))
+            verify_pull_request(_artifacts(pr), default_branch="main")
         assert exc_info.value.code == "pr_merged"
 
     def test_merged_flag_with_open_state_is_pr_merged(self):
         pr = dataclasses.replace(_pr(5), merged=True)
         with pytest.raises(PullRequestInvariantError) as exc_info:
-            verify_pull_request(_artifacts(pr))
+            verify_pull_request(_artifacts(pr), default_branch="main")
         assert exc_info.value.code == "pr_merged"
+
+    def test_wrong_base_is_pr_wrong_base(self):
+        pr = dataclasses.replace(_pr(5), base_ref="develop")
+        with pytest.raises(PullRequestInvariantError) as exc_info:
+            verify_pull_request(_artifacts(pr), default_branch="main")
+        assert exc_info.value.code == "pr_wrong_base"
+        assert exc_info.value.detail == "#5 -> develop"
+
+    def test_base_check_is_casefolded_and_follows_the_state_checks(self):
+        assert verify_pull_request(_artifacts(dataclasses.replace(_pr(5), base_ref="Main")), default_branch="main").base_ref == "Main"
+        closed = dataclasses.replace(_pr(5), state="CLOSED", base_ref="develop")
+        with pytest.raises(PullRequestInvariantError) as exc_info:
+            verify_pull_request(_artifacts(closed), default_branch="main")
+        assert exc_info.value.code == "pr_closed"
 
     def test_pr_invariant_event_shape(self):
         exc = PullRequestInvariantError("pr_ambiguous", "#5, #7")
@@ -5141,6 +5211,33 @@ class TestRunGitHardening:
         assert "config:insteadof" in exc_info.value.detail
         assert list((tmp_path / "prov").iterdir()) == []
 
+    def test_provenance_root_mkdir_failure_is_pr_discovery_incomplete(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr(harness_mod, "_git", lambda argv, **kw: pytest.fail("git must not run"))
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a directory\n")
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            harness_mod._ensure_provenance_dir(blocker / "prov")
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert "blocker" in exc_info.value.detail
+
+    def test_provenance_check_wraps_os_errors(self, tmp_path: Path, monkeypatch):
+        def failing(_root):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(harness_mod, "_ensure_provenance_dir", failing)
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            harness_mod.branch_has_run_provenance(
+                tmp_path / "clone", _SANDBOX, name="feat/x", tip_sha="a" * 40, plan_sha="b" * 40,
+                default_branch="main", provenance_dir=tmp_path / "prov",
+            )
+
+        assert exc_info.value.code == "pr_discovery_incomplete"
+        assert exc_info.value.detail.startswith("branch feat/x: ")
+        assert "disk full" in exc_info.value.detail
+
     @pytest.mark.parametrize("line", ["[include]\n\tpath = /x\n", "[core]\n\thooksPath = /x\n"])
     def test_provenance_dir_rejects_include_and_hookspath_config(self, tmp_path: Path, monkeypatch, line):
         def planting_git(argv, **kwargs):
@@ -5596,13 +5693,3 @@ class TestShutdownRun:
         assert report.kanban_quiescent is False
         assert sleeps == []
         assert stubs.snapshot.call_count == 1
-
-
-class TestHarnessIssueValidation:
-    @pytest.mark.parametrize("number", [0, -1, True])
-    def test_non_positive_number_rejected(self, number):
-        with pytest.raises(ValueError):
-            HarnessIssue(
-                number=number, todo_id="TODO-1", branch="feat/harness-tok00000",
-                plan_path="docs/harness/tok00000-plan.md", title="[harness tok00000] x", run_token="tok00000",
-            )

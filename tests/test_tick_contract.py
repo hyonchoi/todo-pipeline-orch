@@ -97,7 +97,7 @@ class FakeArgs:
 
 class TestTickContractAssignee:
     def test_tick_uses_contract_assignee(self, tmp_path, mocker):
-        """register_todo_phases is called with the contract's assignee."""
+        """create_prepared_todo_phases is called with the contract's assignee."""
         mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",

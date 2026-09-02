@@ -293,6 +293,21 @@ def test_init_sandbox_preflight_error_exits_2(mocker, caplog):
     assert "pass --repo owner/name or set TPO_HARNESS_REPO" in caplog.text
 
 
+def test_init_sandbox_rejects_gh_override_exits_2(mocker, tmp_path, caplog, monkeypatch):
+    monkeypatch.setenv("TPO_GH_BIN", "/opt/fake/gh")
+    mocker.patch("hermes_pipeline.harness._harness_tmp_root", return_value=tmp_path / "tmp")
+    git = mocker.patch("hermes_pipeline.harness._git", side_effect=AssertionError("git must not run"))
+    gh = mocker.patch("hermes_pipeline.github_issues._run", side_effect=AssertionError("gh must not run"))
+
+    with caplog.at_level(logging.ERROR):
+        assert _cmd_test(_test_args(repo="owner/sandbox", init_sandbox=True), config=None) == 2
+
+    git.assert_not_called()
+    gh.assert_not_called()
+    assert "code=gh_override_forbidden" in caplog.text
+    assert list((tmp_path / "tmp").iterdir()) == []  # the init workspace is removed again
+
+
 def test_init_sandbox_creates_missing_tmp_root(mocker, tmp_path, capsys):
     root = tmp_path / "nested" / "hermes-tmp"
     sandbox = SimpleNamespace(repo="owner/sandbox")

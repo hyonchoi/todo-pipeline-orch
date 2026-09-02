@@ -117,9 +117,11 @@ uv run tpo test --repo OWNER/NAME --keep --loop
 5. **Poll** — follow the registered kanban cards until every card is terminal,
    auto-completing gate cards behind their predecessors.
 6. **PR invariant** — exactly one open, unmerged pull request attributable to
-   this run must exist (`pr_invariant_failed` with `pr_missing`,
-   `pr_ambiguous`, `pr_closed`, `pr_merged`, or `pr_discovery_incomplete`
-   otherwise).
+   this run must exist and target the default branch (a `pr_invariant_failed`
+   event with `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, or
+   `pr_wrong_base` otherwise). When discovery itself cannot classify every
+   branch or PR the run fails with `pr_discovery_incomplete` instead; no
+   `pr_invariant_failed` event is emitted for that case.
 7. **Shutdown** (always runs once the issue exists, even after a failure) —
    cancel the tick's kanban tasks, prove quiescence from the archived-inclusive
    snapshot, discover remote artifacts by run provenance (every non-default
@@ -140,8 +142,8 @@ uv run tpo test --repo OWNER/NAME --keep --loop
 | Code | Meaning |
 |------|---------|
 | 0 | Every phase passed, the PR invariant held, and cleanup completed |
-| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (incl. `pr_discovery_incomplete`), or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`). The workspace is deleted after a clean shutdown. |
-| 2 | Profile, preflight, or cleanup error (`cleanup_incomplete`) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory). A `HarnessCleanupError` message prints the retained path; `cleanup_incomplete` prints the remote leftovers with their manual commands. |
+| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (`pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`), `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`). The workspace is deleted after a clean shutdown. |
+| 2 | Profile, preflight, or cleanup error (`cleanup_incomplete`, including when the shutdown discovery fails as well) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory). A `HarnessCleanupError` message prints the retained path; `cleanup_incomplete` prints the remote leftovers with their manual commands. |
 
 ## `--keep` and manual cleanup
 
@@ -212,7 +214,7 @@ numbers, and no leftovers.
 | `gh_override_forbidden` | `TPO_GH_BIN` is set; unset it |
 | `sandbox_not_seeded` | Seed files or the `.hermes/` ignore rule are missing; run `--init-sandbox` |
 | `sandbox_not_empty` | `--init-sandbox` refused a repo tracking files outside the seed set / `.github/**` |
-| `seed_incomplete` | `--init-sandbox` committed but a seed file is not a blob at HEAD; inspect the clone under the workspace |
+| `seed_incomplete` | `--init-sandbox` committed but a seed file is not a blob at HEAD; the init workspace is removed again, so re-run `--init-sandbox` (nothing was pushed) |
 | `default_branch_unknown` | `--init-sandbox`: `gh` reports no default branch but `git ls-remote` advertises refs; set the default branch on GitHub |
 | `default_branch_unset` | `--init-sandbox` pushed `main` but GitHub did not report it as default; set it manually |
 | `default_branch_mismatch` | `--init-sandbox`: the cloned branch differs from the reported default branch |
@@ -222,9 +224,9 @@ numbers, and no leftovers.
 | `unsafe_terminal` | Profile is not live-safe; `native-sdd` is excluded because it is multi-tick |
 | `picked_none` | The tick selected no issue; re-run with `--keep`, then read `artifacts/tick.log` and check the issue labels |
 | `failed_to_spawn`, `tick_timeout`, `tick_failed` | Production tick problems; re-run with `--keep`, then read `artifacts/tick.log` |
-| `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged` | PR invariant failed (none, several, or a non-open attributable PR) |
-| `pr_discovery_incomplete` | Provenance could not classify every branch/PR; cleanup was skipped for safety and leftovers list the manual commands |
-| `cleanup_incomplete` | At least one remote operation failed; finish the printed commands, then remove the workspace |
+| `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base` | PR invariant failed (none, several, a non-open attributable PR, or a PR whose base is not the default branch; a wrong-base PR is still cleaned up) |
+| `pr_discovery_incomplete` | Provenance could not classify every branch/PR at the post-run check (exit 1; the workspace is removed after a clean shutdown). If the shutdown discovery fails too, cleanup is skipped for safety, the run ends with `cleanup_incomplete` (exit 2) and the leftovers list the manual commands |
+| `cleanup_incomplete` | At least one remote operation failed; the detail names the retained workspace; finish the printed commands, then remove it |
 | `issue_unverified`, `issue_ambiguous` | The created issue could not be reconciled by title/token after a `gh` failure; close duplicates by hand |
 
 A missing `git` or `gh` fails preflight with a `Missing dependency: ...`

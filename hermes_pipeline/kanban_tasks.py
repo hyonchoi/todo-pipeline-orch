@@ -11,7 +11,7 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
@@ -1266,51 +1266,6 @@ def create_prepared_todo_phases(
         )
 
     return phase_task_ids
-
-
-def register_todo_phases(
-    *,
-    todo_id: str,
-    tick_id: str,
-    board_slug: str,
-    project_dir: str | Path,
-    phases_path: str | Path | None = None,
-    assignee: str = "default",
-    prompt_client: PromptClient = "claude",
-    plan_path: str | None = None,
-    spec_path: str | None = None,
-    reference_paths: Sequence[str] = (),
-    decisions: Mapping[str, str] | None = None,
-    cancel_event: object | None = None,
-    transform_prepared: Callable[[list[PreparedPhaseTask]], list[PreparedPhaseTask]] | None = None,
-) -> list[str]:
-    """Prepare and register phases as backward-compatible kanban tasks.
-
-    ``transform_prepared`` lets a caller inspect or adjust the rendered cards
-    (the offline harness rewrites the last worker card) before they are created.
-    """
-    prepared = prepare_todo_phases(
-        todo_id=todo_id,
-        tick_id=tick_id,
-        board_slug=board_slug,
-        phases_path=phases_path,
-        prompt_client=prompt_client,
-        plan_path=plan_path,
-        spec_path=spec_path,
-        reference_paths=reference_paths,
-        project_dir=project_dir,
-        decisions=decisions,
-    )
-    if transform_prepared is not None:
-        prepared = transform_prepared(prepared)
-    return create_prepared_todo_phases(
-        prepared=prepared,
-        tick_id=tick_id,
-        board_slug=board_slug,
-        project_dir=project_dir,
-        assignee=assignee,
-        cancel_event=cancel_event,
-    )
 
 
 def _persist_expected_phases(

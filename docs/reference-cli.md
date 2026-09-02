@@ -389,8 +389,8 @@ tpo test --repo OWNER/NAME --keep --loop
 | Code | Meaning |
 |------|---------|
 | 0 | All phases passed, the PR invariant held, and cleanup completed |
-| 1 | Phase failure, convergence halt, overall timeout, PR invariant failure (`pr_missing`/`pr_ambiguous`/`pr_closed`/`pr_merged`/`pr_discovery_incomplete`), or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`). The workspace is deleted after a clean shutdown; re-run with `--keep` to inspect it. |
-| 2 | Profile or preflight error (`unsafe_terminal`, `Unverified` prerequisites, missing dependency, `repo_missing`, `invalid_repo`, `invalid_slug`, `gh_permission`, `gh_override_forbidden`, `sandbox_not_seeded`, `sandbox_not_quiescent`, unknown fixture) or `cleanup_incomplete` — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory); `HarnessCleanupError` messages print the path, `cleanup_incomplete` prints the remote leftovers |
+| 1 | Phase failure, convergence halt, overall timeout, PR invariant failure (`pr_missing`/`pr_ambiguous`/`pr_closed`/`pr_merged`/`pr_wrong_base`) or `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`). The workspace is deleted after a clean shutdown; re-run with `--keep` to inspect it. |
+| 2 | Profile or preflight error (`unsafe_terminal`, `Unverified` prerequisites, missing dependency, `repo_missing`, `invalid_repo`, `invalid_slug`, `gh_permission`, `gh_override_forbidden`, `sandbox_not_seeded`, `sandbox_not_quiescent`, unknown fixture) or `cleanup_incomplete` (also when the shutdown discovery fails after `pr_discovery_incomplete`) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory); `HarnessCleanupError` messages and the `cleanup_incomplete` detail print the path, `cleanup_incomplete` also prints the remote leftovers |
 
 **Preflight and run behavior:**
 - Resolves the selected profile and rejects `Unverified` prerequisites and non-live-safe terminal phases before external checks.

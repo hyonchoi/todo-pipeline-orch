@@ -113,7 +113,7 @@ class HarnessTickError(RuntimeError):
 
 
 _HARNESS_REPO_ENV = "TPO_HARNESS_REPO"
-_SANDBOX_REPO_RE = re.compile(r"^[A-Za-z0-9](?:-?[A-Za-z0-9]){0,38}/[A-Za-z0-9._-]{1,100}\Z")
+_SANDBOX_REPO_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}/[A-Za-z0-9._-]{1,100}\Z")
 
 
 @dataclass(frozen=True)
@@ -369,9 +369,15 @@ def clone_sandbox(sandbox: SandboxRepo, project_dir: Path, *, branch: str | None
     """
     if project_dir.exists():
         raise HarnessPreflightError("workspace_exists", str(project_dir))
-    project_dir.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        project_dir.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HarnessPreflightError("git_error", f"cannot create {project_dir.parent}: {exc}") from exc
     branch_args = ["--branch", branch] if branch is not None else []
-    _run_git(["clone", *branch_args, "--", sandbox.url, str(project_dir)], cwd=project_dir.parent)
+    # Empty template: no ambient GIT_TEMPLATE_DIR hooks land in the clone (ruling R-10.1).
+    _run_git(
+        ["clone", *branch_args, "--template=", "--", sandbox.url, str(project_dir)], cwd=project_dir.parent
+    )
     _run_git(["config", "user.email", _HARNESS_GIT_USER_EMAIL], cwd=project_dir)
     _run_git(["config", "user.name", _HARNESS_GIT_USER_NAME], cwd=project_dir)
 
@@ -527,7 +533,7 @@ def _init_empty_sandbox(
     from .github_issues import _gh
 
     log.info("init-sandbox: initialising empty repository %s at %s", sandbox.repo, project_dir)
-    _run_git(["init", "-b", "main"], cwd=project_dir)
+    _run_git(["init", "-q", "-b", "main", "--template="], cwd=project_dir)
     _run_git(["remote", "add", "origin", sandbox.url], cwd=project_dir)
     _run_git(["config", "user.email", _HARNESS_GIT_USER_EMAIL], cwd=project_dir)
     _run_git(["config", "user.name", _HARNESS_GIT_USER_NAME], cwd=project_dir)
@@ -571,6 +577,20 @@ def _seed_existing_sandbox(
     return "seeded"
 
 
+def _reject_gh_override() -> None:
+    """Fail closed when ``TPO_GH_BIN`` is set (ruling R-12.2).
+
+    The live harness talks to the real sandbox: an overridden gh could hide or fake
+    every remote step (seeding, issue, PR discovery, cleanup).
+    """
+    from .github_issues import GH_BIN_ENV
+
+    if os.environ.get(GH_BIN_ENV):
+        raise HarnessPreflightError(
+            "gh_override_forbidden", f"unset {GH_BIN_ENV} to run the live harness with the real gh"
+        )
+
+
 def init_sandbox(sandbox: SandboxRepo, workspace: Path, *, log: logging.Logger = log) -> str:
     """Seed the live sandbox repository so ``sandbox_seed_check`` passes.
 
@@ -598,6 +618,7 @@ def init_sandbox(sandbox: SandboxRepo, workspace: Path, *, log: logging.Logger =
     """
     from .github_issues import check_auth
 
+    _reject_gh_override()
     try:
         workspace.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -1161,8 +1182,9 @@ def discover_candidate_prs(
     """Sorted unique PR numbers that *might* belong to the run (a superset; never a deletion decision).
 
     Union of every PR whose head is one of *head_refs* and every PR the search API
-    matches on the phrase-quoted issue prefix. Any listing failure, malformed page,
-    or ``incomplete_results`` search page raises
+    matches on the phrase-quoted issue prefix. Any listing failure, empty output
+    (``gh api --slurp`` always prints at least ``[]``), malformed page, or
+    ``incomplete_results`` search page raises
     ``HarnessRemoteCleanupError("pr_discovery_incomplete")`` so callers fail closed
     and delete nothing.
     """
@@ -1186,14 +1208,14 @@ def discover_candidate_prs(
                 ["--paginate", "--slurp", f"repos/{sandbox.repo}/pulls?state=all&head={owner}:{head}&per_page=100"],
                 timeout=_LIST_TIMEOUT,
             )
-            numbers.update(_pr_numbers(_flatten_pages(_decode_json(stdout, "api", empty=[]), "api"), "pulls"))
+            numbers.update(_pr_numbers(_flatten_pages(_decode_json(stdout, "api"), "api"), "pulls"))
         query = quote(f'repo:{sandbox.repo} is:pr "{_issue_prefix(run_token)}"', safe="")
         stdout = _gh_api(
             project_dir,
             ["--paginate", "--slurp", f"search/issues?q={query}&per_page=100"],
             timeout=_LIST_TIMEOUT,
         )
-        pages = _decode_json(stdout, "api", empty=[])
+        pages = _decode_json(stdout, "api")
         if not isinstance(pages, list):
             raise HarnessRemoteCleanupError("pr_discovery_incomplete", "search: response is not a page list")
         for page in pages:
@@ -1272,8 +1294,11 @@ def _ensure_provenance_dir(root: Path) -> Path:
     than on path unreachability (see :func:`_reject_nested_provenance_dir`). The
     caller removes the returned subdirectory when the check ends.
     """
-    root.mkdir(parents=True, exist_ok=True)
-    work = Path(tempfile.mkdtemp(prefix="prov-", dir=root))
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        work = Path(tempfile.mkdtemp(prefix="prov-", dir=root))
+    except OSError as exc:
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"cannot create provenance dir under {root}: {exc}") from exc
     # Empty template: nothing (hooks, config, info/exclude) is copied into the repo.
     _run_git(["init", "-q", "--bare", "--template="], cwd=work)
     leftover = [rel for rel in _PROVENANCE_FORBIDDEN if (work / rel).exists()]
@@ -1345,6 +1370,8 @@ def _branch_provenance_failure(
             return "no run provenance"
     except HarnessPreflightError as exc:
         raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"branch {name}: {_preflight_detail(exc)}") from exc
+    except OSError as exc:
+        raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"branch {name}: {exc}") from exc
     finally:
         if work is not None:
             shutil.rmtree(work, ignore_errors=True)
@@ -1400,9 +1427,7 @@ def _is_protected_branch(name: str, baseline: RunBaseline) -> bool:
     return name.casefold() in protected or "refs" in name.split("/")
 
 
-def is_attributable_pr(
-    pr: PullRequest, *, baseline: RunBaseline, issue: HarnessIssue, provenance_of_head: bool
-) -> bool:
+def is_attributable_pr(pr: PullRequest, *, baseline: RunBaseline, provenance_of_head: bool) -> bool:
     """The single predicate deciding whether *pr* was opened by this live run.
 
     Every condition must hold: same-repository head, authored by the baseline viewer,
@@ -1410,7 +1435,6 @@ def is_attributable_pr(
     default branch, and the head branch carries run provenance
     (:func:`branch_has_run_provenance`). PR text is never consulted: the agent writes it.
     """
-    del issue  # attribution is provenance-based; the issue is kept for call-site symmetry
     if pr.cross_repository or pr.author != baseline.viewer or pr.created_at < baseline.started_at:
         return False
     if pr.head_ref in baseline.heads or pr.head_ref.casefold() == baseline.default_branch.casefold():
@@ -1479,8 +1503,12 @@ class PullRequestInvariantError(RuntimeError):
         self.detail = detail
 
 
-def verify_pull_request(artifacts: RemoteArtifacts) -> PullRequest:
-    """Return the single open, unmerged PR attributed to the run, or raise the violated invariant."""
+def verify_pull_request(artifacts: RemoteArtifacts, *, default_branch: str) -> PullRequest:
+    """Return the single open, unmerged PR targeting *default_branch*, or raise the violated invariant.
+
+    The base check (``pr_wrong_base``) is an invariant only: a PR that targets another
+    branch is still attributable and is cleaned up by shutdown.
+    """
     prs = artifacts.prs
     if not prs:
         raise PullRequestInvariantError("pr_missing", f"issue #{artifacts.issue_number} produced no attributable PR")
@@ -1491,6 +1519,8 @@ def verify_pull_request(artifacts: RemoteArtifacts) -> PullRequest:
         raise PullRequestInvariantError("pr_merged", f"#{pr.number}")
     if pr.state != "OPEN":
         raise PullRequestInvariantError("pr_closed", f"#{pr.number}")
+    if pr.base_ref.casefold() != default_branch.casefold():
+        raise PullRequestInvariantError("pr_wrong_base", f"#{pr.number} -> {pr.base_ref}")
     return pr
 
 
@@ -1686,7 +1716,7 @@ def _discover_remote_artifacts(
             pr_leftovers.append(f"pr #{number}: head {head} pre-existing (not created by this run)")
         elif head not in new_heads:
             pr_leftovers.append(f"pr #{number}: head {head} lacks run provenance")
-        elif is_attributable_pr(pr, baseline=baseline, issue=issue, provenance_of_head=provenance[head]):
+        elif is_attributable_pr(pr, baseline=baseline, provenance_of_head=provenance[head]):
             prs.append(pr)
         else:
             pr_leftovers.append(f"pr #{number}: not attributable")
@@ -1893,10 +1923,9 @@ def _auto_complete_gate_tasks(
         log.warning("failed to query kanban tasks for gate auto-complete: %s", e)
         return
 
-    # Build predecessor map from the same phase list used for registration.
-    # When --phase is used, only a subset of phases is registered — using
-    # load_phases() (all phases) would create predecessor mappings for
-    # phases that don't exist as kanban tasks, causing gates to never match.
+    # Build predecessor map from the registered card set recovered from the tick:
+    # load_phases() (all profile phases) could map predecessors onto phases that
+    # exist as no kanban task, so gates would never match.
     if phases is None:
         from .phases import load_phases
         phases = load_phases()
@@ -1924,7 +1953,6 @@ def poll_registered_phases(
     tick_id: str,
     state_dir: Path,
     todo_id: str,
-    project_dir: Path,
     cards: list[Phase],
     monitor: _ConvergenceMonitor,
     detector: ConvergenceDetector,
@@ -1946,7 +1974,6 @@ def poll_registered_phases(
     Returns True if all cards completed successfully (all done), False otherwise.
     Raises ValueError when ``cards`` is empty.
     """
-    del project_dir  # reserved for parity with the registration signature
     if not cards:
         raise ValueError("poll_registered_phases requires a non-empty registered cards list")
     from .kanban_tasks import (
@@ -1955,8 +1982,9 @@ def poll_registered_phases(
         observe_outcomes,
     )
 
-    # Intentionally unguarded — fail fast before polling begins, matching the
-    # caller's unguarded registration call.
+    # Intentionally unguarded — fail fast before polling begins; the registration
+    # being polled was recovered from the tick, so a failing status query here
+    # means the board itself is unreachable.
     initial_status = get_todo_kanban_status(project_slug, tick_id)
     log.info(
         "initial phase status: %s",
@@ -2930,7 +2958,6 @@ def run_harness(
     import threading
 
     from .contract import PROFILE_NAME_RE
-    from .github_issues import GH_BIN_ENV
     from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .phases import (
         load_phases,
@@ -2961,12 +2988,7 @@ def run_harness(
     validate_live_profile(all_phases, profile_name)
     if fixture_name != _HARNESS_FIXTURE:
         raise HarnessPreflightError("unknown_fixture", fixture_name)
-    if os.environ.get(GH_BIN_ENV):
-        # The live harness talks to the real sandbox: an overridden gh could hide
-        # or fake every remote step (issue, PR discovery, cleanup).
-        raise HarnessPreflightError(
-            "gh_override_forbidden", f"unset {GH_BIN_ENV} to run the live harness with the real gh"
-        )
+    _reject_gh_override()
 
     sandbox = resolve_sandbox_repo(repo)
     run_token = _run_token()
@@ -3080,7 +3102,15 @@ def run_harness(
                 except HarnessTickError as exc:
                     tick_error = exc
                     failure_code = exc.code
-                    log.error("harness: tick did not register a runnable run: %s %s", exc.code, exc.detail)
+                    if exc.code == "tick_not_persisted":
+                        # The detail is the tick log tail and may carry sensitive tool output.
+                        log.error(
+                            "harness: tick did not register a runnable run: %s; see %s",
+                            exc.code, tick_log,
+                        )
+                        log.debug("harness: tick log tail:\n%s", exc.detail)
+                    else:
+                        log.error("harness: tick did not register a runnable run: %s %s", exc.code, exc.detail)
 
                 if tick_error is None:
                     assert registration is not None
@@ -3096,7 +3126,6 @@ def run_harness(
                             tick_id=registration.tick_id,
                             state_dir=project_state,
                             todo_id=registration.todo_id,
-                            project_dir=project_dir,
                             cards=cards,
                             monitor=monitor,
                             detector=detector,
@@ -3131,7 +3160,7 @@ def run_harness(
                                 project_dir, sandbox, issue=issue, baseline=baseline,
                                 plan_sha=plan_sha, provenance_dir=provenance_dir,
                             )
-                            pr = verify_pull_request(artifacts)
+                            pr = verify_pull_request(artifacts, default_branch=baseline.default_branch)
                         except PullRequestInvariantError as exc:
                             base_monitor(*pr_invariant_event(exc))
                             failure_code = exc.code
@@ -3216,7 +3245,9 @@ def run_harness(
                 f" workspace retained at {workspace_dir}; {leftover_text}"
             )
         if not report.remote_all_ok:
-            raise HarnessRemoteCleanupError("cleanup_incomplete", leftover_text)
+            raise HarnessRemoteCleanupError(
+                "cleanup_incomplete", f"{leftover_text}; workspace retained at {workspace_dir}"
+            )
 
         output_dir = artifacts_dir / "reports"
         generate_report(events_log, output_dir)
