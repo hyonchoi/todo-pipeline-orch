@@ -45,6 +45,7 @@ from hermes_pipeline.harness import (
     RemoteArtifacts,
     RunBaseline,
     SandboxRepo,
+    ShutdownReport,
     TickRegistration,
     _build_harness_profile_data,
     _classify_error_class,
@@ -80,6 +81,7 @@ from hermes_pipeline.harness import (
     run_harness,
     run_tick,
     sandbox_seed_check,
+    shutdown_run,
     take_baseline,
     validate_live_profile,
     verify_pull_request,
@@ -1032,6 +1034,18 @@ class TestRecoverTickRegistration:
 
         assert excinfo.value.code == "failed_to_spawn"
         assert json.loads(excinfo.value.detail) == _SPAWN_FAILURE_DETAIL
+        assert excinfo.value.tick_id == "02TICK"
+
+    def test_tick_not_persisted_and_picked_none_carry_no_tick_id(self, tmp_path: Path):
+        state = tmp_path / ".hermes"
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+        assert (excinfo.value.code, excinfo.value.tick_id) == ("tick_not_persisted", None)
+
+        _write_tick_state(state, tick_id="01TICK", phases_outcome="picked_none")
+        with pytest.raises(HarnessTickError) as excinfo:
+            recover_tick_registration(state, expected_issue=1)
+        assert (excinfo.value.code, excinfo.value.tick_id) == ("picked_none", None)
 
     def test_pre_persist_spawn_failure_without_tick_id_file(self, tmp_path: Path):
         state = tmp_path / ".hermes"
@@ -1082,6 +1096,7 @@ class TestRecoverTickRegistration:
             recover_tick_registration(state, expected_issue=1)
 
         assert (excinfo.value.code, excinfo.value.detail) == ("tick_not_started", "01TICK")
+        assert excinfo.value.tick_id == "01TICK"
 
     def test_tick_not_started_when_outcome_unknown(self, tmp_path: Path):
         state = tmp_path / ".hermes"
@@ -1107,6 +1122,7 @@ class TestRecoverTickRegistration:
             recover_tick_registration(state, expected_issue=1)
 
         assert excinfo.value.code == "failed_to_spawn"
+        assert excinfo.value.tick_id == "01TICK"
         assert excinfo.value.detail == json.dumps(
             _SPAWN_FAILURE_DETAIL, separators=(",", ":"), sort_keys=True
         )
@@ -1137,9 +1153,16 @@ class TestRecoverTickRegistration:
             "expected_phases_missing",
             "01TICK",
         )
+        assert excinfo.value.tick_id == "01TICK"
 
 
 class TestCardsForRegisteredKeys:
+    def test_unexpected_registration_has_no_tick_id_by_default(self):
+        with pytest.raises(HarnessTickError) as excinfo:
+            cards_for_registered_keys([], ["ghost"])
+        assert (excinfo.value.code, excinfo.value.tick_id) == ("unexpected_registration", None)
+        assert HarnessTickError("unexpected_registration", "ghost", tick_id="01TICK").tick_id == "01TICK"
+
     PHASES: ClassVar[list[Phase]] = [
         Phase(phase_key="plan", name="Plan"),
         Phase(phase_key="gate", name="Gate", gate=True),
@@ -5991,3 +6014,417 @@ class TestListRunIssuesNumberScreening:
         sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
 
         assert harness_mod._list_run_issues(tmp_path, sandbox, run_token=_RUN_TOKEN, baseline=_baseline()) == [12]
+
+
+
+def _kanban_task(tick_id: str, phase_key: str, status: str) -> dict[str, object]:
+    return {
+        "id": f"task-{phase_key}",
+        "status": status,
+        "body": json.dumps({"tick_id": tick_id, "phase_key": phase_key, "todo_id": "TODO-7"}) + "\nbody",
+    }
+
+
+class TestShutdownRun:
+    """Fail-closed shutdown: destructive remote cleanup only after proven kanban quiescence (R-11.1)."""
+
+    _SANDBOX = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
+    _KEYS = ("impl", "review")
+
+    def _run(self, tmp_path: Path, tick_id: str | None = "tick-1", **overrides):
+        clock = {"t": 0.0}
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            clock["t"] += seconds
+
+        kwargs = dict(
+            issue=_harness_issue(7),
+            baseline=_baseline(),
+            plan_sha="a" * 40,
+            tick_id=tick_id,
+            expected_phase_keys=self._KEYS,
+            provenance_dir=tmp_path / "prov",
+            staging_root=tmp_path / "staging",
+            quiescence_timeout=30.0,
+            poll_interval=5.0,
+            sleep=fake_sleep,
+            now=lambda: clock["t"],
+        )
+        kwargs.update(overrides)
+        report = shutdown_run(tmp_path / "clone", self._SANDBOX, **kwargs)
+        return report, sleeps
+
+    @pytest.fixture
+    def stubs(self):
+        artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(), leftovers=())
+        terminal = [_kanban_task("tick-1", "impl", "archived"), _kanban_task("tick-1", "review", "done")]
+        with (
+            patch.object(harness_mod, "_cancel_registered_tasks", return_value=True) as cancel,
+            patch("hermes_pipeline.kanban_tasks._list_task_snapshot", return_value=terminal) as snapshot,
+            patch.object(harness_mod, "discover_remote_artifacts", return_value=artifacts) as discover,
+            patch.object(harness_mod, "cleanup_remote", return_value=(True, ())) as cleanup,
+            patch("hermes_pipeline.github_issues.close_issue") as close,
+        ):
+            yield MagicMock(cancel=cancel, snapshot=snapshot, discover=discover, cleanup=cleanup, close=close)
+
+    def test_no_tick_id_closes_issue_only(self, stubs, tmp_path: Path, caplog):
+        with caplog.at_level(logging.INFO, logger="hermes_pipeline.harness"):
+            report, sleeps = self._run(tmp_path, tick_id=None)
+
+        assert report == ShutdownReport(
+            tick_id=None, kanban_quiescent=True, remote_all_ok=True, leftovers=(), branch_deletion_skipped=True
+        )
+        stubs.close.assert_called_once_with(tmp_path / "clone", 7, repo="acme/sandbox")
+        stubs.cancel.assert_not_called()
+        stubs.snapshot.assert_not_called()
+        stubs.discover.assert_not_called()
+        stubs.cleanup.assert_not_called()
+        assert sleeps == []
+        assert any("no tick registered" in r.getMessage() for r in caplog.records)
+
+    def test_empty_snapshot_forever_is_not_quiescent(self, stubs, tmp_path: Path, caplog):
+        stubs.snapshot.return_value = []
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            report, sleeps = self._run(tmp_path)
+
+        assert any(
+            r.levelno == logging.WARNING and "cleanup skipped" in r.getMessage() for r in caplog.records
+        )
+
+        assert report.kanban_quiescent is False
+        assert report.remote_all_ok is False
+        assert report.branch_deletion_skipped is True
+        assert sleeps == [5.0] * 6
+        assert stubs.snapshot.call_count == 7
+        assert (
+            "kanban not quiescent for tick tick-1 (issue #7 in acme/sandbox, run tok00000);"
+            " branch/PR cleanup skipped; inspect: hermes kanban list --tenant sandbox --archived;"
+            " gh pr list --repo acme/sandbox; git ls-remote --heads -- https://github.com/acme/sandbox.git"
+        ) in report.leftovers
+        stubs.discover.assert_not_called()
+        stubs.cleanup.assert_not_called()
+        stubs.close.assert_called_once_with(tmp_path / "clone", 7, repo="acme/sandbox")
+
+    def test_terminal_including_archived_after_two_polls_then_cleanup(self, stubs, tmp_path: Path):
+        running = [_kanban_task("tick-1", "impl", "running"), _kanban_task("tick-1", "review", "backlog")]
+        stubs.snapshot.side_effect = [running, running, stubs.snapshot.return_value]
+
+        report, sleeps = self._run(tmp_path)
+
+        assert report == ShutdownReport(
+            tick_id="tick-1", kanban_quiescent=True, remote_all_ok=True, leftovers=(), branch_deletion_skipped=False
+        )
+        assert sleeps == [5.0, 5.0]
+        stubs.cancel.assert_called_once_with(project_slug="sandbox", tick_id="tick-1", project_dir=tmp_path / "clone")
+        stubs.snapshot.assert_called_with("sandbox")
+        stubs.discover.assert_called_once_with(
+            tmp_path / "clone", self._SANDBOX, issue=_harness_issue(7), baseline=_baseline(),
+            plan_sha="a" * 40, provenance_dir=tmp_path / "prov",
+        )
+        stubs.cleanup.assert_called_once_with(
+            tmp_path / "clone", self._SANDBOX, stubs.discover.return_value,
+            staging_root=tmp_path / "staging", log=harness_mod.log,
+        )
+
+    def test_other_ticks_cards_are_ignored(self, stubs, tmp_path: Path):
+        stubs.snapshot.return_value = [
+            *stubs.snapshot.return_value, _kanban_task("tick-0", "impl", "running"),
+        ]
+
+        report, _ = self._run(tmp_path)
+
+        assert report.kanban_quiescent is True
+
+    def test_missing_expected_key_is_not_quiescent(self, stubs, tmp_path: Path):
+        stubs.snapshot.return_value = [_kanban_task("tick-1", "impl", "archived")]
+
+        report, _ = self._run(tmp_path)
+
+        assert report.kanban_quiescent is False
+        stubs.cleanup.assert_not_called()
+        stubs.close.assert_called_once()
+
+    def test_unknown_expected_keys_requires_only_nonempty_terminal(self, stubs, tmp_path: Path):
+        stubs.snapshot.return_value = [_kanban_task("tick-1", "impl", "archived")]
+
+        report, _ = self._run(tmp_path, expected_phase_keys=None)
+
+        assert report.kanban_quiescent is True
+
+    def test_cancel_not_confirmed_skips_polling(self, stubs, tmp_path: Path):
+        stubs.cancel.return_value = False
+
+        report, sleeps = self._run(tmp_path)
+
+        assert report.kanban_quiescent is False
+        assert report.branch_deletion_skipped is True
+        assert sleeps == []
+        stubs.snapshot.assert_not_called()
+        stubs.cleanup.assert_not_called()
+        stubs.close.assert_called_once()
+
+    def test_snapshot_query_error_keeps_polling_to_deadline(self, stubs, tmp_path: Path, caplog):
+        stubs.snapshot.side_effect = RuntimeError("hermes down")
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            report, sleeps = self._run(tmp_path)
+
+        assert report.kanban_quiescent is False
+        assert sum(sleeps) >= 30.0
+        assert stubs.snapshot.call_count == len(sleeps) + 1
+        assert any("hermes down" in r.getMessage() for r in caplog.records)
+        stubs.cleanup.assert_not_called()
+
+    def test_keep_remote_cancels_kanban_but_skips_remote_ops(self, stubs, tmp_path: Path):
+        report, _ = self._run(tmp_path, keep_remote=True)
+
+        assert report.kanban_quiescent is True
+        assert report.remote_all_ok is True
+        assert report.branch_deletion_skipped is True
+        assert report.leftovers == ("kept remote artifacts for issue #7 in acme/sandbox (run tok00000)",)
+        stubs.cancel.assert_called_once()
+        stubs.discover.assert_not_called()
+        stubs.cleanup.assert_not_called()
+        stubs.close.assert_not_called()
+
+    def test_keep_remote_with_no_tick_id_performs_no_remote_op(self, stubs, tmp_path: Path):
+        report, _ = self._run(tmp_path, tick_id=None, keep_remote=True)
+
+        assert report == ShutdownReport(
+            tick_id=None, kanban_quiescent=True, remote_all_ok=True,
+            leftovers=("kept remote artifacts for issue #7 in acme/sandbox (run tok00000)",),
+            branch_deletion_skipped=True,
+        )
+        stubs.close.assert_not_called()
+        stubs.cancel.assert_not_called()
+        stubs.discover.assert_not_called()
+        stubs.cleanup.assert_not_called()
+
+    def test_keep_remote_not_quiescent_reports_remote_not_ok(self, stubs, tmp_path: Path):
+        stubs.cancel.return_value = False
+
+        report, _ = self._run(tmp_path, keep_remote=True)
+
+        assert report.kanban_quiescent is False
+        assert report.remote_all_ok is False
+        assert "kept remote artifacts for issue #7 in acme/sandbox (run tok00000)" in report.leftovers
+        stubs.cancel.assert_called_once()
+        stubs.close.assert_not_called()
+
+    @pytest.mark.parametrize(
+        ("exc", "leftover"),
+        [
+            (HarnessRemoteCleanupError("pr_discovery_incomplete", "x"), "pr_discovery_incomplete: x"),
+            (ValueError("bad sha"), "ValueError: bad sha"),
+            (OSError("disk"), "OSError: disk"),
+        ],
+    )
+    def test_discovery_error_closes_issue_once_and_skips_cleanup(self, stubs, tmp_path: Path, exc, leftover, caplog):
+        stubs.discover.side_effect = exc
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            report, _ = self._run(tmp_path)
+
+        assert report.kanban_quiescent is True
+        assert report.remote_all_ok is False
+        assert report.branch_deletion_skipped is True
+        assert (
+            f"{leftover}; branch/PR cleanup skipped; inspect: gh pr list --repo acme/sandbox;"
+            " git ls-remote --heads -- https://github.com/acme/sandbox.git"
+        ) in report.leftovers
+        assert any(r.levelno == logging.WARNING and leftover in r.getMessage() for r in caplog.records)
+        stubs.cleanup.assert_not_called()
+        stubs.close.assert_called_once_with(tmp_path / "clone", 7, repo="acme/sandbox")
+
+    def test_issue_close_failure_on_fallback_path_is_a_leftover(self, stubs, tmp_path: Path):
+        stubs.discover.side_effect = HarnessRemoteCleanupError("pr_discovery_incomplete", "x")
+        stubs.close.side_effect = GitHubIssuesError("gh_failed", "boom")
+
+        report, _ = self._run(tmp_path)
+
+        assert report.remote_all_ok is False
+        assert "issue #7: close failed (gh_failed); run: gh issue close 7 --repo acme/sandbox" in report.leftovers
+
+    def test_issue_close_value_error_is_invalid_leftover(self, stubs, tmp_path: Path):
+        stubs.discover.side_effect = HarnessRemoteCleanupError("pr_discovery_incomplete", "x")
+        stubs.close.side_effect = ValueError("bad number")
+
+        report, _ = self._run(tmp_path)
+
+        assert "issue #7: close failed (invalid); run: gh issue close 7 --repo acme/sandbox" in report.leftovers
+
+    def test_late_pr_leftovers_pass_through(self, stubs, tmp_path: Path):
+        stubs.cleanup.return_value = (False, ("pr #9: close failed (gh_failed); run: gh pr close 9 --repo acme/sandbox",))
+
+        report, _ = self._run(tmp_path)
+
+        assert report.remote_all_ok is False
+        assert report.branch_deletion_skipped is False
+        assert report.leftovers == ("pr #9: close failed (gh_failed); run: gh pr close 9 --repo acme/sandbox",)
+
+    @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+    def test_interrupt_during_wait_is_logged_then_reraised(self, stubs, tmp_path: Path, caplog, interrupt):
+        stubs.snapshot.return_value = []
+
+        def interrupting_sleep(_seconds: float) -> None:
+            raise interrupt
+
+        with caplog.at_level(logging.ERROR, logger="hermes_pipeline.harness"), pytest.raises(interrupt):
+            self._run(tmp_path, sleep=interrupting_sleep)
+
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("#7" in m and "acme/sandbox" in m and "tok00000" in m for m in errors)
+        stubs.cleanup.assert_not_called()
+
+    @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+    def test_interrupt_during_cleanup_is_logged_then_reraised(self, stubs, tmp_path: Path, caplog, interrupt):
+        stubs.cleanup.side_effect = interrupt
+
+        with caplog.at_level(logging.ERROR, logger="hermes_pipeline.harness"), pytest.raises(interrupt):
+            self._run(tmp_path)
+
+        errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
+        assert any("#7" in m and "acme/sandbox" in m and "tok00000" in m for m in errors)
+        stubs.close.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"poll_interval": 0.0}, {"poll_interval": -1.0}, {"quiescence_timeout": -1.0},
+            {"poll_interval": float("inf")}, {"poll_interval": float("nan")},
+            {"quiescence_timeout": float("inf")}, {"quiescence_timeout": float("nan")},
+        ],
+    )
+    def test_invalid_timing_rejected(self, stubs, tmp_path: Path, kwargs):
+        with pytest.raises(ValueError):
+            self._run(tmp_path, **kwargs)
+        stubs.cancel.assert_not_called()
+
+    def test_sleep_is_clamped_to_remaining_deadline(self, stubs, tmp_path: Path):
+        stubs.snapshot.return_value = []
+
+        report, sleeps = self._run(tmp_path, poll_interval=60.0, quiescence_timeout=30.0)
+
+        assert report.kanban_quiescent is False
+        assert sleeps == [30.0]
+
+    @pytest.mark.parametrize("live_first", [True, False])
+    def test_duplicate_phase_key_folds_to_worst_status(self, stubs, tmp_path: Path, live_first):
+        live = {**_kanban_task("tick-1", "impl", "running"), "id": "task-impl-dup"}
+        archived = _kanban_task("tick-1", "impl", "archived")
+        review = _kanban_task("tick-1", "review", "done")
+        stubs.snapshot.return_value = [live, archived, review] if live_first else [archived, live, review]
+
+        report, _ = self._run(tmp_path)
+
+        assert report.kanban_quiescent is False
+        stubs.cleanup.assert_not_called()
+
+    def test_archived_status_map_reads_archived_snapshot(self):
+        tasks = [
+            _kanban_task("tick-1", "impl", "archived"), _kanban_task("tick-1", "impl", "running"),
+            _kanban_task("tick-1", "review", "done"), _kanban_task("tick-1", "review", "archived"),
+            _kanban_task("tick-9", "impl", "running"), {"id": "x", "status": "running", "body": "not json"},
+            {**_kanban_task("tick-1", "gate", "done"), "status": None},
+            {k: v for k, v in _kanban_task("tick-1", "ship", "done").items() if k != "status"},
+        ]
+        with patch("hermes_pipeline.kanban_tasks._list_task_snapshot", return_value=tasks) as snap:
+            assert harness_mod._archived_status_map("sandbox", "tick-1") == {
+                "impl": "running", "review": "done", "gate": "unknown", "ship": "unknown",
+            }
+        snap.assert_called_once_with("sandbox")
+        with patch("hermes_pipeline.kanban_tasks._list_task_snapshot", return_value=None):
+            assert harness_mod._archived_status_map("sandbox", "tick-1") is None
+
+    def test_card_without_status_is_not_quiescent(self, stubs, tmp_path: Path):
+        stubs.snapshot.return_value = [
+            _kanban_task("tick-1", "impl", "archived"),
+            {k: v for k, v in _kanban_task("tick-1", "review", "done").items() if k != "status"},
+        ]
+
+        report, _ = self._run(tmp_path)
+
+        assert report.kanban_quiescent is False
+        stubs.cleanup.assert_not_called()
+
+    def test_long_cleanup_error_reason_is_bounded(self, stubs, tmp_path: Path):
+        stubs.discover.side_effect = ValueError("x" * 5000)
+
+        report, _ = self._run(tmp_path)
+
+        reason = report.leftovers[0]
+        assert reason.startswith("ValueError: xxx")
+        assert reason.endswith("git ls-remote --heads -- https://github.com/acme/sandbox.git")
+        assert "x" * harness_mod._ERROR_MESSAGE_MAX not in reason
+
+    def test_stalled_clock_cannot_spin_forever(self, stubs, tmp_path: Path):
+        stubs.snapshot.return_value = []
+        sleeps: list[float] = []
+
+        report = shutdown_run(
+            tmp_path / "clone", self._SANDBOX, issue=_harness_issue(7), baseline=_baseline(), plan_sha="a" * 40,
+            tick_id="tick-1", expected_phase_keys=self._KEYS, provenance_dir=tmp_path / "prov",
+            staging_root=tmp_path / "staging", quiescence_timeout=30.0, poll_interval=5.0,
+            sleep=sleeps.append, now=lambda: 0.0,
+        )
+
+        assert report.kanban_quiescent is False
+        assert len(sleeps) == 7  # ceil(30 / 5) + 1 iterations, one sleep each
+        assert stubs.snapshot.call_count == 7
+
+    def test_real_snapshot_reader_failing_subprocess_is_not_quiescent(self, tmp_path: Path):
+        artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(), leftovers=())
+        failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+        with (
+            patch.object(harness_mod, "_cancel_registered_tasks", return_value=True),
+            patch("hermes_pipeline.kanban_tasks.subprocess.run", return_value=failed) as run,
+            patch.object(harness_mod, "discover_remote_artifacts", return_value=artifacts),
+            patch.object(harness_mod, "cleanup_remote", return_value=(True, ())) as cleanup,
+            patch("hermes_pipeline.github_issues.close_issue"),
+        ):
+            report, _ = self._run(tmp_path)
+
+        assert report.kanban_quiescent is False
+        assert run.call_args.args[0] == ["hermes", "kanban", "list", "--tenant", "sandbox", "--archived", "--json"]
+        cleanup.assert_not_called()
+
+    def test_real_snapshot_reader_success_is_quiescent(self, tmp_path: Path):
+        artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(), leftovers=())
+        stdout = json.dumps([_kanban_task("tick-1", "impl", "archived"), _kanban_task("tick-1", "review", "done")])
+        ok = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
+        with (
+            patch.object(harness_mod, "_cancel_registered_tasks", return_value=True),
+            patch("hermes_pipeline.kanban_tasks.subprocess.run", return_value=ok) as run,
+            patch.object(harness_mod, "discover_remote_artifacts", return_value=artifacts),
+            patch.object(harness_mod, "cleanup_remote", return_value=(True, ())) as cleanup,
+            patch("hermes_pipeline.github_issues.close_issue"),
+        ):
+            report, sleeps = self._run(tmp_path)
+
+        assert report.kanban_quiescent is True
+        assert report.branch_deletion_skipped is False
+        assert sleeps == []
+        assert run.call_args.args[0] == ["hermes", "kanban", "list", "--tenant", "sandbox", "--archived", "--json"]
+        cleanup.assert_called_once()
+
+    def test_zero_timeout_checks_exactly_once(self, stubs, tmp_path: Path):
+        stubs.snapshot.return_value = []
+
+        report, sleeps = self._run(tmp_path, quiescence_timeout=0.0)
+
+        assert report.kanban_quiescent is False
+        assert sleeps == []
+        assert stubs.snapshot.call_count == 1
+
+
+class TestHarnessIssueValidation:
+    @pytest.mark.parametrize("number", [0, -1, True])
+    def test_non_positive_number_rejected(self, number):
+        with pytest.raises(ValueError):
+            HarnessIssue(
+                number=number, todo_id="TODO-1", branch="feat/harness-tok00000",
+                plan_path="docs/harness/tok00000-plan.md", title="[harness tok00000] x", run_token="tok00000",
+            )

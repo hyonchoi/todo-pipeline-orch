@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json as _json
 import logging
+import math
 import os
 import re
 import shlex
@@ -114,12 +115,19 @@ class HarnessPreflightError(RuntimeError):
 
 
 class HarnessTickError(RuntimeError):
-    """The production ``tpo tick`` subprocess did not register a runnable tick."""
+    """The production ``tpo tick`` subprocess did not register a runnable tick.
 
-    def __init__(self, code: str, detail: str = "") -> None:
+    ``tick_id`` is the tick id known when the error was raised; kanban cards may
+    exist for it. Set for ``tick_not_started``, ``failed_to_spawn``,
+    ``expected_phases_missing`` (and by callers for ``unexpected_registration``);
+    ``None`` for ``tick_not_persisted`` and ``picked_none``, where no card can exist.
+    """
+
+    def __init__(self, code: str, detail: str = "", *, tick_id: str | None = None) -> None:
         super().__init__(code)
         self.code = code
         self.detail = detail
+        self.tick_id = tick_id
 
 
 _HARNESS_REPO_ENV = "TPO_HARNESS_REPO"
@@ -906,6 +914,9 @@ class HarnessIssue:
     run_token: str
 
     def __post_init__(self) -> None:
+        number = self.number
+        if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
+            raise ValueError(f"issue number must be a positive int, got {number!r}")
         # The path is interpolated into git argv and joined onto the clone root.
         if (
             self.plan_path.startswith("/")
@@ -1972,6 +1983,10 @@ _KANBAN_POLL_MAX_INTERVAL = 30.0
 # never races a still-mutating producer.
 _POLL_CANCELLATION_TIMEOUT = 65.0
 
+# Upper bound on waiting for the tick's kanban cards to reach a terminal status
+# during shutdown before remote branch/PR cleanup is declared unsafe (seconds).
+_SHUTDOWN_TIMEOUT = 300.0
+
 # Maximum characters in error messages captured by the harness
 _ERROR_MESSAGE_MAX = 500
 
@@ -2717,8 +2732,10 @@ def _compact_detail(payload: Mapping[str, Any]) -> str:
     return _json.dumps(payload.get("detail"), separators=(",", ":"), sort_keys=True)
 
 
-def _find_new_spawn_failure(outcomes_dir: Path, previous_tick_id: str | None) -> str | None:
-    """Compact detail of the newest ``failed_to_spawn`` record not belonging to *previous_tick_id*.
+def _find_new_spawn_failure(
+    outcomes_dir: Path, previous_tick_id: str | None
+) -> tuple[str | None, str] | None:
+    """``(tick_id, compact detail)`` of the newest ``failed_to_spawn`` record not belonging to *previous_tick_id*.
 
     ``cli._record_failed_to_spawn`` may run before ``current_tick_id.txt`` is
     updated, so a spawn failure can exist for a tick that never persisted its id.
@@ -2745,7 +2762,8 @@ def _find_new_spawn_failure(outcomes_dir: Path, previous_tick_id: str | None) ->
             and payload.get("outcome") == "failed_to_spawn"
             and payload.get("tick_id") != previous_tick_id
         ):
-            return _compact_detail(payload)
+            record_tick = payload.get("tick_id")
+            return (record_tick if isinstance(record_tick, str) else None, _compact_detail(payload))
     return None
 
 
@@ -2775,13 +2793,18 @@ def recover_tick_registration(
     ``requires_plan`` profiles the sentinel is written under the run worktree
     (``<worktree>/.hermes/outcomes/``), not *project_state*; pass the worktree's
     ``.hermes`` directory.
+
+    Every ``HarnessTickError`` raised once a tick id is known (``tick_not_started``,
+    ``failed_to_spawn``, ``expected_phases_missing``) carries it as ``exc.tick_id``
+    so :func:`shutdown_run` can still quiesce cards that may exist for it.
     """
     tick_id = read_current_tick_id(project_state)
     outcomes_dir = project_state / "outcomes"
     if tick_id is None or tick_id == previous_tick_id:
-        spawn_detail = _find_new_spawn_failure(outcomes_dir, previous_tick_id)
-        if spawn_detail is not None:
-            raise HarnessTickError("failed_to_spawn", spawn_detail)
+        spawn_failure = _find_new_spawn_failure(outcomes_dir, previous_tick_id)
+        if spawn_failure is not None:
+            spawn_tick, spawn_detail = spawn_failure
+            raise HarnessTickError("failed_to_spawn", spawn_detail, tick_id=spawn_tick)
         raise HarnessTickError("tick_not_persisted", _log_tail(tick_log))
 
     phases_path = outcomes_dir / f"{tick_id}-phases.json"
@@ -2797,11 +2820,11 @@ def recover_tick_registration(
     if outcome == "picked_none":
         raise HarnessTickError("picked_none", tick_id)
     if outcome != "tick_started":
-        raise HarnessTickError("tick_not_started", tick_id)
+        raise HarnessTickError("tick_not_started", tick_id, tick_id=tick_id)
 
     spawn_record = _read_json_file(outcomes_dir / f"{tick_id}.json")
     if isinstance(spawn_record, dict) and spawn_record.get("outcome") == "failed_to_spawn":
-        raise HarnessTickError("failed_to_spawn", _compact_detail(spawn_record))
+        raise HarnessTickError("failed_to_spawn", _compact_detail(spawn_record), tick_id=tick_id)
 
     expected = _read_json_file(outcomes_dir / "expected-phases.json")
     if (
@@ -2809,7 +2832,7 @@ def recover_tick_registration(
         or not expected
         or not all(isinstance(key, str) for key in expected)
     ):
-        raise HarnessTickError("expected_phases_missing", tick_id)
+        raise HarnessTickError("expected_phases_missing", tick_id, tick_id=tick_id)
 
     return TickRegistration(
         tick_id=tick_id,
@@ -2934,6 +2957,279 @@ def _cancel_registered_tasks(
             type(exc).__name__,
         )
         return False
+
+
+@dataclass(frozen=True)
+class ShutdownReport:
+    """What :func:`shutdown_run` proved and what it left for a human."""
+
+    tick_id: str | None
+    kanban_quiescent: bool
+    remote_all_ok: bool
+    leftovers: tuple[str, ...]
+    branch_deletion_skipped: bool
+
+
+def _archived_status_map(tenant: str, tick_id: str) -> dict[str, str] | None:
+    """``{phase_key: status}`` for *tick_id* from the archived-inclusive snapshot, or ``None``.
+
+    Reads the same ``hermes kanban list --tenant <t> --archived --json`` snapshot that
+    :func:`kanban_tasks.cancel_todo_kanban_tasks` verifies against, so archived cards
+    (the state cancel leaves them in) are visible; :func:`get_todo_kanban_status` omits
+    them and would report a fully archived tick as an empty (vacuously terminal) map.
+    ``None`` means the snapshot could not be read and proves nothing.
+    """
+    from .kanban_tasks import TERMINAL_STATUSES, _list_task_snapshot, _parse_task_header
+
+    snapshot = _list_task_snapshot(tenant)
+    if snapshot is None:
+        return None
+    status_map: dict[str, str] = {}
+    for task in snapshot:
+        header = _parse_task_header(task)
+        if header is None or header.get("tick_id") != tick_id:
+            continue
+        phase_key = header.get("phase_key")
+        if not isinstance(phase_key, str):
+            continue
+        status = task.get("status")
+        if not isinstance(status, str):
+            # Mirrors get_todo_kanban_status: a card whose status cannot be read
+            # is still this tick's card and must block quiescence, never vanish.
+            status = "unknown"
+        # A duplicate card for one phase folds to the worst status so a live
+        # duplicate can never be shadowed by an archived one (order-independent).
+        previous = status_map.get(phase_key)
+        if previous is None or (previous in TERMINAL_STATUSES and status not in TERMINAL_STATUSES):
+            status_map[phase_key] = status
+    return status_map
+
+
+def _wait_for_kanban_quiescence(
+    project_slug: str,
+    tick_id: str,
+    *,
+    expected_phase_keys: tuple[str, ...] | None,
+    timeout: float,
+    poll_interval: float,
+    sleep: Callable[[float], None],
+    now: Callable[[], float],
+    log: logging.Logger,
+) -> bool:
+    """Poll the archived-inclusive snapshot until the tick is provably terminal or *timeout* elapses.
+
+    Quiescent iff the tick's cards are non-empty, every *expected_phase_keys* entry is
+    present (when known), and every status is in ``TERMINAL_STATUSES``. An empty map,
+    an unreadable snapshot, or a raising query proves nothing and counts as
+    "not yet"; polling continues until the deadline. Iterations are additionally
+    capped at ``ceil(timeout / poll_interval) + 1`` so a stalled clock cannot spin.
+    """
+    from .kanban_tasks import TERMINAL_STATUSES
+
+    deadline = now() + timeout
+    max_iterations = math.ceil(timeout / poll_interval) + 1
+    for _ in range(max_iterations):
+        try:
+            status_map = _archived_status_map(project_slug, tick_id)
+        except Exception as exc:
+            log.warning(
+                "harness shutdown: kanban snapshot failed for tick %s (%s: %s); treating as not quiescent",
+                tick_id, type(exc).__name__, exc,
+            )
+            status_map = None
+        if status_map is None:
+            log.warning("harness shutdown: kanban snapshot unreadable for tick %s; not yet quiescent", tick_id)
+        elif not status_map:
+            log.info("harness shutdown: no cards visible yet for tick %s; not yet quiescent", tick_id)
+        elif expected_phase_keys is not None and not set(expected_phase_keys) <= status_map.keys():
+            log.info(
+                "harness shutdown: tick %s missing cards for %s; not yet quiescent",
+                tick_id, sorted(set(expected_phase_keys) - status_map.keys()),
+            )
+        elif all(status in TERMINAL_STATUSES for status in status_map.values()):
+            return True
+        remaining = deadline - now()
+        if remaining <= 0:
+            return False
+        sleep(min(poll_interval, remaining))
+    return False
+
+
+def _close_issue_leftover(project_dir: Path, sandbox: SandboxRepo, number: int, *, log: logging.Logger) -> list[str]:
+    """Close the run's issue on a path where :func:`cleanup_remote` will not run."""
+    from .github_issues import GitHubIssuesError, close_issue
+
+    log.info("harness shutdown: closing issue #%d in %s", number, sandbox.repo)
+    try:
+        close_issue(project_dir, number, repo=sandbox.repo)
+    except (GitHubIssuesError, ValueError) as exc:
+        code = getattr(exc, "code", "invalid")
+        return [f"issue #{number}: close failed ({code}); run: gh issue close {number} --repo {sandbox.repo}"]
+    return []
+
+
+def shutdown_run(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    issue: HarnessIssue,
+    baseline: RunBaseline,
+    plan_sha: str,
+    tick_id: str | None,
+    expected_phase_keys: tuple[str, ...] | None,
+    provenance_dir: Path,
+    staging_root: Path,
+    quiescence_timeout: float = _SHUTDOWN_TIMEOUT,
+    poll_interval: float = 5.0,
+    sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], float] = time.monotonic,
+    keep_remote: bool = False,
+    log: logging.Logger = log,
+) -> ShutdownReport:
+    """Fail-closed shutdown for a live run once its sandbox issue exists.
+
+    *tick_id* and *expected_phase_keys* are what the caller learned from
+    :func:`recover_tick_registration` (never re-derived from disk here): on success
+    pass ``registration.tick_id`` and ``registration.phase_keys``. When it raised
+    ``HarnessTickError`` with a non-``None`` ``exc.tick_id`` (``tick_not_started``,
+    ``failed_to_spawn``, ``expected_phases_missing``, or ``unexpected_registration``
+    after registration), cards may exist for that tick: pass ``exc.tick_id`` with
+    ``expected_phase_keys=None``. ``None`` for both is only correct for
+    ``tick_not_persisted`` and ``picked_none``, where no card can exist.
+    ``expected_phase_keys=None`` forfeits the completeness check (quiescence then
+    needs only a non-empty, fully terminal set of cards) and is meant solely for
+    those partial-registration callers. Order:
+    cancel the tick's kanban tasks, wait for proven quiescence on the
+    archived-inclusive snapshot, then (only when proven) discover and delete remote
+    artifacts. Destructive branch/PR cleanup never runs while an agent may still be
+    pushing: on an unconfirmed cancel, a quiescence timeout, or any discovery/cleanup
+    failure, only the issue is closed and everything else is reported as a leftover.
+    With no *tick_id* no agent ever ran, so there is nothing to discover or delete:
+    only the issue is closed.
+
+    Quiescence accepts every ``TERMINAL_STATUSES`` member, not only ``archived``:
+    after a confirmed cancel a card that reached ``done``/``failed`` on its own has
+    no worker behind it either, and the confirmed cancel already proved no run is
+    still executing.
+
+    ``keep_remote`` still cancels and quiesces the kanban (workers must stop) but
+    performs no remote operation at all, not even closing the issue; then
+    ``remote_all_ok`` reflects kanban quiescence only, and the ``kept remote
+    artifacts ...`` leftover is always emitted so the operator has the pointer.
+
+    Never raises for operational failures. Any ``BaseException`` that is not an
+    ``Exception`` (``KeyboardInterrupt``, ``SystemExit``) is logged at ERROR with
+    the manual pointers and re-raised.
+    """
+    if not math.isfinite(poll_interval) or poll_interval <= 0:
+        raise ValueError(f"poll_interval must be finite and > 0, got {poll_interval!r}")
+    if not math.isfinite(quiescence_timeout) or quiescence_timeout < 0:
+        raise ValueError(f"quiescence_timeout must be finite and >= 0, got {quiescence_timeout!r}")
+
+    pointer = f"issue #{issue.number} in {sandbox.repo}, run {issue.run_token}"
+    inspect_hint = f"hermes kanban list --tenant {sandbox.slug} --archived"
+    remote_hint = f"gh pr list --repo {sandbox.repo}; git ls-remote --heads -- {_scrub_url(sandbox.url)}"
+    kept_leftover = f"kept remote artifacts for issue #{issue.number} in {sandbox.repo} (run {issue.run_token})"
+
+    if tick_id is None and keep_remote:
+        log.info("harness shutdown: keep_remote and no tick registered; nothing touched (%s)", pointer)
+        return ShutdownReport(
+            tick_id=None, kanban_quiescent=True, remote_all_ok=True,
+            leftovers=(kept_leftover,), branch_deletion_skipped=True,
+        )
+
+    if tick_id is None:
+        # No kanban registration ever happened, so no worker exists and no remote
+        # artifact beyond the issue can exist; nothing to discover or delete.
+        log.info("harness shutdown: no tick registered; only the issue is closed (%s)", pointer)
+        leftovers = _close_issue_leftover(project_dir, sandbox, issue.number, log=log)
+        return ShutdownReport(
+            tick_id=None, kanban_quiescent=True, remote_all_ok=not leftovers,
+            leftovers=tuple(leftovers), branch_deletion_skipped=True,
+        )
+
+    try:
+        log.info("harness shutdown: cancelling kanban tasks for tick %s (%s)", tick_id, pointer)
+        confirmed = _cancel_registered_tasks(project_slug=sandbox.slug, tick_id=tick_id, project_dir=project_dir)
+        if confirmed:
+            log.info("harness shutdown: waiting up to %.0fs for tick %s to go quiescent", quiescence_timeout, tick_id)
+            all_terminal = _wait_for_kanban_quiescence(
+                sandbox.slug, tick_id, expected_phase_keys=expected_phase_keys,
+                timeout=quiescence_timeout, poll_interval=poll_interval, sleep=sleep, now=now, log=log,
+            )
+        else:
+            log.info("harness shutdown: cancel of tick %s not confirmed; skipping quiescence wait", tick_id)
+            all_terminal = False
+    except BaseException:
+        log.error(
+            "harness shutdown interrupted while quiescing tick %s (%s); inspect: %s; %s;"
+            " then: gh issue close %d --repo %s",
+            tick_id, pointer, inspect_hint, remote_hint, issue.number, sandbox.repo,
+        )
+        raise
+    kanban_quiescent = confirmed and all_terminal
+    log.info(
+        "harness shutdown: tick %s cancel_confirmed=%s all_terminal=%s", tick_id, confirmed, all_terminal
+    )
+
+    if keep_remote:
+        log.info("harness shutdown: keep_remote; leaving %s, its PRs and branches in place", pointer)
+        return ShutdownReport(
+            tick_id=tick_id, kanban_quiescent=kanban_quiescent, remote_all_ok=kanban_quiescent,
+            leftovers=(kept_leftover,), branch_deletion_skipped=True,
+        )
+
+    if not kanban_quiescent:
+        leftovers = _close_issue_leftover(project_dir, sandbox, issue.number, log=log)
+        leftovers.append(
+            f"kanban not quiescent for tick {tick_id} ({pointer}); branch/PR cleanup skipped;"
+            f" inspect: {inspect_hint}; {remote_hint}"
+        )
+        log.warning(
+            "harness shutdown: kanban not quiescent for tick %s; branch/PR cleanup skipped, live remote"
+            " artifacts may remain (%s)", tick_id, pointer,
+        )
+        return ShutdownReport(
+            tick_id=tick_id, kanban_quiescent=False, remote_all_ok=False,
+            leftovers=tuple(leftovers), branch_deletion_skipped=True,
+        )
+
+    log.info("harness shutdown: discovering remote artifacts (%s)", pointer)
+    try:
+        artifacts = discover_remote_artifacts(
+            project_dir, sandbox, issue=issue, baseline=baseline, plan_sha=plan_sha, provenance_dir=provenance_dir,
+        )
+        log.info("harness shutdown: cleaning up remote artifacts (%s)", pointer)
+        all_ok, leftovers = cleanup_remote(project_dir, sandbox, artifacts, staging_root=staging_root, log=log)
+    except Exception as exc:
+        # Nothing was deleted: discovery is read-only and cleanup_remote raises only
+        # before touching the remote; any other failure is reported, not propagated.
+        code = getattr(exc, "code", None)
+        detail = getattr(exc, "detail", None)
+        reason = f"{code}: {detail}" if code and detail else f"{type(exc).__name__}: {exc}"
+        reason = reason[:_ERROR_MESSAGE_MAX]
+        log.warning(
+            "harness shutdown: remote cleanup aborted (%s); closing issue only, live remote artifacts"
+            " may remain (%s)", reason, pointer,
+        )
+        issue_leftovers = _close_issue_leftover(project_dir, sandbox, issue.number, log=log)
+        return ShutdownReport(
+            tick_id=tick_id, kanban_quiescent=True, remote_all_ok=False,
+            leftovers=tuple((*issue_leftovers, f"{reason}; branch/PR cleanup skipped; inspect: {remote_hint}")),
+            branch_deletion_skipped=True,
+        )
+    except BaseException:
+        log.error(
+            "harness shutdown interrupted during remote cleanup (%s); inspect: %s; then: gh issue close %d --repo %s",
+            pointer, remote_hint, issue.number, sandbox.repo,
+        )
+        raise
+
+    log.info("harness shutdown: remote cleanup all_ok=%s leftovers=%d (%s)", all_ok, len(leftovers), pointer)
+    return ShutdownReport(
+        tick_id=tick_id, kanban_quiescent=True, remote_all_ok=all_ok,
+        leftovers=tuple(leftovers), branch_deletion_skipped=False,
+    )
 
 
 def run_harness(
