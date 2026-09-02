@@ -90,6 +90,44 @@ class PlanSource:
     plan_path: str | None = None
 
 
+@dataclass(frozen=True)
+class PlanReference:
+    """A runtime reference bound to one validated Plan source and digest."""
+
+    value: str
+    source: PlanSource
+
+
+def validate_plan_reference(reference: PlanReference, *, expected_todo_id: str) -> None:
+    source = reference.source
+    if source.kind == "embedded":
+        reference_path = Path(reference.value)
+        if (
+            source.plan_path is not None
+            or not reference_path.is_absolute()
+            or reference_path.name != "plan.md"
+            or reference_path != reference_path.resolve()
+        ):
+            raise TodoPlanValidationError("invalid_plan_reference")
+        from .run_registration import RunRegistrationError, _read_verified_artifact
+
+        try:
+            document = _read_verified_artifact(reference_path, source.plan_hash).decode()
+        except (RunRegistrationError, UnicodeError) as exc:
+            raise TodoPlanValidationError("invalid_plan_reference") from exc
+    elif source.kind == "legacy_path":
+        if not source.plan_path or reference.value != source.plan_path:
+            raise TodoPlanValidationError("invalid_plan_reference")
+        document = source.document
+    else:
+        raise TodoPlanValidationError("invalid_plan_reference")
+    if hashlib.sha256(document.encode()).hexdigest() != source.plan_hash:
+        raise TodoPlanValidationError("invalid_plan_reference")
+    manifest = parse_plan_manifest(document, expected_todo_id=expected_todo_id)
+    if manifest != source.manifest:
+        raise TodoPlanValidationError("invalid_plan_reference")
+
+
 def _normalized_document(document: str) -> str:
     return document.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
 

@@ -285,19 +285,31 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
         actual["base_sha"] = (
             base.stdout.strip() if base.returncode == 0 else "<unavailable>"
         )
-        plan_at_base = _cli_sp.run(
-            ["git", "show", f"{registration['base_sha']}:{registration['plan_path']}"],
-            cwd=worktree,
-            capture_output=True,
-        )
-        plan_bytes = plan_at_base.stdout
-        if isinstance(plan_bytes, str):
-            plan_bytes = plan_bytes.encode()
-        actual["plan_hash"] = (
-            hashlib.sha256(plan_bytes).hexdigest()
-            if plan_at_base.returncode == 0
-            else "<missing>"
-        )
+        if registration.get("plan_source_kind", "legacy_path") == "embedded":
+            from .run_registration import RunRegistrationError, _read_verified_artifact
+
+            try:
+                plan_bytes = _read_verified_artifact(
+                    registration_path.parent / "plan.md", registration["plan_hash"]
+                )
+            except RunRegistrationError:
+                actual["plan_hash"] = "<missing>"
+            else:
+                actual["plan_hash"] = hashlib.sha256(plan_bytes).hexdigest()
+        else:
+            plan_at_base = _cli_sp.run(
+                ["git", "show", f"{registration['base_sha']}:{registration['plan_path']}"],
+                cwd=worktree,
+                capture_output=True,
+            )
+            plan_bytes = plan_at_base.stdout
+            if isinstance(plan_bytes, str):
+                plan_bytes = plan_bytes.encode()
+            actual["plan_hash"] = (
+                hashlib.sha256(plan_bytes).hexdigest()
+                if plan_at_base.returncode == 0
+                else "<missing>"
+            )
         snapshot = registration.get("issue_snapshot")
         actual["selected_entry_hash"] = (
             hashlib.sha256(snapshot.encode()).hexdigest()
@@ -1343,6 +1355,17 @@ _CONTENT_REGISTRATION_CODES = frozenset({"plan_invalid", "branch_invalid", "bran
 _PLAN_TRACKED_TIMEOUT = 30.0
 
 
+def _abandon_run_if_registered(state_dir: Path, tick_id: str, reason: str) -> bool:
+    """Durably retire a pre-dispatch registration while preserving its evidence."""
+    run_dir = state_dir / "runs" / tick_id
+    if not (run_dir / "registration.json").is_file():
+        return False
+    from .state import _atomic_write_text
+
+    _atomic_write_text(run_dir / "abandoned", reason + "\n")
+    return True
+
+
 def _plan_tracked_at_head(project_dir: Path, plan_path: str) -> bool:
     """True only when ``plan_path`` is committed at ``HEAD`` of ``project_dir``.
 
@@ -1390,9 +1413,7 @@ def _block_untracked_plans(project_dir: Path, eligibility):
     kept = []
     blocked = dict(eligibility.blocked_reasons)
     for candidate in eligibility.candidates:
-        if candidate.plan_source is not None and candidate.plan_source.kind == "embedded":
-            blocked[candidate.entry.todo_id] = "plan_invalid:artifact_pending"
-        elif candidate.plan_path and not _plan_tracked_at_head(project_dir, candidate.plan_path):
+        if candidate.plan_path and not _plan_tracked_at_head(project_dir, candidate.plan_path):
             blocked[candidate.entry.todo_id] = "plan_invalid:untracked"
         else:
             kept.append(candidate)
@@ -1998,10 +2019,45 @@ def _tick_project(
     if selected is None:
         raise RuntimeError(f"selection returned a non-candidate id: {picked}")
     plan_path = selected.plan_path
+    plan_source = selected.plan_source
     issue = selected.entry
+    plan_reference = None
 
     # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
-    from .kanban_tasks import create_prepared_todo_phases, prepare_todo_phases
+    from .kanban_tasks import (
+        create_prepared_todo_phases,
+        planned_phase_keys,
+        prepare_todo_phases,
+    )
+
+    registration = None
+    if phase_profile.requires_plan and plan_source is not None and plan_source.kind == "embedded":
+        from .result_contract import ResultContractError, load_validated_registration
+        from .run_registration import RunRegistrationError, register_pinned_run
+
+        try:
+            registration = register_pinned_run(
+                project_dir=project_dir, state_dir=project_state, tick_id=tick_id,
+                selected_issue=issue, plan_path=None, repo=repo, profile=contract.profile,
+                prompt_client=config.prompt_client, assignee=contract.assignee,
+                review_assignee=getattr(contract, "review_assignee", None),
+                step_keys=planned_phase_keys(phases_path, plan_source),
+            )
+            validated = load_validated_registration(project_dir, project_state, tick_id, repo=repo)
+            plan_source = validated.plan_source
+            plan_reference = validated.plan_reference
+        except (RunRegistrationError, ResultContractError) as exc:
+            _abandon_run_if_registered(project_state, tick_id, "run_registration_failed")
+            _record_failed_to_spawn(project_state, tick_id, picked, exc, reason="run_registration_failed")
+            cb.observe(picked=None, counts_as_no_progress=True)
+            code = getattr(exc, "code", "registration_invalid")
+            log.error(
+                "project %s: pinned embedded run registration failed: code=%s",
+                project_slug, code,
+            )
+            if code in _CONTENT_REGISTRATION_CODES:
+                _demote_issue(project_dir, issue, repo=repo, project_slug=project_slug, code=code)
+            return
 
     log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
     try:
@@ -2012,12 +2068,18 @@ def _tick_project(
             phases_path=phases_path,
             prompt_client=config.prompt_client,
             plan_path=plan_path,
+            plan_source=plan_source,
+            plan_reference=plan_reference,
             spec_path=issue.spec,
             reference_paths=issue.references,
             project_dir=project_dir,
             decisions=github_issues.issue_decisions(issue),
         )
     except Exception as exc:  # PhasePromptRenderError, path validation, manifest errors
+        if registration is not None:
+            _abandon_run_if_registered(
+                project_state, tick_id, "phase_prompt_preparation_failed"
+            )
         _record_failed_to_spawn(
             project_state,
             tick_id,
@@ -2033,8 +2095,16 @@ def _tick_project(
         )
         return
 
-    registration = None
-    if phase_profile.requires_plan:
+    if registration is not None and tuple(phase.phase_key for phase in prepared) != registration.step_keys:
+        _abandon_run_if_registered(project_state, tick_id, "phase_key_drift")
+        _record_failed_to_spawn(
+            project_state, tick_id, picked, RuntimeError("registered phase keys drifted"),
+            reason="phase_prompt_preparation_failed",
+        )
+        cb.observe(picked=None, counts_as_no_progress=True)
+        return
+
+    if phase_profile.requires_plan and registration is None:
         from .run_registration import RunRegistrationError, register_pinned_run
 
         try:

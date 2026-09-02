@@ -546,7 +546,7 @@ def test_compile_eligible_issues_accepts_embedded_manifest(tmp_path):
     assert result.candidates[0].plan_source.kind == "embedded"
 
 
-def test_tick_filter_defers_embedded_plan_until_runtime_consumers_support_artifact(
+def test_tick_filter_accepts_embedded_plan_for_runtime_consumers(
     tmp_path, monkeypatch
 ):
     from unittest.mock import MagicMock
@@ -570,8 +570,8 @@ def test_tick_filter_defers_embedded_plan_until_runtime_consumers_support_artifa
 
     filtered = _block_untracked_plans(tmp_path, eligibility)
 
-    assert filtered.candidates == ()
-    assert filtered.blocked_reasons == {"TODO-1": "plan_invalid:artifact_pending"}
+    assert filtered.candidates == eligibility.candidates
+    assert filtered.blocked_reasons == {}
 
 
 def test_compile_eligible_issues_without_plan_requirement_skips_plan_only(tmp_path):

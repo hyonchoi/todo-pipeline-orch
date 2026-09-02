@@ -20,7 +20,7 @@ from .github_issues import (
     snapshot_hash,
     split_canonical_snapshot,
 )
-from .plan_manifest import PlanManifest, parse_plan_manifest
+from .plan_manifest import PlanManifest, PlanReference, PlanSource, parse_plan_manifest
 
 MAX_METADATA_BYTES = 64 * 1024
 MAX_SUMMARY_LENGTH = 8 * 1024
@@ -107,7 +107,7 @@ class ValidatedRegistration:
     base_sha: str
     issue_number: int
     issue_url: str
-    plan_path: str
+    plan_path: str | None
     branch: str
     worktree: Path
     step_keys: tuple[str, ...]
@@ -115,6 +115,9 @@ class ValidatedRegistration:
     assignee: str
     review_assignee: str | None
     prompt_client: str
+    plan_source_kind: str = "legacy_path"
+    plan_reference: PlanReference | None = None
+    plan_source: PlanSource | None = None
 
 
 def sanitize_result_text(value: object, *, maximum: int) -> str:
@@ -511,7 +514,6 @@ def load_validated_registration(
             )
         except RunRegistrationError as exc:
             raise ResultContractError("registration_invalid", "plan artifact") from exc
-        plan_path = "plan.md"
     else:
         assert isinstance(plan_path, str)
         relative = PurePosixPath(plan_path)
@@ -583,6 +585,19 @@ def load_validated_registration(
         }
         if not required_steps <= set(steps):
             raise ResultContractError("registration_invalid")
+    plan_reference_value = (
+        str((path.parent / "plan.md").resolve())
+        if plan_source_kind == "embedded"
+        else str(plan_path)
+    )
+    resolved_source = PlanSource(
+        plan_source_kind,
+        plan_bytes.decode("utf-8"),
+        registration["plan_hash"],
+        manifest,
+        plan_path,
+    )
+    plan_reference = PlanReference(plan_reference_value, resolved_source)
     return ValidatedRegistration(
         registration["todo_id"],
         repository,
@@ -597,6 +612,9 @@ def load_validated_registration(
         registration["assignee"],
         registration["review_assignee"],
         registration["prompt_client"],
+        plan_source_kind,
+        plan_reference,
+        resolved_source,
     )
 
 
