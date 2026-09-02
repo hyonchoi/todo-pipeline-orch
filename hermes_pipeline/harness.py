@@ -1,4 +1,4 @@
-"""Mock integration test harness — fixture factory, preflight, runner."""
+"""Live integration test harness — sandbox preflight, tick runner, shutdown."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ import tempfile
 import time
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
@@ -33,30 +33,8 @@ from .profile_prerequisites import (
 log = logging.getLogger(__name__)
 
 
-_MOCK_PROJECT_GITIGNORE = """\
-# Harness runtime artifacts
-.hermes/outcomes/
-.hermes/tpo-config.yaml
-.hermes/fake-gh-state.json*
-
-# Agent scratch space
-.superpowers/
-.code-review-graph/
-
-# Python runtime artifacts
-__pycache__/
-*.py[cod]
-"""
 _HARNESS_ASSIGNEE = "pipeline"
 _HARNESS_PLAN_PATH = "docs/harness/TODO-1-plan.md"
-# Placeholder GitHub identity for the disposable fixture. The remote is never
-# contacted: every ``gh`` call is served offline by the bundled fake_gh stub.
-_HARNESS_REPO = "tpo-harness/mock-project"
-_HARNESS_ORIGIN_URL = f"https://github.com/{_HARNESS_REPO}.git"
-_HARNESS_NO_PUSH_URL = f"no-push://{_HARNESS_REPO}.git"
-_FAKE_GH_STATE_ENV = "TPO_FAKE_GH_STATE"
-_FAKE_GH_BIN_RELPATH = Path("bin") / "gh"
-_FAKE_GH_STATE_RELPATH = Path(".hermes") / "fake-gh-state.json"
 _HARNESS_PLAN = """\
 # TODO-1 Mock Name Normalization Plan
 
@@ -121,6 +99,10 @@ class HarnessTickError(RuntimeError):
     exist for it. Set for ``tick_not_started``, ``failed_to_spawn``,
     ``expected_phases_missing`` (and by callers for ``unexpected_registration``);
     ``None`` for ``tick_not_persisted`` and ``picked_none``, where no card can exist.
+    ``tick_timeout`` (raised by :func:`run_tick`) carries ``None``: the subprocess
+    may have persisted a tick id and spawned workers before the deadline, so the
+    caller must re-read ``current_tick_id.txt`` and, when no new id is readable,
+    treat the sandbox as not provably idle.
     """
 
     def __init__(self, code: str, detail: str = "", *, tick_id: str | None = None) -> None:
@@ -405,18 +387,33 @@ def _tracked_blobs_missing(project_dir: Path, paths: tuple[str, ...] | list[str]
 
 
 def sandbox_seed_check(project_dir: Path, sandbox: SandboxRepo) -> None:
-    """Require every sandbox seed path to be a tracked file (blob) at HEAD of the clone."""
+    """Require the seed paths and a ``.gitignore`` carrying every runtime-state rule at HEAD.
+
+    Every :data:`_SANDBOX_SEED_PATHS` entry must be a tracked file (blob), and
+    ``HEAD:.gitignore`` must exist and contain each :data:`_SANDBOX_GITIGNORE_REQUIRED`
+    line, so harness state written into the clone (``.hermes/``) can never reach a PR.
+    """
+    hint = f"run tpo test --repo {sandbox.repo} --init-sandbox"
     missing = _tracked_blobs_missing(project_dir, _SANDBOX_SEED_PATHS)
     if missing:
+        raise HarnessPreflightError("sandbox_not_seeded", f"missing: {', '.join(missing)}; {hint}")
+    shown = _run_git(["show", "HEAD:.gitignore"], cwd=project_dir, check=False)
+    if shown.returncode != 0:
         raise HarnessPreflightError(
             "sandbox_not_seeded",
-            f"missing: {', '.join(missing)}; run tpo test --repo {sandbox.repo} --init-sandbox",
+            f"missing: .gitignore (must ignore {', '.join(_SANDBOX_GITIGNORE_REQUIRED)}); {hint}",
+        )
+    lines = {line.strip() for line in shown.stdout.splitlines()}
+    lacking = [rule for rule in _SANDBOX_GITIGNORE_REQUIRED if rule not in lines]
+    if lacking:
+        raise HarnessPreflightError(
+            "sandbox_not_seeded", f".gitignore lacks: {', '.join(lacking)}; {hint}"
         )
 
 
 _SANDBOX_GITIGNORE = """\
-# Harness runtime state: pipeline.toml, pipeline_branch.txt, outcomes, fake-gh
-# state. Written into the clone by every run; none of it may reach a PR.
+# Harness runtime state: pipeline.toml, pipeline_branch.txt, outcomes.
+# Written into the clone by every run; none of it may reach a PR.
 .hermes/
 
 # Agent scratch space
@@ -734,89 +731,7 @@ def write_project_contract(project_dir: Path, profile_name: str) -> None:
     _write_project_contract_text(project_dir, _render_project_contract(profile_name))
 
 
-def create_mock_project(
-    path: Path, fixture_name: str, profile_name: str = "gstack"
-) -> dict[str, Any]:
-    """Create a mock project in *path* for integration testing."""
-    # Resolve the profile first so an unknown profile fails before touching the filesystem.
-    pipeline_toml = _render_project_contract(profile_name)
-
-    path.mkdir(parents=True, exist_ok=True)
-
-    _env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
-
-    subprocess.run(["git", "init", "-b", "main"], cwd=path, check=True, capture_output=True, env=_env)
-    subprocess.run(["git", "config", "user.email", "test@localhost"], cwd=path, check=True, capture_output=True, env=_env)
-    subprocess.run(["git", "config", "user.name", "Test User"], cwd=path, check=True, capture_output=True, env=_env)
-
-    gh_state = _fake_gh_state_for_fixture(fixture_name)
-    (path / "README.md").write_text(f"# Mock Project — {fixture_name}\n")
-    (path / ".gitignore").write_text(_MOCK_PROJECT_GITIGNORE)
-    plan_path = path / _HARNESS_PLAN_PATH
-    plan_path.parent.mkdir(parents=True)
-    plan_path.write_text(_HARNESS_PLAN)
-
-    # Create pipeline.toml contract for assignee configuration
-    _write_project_contract_text(path, pipeline_toml)
-
-    # Offline GitHub Issues backend: an executable ``gh`` stand-in plus its
-    # gitignored state file, seeded with the fixture's single eligible issue.
-    gh_bin = path / _FAKE_GH_BIN_RELPATH
-    gh_bin.parent.mkdir()
-    shutil.copyfile(fake_gh_script_path(), gh_bin)
-    gh_bin.chmod(0o755)
-    gh_state_path = path / _FAKE_GH_STATE_RELPATH
-    gh_state_path.write_text(_json.dumps(gh_state, indent=2, sort_keys=True) + "\n")
-    # The fetch URL gives the tick a GitHub identity; the push URL uses an
-    # unknown scheme so any stray `git push` fails fast without touching the
-    # network, and no credential helper can be consulted.
-    for git_args in (
-        ["remote", "add", "origin", _HARNESS_ORIGIN_URL],
-        ["remote", "set-url", "--push", "origin", _HARNESS_NO_PUSH_URL],
-        ["config", "--local", "credential.helper", ""],
-    ):
-        subprocess.run(["git", *git_args], cwd=path, check=True, capture_output=True, env=_env)
-
-    subprocess.run(["git", "add", "."], cwd=path, check=True, capture_output=True)
-    subprocess.run(["git", "commit", "-m", "initial: mock project setup"], cwd=path, check=True, capture_output=True)
-
-    todo_id = _get_todo_id_for_fixture(fixture_name)
-    return {
-        "project_slug": "mock-project",
-        "todo_id": todo_id,
-        "branch": f"feat/mock-{fixture_name}",
-        "fixture_name": fixture_name,
-        "profile": profile_name,
-        "repo": _HARNESS_REPO,
-        "gh_bin": str(gh_bin),
-        "gh_state": str(gh_state_path),
-    }
-
-
-def fake_gh_script_path() -> Path:
-    """Filesystem path of the bundled offline ``gh`` stand-in."""
-    from .contract import _resolve_bundled_dir
-
-    return _resolve_bundled_dir("harness") / "fake_gh.py"
-
-
-def _get_issue_body_for_fixture(fixture_name: str) -> str:
-    """Issue body for the fixture TODO, rendered by the production issue-form renderer."""
-    from .github_issues import render_issue_body
-
-    if fixture_name != "happy-path":
-        raise ValueError(f"Unknown fixture: {fixture_name}")
-    return render_issue_body(_HARNESS_ISSUE_FIELDS | {"Branch": f"feat/mock-{fixture_name}"}, include_empty=False)
-
-
-def _harness_decisions() -> dict[str, str]:
-    """The fixture's decisions, derived from the same fields that build its issue body."""
-    from .github_issues import DECISION_SECTIONS
-
-    return {key: _HARNESS_ISSUE_FIELDS[key] for key in DECISION_SECTIONS if key in _HARNESS_ISSUE_FIELDS}
-
-
-# Offline fixture issue: every review is opted out so the harness never blocks.
+# Harness issue fields: every review is opted out so the run never blocks on a human.
 _HARNESS_ISSUE_FIELDS: dict[str, str] = {
     "What": (
         "Create `mock_transform.py` with "
@@ -1350,9 +1265,12 @@ def _ensure_provenance_dir(root: Path) -> Path:
     *root* is never deleted or reused as a repository: each check gets its own
     ``prov-*`` subdirectory (returned) so nothing left behind (grafts, alternates, a
     shallow file, stale refs) can shape ancestry, and the forgery vectors are asserted
-    absent afterwards. Callers must place *root* outside the clone's parent tree (for
-    example ``workspace/artifacts/provenance``) so the agent cannot reach it through
-    the clone; the caller removes the returned subdirectory when the check ends.
+    absent afterwards. The harness layout puts *root* beside the clone
+    (``workspace/artifacts/provenance`` next to ``workspace/projects/<slug>``), so it
+    is reachable from the clone via ``../..``; isolation therefore rests on the fresh
+    per-check directory, the empty template, and the forbidden-file checks rather
+    than on path unreachability (see :func:`_reject_nested_provenance_dir`). The
+    caller removes the returned subdirectory when the check ends.
     """
     root.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="prov-", dir=root))
@@ -1789,85 +1707,13 @@ def _discover_remote_artifacts(
     )
 
 
-def _fake_gh_state_for_fixture(fixture_name: str) -> dict[str, Any]:
-    """Initial fake ``gh`` state: one open, unblocked, ready ``tpo:todo`` issue (#1)."""
-    from .github_issues import READY_LABEL, TODO_LABEL
-
-    number = _get_todo_id_for_fixture(fixture_name)
-    labels = [TODO_LABEL, READY_LABEL]
-    return {
-        "repo": _HARNESS_REPO,
-        "labels": labels,
-        "issues": {
-            str(number): {
-                "id": 1000 + number,
-                "number": number,
-                "title": "Implement mock name normalization",
-                "body": _get_issue_body_for_fixture(fixture_name),
-                "state": "open",
-                "labels": [{"name": name} for name in labels],
-                "assignees": [],
-                "html_url": f"https://github.com/{_HARNESS_REPO}/issues/{number}",
-                "issue_dependencies_summary": {
-                    "blocked_by": 0,
-                    "blocking": 0,
-                    "total_blocked_by": 0,
-                    "total_blocking": 0,
-                },
-            }
-        },
-        "comments": {},
-        "dependencies": [],
-    }
-
-
-@contextmanager
-def fake_gh_env(project_dir: Path):
-    """Route every ``gh`` call (this process and children) to the fixture's fake gh.
-
-    Sets ``TPO_GH_BIN`` and ``TPO_FAKE_GH_STATE`` and prepends ``<project>/bin``
-    to ``PATH`` so agent shells resolving a bare ``gh`` hit the stub too. This
-    mutates process-global ``os.environ`` (restored on exit) and is therefore
-    not safe to nest or to use from concurrent threads.
-    """
-    from .github_issues import GH_BIN_ENV
-
-    gh_bin = project_dir / _FAKE_GH_BIN_RELPATH
-    values = {
-        GH_BIN_ENV: str(gh_bin),
-        _FAKE_GH_STATE_ENV: str(project_dir / _FAKE_GH_STATE_RELPATH),
-        "PATH": os.pathsep.join(
-            [str(gh_bin.parent), *filter(None, [os.environ.get("PATH", "")])]
-        ),
-    }
-    saved = {key: os.environ.get(key) for key in values}
-    os.environ.update(values)
-    try:
-        yield
-    finally:
-        for key, previous in saved.items():
-            if previous is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = previous
-
-
-def _get_todo_id_for_fixture(fixture_name: str) -> int:
-    return 1
-
-
 def preflight_check(
     *,
     prompt_client: PromptClient = "claude",
     profile_name: str | None = None,
     prerequisites=None,
 ) -> None:
-    """Verify required CLI tools are available.
-
-    The ``gh`` check is skipped when ``TPO_GH_BIN`` names an override binary
-    (the harness points it at the fixture's offline stub).
-    """
-    from .github_issues import GH_BIN_ENV
+    """Verify required CLI tools (git, gh, hermes, the selected prompt client) are available."""
     from .hermes_adapter import AgentClientDependencyError, HermesDependencyError
 
     if shutil.which("git") is None:
@@ -1875,7 +1721,7 @@ def preflight_check(
             "Missing dependency: git — Git is not installed or not on PATH. "
             "Install: https://git-scm.com"
         )
-    if not os.environ.get(GH_BIN_ENV) and shutil.which("gh") is None:
+    if shutil.which("gh") is None:
         raise RuntimeError(
             "Missing dependency: gh — GitHub CLI is not installed or not on PATH. "
             "Install: https://cli.github.com"
@@ -1990,23 +1836,6 @@ _SHUTDOWN_TIMEOUT = 300.0
 # Maximum characters in error messages captured by the harness
 _ERROR_MESSAGE_MAX = 500
 
-_OFFLINE_TERMINAL_PROMPT = """\
-Run the harness local terminal workflow.
-
-This disposable fixture's `origin` remote is a placeholder that must never be
-contacted. Do not invoke the ship skill, and do not push or open a pull request.
-
-1. Run the TODO acceptance tests and any repository tests added by prior phases.
-2. Inspect the complete local diff and commit every intended fixture change.
-3. Write the current branch name to `.hermes/pipeline_branch.txt` if needed and
-   include that state in the final local commit.
-4. Verify `git status --porcelain` is empty.
-
-Complete this task only when the local branch is tested, clean, and fully
-committed. Exit non-zero if any local verification or commit cannot complete.
-"""
-
-
 def _kanban_preflight(*, tenant: str) -> None:
     """Fail fast if the kanban tenant isn't accessible before constructing the real adapter.
 
@@ -2089,108 +1918,6 @@ def _auto_complete_gate_tasks(
             log.warning("gate task %s (%s) remains blocked: auto-complete after %s done failed", info.task_id, phase_key, completed_phase_key)
 
 
-def _poll_kanban_phases(
-    *,
-    project_slug: str,
-    tick_id: str,
-    state_dir: Path,
-    todo_id: str,
-    project_dir: Path,
-    phases_path: Path | None,
-    monitor: _ConvergenceMonitor,
-    detector: ConvergenceDetector,
-    poll_interval: float = 5.0,
-    max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
-    phases: list[Phase] | None = None,
-    prompt_client: PromptClient = "claude",
-    cancel_event: Any = None,
-    registration_event: Any = None,
-    offline_terminal_phase_key: str | None = None,
-) -> bool:
-    """Legacy offline path: register kanban phases, then poll them to completion.
-
-    Registers all phases as kanban tasks. With a written harness profile the
-    cards are pre-rendered (a tpo-plan manifest fans the development phase out
-    into ``plan:``/``validate:`` cards) and created directly. Polling is then
-    delegated to :func:`poll_registered_phases`, keyed on that registered card
-    set rather than the profile.
-
-    Returns True if all phases completed successfully (all done), False otherwise.
-    """
-    from .contract import load_contract as _load_contract
-    from .kanban_tasks import register_todo_phases
-    from .phases import Phase as _Phase
-
-    # Resolve assignee from project contract (same path as tpo tick)
-    assignee = "default"
-    try:
-        assignee = _load_contract(state_dir).assignee
-    except Exception as e:
-        log.warning("failed to load pipeline contract, using assignee='default': %s", e)
-    log.info("registering kanban phases for %s tick %s (assignee=%s)", todo_id, tick_id, assignee)
-    # Registration can mutate Hermes before it raises. Signal that cleanup may
-    # be required before entering the call so a partial create cannot cause the
-    # only durable recovery marker to be deleted with the harness workspace.
-    if registration_event is not None:
-        registration_event.set()
-    # Registration renders the cards (a tpo-plan manifest fans the development
-    # phase out into plan:/validate: cards). Capture that set so every loop
-    # decision keys on the registered cards, and give the last worker card the
-    # offline workflow when the manifest skipped the profile's terminal phase.
-    registered_cards: list[_Phase] = []
-
-    def _on_prepared(prepared):
-        if offline_terminal_phase_key is not None and not any(
-            task.phase_key == offline_terminal_phase_key for task in prepared
-        ):
-            prepared = _with_offline_terminal_card(prepared)
-        registered_cards[:] = [
-            _Phase(phase_key=task.phase_key, name=task.name, gate=task.gate, kind=task.kind)
-            for task in prepared
-        ]
-        return prepared
-
-    register_todo_phases(
-        todo_id=todo_id,
-        tick_id=tick_id,
-        board_slug=project_slug,
-        project_dir=project_dir,
-        phases_path=phases_path,
-        assignee=assignee,
-        prompt_client=prompt_client,
-        plan_path=_HARNESS_PLAN_PATH,
-        spec_path=None,
-        reference_paths=(),
-        decisions=_harness_decisions(),
-        cancel_event=cancel_event,
-        transform_prepared=_on_prepared,
-    )
-    # Callers that stub registration never render cards: fall back to the profile.
-    cards: list[_Phase] | None = registered_cards or phases
-    if not cards:
-        # Bare legacy callers with neither rendered cards nor a profile keep the
-        # card-less polling rule until Task 12 removes this path.
-        return _poll_cards(
-            project_slug=project_slug, tick_id=tick_id, state_dir=state_dir,
-            todo_id=todo_id, cards=cards, monitor=monitor, detector=detector,
-            poll_interval=poll_interval, max_poll_interval=max_poll_interval,
-            cancel_event=cancel_event,
-        )
-    return poll_registered_phases(
-        project_slug=project_slug,
-        tick_id=tick_id,
-        state_dir=state_dir,
-        todo_id=todo_id,
-        project_dir=project_dir,
-        cards=cards,
-        monitor=monitor,
-        detector=detector,
-        poll_interval=poll_interval,
-        max_poll_interval=max_poll_interval,
-        cancel_event=cancel_event,
-    )
-
-
 def poll_registered_phases(
     *,
     project_slug: str,
@@ -2207,9 +1934,9 @@ def poll_registered_phases(
 ) -> bool:
     """Poll already-registered kanban cards to completion.
 
-    Registration is the caller's job (the production ``tpo tick`` path); this
-    function never creates cards. ``cards`` is the registered card set and keys
-    every loop decision: completion, gate terminality, and gate auto-completion.
+    Registration is the production ``tpo tick`` path's job; this function never
+    creates cards. ``cards`` is the registered card set and keys every loop
+    decision: completion, gate terminality, and gate auto-completion.
 
     1. Polls get_todo_kanban_status() until every card is terminal.
     2. Auto-completes gate tasks whose predecessor just finished.
@@ -2222,34 +1949,6 @@ def poll_registered_phases(
     del project_dir  # reserved for parity with the registration signature
     if not cards:
         raise ValueError("poll_registered_phases requires a non-empty registered cards list")
-    return _poll_cards(
-        project_slug=project_slug,
-        tick_id=tick_id,
-        state_dir=state_dir,
-        todo_id=todo_id,
-        cards=cards,
-        monitor=monitor,
-        detector=detector,
-        poll_interval=poll_interval,
-        max_poll_interval=max_poll_interval,
-        cancel_event=cancel_event,
-    )
-
-
-def _poll_cards(
-    *,
-    project_slug: str,
-    tick_id: str,
-    state_dir: Path,
-    todo_id: str,
-    cards: list[Phase] | None,
-    monitor: _ConvergenceMonitor,
-    detector: ConvergenceDetector,
-    poll_interval: float,
-    max_poll_interval: float,
-    cancel_event: Any,
-) -> bool:
-    """Shared polling loop; ``cards=None`` is the legacy card-less rule."""
     from .kanban_tasks import (
         TERMINAL_STATUSES,
         get_todo_kanban_status,
@@ -2271,7 +1970,7 @@ def _poll_cards(
     previous_status: dict[str, str] = {}
     all_terminal = False
     current_interval = poll_interval
-    card_by_key = {card.phase_key: card for card in cards or []}
+    card_by_key = {card.phase_key: card for card in cards}
     # Completion means every *registered* card is terminal — keying this on the
     # profile phases would spin forever under a manifest fan-out.
     expected_phase_keys = frozenset(card_by_key)
@@ -2283,8 +1982,6 @@ def _poll_cards(
             return True
         if status != "blocked":
             return False
-        if not card_by_key:
-            return True  # no card knowledge at all (bare unit callers): legacy rule
         card = card_by_key.get(phase_key)
         # A blocked registered gate waits for auto-completion; a blocked worker
         # is stuck for good. An unregistered key is never terminal by omission.
@@ -2460,42 +2157,6 @@ class _ConvergenceMonitor:
         self._inner(event_type, data)
 
 
-def filter_phases(phases: list[Phase], phase_key: str) -> list[Phase]:
-    """Return a single-element list with only the requested phase."""
-    for p in phases:
-        if p.phase_key == phase_key:
-            return [p]
-    available = ", ".join(p.phase_key for p in phases)
-    raise ValueError(
-        f"Unknown phase key {phase_key!r}. Available: {available}"
-    )
-
-
-def _offline_terminal_phase_key(
-    phases: list[Phase], profile_name: str = "<selected>"
-) -> str:
-    """Return the executable phase that must be made safe for an offline run."""
-    terminal_indexes = [index for index, phase in enumerate(phases) if phase.terminal]
-    if len(terminal_indexes) != 1:
-        raise HarnessProfileError(
-            "invalid_terminal_topology",
-            profile_name,
-            "expected exactly one terminal phase",
-        )
-    terminal_index = terminal_indexes[0]
-    terminal = phases[terminal_index]
-    if not terminal.gate:
-        return terminal.phase_key
-    for phase in reversed(phases[:terminal_index]):
-        if not phase.gate:
-            return phase.phase_key
-    raise HarnessProfileError(
-        "invalid_terminal_topology",
-        profile_name,
-        "terminal gate has no executable predecessor",
-    )
-
-
 _LIVE_SAFE_PROFILES = frozenset({"gstack", "agent-skills"})
 
 
@@ -2514,43 +2175,6 @@ def validate_live_profile(phases: list[Phase], profile_name: str) -> None:
             profile_name,
             "profile is not on the live-safe allow-list",
         )
-
-
-def _with_offline_terminal_card(prepared: list) -> list:
-    """Append the offline workflow to the last worker card's external-agent prompt."""
-    for index in range(len(prepared) - 1, -1, -1):
-        task = prepared[index]
-        if task.gate:
-            continue
-        marker = "END EXTERNAL AGENT PROMPT\n"
-        body = (
-            task.body.replace(marker, f"\n{_OFFLINE_TERMINAL_PROMPT.rstrip()}\n{marker}", 1)
-            if marker in task.body
-            else f"{task.body.rstrip()}\n\n{_OFFLINE_TERMINAL_PROMPT}"
-        )
-        return [*prepared[:index], replace(task, body=body), *prepared[index + 1:]]
-    return prepared
-
-
-def _with_offline_terminal_workflow(
-    phases: list[Phase], terminal_phase_key: str
-) -> list[Phase]:
-    """Replace the network-only final phase for the no-remote harness fixture."""
-    return [
-        replace(phase, prompt=_OFFLINE_TERMINAL_PROMPT)
-        if phase.phase_key == terminal_phase_key
-        else phase
-        for phase in phases
-    ]
-
-
-def _build_harness_profile_data(
-    profile_data: dict[str, Any], phases: list[Phase]
-) -> dict[str, Any]:
-    """Preserve profile metadata while replacing phases for the harness run."""
-    harness_profile_data = dict(profile_data)
-    harness_profile_data["phases"] = [asdict(phase) for phase in phases]
-    return harness_profile_data
 
 
 def _validate_profile_prerequisites(
@@ -2757,13 +2381,13 @@ def _find_new_spawn_failure(
     candidates.sort(key=_mtime, reverse=True)
     for path in candidates:
         payload = _read_json_file(path)
-        if (
-            isinstance(payload, dict)
-            and payload.get("outcome") == "failed_to_spawn"
-            and payload.get("tick_id") != previous_tick_id
-        ):
-            record_tick = payload.get("tick_id")
-            return (record_tick if isinstance(record_tick, str) else None, _compact_detail(payload))
+        if not isinstance(payload, dict) or payload.get("outcome") != "failed_to_spawn":
+            continue
+        record_tick = payload.get("tick_id")
+        # ``<tick_id>.json`` names the tick even when the payload omits it.
+        tick_id = record_tick if isinstance(record_tick, str) else path.stem
+        if tick_id != previous_tick_id:
+            return (tick_id, _compact_detail(payload))
     return None
 
 
@@ -2869,17 +2493,21 @@ class HarnessResult:
     cleanup_leftovers: tuple[str, ...] = ()
 
 
-def _prune_retained_state(state_dir: Path) -> None:
-    """Remove only disposable harness state from a retained fixture."""
-    for filename in ("pipeline_branch.txt", "tpo-config.yaml"):
-        path = state_dir / filename
-        try:
-            path.unlink(missing_ok=True)
-        except OSError as exc:
-            log.warning("could not prune retained harness state %s: %s", path, exc)
+def _prune_retained_state(project_state: Path, state_dir: Path) -> None:
+    """Remove only disposable harness state from a retained workspace.
+
+    ``pipeline_branch.txt`` under *project_state* is kept on purpose: it is the
+    pointer to the remote branch a ``--keep`` run leaves behind. The isolated
+    ``tpo-config.yaml`` lives in *state_dir* (``workspace/state``), not in the clone.
+    """
+    config_path = state_dir / "tpo-config.yaml"
+    try:
+        config_path.unlink(missing_ok=True)
+    except OSError as exc:
+        log.warning("could not prune retained harness state %s: %s", config_path, exc)
 
     for dirname in ("outcomes", "pipeline_checkpoints", "ready_for_review"):
-        path = state_dir / dirname
+        path = project_state / dirname
         try:
             if not path.exists():
                 continue
@@ -2901,7 +2529,9 @@ def _run_with_timeout(
 
     Returns (success, timed_out, result_box). result_box carries
     "convergence_error" or "exception" keys when fn raised those instead
-    of returning normally.
+    of returning normally. A ``KeyboardInterrupt`` raised on the worker propagates
+    unchanged; any other ``BaseException`` (``SystemExit``, ...) is translated into
+    ``PollCancellationError`` so the caller's shutdown obligation still holds.
     """
     import threading
 
@@ -2912,8 +2542,12 @@ def _run_with_timeout(
             result_box["success"] = fn()
         except ConvergenceHaltError as e:
             result_box["convergence_error"] = e
-        except Exception as e:
+        except (Exception, KeyboardInterrupt) as e:
             result_box["exception"] = e
+        except BaseException as e:
+            cancelled = PollCancellationError(f"poll worker exited: {type(e).__name__}: {e}")
+            cancelled.__cause__ = e
+            result_box["exception"] = cancelled
 
     worker = threading.Thread(target=_run_and_capture, daemon=True)
     worker.start()
@@ -3084,6 +2718,7 @@ def shutdown_run(
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
     keep_remote: bool = False,
+    assume_workers_may_exist: bool = False,
     log: logging.Logger = log,
 ) -> ShutdownReport:
     """Fail-closed shutdown for a live run once its sandbox issue exists.
@@ -3098,7 +2733,12 @@ def shutdown_run(
     ``tick_not_persisted`` and ``picked_none``, where no card can exist.
     ``expected_phase_keys=None`` forfeits the completeness check (quiescence then
     needs only a non-empty, fully terminal set of cards) and is meant solely for
-    those partial-registration callers. Order:
+    those partial-registration callers. After ``tick_timeout`` (or any failure
+    escaping :func:`run_tick`) the caller re-reads ``current_tick_id.txt``: a new id
+    is passed like ``exc.tick_id`` above; when none is readable pass ``tick_id=None``
+    with ``assume_workers_may_exist=True``, which closes the issue only (nothing
+    remote is deleted) and reports ``kanban_quiescent=False`` with a leftover
+    pointer, since a worker may have spawned under an unknown tick. Order:
     cancel the tick's kanban tasks, wait for proven quiescence on the
     archived-inclusive snapshot, then (only when proven) discover and delete remote
     artifacts. Destructive branch/PR cleanup never runs while an agent may still be
@@ -3130,6 +2770,23 @@ def shutdown_run(
     inspect_hint = f"hermes kanban list --tenant {sandbox.slug} --archived"
     remote_hint = f"gh pr list --repo {sandbox.repo}; git ls-remote --heads -- {_scrub_url(sandbox.url)}"
     kept_leftover = f"kept remote artifacts for issue #{issue.number} in {sandbox.repo} (run {issue.run_token})"
+
+    if tick_id is None and assume_workers_may_exist:
+        unknown = (
+            f"tick id unknown after a tick failure ({pointer}); workers may exist; branch/PR cleanup"
+            f" skipped; inspect: {inspect_hint}; {remote_hint}"
+        )
+        log.warning("harness shutdown: %s", unknown)
+        if keep_remote:
+            return ShutdownReport(
+                tick_id=None, kanban_quiescent=False, remote_all_ok=False,
+                leftovers=(kept_leftover, unknown), branch_deletion_skipped=True,
+            )
+        leftovers = _close_issue_leftover(project_dir, sandbox, issue.number, log=log)
+        return ShutdownReport(
+            tick_id=None, kanban_quiescent=False, remote_all_ok=False,
+            leftovers=(*leftovers, unknown), branch_deletion_skipped=True,
+        )
 
     if tick_id is None and keep_remote:
         log.info("harness shutdown: keep_remote and no tick registered; nothing touched (%s)", pointer)
@@ -3232,21 +2889,49 @@ def shutdown_run(
     )
 
 
+_HARNESS_FIXTURE = "happy-path"
+
+
+def _harness_tmp_root() -> Path:
+    """Directory harness workspaces are allocated under (seam for hermetic tests).
+
+    ``~/.hermes/tmp`` rather than the OS default temp root: on macOS,
+    ``tempfile.mkdtemp()`` resolves under ``/var/folders/...``, a symlink to
+    ``/private/var/folders/...`` — a prefix the Hermes agent's write-tool
+    sensitive-path guard blocks, causing every worker in ``--kanban hermes`` mode
+    to crash-loop on writes inside the project clone.
+    """
+    return Path("~/.hermes/tmp").expanduser()
+
+
 def run_harness(
     *,
     fixture_name: str,
+    repo: str | None,
     loop: bool,
-    phase_only: str | None,
     keep_dir: bool,
     timeout: int,
     convergence_threshold: int,
     config: Any = None,
     profile_name: str = "gstack",
 ) -> HarnessResult:
-    """Main orchestration: bootstrap fixture, run pipeline, generate report."""
+    """Main orchestration: drive one production tick against a live GitHub sandbox.
+
+    Preflight (profile, tools, gh, kanban), clone and verify the sandbox, create
+    the run's issue and plan commit, run ``tpo tick`` and poll its registered
+    cards, verify the pull request, then shut down (kanban quiescence, remote
+    cleanup) and report. Once the issue exists :func:`shutdown_run` always runs,
+    even when a later step raised (the original exception is re-raised
+    afterwards) — except on an interrupt (``KeyboardInterrupt``/``SystemExit``),
+    when no remote operation is started: the workspace is retained and the
+    recovery pointers are logged. A ``HarnessTickError`` is not raised out of
+    this function: it becomes exit code 1 with its code in the summary.
+    """
+    import threading
+
     from .contract import PROFILE_NAME_RE
+    from .github_issues import GH_BIN_ENV
     from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
-    from .logging_setup import new_tick_id
     from .phases import (
         load_phases,
         load_profile_prerequisites,
@@ -3264,9 +2949,6 @@ def run_harness(
     if not isinstance(profile_name, str) or not PROFILE_NAME_RE.fullmatch(profile_name):
         raise HarnessProfileError("invalid_profile_name", "<invalid>")
     profile_path = resolve_profile_phases_path(profile_name)
-    profile_data = yaml.safe_load(profile_path.read_text())
-    if not isinstance(profile_data, dict):
-        raise HarnessProfileError("invalid_profile_data", profile_name)
     all_phases = load_phases(profile_path)
     prerequisites = load_profile_prerequisites(profile_name)
     unverified = unverified_prerequisite_ids(prerequisites, prompt_client)
@@ -3276,209 +2958,321 @@ def run_harness(
             profile_name,
             ", ".join(unverified),
         )
-    offline_terminal_phase_key = _offline_terminal_phase_key(all_phases, profile_name)
-    phases = all_phases
-    if phase_only:
-        phases = filter_phases(all_phases, phase_only)
-        if phases[0].gate:
-            raise HarnessProfileError(
-                "gate_phase_not_executable", profile_name, phases[0].phase_key
-            )
-    phases = _with_offline_terminal_workflow(phases, offline_terminal_phase_key)
+    validate_live_profile(all_phases, profile_name)
+    if fixture_name != _HARNESS_FIXTURE:
+        raise HarnessPreflightError("unknown_fixture", fixture_name)
+    if os.environ.get(GH_BIN_ENV):
+        # The live harness talks to the real sandbox: an overridden gh could hide
+        # or fake every remote step (issue, PR discovery, cleanup).
+        raise HarnessPreflightError(
+            "gh_override_forbidden", f"unset {GH_BIN_ENV} to run the live harness with the real gh"
+        )
 
-    # Allocate under ~/.hermes/tmp rather than the OS default temp root: on
-    # macOS, tempfile.mkdtemp() resolves under /var/folders/..., which is a
-    # symlink to /private/var/folders/... — a prefix the Hermes agent's
-    # write-tool sensitive-path guard blocks, causing every worker in
-    # --kanban hermes mode to crash-loop on writes inside the mock project.
-    harness_tmp_root = Path("~/.hermes/tmp").expanduser()
+    sandbox = resolve_sandbox_repo(repo)
+    run_token = _run_token()
+
+    harness_tmp_root = _harness_tmp_root()
     harness_tmp_root.mkdir(parents=True, exist_ok=True)
     workspace_dir = Path(tempfile.mkdtemp(prefix="harness-", dir=harness_tmp_root))
-    project_dir = workspace_dir / "project"
+    projects_dir = workspace_dir / "projects"
+    project_dir = projects_dir / sandbox.slug
+    project_state = project_dir / ".hermes"
+    state_dir = workspace_dir / "state"
     artifacts_dir = workspace_dir / "artifacts"
     artifacts_dir.mkdir(parents=True)
+    provenance_dir = artifacts_dir / "provenance"
+    staging_root = artifacts_dir / "staging"
+    tick_log = artifacts_dir / "tick.log"
+    events_log = artifacts_dir / "events.jsonl"
+    base_monitor = HarnessMonitor(events_log)
+    detector = ConvergenceDetector(threshold=convergence_threshold)
+    monitor = _ConvergenceMonitor(base_monitor, detector, {})
+
     workspace_quiescent = True
-    # Route gh for this process and every child (hermes/claude workers, tpo
-    # subcommands run inside the fixture) to the fixture's offline stub.
+    cleanup_incomplete = False
     try:
-        with fake_gh_env(project_dir):
-            preflight_check(
-                prompt_client=prompt_client,
-                profile_name=profile_name,
-                prerequisites=prerequisites,
-            )
-            fixture = create_mock_project(project_dir, fixture_name, profile_name)
+        preflight_check(
+            prompt_client=prompt_client,
+            profile_name=profile_name,
+            prerequisites=prerequisites,
+        )
+        gh_pre = github_preflight(workspace_dir, sandbox)
+        _kanban_preflight(tenant=sandbox.slug)
 
-            state_dir = project_dir / ".hermes"
+        clone_sandbox(sandbox, project_dir, branch=gh_pre.default_branch or None)
+        sandbox_seed_check(project_dir, sandbox)
+        baseline = take_baseline(
+            project_dir, sandbox, viewer=gh_pre.viewer, default_branch=gh_pre.default_branch
+        )
+        write_project_contract(project_dir, profile_name)
+        try:
+            issue = create_harness_issue(project_dir, sandbox, run_token=run_token, baseline=baseline)
+        except HarnessRemoteCleanupError:
+            # The issue may exist remotely but could not be reconciled: keep the
+            # workspace as the only record of the run token for manual cleanup.
+            cleanup_incomplete = True
+            raise
+        # From here on the sandbox carries this run's issue: shutdown_run is owed.
 
-            events_log = artifacts_dir / "events.jsonl"
-            base_monitor = HarnessMonitor(events_log)
-            detector = ConvergenceDetector(threshold=convergence_threshold)
-            error_holder: dict[str, Any] = {}
-            monitor = _ConvergenceMonitor(base_monitor, detector, error_holder)
-
-            tick_id = new_tick_id()
-
-            _kanban_preflight(tenant=fixture["project_slug"])
-
-            # Always register an explicit harness profile. The full profile keeps
-            # every production phase key while substituting the offline terminal
-            # workflow for the no-remote fixture.
-            _phases_path_override = artifacts_dir / "harness-phases.yaml"
-            _phases_path_override.write_text(
-                yaml.safe_dump(_build_harness_profile_data(profile_data, phases))
-            )
-
-            checkpoint_dir = state_dir / "pipeline_checkpoints"
-            ready_dir = state_dir / "ready_for_review"
-            checkpoint_dir.mkdir(parents=True, exist_ok=True)
-            ready_dir.mkdir(parents=True, exist_ok=True)
-
-            timed_out = False
-            timed_out_phase: str | None = None
-            with isolate_config(state_dir=state_dir, projects_dir=workspace_dir / "projects"):
+        pointer = (
+            f"issue #{issue.number} in {sandbox.repo} (run {run_token}); workspace retained at {workspace_dir};"
+            f" inspect: hermes kanban list --tenant {sandbox.slug} --archived; gh pr list --repo {sandbox.repo};"
+            f" git ls-remote --heads -- {_scrub_url(sandbox.url)}; then: gh issue close {issue.number}"
+            f" --repo {sandbox.repo}"
+        )
+        plan_sha: str | None = None
+        registration: TickRegistration | None = None
+        tick_error: HarnessTickError | None = None
+        workers_unaccounted = False
+        failure_code: str | None = None
+        success = False
+        timed_out = False
+        poll_cancelled = False
+        pr: PullRequest | None = None
+        pending: Exception | None = None
+        try:
+            plan_sha = commit_plan(project_dir, issue)
+            with isolate_config(
+                state_dir=state_dir, projects_dir=projects_dir, prompt_client=prompt_client
+            ):
                 # Emit initial event so the events log file exists for report generation
                 base_monitor(
                     "run_started",
                     {
-                        "tick_id": tick_id,
+                        "tick_id": None,
                         "kanban_mode": "hermes",
                         "profile": profile_name,
                         "fixture_name": fixture_name,
                         "prompt_client": prompt_client,
+                        "repo": sandbox.repo,
+                        "issue_number": issue.number,
+                        "run_token": run_token,
                     },
                 )
-
-                import threading
-
-                cancel_event = threading.Event()
-                registration_event = threading.Event()
-
-                def _poll() -> bool:
-                    todo_id_str = f"TODO-{fixture['todo_id']}"
-                    return _poll_kanban_phases(
-                        project_slug=fixture["project_slug"],
-                        tick_id=tick_id,
-                        state_dir=state_dir,
-                        todo_id=todo_id_str,
-                        project_dir=project_dir,
-                        phases_path=_phases_path_override,
-                        monitor=monitor,
-                        detector=detector,
-                        phases=phases,
-                        prompt_client=prompt_client,
-                        cancel_event=cancel_event,
-                        registration_event=registration_event,
-                        offline_terminal_phase_key=offline_terminal_phase_key,
+                ready = other_ready_issues(project_dir, sandbox, exclude_issue=issue.number)
+                if ready:
+                    raise HarnessPreflightError(
+                        "sandbox_not_quiescent", ", ".join(f"#{number}" for number in ready)
                     )
 
                 try:
-                    success, timed_out, result_box = _run_with_timeout(
-                        _poll,
-                        timeout=timeout,
-                        cancel_event=cancel_event,
-                    )
-                except PollCancellationError as exc:
-                    workspace_quiescent = False
-                    raise HarnessCleanupError(
-                        f"{exc}; remote cleanup was not started while the registration "
-                        f"worker remained active; workspace retained at {workspace_dir}"
-                    ) from exc
-                except Exception as exc:
-                    if not registration_event.is_set():
-                        raise
-                    cleanup_confirmed = _cancel_registered_tasks(
-                        project_slug=fixture["project_slug"],
-                        tick_id=tick_id,
-                        project_dir=project_dir,
-                    )
-                    if cleanup_confirmed:
-                        raise
-                    workspace_quiescent = False
-                    raise HarnessCleanupError(
-                        "Poll failed after Hermes task registration and task or "
-                        "worker termination could not be confirmed; workspace "
-                        f"retained at {workspace_dir}"
-                    ) from exc
-
-                if timed_out:
+                    previous_tick_id = read_current_tick_id(project_state)
                     try:
-                        in_flight = get_todo_kanban_status(fixture["project_slug"], tick_id)
-                        timed_out_phase = next(
-                            (k for k, v in in_flight.items()
-                             if v not in TERMINAL_STATUSES),
-                            None,
-                        )
-                    except Exception:
-                        pass
-                    cleanup_confirmed = _cancel_registered_tasks(
-                        project_slug=fixture["project_slug"],
-                        tick_id=tick_id,
-                        project_dir=project_dir,
+                        run_tick(sandbox.slug, cwd=workspace_dir, log_path=tick_log, timeout=timeout)
+                    except Exception as exc:
+                        # The subprocess may have persisted a tick and spawned workers
+                        # before failing: re-read the id so shutdown can quiesce it.
+                        if not isinstance(exc, HarnessTickError):
+                            exc = HarnessTickError("tick_failed", f"{type(exc).__name__}: {exc}"[:_ERROR_MESSAGE_MAX])
+                        current_tick_id = read_current_tick_id(project_state)
+                        if current_tick_id is not None and current_tick_id != previous_tick_id:
+                            exc.tick_id = current_tick_id
+                        else:
+                            workers_unaccounted = True
+                        raise exc
+                    registration = recover_tick_registration(
+                        project_state,
+                        expected_issue=issue.number,
+                        tick_log=tick_log,
+                        previous_tick_id=previous_tick_id,
                     )
-                    if not cleanup_confirmed:
-                        workspace_quiescent = False
-                        raise HarnessCleanupError(
-                            "Hermes task or worker termination could not be "
-                            f"confirmed; workspace retained at {workspace_dir}"
+                    cards = cards_for_registered_keys(all_phases, registration.phase_keys)
+                except HarnessTickError as exc:
+                    tick_error = exc
+                    failure_code = exc.code
+                    log.error("harness: tick did not register a runnable run: %s %s", exc.code, exc.detail)
+
+                if tick_error is None:
+                    assert registration is not None
+                    base_monitor(
+                        "tick_registered",
+                        {"tick_id": registration.tick_id, "phase_keys": list(registration.phase_keys)},
+                    )
+                    cancel_event = threading.Event()
+
+                    def _poll() -> bool:
+                        return poll_registered_phases(
+                            project_slug=sandbox.slug,
+                            tick_id=registration.tick_id,
+                            state_dir=project_state,
+                            todo_id=registration.todo_id,
+                            project_dir=project_dir,
+                            cards=cards,
+                            monitor=monitor,
+                            detector=detector,
+                            cancel_event=cancel_event,
                         )
-                    timed_out_phase = timed_out_phase or monitor.current_phase_key
-                    if timed_out_phase:
-                        base_monitor(
-                            "phase_timed_out",
-                            {"phase_key": timed_out_phase},
-                        )
-                elif "convergence_error" in result_box:
-                    # Convergence-halt fired during polling. The poll loop already
-                    # exited with all_terminal=True, so phases are already in terminal
-                    # state on the kanban board — no additional cleanup needed beyond
-                    # surfacing the convergence error in the result.
-                    log.warning("convergence-halt: %s", result_box["convergence_error"])
 
-            output_dir = artifacts_dir / "reports"
-            generate_report(events_log, output_dir)
-            report_json = output_dir / "report.json"
-            summary = summarize_report(report_json)
-            if timed_out:
-                summary = f"[overall timeout after {timeout}s] " + summary
+                    success, timed_out, result_box = _run_with_timeout(
+                        _poll, timeout=timeout, cancel_event=cancel_event
+                    )
+                    if timed_out:
+                        timed_out_phase: str | None = None
+                        try:
+                            in_flight = get_todo_kanban_status(sandbox.slug, registration.tick_id)
+                            timed_out_phase = next(
+                                (k for k, v in in_flight.items() if v not in TERMINAL_STATUSES),
+                                None,
+                            )
+                        except Exception:
+                            pass
+                        timed_out_phase = timed_out_phase or monitor.current_phase_key
+                        if timed_out_phase:
+                            base_monitor("phase_timed_out", {"phase_key": timed_out_phase})
+                    elif "convergence_error" in result_box:
+                        # Convergence-halt fired during polling; the cards are already
+                        # terminal on the board. Name it in the summary.
+                        log.warning("convergence-halt: %s", result_box["convergence_error"])
+                        failure_code = "convergence_halt"
 
-            if loop:
-                prev_reports = sorted(output_dir.parent.glob(f"{fixture_name}-report.*.json"))
-                if prev_reports:
-                    diffs = diff_reports(prev_reports[-1], report_json)
-                    diff_summary = summarize_diff(diffs)
-                    summary += f" | diff: {diff_summary}"
+                    if success and not timed_out:
+                        try:
+                            artifacts = discover_remote_artifacts(
+                                project_dir, sandbox, issue=issue, baseline=baseline,
+                                plan_sha=plan_sha, provenance_dir=provenance_dir,
+                            )
+                            pr = verify_pull_request(artifacts)
+                        except PullRequestInvariantError as exc:
+                            base_monitor(*pr_invariant_event(exc))
+                            failure_code = exc.code
+                        except HarnessRemoteCleanupError as exc:
+                            log.error("harness: PR discovery failed: %s %s", exc.code, exc.detail)
+                            failure_code = exc.code
+        except PollCancellationError as exc:
+            poll_cancelled = True
+            pending = exc
+        except Exception as exc:
+            pending = exc
+        except BaseException:
+            # Interrupt (KeyboardInterrupt/SystemExit): no remote operation is safe to
+            # start now; retain the workspace and hand the operator the pointers.
+            workspace_quiescent = False
+            log.error("harness interrupted after %s", pointer)
+            raise
 
-                if prev_reports:
-                    next_n = int(prev_reports[-1].stem.split(".")[-1]) + 1
-                else:
-                    next_n = 1
-                next_report = output_dir.parent / f"{fixture_name}-report.{next_n}.json"
-                next_report.write_text(report_json.read_text())
-
-            status_map = get_todo_kanban_status(fixture["project_slug"], tick_id)
-            print(
-                f"[kanban] tenant={fixture['project_slug']} tick_id={tick_id} "
-                f"profile={profile_name} "
-                f"phases={status_map} "
-                f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
+        # Shutdown always runs once the issue exists, whatever happened above. The
+        # workspace is presumed live until the report proves kanban quiescence.
+        workspace_quiescent = False
+        shutdown_tick_id = registration.tick_id if registration is not None else None
+        shutdown_keys: tuple[str, ...] | None = (
+            registration.phase_keys if registration is not None else None
+        )
+        if tick_error is not None:
+            shutdown_tick_id = tick_error.tick_id or shutdown_tick_id
+            shutdown_keys = None
+        try:
+            report = shutdown_run(
+                project_dir,
+                sandbox,
+                issue=issue,
+                baseline=baseline,
+                plan_sha=plan_sha or "",
+                tick_id=shutdown_tick_id,
+                expected_phase_keys=shutdown_keys,
+                provenance_dir=provenance_dir,
+                staging_root=staging_root,
+                keep_remote=keep_dir,
+                assume_workers_may_exist=workers_unaccounted and shutdown_tick_id is None,
             )
-
-            if keep_dir and not timed_out:
-                _prune_retained_state(state_dir)
-
-            exit_code = 0 if (success and not timed_out) else 1
-
-            return HarnessResult(
-                exit_code=exit_code,
-                report_path=report_json,
-                temp_dir=workspace_dir if keep_dir else None,
-                summary=summary,
+        except Exception as exc:
+            log.error("harness shutdown failed (%s: %s) after %s", type(exc).__name__, exc, pointer)
+            if pending is not None:
+                raise exc from pending
+            raise
+        except BaseException as exc:
+            log.error("harness interrupted during shutdown after %s", pointer)
+            if pending is not None:
+                raise exc from pending
+            raise
+        leftovers = report.leftovers
+        leftover_text = "; ".join(leftovers) or "none"
+        pr_numbers = (pr.number,) if pr is not None else ()
+        if events_log.exists():
+            base_monitor(
+                "run_finished",
+                {
+                    "issue_number": issue.number,
+                    "pr_numbers": list(pr_numbers),
+                    "kanban_quiescent": report.kanban_quiescent,
+                    "remote_all_ok": report.remote_all_ok,
+                    "leftovers": list(leftovers),
+                },
             )
+        workspace_quiescent = report.kanban_quiescent and not poll_cancelled
+        if not report.remote_all_ok:
+            cleanup_incomplete = True
 
-    except Exception:
-        raise
+        if pending is not None:
+            if isinstance(pending, PollCancellationError):
+                raise HarnessCleanupError(
+                    f"{pending}; workspace retained at {workspace_dir}; shutdown leftovers: {leftover_text}"
+                ) from pending
+            pending.add_note(f"harness shutdown leftovers: {leftover_text}; workspace at {workspace_dir}")
+            raise pending
+        if not report.kanban_quiescent:
+            tick_label = f"tick {shutdown_tick_id}" if shutdown_tick_id is not None else "an unknown tick"
+            raise HarnessCleanupError(
+                f"Hermes task or worker termination could not be confirmed for {tick_label};"
+                f" workspace retained at {workspace_dir}; {leftover_text}"
+            )
+        if not report.remote_all_ok:
+            raise HarnessRemoteCleanupError("cleanup_incomplete", leftover_text)
+
+        output_dir = artifacts_dir / "reports"
+        generate_report(events_log, output_dir)
+        report_json = output_dir / "report.json"
+        summary = summarize_report(report_json)
+        if timed_out:
+            summary = f"[overall timeout after {timeout}s] " + summary
+        if failure_code is not None:
+            summary = f"[{failure_code}] " + summary
+
+        if loop:
+            prev_reports = sorted(output_dir.parent.glob(f"{fixture_name}-report.*.json"))
+            if prev_reports:
+                diffs = diff_reports(prev_reports[-1], report_json)
+                diff_summary = summarize_diff(diffs)
+                summary += f" | diff: {diff_summary}"
+
+            if prev_reports:
+                next_n = int(prev_reports[-1].stem.split(".")[-1]) + 1
+            else:
+                next_n = 1
+            next_report = output_dir.parent / f"{fixture_name}-report.{next_n}.json"
+            next_report.write_text(report_json.read_text())
+
+        # Cards are archived by shutdown, so read the archived-inclusive snapshot
+        # (get_todo_kanban_status omits archived cards and would print ``{}``).
+        status_map: dict[str, str] = {}
+        if shutdown_tick_id is not None:
+            try:
+                status_map = _archived_status_map(sandbox.slug, shutdown_tick_id) or {}
+            except Exception as exc:
+                log.warning("kanban status summary unavailable: %s", exc)
+        pr_display = f"#{pr.number}" if pr is not None else "none"
+        print(
+            f"[kanban] tenant={sandbox.slug} tick_id={shutdown_tick_id} "
+            f"profile={profile_name} "
+            f"repo={sandbox.repo} issue=#{issue.number} pr={pr_display} "
+            f"phases={status_map} "
+            f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
+        )
+
+        if keep_dir and not timed_out:
+            _prune_retained_state(project_state, state_dir)
+
+        exit_code = 0 if (success and not timed_out and failure_code is None) else 1
+
+        return HarnessResult(
+            exit_code=exit_code,
+            report_path=report_json,
+            temp_dir=workspace_dir if keep_dir else None,
+            summary=summary,
+            issue_number=issue.number,
+            pr_numbers=pr_numbers,
+            cleanup_leftovers=leftovers,
+        )
 
     finally:
-        if not keep_dir and workspace_quiescent:
+        if not keep_dir and workspace_quiescent and not cleanup_incomplete:
             shutil.rmtree(workspace_dir, ignore_errors=True)

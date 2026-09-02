@@ -3122,8 +3122,8 @@ def _cmd_test(args, config: Config) -> int:
     try:
         result = run_harness(
             fixture_name=args.fixture,
+            repo=getattr(args, "repo", None),
             loop=args.loop,
-            phase_only=args.phase,
             keep_dir=args.keep,
             timeout=args.timeout,
             convergence_threshold=args.convergence_threshold,
