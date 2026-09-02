@@ -727,6 +727,270 @@ _HARNESS_ISSUE_FIELDS: dict[str, str] = {
 }
 
 
+_HARNESS_ISSUE_TITLE = "Implement mock name normalization"
+_TODO_ID_RE = re.compile(r"\ATODO-[0-9]+\Z")
+_RUN_TOKEN_RE = re.compile(r"\A[0-9a-z]{8}\Z")
+_HARNESS_PLAN_PATH_RE = re.compile(r"\Adocs/harness/[0-9a-z]{8}-plan\.md\Z")
+_RECONCILE_ATTEMPTS = 5
+_RECONCILE_BACKOFF_SECONDS = 2.0
+# Create failures that provably left no issue behind: re-raise instead of listing.
+_CREATE_CODES_WITHOUT_SIDE_EFFECT = frozenset(
+    {"gh_auth", "gh_missing", "gh_version", "gh_not_found", "gh_rejected"}
+)
+
+
+def _run_token() -> str:
+    """Eight-character lowercase token that makes one live run's remote artifacts distinct."""
+    from .logging_setup import new_tick_id
+
+    return new_tick_id()[-8:].lower()
+
+
+def _issue_prefix(run_token: str) -> str:
+    """Title prefix that ties a sandbox issue to one run; the reconciliation key."""
+    return f"[harness {run_token}]"
+
+
+def _issue_title(run_token: str) -> str:
+    return f"{_issue_prefix(run_token)} {_HARNESS_ISSUE_TITLE}"
+
+
+def _issue_fields(*, branch: str, plan_path: str) -> dict[str, str]:
+    """Issue-form fields for a live sandbox issue on *branch* planned at *plan_path*."""
+    return _HARNESS_ISSUE_FIELDS | {"Branch": branch, "Plan": plan_path}
+
+
+def _plan_document(todo_id: str) -> str:
+    """The fixture plan re-addressed to *todo_id* (heading and manifest ``todo_id``)."""
+    if _TODO_ID_RE.match(todo_id) is None:
+        raise ValueError(f"invalid todo id: {todo_id!r}")
+    return _HARNESS_PLAN.replace("TODO-1", todo_id)
+
+
+def _harness_labels() -> list[str]:
+    """Backlog labels plus the decision mirrors derived from the fixture fields."""
+    from .github_issues import READY_LABEL, TODO_LABEL, phase_label
+
+    fields = _HARNESS_ISSUE_FIELDS
+    return [
+        TODO_LABEL,
+        READY_LABEL,
+        f"priority:{fields['Priority']}",
+        f"effort:{fields['Effort']}",
+        phase_label(fields["Phase"]),
+        f"test-coverage:{fields['Test Coverage']}",
+        f"security-review:{fields['Security Review']}",
+        f"ui-review:{fields['UI Review']}",
+    ]
+
+
+@dataclass(frozen=True)
+class HarnessIssue:
+    """The sandbox issue created for one live harness run."""
+
+    number: int
+    todo_id: str
+    branch: str
+    plan_path: str
+    title: str
+    run_token: str
+
+    def __post_init__(self) -> None:
+        # The path is interpolated into git argv and joined onto the clone root.
+        if (
+            self.plan_path.startswith("/")
+            or ".." in self.plan_path.split("/")
+            or _HARNESS_PLAN_PATH_RE.match(self.plan_path) is None
+        ):
+            raise ValueError(f"invalid harness plan path: {self.plan_path!r}")
+
+
+def _issue_matches_run(project_dir: Path, sandbox: SandboxRepo, number: int, title: str) -> bool:
+    """True when issue *number* in *sandbox* is a real issue (not a PR) titled *title*."""
+    from .github_issues import _decode_json, _gh_api
+
+    payload = _decode_json(_gh_api(project_dir, [f"repos/{sandbox.repo}/issues/{number}"]), "api")
+    return (
+        isinstance(payload, Mapping)
+        and "pull_request" not in payload
+        and payload.get("number") == number
+        and payload.get("title") == title
+    )
+
+
+def create_harness_issue(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    run_token: str,
+    baseline: RunBaseline,
+    sleep: Callable[[float], None] = time.sleep,
+) -> HarnessIssue:
+    """Create the run's issue in *sandbox*; reconcile against the remote if the create fails.
+
+    The label vocabulary is ensured first (``ensure_labels`` is idempotent), so
+    the create never fails on a missing mirror label. The number ``gh`` reports
+    is verified by fetching the issue: only a real issue (not a PR) carrying this
+    run's title is adopted. A create that fails locally without proving nothing
+    was created (timeout, malformed output, transport error, rate limit) may
+    still have succeeded remotely, so it is followed by an authoritative listing
+    rather than a blind retry that could duplicate the issue. Failures that
+    provably created nothing (auth, missing/old gh, unknown repo, rejected
+    request) are re-raised as-is.
+    """
+    from .github_issues import (
+        GitHubIssuesError,
+        create_issue,
+        ensure_labels,
+        render_issue_body,
+    )
+
+    if _RUN_TOKEN_RE.match(run_token) is None:
+        raise ValueError(f"invalid run token: {run_token!r}")
+    branch = f"feat/harness-{run_token}"
+    plan_path = f"docs/harness/{run_token}-plan.md"
+    title = _issue_title(run_token)
+    body = render_issue_body(_issue_fields(branch=branch, plan_path=plan_path), include_empty=False)
+    ensure_labels(project_dir, repo=sandbox.repo)
+    log.info("harness: creating sandbox issue %s in %s", title, sandbox.repo)
+    number: int | None = None
+    cause: Exception | None = None
+    try:
+        reported = create_issue(
+            project_dir, title=title, body=body, labels=_harness_labels(), repo=sandbox.repo
+        )
+    except GitHubIssuesError as exc:
+        if exc.code in _CREATE_CODES_WITHOUT_SIDE_EFFECT:
+            raise
+        cause = exc
+    except OSError as exc:  # body temp file failures may follow a remote success
+        cause = exc
+    if cause is None:
+        # Verify the reported number; any failure here (404, 403, timeout) is
+        # inconclusive, so it falls through to reconciliation like a failed create.
+        try:
+            if _issue_matches_run(project_dir, sandbox, reported, title):
+                number = reported
+            else:
+                cause = RuntimeError(f"issue #{reported} reported by gh is not this run's issue")
+        except Exception as exc:
+            cause = exc
+    if number is None:
+        assert cause is not None
+        number = reconcile_created_issue(
+            project_dir, sandbox, run_token=run_token, baseline=baseline, cause=cause, sleep=sleep
+        )
+    return HarnessIssue(
+        number=number,
+        todo_id=f"TODO-{number}",
+        branch=branch,
+        plan_path=plan_path,
+        title=title,
+        run_token=run_token,
+    )
+
+
+def _list_run_issues(
+    project_dir: Path, sandbox: SandboxRepo, *, run_token: str, baseline: RunBaseline
+) -> list[int]:
+    """Numbers of the viewer's issues (not PRs) in *sandbox* titled for *run_token*."""
+    from urllib.parse import quote
+
+    from .github_issues import _LIST_TIMEOUT, _decode_json, _flatten_pages, _gh_api
+
+    query = f"state=all&creator={quote(baseline.viewer, safe='')}&per_page=100"
+    stdout = _gh_api(
+        project_dir,
+        ["--paginate", "--slurp", f"repos/{sandbox.repo}/issues?{query}"],
+        timeout=_LIST_TIMEOUT,
+    )
+    prefix = _issue_prefix(run_token)
+    numbers: list[int] = []
+    for payload in _flatten_pages(_decode_json(stdout, "api", empty=[]), "api"):
+        if not isinstance(payload, Mapping) or "pull_request" in payload:
+            continue
+        title = payload.get("title")
+        number = payload.get("number")
+        if isinstance(title, str) and title.startswith(prefix) and isinstance(number, int):
+            numbers.append(number)
+    return sorted(numbers)
+
+
+def reconcile_created_issue(
+    project_dir: Path,
+    sandbox: SandboxRepo,
+    *,
+    run_token: str,
+    baseline: RunBaseline,
+    cause: Exception,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Find the issue a failed create may have made, by authoritative listing (not search).
+
+    Lists the viewer's issues and keeps those titled ``[harness <run_token>]…``.
+    Retries (with backoff) only while nothing matches, because GitHub's list
+    index can lag a just-created issue; a listing failure counts as an empty
+    attempt. Exactly one match is adopted as the created issue. None after all
+    attempts means the remote state is unproven (``issue_unverified``). Several
+    means a duplicate the operator must sort out (``issue_ambiguous``); this
+    detection is best-effort: a duplicate that lags the index past the first
+    non-empty listing is not seen, and the earlier match is adopted.
+    """
+    from .github_issues import GitHubIssuesError
+
+    numbers: list[int] = []
+    for attempt in range(1, _RECONCILE_ATTEMPTS + 1):
+        try:
+            numbers = _list_run_issues(project_dir, sandbox, run_token=run_token, baseline=baseline)
+        except GitHubIssuesError as exc:
+            log.warning("harness: reconcile listing attempt %d failed: %s", attempt, exc)
+            numbers = []
+        if numbers:
+            break
+        if attempt < _RECONCILE_ATTEMPTS:
+            sleep(_RECONCILE_BACKOFF_SECONDS)
+    prefix = _issue_prefix(run_token)
+    if len(numbers) == 1:
+        log.warning("harness: reconciled issue #%d after create failure (%s)", numbers[0], cause)
+        return numbers[0]
+    if not numbers:
+        raise HarnessRemoteCleanupError(
+            "issue_unverified",
+            f"create failed ({cause}); could not prove no issue titled '{prefix}' exists; "
+            f"check: gh issue list --repo {sandbox.repo} --state all --search '{prefix} in:title'",
+        ) from cause
+    raise HarnessRemoteCleanupError(
+        "issue_ambiguous",
+        f"{', '.join(f'#{number}' for number in numbers)} in {sandbox.repo} for {prefix}; "
+        f"close duplicates: gh issue close <n> --repo {sandbox.repo}",
+    ) from cause
+
+
+def commit_plan(project_dir: Path, issue: HarnessIssue) -> str:
+    """Write the plan for *issue* into the clone and commit only that file; return the HEAD sha.
+
+    Idempotent: when HEAD already tracks an identical plan, nothing is committed.
+    Other staged changes are left staged and untouched. Never pushes: publishing
+    the branch is the pipeline's job, not the harness's.
+    """
+    document = _plan_document(issue.todo_id)
+    target = project_dir / issue.plan_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(document, encoding="utf-8")
+    tracked = _run_git(["cat-file", "-p", f"HEAD:{issue.plan_path}"], cwd=project_dir, check=False)
+    if tracked.returncode == 0 and tracked.stdout == document:
+        return _run_git(["rev-parse", "HEAD"], cwd=project_dir).stdout.strip()
+    _run_git(["add", "-f", "--", issue.plan_path], cwd=project_dir)
+    _run_git(
+        [
+            "-c", "commit.gpgsign=false", "commit", "--no-verify",
+            "-m", f"docs(harness): plan for {issue.todo_id}", "--", issue.plan_path,
+        ],
+        cwd=project_dir,
+    )
+    return _run_git(["rev-parse", "HEAD"], cwd=project_dir).stdout.strip()
+
+
 def _fake_gh_state_for_fixture(fixture_name: str) -> dict[str, Any]:
     """Initial fake ``gh`` state: one open, unblocked, ready ``tpo:todo`` issue (#1)."""
     from .github_issues import READY_LABEL, TODO_LABEL
@@ -895,6 +1159,15 @@ class KanbanPreflightError(RuntimeError):
 
 class HarnessCleanupError(RuntimeError):
     """Raised when timeout cleanup cannot prove the workspace is quiescent."""
+
+
+class HarnessRemoteCleanupError(HarnessCleanupError):
+    """Remote sandbox state (issues, branches) cannot be proven clean or unambiguous."""
+
+    def __init__(self, code: str, detail: str) -> None:
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+        self.detail = detail
 
 
 class PollCancellationError(RuntimeError):

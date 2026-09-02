@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import subprocess
+import sys
 import tomllib
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -17,14 +18,23 @@ import pytest
 from hermes_pipeline import harness as harness_mod
 from hermes_pipeline.config import Config
 from hermes_pipeline.contract import ContractSchemaError
-from hermes_pipeline.github_issues import GitHubIssuesError
+from hermes_pipeline.github_issues import (
+    LABEL_VOCABULARY,
+    GitHubIssuesError,
+    compile_eligible_issues,
+    issue_from_api,
+    parse_issue_body,
+    render_issue_body,
+)
 from hermes_pipeline.harness import (
     ConvergenceDetector,
     ConvergenceHaltError,
     GitHubPreflight,
+    HarnessIssue,
     HarnessMonitor,
     HarnessPreflightError,
     HarnessProfileError,
+    HarnessRemoteCleanupError,
     HarnessResult,
     RunBaseline,
     SandboxRepo,
@@ -36,6 +46,8 @@ from hermes_pipeline.harness import (
     _validate_profile_prerequisites,
     _with_offline_terminal_workflow,
     clone_sandbox,
+    commit_plan,
+    create_harness_issue,
     create_mock_project,
     filter_phases,
     github_preflight,
@@ -43,6 +55,7 @@ from hermes_pipeline.harness import (
     isolate_config,
     other_ready_issues,
     preflight_check,
+    reconcile_created_issue,
     resolve_sandbox_repo,
     run_harness,
     sandbox_seed_check,
@@ -51,7 +64,8 @@ from hermes_pipeline.harness import (
     write_project_contract,
 )
 from hermes_pipeline.phases import Phase, load_phases, resolve_profile_phases_path
-from tests.gh_fakes import API_ARGV, seed_project_issues, todo_payload
+from hermes_pipeline.plan_manifest import validate_plan_candidate
+from tests.gh_fakes import API_ARGV, issue_payload, seed_project_issues, todo_payload
 
 
 class TestCreateMockProject:
@@ -3401,3 +3415,538 @@ class TestInitSandbox:
         assert _real_git("rev-parse", "main", cwd=bare) == raced["tip"]
         assert "RACE.txt" in _remote_tree(bare, "main")
         assert not (tmp_path / "workspace" / "sandbox").exists()
+
+
+_RUN_TOKEN = "abcd1234"
+_HARNESS_TITLE = f"[harness {_RUN_TOKEN}] Implement mock name normalization"
+_LIST_QUERY = "repos/acme/sandbox/issues?state=all&creator=octocat&per_page=100"
+_LIST_ARGV = (*API_ARGV, "--paginate", "--slurp", _LIST_QUERY)
+_LABEL_LIST_ARGV = ("gh", "label", "list", "--repo", "acme/sandbox")
+_LABEL_CREATE_ARGV = ("gh", "label", "create", "--repo", "acme/sandbox")
+_ISSUE_URL = "https://github.com/acme/sandbox/issues/{}\n"
+
+
+def _baseline() -> RunBaseline:
+    return RunBaseline(
+        head_pairs=(("main", "0" * 40),),
+        started_at=datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC),
+        viewer="octocat",
+        default_branch="main",
+    )
+
+
+def _seeded_clone(tmp_path: Path) -> tuple[Path, SandboxRepo]:
+    bare = _make_bare_remote(tmp_path, harness_mod._SANDBOX_SEED_FILES)
+    sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url=f"file://{bare}")
+    project_dir = tmp_path / "workspace" / "sandbox"
+    clone_sandbox(sandbox, project_dir)
+    return project_dir, sandbox
+
+
+def _harness_issue(number: int = 42, token: str = "tok00000") -> HarnessIssue:
+    return HarnessIssue(
+        number=number,
+        todo_id=f"TODO-{number}",
+        branch=f"feat/harness-{token}",
+        plan_path=f"docs/harness/{token}-plan.md",
+        title=f"[harness {token}] Implement mock name normalization",
+        run_token=token,
+    )
+
+
+class TestHappyPathFixture:
+    def test_rendered_issue_parses_back_eligible(self, tmp_project):
+        branch = f"feat/harness-{_RUN_TOKEN}"
+        plan_path = f"docs/harness/{_RUN_TOKEN}-plan.md"
+        body = render_issue_body(
+            harness_mod._issue_fields(branch=branch, plan_path=plan_path), include_empty=False
+        )
+        issue = issue_from_api(
+            issue_payload(7, title=_HARNESS_TITLE, body=body, labels=harness_mod._harness_labels()),
+            repo="acme/sandbox",
+        )
+
+        result = compile_eligible_issues(tmp_project, [issue], in_flight=(), requires_plan=False)
+
+        assert result.blocked_reasons == {}
+        assert result.todo_ids == frozenset({"TODO-7"})
+        (candidate,) = result.candidates
+        assert candidate.entry.branch_values == (branch,)
+        assert candidate.entry.plan_values == (plan_path,)
+
+    @pytest.mark.parametrize("todo_id", ["TODO-x", "todo-1", "TODO-1\n", "", "TODO-", "TODO-\u0661"])  # U+0661: ARABIC-INDIC DIGIT ONE
+    def test_plan_document_rejects_bad_todo_id(self, todo_id):
+        with pytest.raises(ValueError):
+            harness_mod._plan_document(todo_id)
+
+    def test_run_token_shape(self):
+        token = harness_mod._run_token()
+
+        assert len(token) == 8
+        assert token == token.lower()
+        assert all(char in "0123456789abcdefghijklmnopqrstuvwxyz" for char in token)
+
+    def test_seed_pyproject_collects_tests(self, tmp_path):
+        clone = tmp_path / "sandbox"
+        for rel, content in harness_mod._SANDBOX_SEED_FILES.items():
+            target = clone / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content)
+        (clone / "mock_transform.py").write_text(
+            "def normalize_names(names: list[str]) -> list[str]:\n"
+            "    return [n.strip().lower() for n in names if n.strip()]\n"
+        )
+        (clone / "tests" / "test_mock_transform.py").write_text(
+            "from mock_transform import normalize_names\n\n\n"
+            "def test_acceptance():\n"
+            '    assert normalize_names([" Alice ", "", "BOB"]) == ["alice", "bob"]\n'
+            "    assert normalize_names([]) == []\n"
+        )
+        pyproject = tomllib.loads((clone / "pyproject.toml").read_text())
+        assert any(dep.startswith("pytest") for dep in pyproject["dependency-groups"]["dev"])
+        env = {
+            key: value
+            for key, value in os.environ.items()
+            if key not in ("PYTEST_ADDOPTS", "PYTEST_DISABLE_PLUGIN_AUTOLOAD", "PYTHONPATH")
+        }
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+
+        # No path argument: the seeded ``testpaths`` must drive collection.
+        result = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider"],
+            cwd=clone,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "1 passed" in result.stdout
+
+    def test_harness_labels_are_in_vocabulary(self):
+        labels = harness_mod._harness_labels()
+
+        names = {name for name, _, _ in LABEL_VOCABULARY}
+        assert set(labels) <= names
+        assert labels[:2] == ["tpo:todo", "ready-for-agent"]
+        assert set(labels[2:]) == {
+            "priority:P1",
+            "effort:S",
+            "phase:4-development",
+            "test-coverage:required",
+            "security-review:not-required",
+            "ui-review:not-required",
+        }
+        assert len(labels) == len(set(labels))
+
+
+class TestCreateHarnessIssue:
+    sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="file:///nonexistent-sandbox")
+
+    @staticmethod
+    def _listing(*pages: list[dict] | Exception):
+        """Serve one response per call from *pages* (last one repeats); record the count.
+
+        An ``Exception`` entry is served as ``rc=1`` with an HTTP 502 stderr.
+        """
+        state = {"calls": 0}
+
+        def handler(argv):
+            page = pages[min(state["calls"], len(pages) - 1)]
+            state["calls"] += 1
+            if isinstance(page, Exception):
+                return 1, "", "HTTP 502: Bad Gateway\n"
+            return 0, json.dumps([page]), ""
+
+        return handler, state
+
+    def _serve_labels(self, fake_gh, existing: list[str] | None = None):
+        """``gh label list`` reports *existing* (default: the whole vocabulary); create succeeds."""
+        names = existing if existing is not None else [name for name, _, _ in LABEL_VOCABULARY]
+        fake_gh.on(*_LABEL_LIST_ARGV, stdout=json.dumps([{"name": name} for name in names]))
+        fake_gh.on(*_LABEL_CREATE_ARGV, stdout="")
+
+    def _serve_view(self, fake_gh, number: int, title: str = _HARNESS_TITLE, **extra):
+        fake_gh.on(
+            *API_ARGV,
+            f"repos/acme/sandbox/issues/{number}",
+            stdout=json.dumps(issue_payload(number, title=title, **extra)),
+        )
+
+    def _create(self, fake_gh, tmp_project, **kwargs):
+        kwargs.setdefault("sleep", lambda _: None)
+        return create_harness_issue(
+            tmp_project, self.sandbox, run_token=_RUN_TOKEN, baseline=_baseline(), **kwargs
+        )
+
+    def test_creates_issue_with_renderer_labels_and_token_title(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh)
+        self._serve_view(fake_gh, 7)
+        captured: dict[str, str] = {}
+
+        def create(argv):
+            captured["body"] = Path(argv[argv.index("--body-file") + 1]).read_text()
+            return 0, _ISSUE_URL.format(7), ""
+
+        fake_gh.on("gh", "issue", "create", handler=create)
+
+        issue = self._create(fake_gh, tmp_project)
+
+        assert issue == HarnessIssue(
+            number=7,
+            todo_id="TODO-7",
+            branch=f"feat/harness-{_RUN_TOKEN}",
+            plan_path=f"docs/harness/{_RUN_TOKEN}-plan.md",
+            title=_HARNESS_TITLE,
+            run_token=_RUN_TOKEN,
+        )
+        (argv,) = [call for call in fake_gh.gh_calls() if call[:2] == ["issue", "create"]]
+        assert argv[argv.index("--repo") + 1] == "acme/sandbox"
+        assert argv[argv.index("--title") + 1] == _HARNESS_TITLE
+        given = [argv[i + 1] for i, item in enumerate(argv) if item == "--label"]
+        assert given == harness_mod._harness_labels()
+        sections = parse_issue_body(captured["body"])
+        assert sections["Branch"] == (f"feat/harness-{_RUN_TOKEN}",)
+        assert sections["Plan"] == (f"docs/harness/{_RUN_TOKEN}-plan.md",)
+        assert "_No response_" not in captured["body"]
+        api_calls = [call for call in fake_gh.gh_calls() if call[:1] == ["api"]]
+        assert [call[-1] for call in api_calls] == ["repos/acme/sandbox/issues/7"]
+
+    def test_ensures_labels_before_creating(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh, existing=["tpo:todo"])
+        self._serve_view(fake_gh, 7)
+        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(7))
+
+        self._create(fake_gh, tmp_project)
+
+        verbs = [tuple(call[:2]) for call in fake_gh.gh_calls()]
+        assert verbs.index(("label", "list")) < verbs.index(("issue", "create"))
+        created = [call[-1] for call in fake_gh.gh_calls() if call[:2] == ["label", "create"]]
+        assert "ready-for-agent" in created
+        assert "phase:4-development" in created
+        assert max(i for i, v in enumerate(verbs) if v == ("label", "create")) < verbs.index(("issue", "create"))
+
+    def test_rejects_malformed_run_token(self, fake_gh, tmp_project):
+        for token in ("ABCD1234", "abcd123", "abcd12345", "abcd/234", "abcd 234", "abcd-234", "abcd1234\n", ""):
+            with pytest.raises(ValueError):
+                create_harness_issue(tmp_project, self.sandbox, run_token=token, baseline=_baseline())
+        assert fake_gh.gh_calls() == []
+
+    def test_adopted_number_with_foreign_title_is_reconciled(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(12))
+        self._serve_view(fake_gh, 12, title="Somebody else's issue")
+        handler, state = self._listing([issue_payload(123, title=_HARNESS_TITLE)])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+
+        issue = self._create(fake_gh, tmp_project)
+
+        assert issue.number == 123
+        assert issue.todo_id == "TODO-123"
+        assert state["calls"] == 1
+
+    def test_adopted_number_that_is_a_pull_request_is_reconciled(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(12))
+        self._serve_view(fake_gh, 12, pull_request=True)
+        handler, _ = self._listing([issue_payload(123, title=_HARNESS_TITLE)])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+
+        assert self._create(fake_gh, tmp_project).number == 123
+
+    def test_timeout_after_remote_success_is_reconciled(self, fake_gh, tmp_project, caplog):
+        self._serve_labels(fake_gh)
+        fake_gh.on(
+            "gh", "issue", "create", raises=subprocess.TimeoutExpired(cmd="gh issue create", timeout=60)
+        )
+        handler, state = self._listing([], [], [issue_payload(7, title=_HARNESS_TITLE)])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+        sleeps: list[float] = []
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            issue = self._create(fake_gh, tmp_project, sleep=sleeps.append)
+
+        assert issue.number == 7
+        assert issue.todo_id == "TODO-7"
+        assert state["calls"] == 3
+        assert sleeps == [2.0, 2.0]
+        assert "reconciled issue #7 after create failure" in caplog.text
+
+    def test_malformed_create_stdout_reconciles(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", stdout="Creating issue... done\n")
+        handler, state = self._listing([issue_payload(7, title=_HARNESS_TITLE)])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+        sleeps: list[float] = []
+
+        issue = self._create(fake_gh, tmp_project, sleep=sleeps.append)
+
+        assert issue.number == 7
+        assert state["calls"] == 1
+        assert sleeps == []
+
+    def test_oserror_from_create_is_reconciled(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", raises=PermissionError("body file"))
+        handler, state = self._listing([issue_payload(7, title=_HARNESS_TITLE)])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+
+        issue = self._create(fake_gh, tmp_project)
+
+        assert issue.number == 7
+        assert state["calls"] == 1
+
+    @pytest.mark.parametrize(
+        ("code", "failure"),
+        [
+            ("gh_auth", {"rc": 1, "stderr": "error: not logged in\n"}),
+            ("gh_missing", {"raises": FileNotFoundError("gh")}),
+            ("gh_version", {"rc": 1, "stderr": "unknown flag: --body-file\n"}),
+            ("gh_not_found", {"rc": 1, "stderr": "HTTP 404: Not Found\n"}),
+            ("gh_rejected", {"rc": 1, "stderr": "HTTP 422: Validation Failed\n"}),
+        ],
+    )
+    def test_create_failure_without_side_effect_is_raised_without_listing(
+        self, fake_gh, tmp_project, code, failure
+    ):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", **failure)
+        handler, state = self._listing([issue_payload(7, title=_HARNESS_TITLE)])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+        sleeps: list[float] = []
+
+        with pytest.raises(GitHubIssuesError) as exc_info:
+            self._create(fake_gh, tmp_project, sleep=sleeps.append)
+
+        assert exc_info.value.code == code
+        assert state["calls"] == 0
+        assert sleeps == []
+
+    @pytest.mark.parametrize(
+        "view_failure",
+        [
+            {"rc": 1, "stderr": "HTTP 404: Not Found\n"},
+            {"rc": 1, "stderr": "HTTP 403: Forbidden\n"},
+            {"raises": subprocess.TimeoutExpired(cmd="gh api", timeout=60)},
+        ],
+    )
+    def test_verification_failure_falls_through_to_reconciliation(self, fake_gh, tmp_project, view_failure):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(12))
+        fake_gh.on(*API_ARGV, "repos/acme/sandbox/issues/12", **view_failure)
+        handler, state = self._listing([issue_payload(12, title=_HARNESS_TITLE)])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+
+        issue = self._create(fake_gh, tmp_project)
+
+        assert issue.number == 12
+        assert state["calls"] == 1
+
+    def test_zero_matches_after_retries_raises_issue_unverified(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", rc=1, stderr="HTTP 502\n")
+        handler, state = self._listing([issue_payload(8, title="unrelated")])
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+        sleeps: list[float] = []
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._create(fake_gh, tmp_project, sleep=sleeps.append)
+
+        assert exc_info.value.code == "issue_unverified"
+        assert state["calls"] == 5
+        assert sleeps == [2.0] * 4
+        assert isinstance(exc_info.value.__cause__, GitHubIssuesError)
+        assert (
+            f"gh issue list --repo acme/sandbox --state all --search '[harness {_RUN_TOKEN}] in:title'"
+            in exc_info.value.detail
+        )
+        assert str(exc_info.value).startswith("issue_unverified: ")
+
+    def test_two_matches_raises_issue_ambiguous(self, fake_gh, tmp_project):
+        self._serve_labels(fake_gh)
+        fake_gh.on("gh", "issue", "create", rc=1, stderr="HTTP 502\n")
+        handler, _ = self._listing(
+            [issue_payload(10, title=_HARNESS_TITLE), issue_payload(11, title=_HARNESS_TITLE + " (again)")]
+        )
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._create(fake_gh, tmp_project)
+
+        assert exc_info.value.code == "issue_ambiguous"
+        assert exc_info.value.detail == (
+            f"#10, #11 in acme/sandbox for [harness {_RUN_TOKEN}]; "
+            "close duplicates: gh issue close <n> --repo acme/sandbox"
+        )
+
+    def _reconcile(self, tmp_project, **kwargs):
+        kwargs.setdefault("sleep", lambda _: None)
+        return reconcile_created_issue(
+            tmp_project,
+            self.sandbox,
+            run_token=_RUN_TOKEN,
+            baseline=_baseline(),
+            cause=RuntimeError("boom"),
+            **kwargs,
+        )
+
+    def test_listing_skips_pull_requests(self, fake_gh, tmp_project):
+        handler, _ = self._listing(
+            [
+                issue_payload(6, title=_HARNESS_TITLE, pull_request=True),
+                issue_payload(7, title=_HARNESS_TITLE),
+            ]
+        )
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+
+        assert self._reconcile(tmp_project) == 7
+
+    def test_listing_requires_title_prefix(self, fake_gh, tmp_project):
+        handler, _ = self._listing(
+            [
+                issue_payload(6, title=f"Re: {_HARNESS_TITLE}"),
+                issue_payload(7, title=_HARNESS_TITLE),
+            ]
+        )
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+
+        assert self._reconcile(tmp_project) == 7
+
+    def test_listing_quotes_viewer_and_uses_list_timeout(self, fake_gh, tmp_project):
+        baseline = dataclasses.replace(_baseline(), viewer="octo cat/x")
+        fake_gh.on(*API_ARGV, "--paginate", "--slurp", stdout=json.dumps([[issue_payload(7, title=_HARNESS_TITLE)]]))
+
+        number = reconcile_created_issue(
+            tmp_project, self.sandbox, run_token=_RUN_TOKEN, baseline=baseline, cause=RuntimeError("boom")
+        )
+
+        assert number == 7
+        (argv,) = fake_gh.gh_calls()
+        assert argv[-1] == "repos/acme/sandbox/issues?state=all&creator=octo%20cat%2Fx&per_page=100"
+        assert fake_gh.kwargs[0]["timeout"] == 180.0
+
+    def test_listing_failures_are_retried_then_adopted(self, fake_gh, tmp_project, caplog):
+        handler, state = self._listing(
+            RuntimeError(), RuntimeError(), [issue_payload(7, title=_HARNESS_TITLE)]
+        )
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+        sleeps: list[float] = []
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            number = self._reconcile(tmp_project, sleep=sleeps.append)
+
+        assert number == 7
+        assert state["calls"] == 3
+        assert sleeps == [2.0, 2.0]
+        assert "reconcile listing attempt 1 failed" in caplog.text
+        assert "reconcile listing attempt 2 failed" in caplog.text
+
+    def test_listing_failing_every_attempt_raises_issue_unverified(self, fake_gh, tmp_project):
+        handler, state = self._listing(RuntimeError())
+        fake_gh.on(*_LIST_ARGV, handler=handler)
+        sleeps: list[float] = []
+
+        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
+            self._reconcile(tmp_project, sleep=sleeps.append)
+
+        assert exc_info.value.code == "issue_unverified"
+        assert state["calls"] == 5
+        assert sleeps == [2.0] * 4
+
+
+class TestHarnessIssue:
+    @pytest.mark.parametrize(
+        "plan_path",
+        [
+            "/docs/harness/tok00000-plan.md",
+            "docs/harness/../tok00000-plan.md",
+            "docs/harness/TOK00000-plan.md",
+            "docs/harness/tok0000-plan.md",
+            "docs/harness/tok00000-plan.md\n",
+            "plans/tok00000-plan.md",
+        ],
+    )
+    def test_rejects_bad_plan_path(self, plan_path):
+        with pytest.raises(ValueError):
+            dataclasses.replace(_harness_issue(), plan_path=plan_path)
+
+    def test_accepts_canonical_plan_path(self):
+        assert _harness_issue().plan_path == "docs/harness/tok00000-plan.md"
+
+
+class TestCommitPlan:
+    @pytest.mark.real_git
+    def test_commit_plan_document_validates_for_issue_number(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        issue = _harness_issue(42)
+
+        sha = commit_plan(project_dir, issue)
+
+        assert sha == _real_git("rev-parse", "HEAD", cwd=project_dir)
+        assert _real_git("status", "--porcelain", cwd=project_dir) == ""
+        assert _real_git("log", "-1", "--format=%s", cwd=project_dir) == "docs(harness): plan for TODO-42"
+        manifest = validate_plan_candidate(project_dir, issue.plan_path, expected_todo_id="TODO-42")
+        assert manifest is not None
+        assert manifest.todo_id == "TODO-42"
+        document = (project_dir / issue.plan_path).read_text()
+        assert document.startswith("# TODO-42 Mock Name Normalization Plan\n")
+        assert '"todo_id": "TODO-42"' in document
+        assert '"todo_id": "TODO-1"' not in document
+
+    @pytest.mark.real_git
+    def test_commit_plan_does_not_push_and_pins_no_verify(self, tmp_path, monkeypatch):
+        project_dir, _ = _seeded_clone(tmp_path)
+        recorded: list[list[str]] = []
+
+        def recording_git(argv, **kwargs):
+            recorded.append(list(argv))
+            return subprocess.run(argv, **kwargs)
+
+        monkeypatch.setattr(harness_mod, "_git", recording_git)
+
+        commit_plan(project_dir, _harness_issue(3))
+
+        verbs = [harness_mod._git_verb(argv[1:]) for argv in recorded]
+        assert "commit" in verbs
+        assert "push" not in verbs
+        (commit_argv,) = [argv for argv in recorded if harness_mod._git_verb(argv[1:]) == "commit"]
+        assert "--no-verify" in commit_argv
+        assert commit_argv[1:3] == ["-c", "commit.gpgsign=false"]
+        assert commit_argv[-2:] == ["--", "docs/harness/tok00000-plan.md"]
+        assert _real_git("rev-parse", "origin/main", cwd=project_dir) != _real_git("rev-parse", "HEAD", cwd=project_dir)
+
+    @pytest.mark.real_git
+    def test_commit_plan_commits_only_the_plan(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        (project_dir / "SECRET.txt").write_text("hunter2\n")
+        _real_git("add", "SECRET.txt", cwd=project_dir)
+
+        commit_plan(project_dir, _harness_issue(3))
+
+        committed = _real_git("show", "--name-only", "--format=", "HEAD", cwd=project_dir).splitlines()
+        assert committed == ["docs/harness/tok00000-plan.md"]
+        assert _real_git("status", "--porcelain", cwd=project_dir) == "A  SECRET.txt"
+
+    @pytest.mark.real_git
+    def test_commit_plan_is_idempotent(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        issue = _harness_issue(3)
+
+        first = commit_plan(project_dir, issue)
+        second = commit_plan(project_dir, issue)
+
+        assert first == second == _real_git("rev-parse", "HEAD", cwd=project_dir)
+        assert _real_git("rev-list", "--count", "HEAD", cwd=project_dir) == "2"
+
+    @pytest.mark.real_git
+    def test_commit_plan_recommits_when_tracked_plan_differs(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        issue = _harness_issue(3)
+        first = commit_plan(project_dir, issue)
+        (project_dir / issue.plan_path).write_text("# stale\n")
+        _real_git("commit", "-am", "tamper", cwd=project_dir)
+
+        second = commit_plan(project_dir, issue)
+
+        assert second != first
+        assert (project_dir / issue.plan_path).read_text() == harness_mod._plan_document("TODO-3")
