@@ -6,7 +6,7 @@ The examples below use the installed `tpo` command. In a source checkout,
 contributors can run the same commands as `uv run tpo ...`.
 
 - `tpo <command> [args]` — Production pipeline orchestration (tick, init, doctor, ...)
-- `tpo test [args]` — Mock integration test harness
+- `tpo test [args]` — Live integration test harness (GitHub sandbox repository)
 
 ## tpo Global Flags
 
@@ -357,47 +357,52 @@ for the evidence protocol.
 
 ## tpo test
 
-Run the mock integration test harness: bootstraps a temporary git project, executes
-pipeline phases, and generates a structured findings report. Runs against the real
-`hermes kanban` adapter (tenant `mock-project`) — the `--kanban null` no-network mode
-was removed along with `runner.py`/`watcher.py` in v0.5.6; the harness now always
-requires `hermes login` and access to the `mock-project` tenant.
+Run the live integration test harness: clones a disposable GitHub sandbox
+repository, files a real `tpo:todo` issue, commits a Plan, runs the production
+`tpo tick` as a subprocess, follows its Hermes kanban cards, requires exactly one
+attributable open pull request, and tears everything down fail-closed. The kanban
+tenant is the sandbox repository name. Requires `gh` >= 2.44 authenticated with
+`repo` scope, `git` >= 2.32, `hermes login`, and `TPO_GH_BIN` unset. See
+[howto-live-integration-test-harness.md](howto-live-integration-test-harness.md).
 
 ```bash
-tpo test --fixture happy-path
-tpo test --fixture happy-path --profile gstack
-tpo test --fixture happy-path --phase phase_2_autoplan
-tpo test --fixture happy-path --convergence-threshold 2
+tpo test --repo OWNER/NAME --init-sandbox     # one-time seeding
+tpo test --repo OWNER/NAME
+tpo test --repo OWNER/NAME --profile agent-skills
+tpo test --repo OWNER/NAME --convergence-threshold 2
+tpo test --repo OWNER/NAME --keep --loop
 ```
 
 **Arguments:**
 | Arg | Required | Default | Description |
 |-----|----------|---------|-------------|
-| `--fixture` | Yes | — | Fixture name. Only `happy-path` is implemented. |
-| `--profile` | No | `gstack` | Bundled phase profile to test. Unknown profiles and profile/client pairs with `Unverified` prerequisites fail before workspace creation or kanban registration. |
-| `--phase` | No | — | Run only the named executable phase from the selected profile (e.g. `phase_2_autoplan`). Gate phases are rejected because they cannot execute independently. |
-| `--timeout` | No | `86400` | Overall run timeout in seconds. Cooperatively stops polling, then reclaims and archives the tick's Hermes tasks. |
-| `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before circuit breaker halts the run. |
-| `--keep` | No | — | Preserve the temporary directory after the run for inspection. |
-| `--loop` | No | — | Write a numbered report snapshot in the current workspace's `artifacts/` directory. Snapshots do not carry across separate CLI invocations, so cross-invocation auto-diff is unavailable. Requires `--keep`. |
+| `--repo` | Yes (or `TPO_HARNESS_REPO`) | — | Sandbox repository as `OWNER/NAME`. Must be a dedicated disposable repo; the harness closes issues/PRs and deletes branches in it. |
+| `--init-sandbox` | No | — | Seed the sandbox default branch once (README, `.gitignore` ignoring `.hermes/`, `pyproject.toml`, `tests/__init__.py`, `docs/harness/SANDBOX.md`) and exit. Refuses repositories tracking files outside the seed set and `.github/**`. |
+| `--fixture` | No | `happy-path` | Fixture name. Only `happy-path` is implemented. |
+| `--profile` | No | `gstack` | Bundled phase profile to test. Only live-safe profiles (`gstack`, `agent-skills`) are accepted; `native-sdd` fails with `unsafe_terminal`. Unknown profiles and profile/client pairs with `Unverified` prerequisites fail before workspace creation. |
+| `--timeout` | No | `86400` | Overall run timeout in seconds. Cooperatively stops polling, then reclaims and archives the tick's Hermes tasks before remote cleanup. |
+| `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before the run halts. |
+| `--keep` | No | — | Preserve the workspace and the remote artifacts (issue, PR, branch). The next run fails `sandbox_not_quiescent` until they are cleaned up manually. |
+| `--loop` | No | — | Write a numbered report snapshot in the workspace's `artifacts/` directory. Snapshots do not carry across separate CLI invocations; meaningful only with `--keep` (not enforced). |
 
 **Exit codes:**
 | Code | Meaning |
 |------|---------|
-| 0 | All phases passed |
-| 1 | Phase failure, convergence halt, or timeout |
-| 2 | Profile, prerequisite, preflight, or setup error (including unknown/unsupported profile, missing Conditional skill, missing dependency, or unreachable `mock-project` tenant) |
+| 0 | All phases passed, the PR invariant held, and cleanup completed |
+| 1 | Phase failure, convergence halt, overall timeout, PR invariant failure (`pr_missing`/`pr_ambiguous`/`pr_closed`/`pr_merged`/`pr_discovery_incomplete`), or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`). The workspace is deleted after a clean shutdown; re-run with `--keep` to inspect it. |
+| 2 | Profile or preflight error (`unsafe_terminal`, `Unverified` prerequisites, missing dependency, `repo_missing`, `invalid_repo`, `invalid_slug`, `gh_permission`, `gh_override_forbidden`, `sandbox_not_seeded`, `sandbox_not_quiescent`, unknown fixture) or `cleanup_incomplete` — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory); `HarnessCleanupError` messages print the path, `cleanup_incomplete` prints the remote leftovers |
 
-**Kanban preflight behavior:**
-- Resolves the selected profile and rejects `Unverified` prerequisites before external checks.
+**Preflight and run behavior:**
+- Resolves the selected profile and rejects `Unverified` prerequisites and non-live-safe terminal phases before external checks.
 - Verifies locally discoverable Conditional Hermes skills against the `pipeline` assignee before workspace creation.
-- Runs a preflight check (`hermes kanban list --tenant mock-project`) before phase execution. Timeouts after 15 s.
-- Creates a kanban card in the fixture's `mock-project` tenant (never suffixed with tick ID).
-- Card body includes `tick_id`, `fixture_name`, and `state_dir` metadata for debug tracing.
-- On convergence halt, clears the active task with `outcome="abandoned"`.
+- Verifies `gh` auth, the viewer login, push permission, and that no other open `tpo:todo` + `ready-for-agent` issue exists in the sandbox.
+- Runs `hermes kanban list --tenant <repo-name>` before phase execution. Timeouts after 15 s.
+- Clones the sandbox, verifies the seed (`sandbox_seed_check`), ensures labels, creates the issue `[harness <token>] Implement mock name normalization`, commits the Plan locally, and runs the production tick (log at `artifacts/tick.log`).
+- Kanban cards are created by the production tick in the tenant named after the repository (never suffixed with tick ID).
+- Shutdown cancels the tick's tasks, proves kanban quiescence, discovers artifacts by run provenance, closes the issue and PR, and deletes the branch with `git push --force-with-lease`; unfinished operations are printed as leftovers with manual commands.
 - Prints a `[kanban]` summary line after report generation:
   ```
-  [kanban] tenant=mock-project tick_id=01ARZ3... phases={phase_1 kickoff: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
+  [kanban] tenant=<repo-name> tick_id=01ARZ3... profile=gstack repo=OWNER/NAME issue=#12 pr=#13 phases={phase_1 kickoff: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
   ```
 
 **Timeout and exceptional poll cleanup:**

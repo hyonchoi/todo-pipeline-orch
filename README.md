@@ -181,7 +181,7 @@ tpo tick my-project
 | `plan validate` | Validate a TODO's Plan attachment and optional `tpo-plan` manifest. |
 | `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
 | `config` | Read and write global `tpo` configuration. |
-| `test` | Run the mock integration test harness. |
+| `test` | Run the live integration test harness against a GitHub sandbox repository. |
 
 See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detailed behavior.
 
@@ -236,7 +236,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | Doc | Type | When to read |
 |---|---|---|
 | [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
-| [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `tpo test` against mock project data |
+| [Live integration test harness](docs/howto-live-integration-test-harness.md) | How-to | Running `tpo test` against a live GitHub sandbox repository |
 | [Harness production-code coverage checklist](docs/checklist-harness-production-coverage.md) | Reference | Acceptance criteria for production-code path reuse |
 
 ### Architecture and reference

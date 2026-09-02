@@ -5,8 +5,9 @@ production module/code). Ground truth is `hermes_pipeline/*.py` as it exists
 today, verified by reading full function bodies — not signatures, not docs.
 
 **Scope:** one automated tpo cycle in the kanban-as-scheduler path
-(`kanban_mode == "hermes"`, i.e. `harness.py::_poll_kanban_phases` and its
-callees). Multi-project scan, Slack alerts, and preflight startup checks are
+(`kanban_mode == "hermes"`, i.e. `harness.py::poll_registered_phases` and its
+callees; registration itself is performed by the production `tpo tick`
+subprocess, see the bullet under "Not covered"). Multi-project scan, Slack alerts, and preflight startup checks are
 out of scope — see [docs/gstack design doc TODO-22] "NOT in scope" section for
 rationale.
 
@@ -41,10 +42,10 @@ makes the harness call that transition's production function.
 | 7 | Phase completes, a gate task's direct predecessor matches `completed_phase_key` | gate task `BLOCKED` | gate task completed | `kanban_tasks.complete_todo_kanban_task`. Harness-local `_auto_complete_gate_tasks` retains its predecessor-map construction and eligibility filtering, but delegates the completion mechanic to this production function instead of a raw `hermes kanban complete` subprocess call (see [#19](https://github.com/hyonchoi/todo-pipeline-orch/issues/19)). | Gate task status flips from `blocked` to a completion status via `complete_todo_kanban_task`, not a harness-local subprocess call | `tests/test_harness.py::TestAutoCompleteGateTasks::test_completes_blocked_gate_tasks` (spies on `hermes_pipeline.kanban_tasks.complete_todo_kanban_task`) |
 | 8 | Status transition: `running` → `failed` (or fast phase skips straight `(None\|ready\|blocked)` → `failed`) | phase in flight or not-yet-observed | phase failed | `N/A (premise corrected)` — see [#16](https://github.com/hyonchoi/todo-pipeline-orch/issues/16). Originally proposed routing this through `circuit.py::CircuitBreaker.observe` / `observe_from_outcomes`; that premise was wrong. `CircuitBreaker` is cross-tick, disk-persisted, and Slack-alerting — it protects the tpo loop across many ticks over time. The harness's `ConvergenceDetector`/`_ConvergenceMonitor` is in-memory, per-run, phase-granularity, and side-effect-free — it protects one cycle's poll loop. These solve different problems and must not be merged; the harness-local detector is the correct production path for this transition. | `phase_failed` event emitted with classified `error_class`; failure observation recorded via the harness-local `ConvergenceDetector`, which is correct as-is | N/A |
 | 9 | N consecutive same-class failures reach `CircuitBreaker`'s threshold | breaker below threshold | breaker trips, cycle halts | `N/A (premise corrected)` — see [#16](https://github.com/hyonchoi/todo-pipeline-orch/issues/16). Originally proposed routing this through `circuit.py::CircuitBreaker`'s halt/trip logic; that premise was wrong for the same reason as row 8: `CircuitBreaker` is cross-tick/disk-persisted/Slack-alerting, while the harness-local `_ConvergenceMonitor.__call__` raising `ConvergenceHaltError` when `ConvergenceDetector.should_halt()` returns true is in-memory/per-run/side-effect-free. Bypassing `circuit.py` here is correct, not a gap. | Cycle halts (poll loop exits, `all_terminal=True`) only after the harness-local `ConvergenceDetector`, not `circuit.py`'s breaker, reports the halt condition met | N/A |
-| 10 | All phases reach a terminal status (`done`/`failed`, cross-ref state-machine row on completion) | poll loop running | poll loop exits | (loop-internal — `TERMINAL_STATUSES` check against `kanban_tasks.get_todo_kanban_status`'s return, no separate production fn) | `all(s in TERMINAL_STATUSES for s in status_map.values())` is true; poll loop's `while not all_terminal` exits | `tests/test_harness.py::TestPollKanbanPhases::test_registers_phases_and_polls_to_completion` |
-| 11 | Poll loop exits (terminal or convergence-halted) | final status known | outcomes written to decision store | `kanban_tasks.observe_outcomes` | `.hermes/outcomes/<tick_id>-phases.json` contains one line per newly-done/failed/archived phase (`phase_complete`/`failed_at_phase_<key>` outcomes), high-watermarked against prior entries; `all_phases_complete` sentinel written once all phases in `COMPLETION_STATUSES` | `tests/test_kanban_tasks.py::TestObserveOutcomes::test_writes_phase_complete_outcomes`, `tests/test_harness.py::TestPollKanbanPhases::test_convergence_halt_stops_polling` |
-| 12 | Contract lookup at poll start | — | assignee resolved | `contract.load_contract` | `register_todo_phases`'s `--assignee` arg matches `PipelineContract.assignee` from `.hermes/pipeline.toml`, not a hardcoded `"default"` unless load genuinely fails (fallback path, logged as warning) | `tests/test_harness.py::TestPollKanbanPhases::test_assignee_resolved_from_contract`, `::test_assignee_defaults_when_contract_load_fails` |
-| 13 | Overall cycle timeout (`--timeout` seconds elapse with poll loop still running) | poll loop and possibly a Hermes worker are active | poll cancelled, Hermes run termination confirmed, task chain archived, then timeout reported | Harness `_run_with_timeout` sets the cooperative cancellation event and joins the poll thread; `kanban_tasks.cancel_todo_kanban_tasks` reclaims running workers, verifies ended run metadata, and archives child-first | `phase_timed_out` is emitted and reports/cleanup start only after local polling and remote work are quiescent; unconfirmed termination raises `HarnessCleanupError` and retains the workspace | `tests/test_harness.py::TestRunHarnessTimeout::test_timeout_stops_poll_and_remote_run_before_report`, `::test_timeout_retains_workspace_when_remote_termination_is_unconfirmed`, `tests/test_kanban_tasks.py::TestCancelTodoKanbanTasks` |
+| 10 | All phases reach a terminal status (`done`/`failed`, cross-ref state-machine row on completion) | poll loop running | poll loop exits | (loop-internal — `TERMINAL_STATUSES` check against `kanban_tasks.get_todo_kanban_status`'s return, no separate production fn) | `all(s in TERMINAL_STATUSES for s in status_map.values())` is true; poll loop's `while not all_terminal` exits | `tests/test_harness.py::TestPollRegisteredPhases` |
+| 11 | Poll loop exits (terminal or convergence-halted) | final status known | outcomes written to decision store | `kanban_tasks.observe_outcomes` | `.hermes/outcomes/<tick_id>-phases.json` contains one line per newly-done/failed/archived phase (`phase_complete`/`failed_at_phase_<key>` outcomes), high-watermarked against prior entries; `all_phases_complete` sentinel written once all phases in `COMPLETION_STATUSES` | `tests/test_kanban_tasks.py::TestObserveOutcomes::test_writes_phase_complete_outcomes`, `tests/test_harness.py::TestPollRegisteredPhases` |
+| 12 | Contract lookup at registration | — | assignee resolved | `contract.load_contract` (inside the production tick) | Registration and assignee resolution now flow through the production `tpo tick` subprocess; the harness poll loop never registers and only consumes the recovered registration (`recover_tick_registration`). `register_todo_phases`'s `--assignee` arg matches `PipelineContract.assignee` from the harness-written `.hermes/pipeline.toml` | `tests/test_harness.py::TestRecoverTickRegistration`, `::TestRunHarness`; assignee resolution is covered by the tick's own tests |
+| 13 | Overall cycle timeout (`--timeout` seconds elapse with poll loop still running) | poll loop and possibly a Hermes worker are active | poll cancelled, Hermes run termination confirmed, task chain archived, then timeout reported | Harness `_run_with_timeout` sets the cooperative cancellation event and joins the poll thread; `kanban_tasks.cancel_todo_kanban_tasks` reclaims running workers, verifies ended run metadata, and archives child-first | `phase_timed_out` is emitted and reports/cleanup start only after local polling and remote work are quiescent; unconfirmed termination raises `HarnessCleanupError` and retains the workspace | `tests/test_harness.py::TestRunHarness`, `::TestShutdownRun`, `tests/test_kanban_tasks.py::TestCancelTodoKanbanTasks` |
 
 ---
 
@@ -52,8 +53,8 @@ makes the harness call that transition's production function.
 
 **Row 7 — `_auto_complete_gate_tasks` predecessor/eligibility logic placement (TODO-24 follow-up):**
 Stays in `harness.py`. This logic only exists to compensate for the kanban
-board not propagating unblock signals in the harness's simulated environment
-— it is a harness-fixture workaround, not a tpo production
+board not propagating unblock signals while the harness polls the live run
+— it is a harness workaround, not a tpo production
 concern, so `phases.py` should not gain harness-specific compensation logic.
 The completion *mechanic* (the actual status flip) already correctly
 delegates to `kanban_tasks.complete_todo_kanban_task` per #19 — that part is
@@ -64,10 +65,11 @@ unchanged and unaffected by this decision.
 ## Not covered by this checklist (see design doc "NOT in scope")
 
 - Multi-project scan coverage
-- `tick.py::TickLock.acquire` — the kanban-as-scheduler path as implemented in
-  `harness.py` does not itself acquire a tick lock (that's a tpo
-  tick-runner concern, upstream of what the harness fixture drives). If TODO-21
-  changes this, add a row here.
+- `tick.py::TickLock.acquire`, issue selection, and phase registration — the
+  live harness runs the production `tpo tick` as a subprocess (see
+  [howto-live-integration-test-harness.md](howto-live-integration-test-harness.md)),
+  so these fire through the real tick runner rather than through harness-local
+  calls; rows 1-3 remain covered by the production functions' own tests.
 - Multi-project scan, Slack alert delivery, preflight startup checks.
 - `_dispatch_phase` / `phases.run` / marker lifecycle (`.hermes/phase_started/`)
   — these only fire in the non-kanban path, out of scope (see design doc

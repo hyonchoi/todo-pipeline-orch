@@ -245,8 +245,10 @@ and `TODOS-archive.md` are retired (see
   `in_progress_stale` is the expected blocked reason for a delivered issue.
   Completion markers count only when TPO wrote them (the current `gh` login, or
   a `tick=` naming a local `runs/<tick>` directory).
-- **Offline harness** — `tpo test` serves every `gh` call from a bundled fake
-  (`TPO_GH_BIN`, `TPO_FAKE_GH_STATE`); the minimum real `gh` is 2.44.
+- **Live harness** — `tpo test --repo OWNER/NAME` runs one production tick
+  against a disposable GitHub sandbox repository with the real `gh` (minimum
+  2.44; `TPO_GH_BIN` overrides are rejected). See
+  [howto-live-integration-test-harness.md](howto-live-integration-test-harness.md).
 
 ## See Also
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state
