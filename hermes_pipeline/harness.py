@@ -115,18 +115,32 @@ class HarnessTickError(RuntimeError):
     registered ``plan_hash`` is not the hash of the Plan text the harness
     committed, as a ``git replace`` forgery in the clone would produce),
     ``unexpected_selection`` (raised by
-    :func:`assert_tick_id_unchanged` when a later tick persisted a different, or
-    no, tick id), and, raised by the multi-tick driver :func:`drive_ticks`,
-    ``tick_stalled`` (two consecutive ticks settled on an identical, undelivered
-    status map, so no card progressed) and ``tick_budget_exhausted`` (the run
-    consumed :func:`pinned_tick_budget` ticks without reaching a verdict).
+    :func:`assert_tick_id_unchanged` when a later tick genuinely registered a
+    different tick id, or persisted none), and, raised by the multi-tick driver
+    :func:`drive_ticks`, ``tick_stalled`` (two consecutive ticks settled on an
+    identical, undelivered status map, or a later tick selected no work at all,
+    so no card progressed) and ``tick_budget_exhausted`` (the run consumed
+    :func:`pinned_tick_budget` ticks without reaching a verdict).
+
+    ``workers_unaccounted`` marks an error after which agents may be running
+    under a tick id this run cannot cancel, so no remote artifact may be
+    deleted. Only ``unexpected_selection`` for a genuinely registered new id
+    sets it; the driver folds it into ``TickDrive.workers_unaccounted``.
     """
 
-    def __init__(self, code: str, detail: str = "", *, tick_id: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        detail: str = "",
+        *,
+        tick_id: str | None = None,
+        workers_unaccounted: bool = False,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.detail = detail
         self.tick_id = tick_id
+        self.workers_unaccounted = workers_unaccounted
 
 
 _HARNESS_REPO_ENV = "TPO_HARNESS_REPO"
@@ -2220,11 +2234,15 @@ def poll_pinned_run(
     step_keys: Iterable[str],
     monitor: _ConvergenceMonitor,
     detector: ConvergenceDetector,
+    cancel_event: Any,
     poll_interval: float = 5.0,
     max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
-    cancel_event: Any = None,
 ) -> dict[str, str]:
     """Poll a ``requires_plan`` (native-sdd) run under one tick id until it settles.
+
+    *cancel_event* is required: the loop has no other bound, so a caller without
+    one would poll a stuck board forever. Its ``wait`` doubles as the backoff
+    sleep; setting it ends the poll with ``{}``.
 
     Unlike ``poll_registered_phases`` this never completes cards: gates
     (``validate:*``, ``review-acceptance``, ``human-gate``) belong to the
@@ -2277,11 +2295,8 @@ def poll_pinned_run(
     previous_status: dict[str, str] = dict(initial_status)
     current_interval = poll_interval
     while True:
-        if cancel_event is not None:
-            if cancel_event.wait(current_interval):
-                return {}
-        else:
-            time.sleep(current_interval)
+        if cancel_event.wait(current_interval):
+            return {}
         current_interval = min(current_interval * 1.5, max_poll_interval)
 
         try:
@@ -2749,6 +2764,32 @@ def recover_tick_registration(
     )
 
 
+def _first_phases_outcome(outcomes_dir: Path, tick_id: str) -> str | None:
+    """The ``outcome`` of the first ``<tick_id>-phases.json`` entry, else ``None``.
+
+    The production CLI writes exactly one of two first entries for a tick that
+    persisted an id: ``tick_started`` before it registers kanban cards and
+    spawns workers, or ``picked_none`` for a tick that selected no work and so
+    registers nothing and spawns nothing. ``None`` means the file is missing or
+    unreadable, which is never evidence that no worker exists.
+    """
+    first_entry: Any = None
+    try:
+        for line in (outcomes_dir / f"{tick_id}-phases.json").read_text().splitlines():
+            if line.strip():
+                first_entry = _json.loads(line)
+                break
+    except (OSError, ValueError):
+        first_entry = None
+    outcome = first_entry.get("outcome") if isinstance(first_entry, dict) else None
+    return outcome if isinstance(outcome, str) else None
+
+
+def _tick_picked_no_work(project_state: Path, tick_id: str) -> bool:
+    """True only when *tick_id* is provably a worker-less ``picked_none`` tick."""
+    return _first_phases_outcome(project_state / "outcomes", tick_id) == "picked_none"
+
+
 def _recover_started_tick(
     project_state: Path, *, tick_log: Path | None, previous_tick_id: str | None
 ) -> tuple[str, Path]:
@@ -2767,16 +2808,7 @@ def _recover_started_tick(
             raise HarnessTickError("failed_to_spawn", spawn_detail, tick_id=spawn_tick)
         raise HarnessTickError("tick_not_persisted", _log_tail(tick_log))
 
-    phases_path = outcomes_dir / f"{tick_id}-phases.json"
-    first_entry: Any = None
-    try:
-        for line in phases_path.read_text().splitlines():
-            if line.strip():
-                first_entry = _json.loads(line)
-                break
-    except (OSError, ValueError):
-        first_entry = None
-    outcome = first_entry.get("outcome") if isinstance(first_entry, dict) else None
+    outcome = _first_phases_outcome(outcomes_dir, tick_id)
     if outcome == "picked_none":
         raise HarnessTickError("picked_none", tick_id)
     if outcome != "tick_started":
@@ -2896,17 +2928,45 @@ def recover_pinned_registration(
 
 
 def assert_tick_id_unchanged(project_state: Path, *, expected: str) -> None:
-    """Raise ``unexpected_selection`` unless ``current_tick_id.txt`` still reads *expected*.
+    """Fail unless ``current_tick_id.txt`` still reads *expected*, or picked no work.
 
-    Later ticks of a plan-pinned run must not register a new tick; a missing or
-    blank id is reported with detail ``"missing"``. ``tick_id`` is *expected*
-    because that is the tick whose cards may still exist.
+    Later ticks of a plan-pinned run must not register a new tick. Which failure
+    it is decides whether the harness may still touch the remote, so the new
+    id's ``outcomes/<tick>-phases.json`` sentinel is re-read:
+
+    * ``picked_none`` -- the tick selected nothing, so it registered no card and
+      spawned no worker. That is the run making no progress, not another run's
+      cards appearing: reported as ``tick_stalled`` so the failure is
+      diagnosable and shutdown keeps the observed-card completeness set.
+    * anything else (``tick_started``, or no readable sentinel) -- a tick may
+      have registered and spawned agents under an id this run's shutdown will
+      not cancel. Reported as ``unexpected_selection`` with
+      ``workers_unaccounted``, which forbids destructive remote cleanup.
+
+    A missing or blank id is reported as ``unexpected_selection`` with detail
+    ``"missing"`` and no unaccounted workers: the CLI persists the tick id
+    before it registers cards or spawns anything, so nothing can be running
+    under an id that was never written.
+
+    ``tick_id`` is always *expected*, the tick whose cards may still exist.
     """
     current = read_current_tick_id(project_state)
     if current is None:
         raise HarnessTickError("unexpected_selection", "missing", tick_id=expected)
-    if current != expected:
-        raise HarnessTickError("unexpected_selection", f"{current} != {expected}", tick_id=expected)
+    if current == expected:
+        return
+    if _tick_picked_no_work(project_state, current):
+        raise HarnessTickError(
+            "tick_stalled",
+            f"tick {current} selected no work; the run made no progress",
+            tick_id=expected,
+        )
+    raise HarnessTickError(
+        "unexpected_selection",
+        f"{current} != {expected}",
+        tick_id=expected,
+        workers_unaccounted=True,
+    )
 
 
 def cards_for_registered_keys(phases: Sequence[Phase], keys: Sequence[str]) -> list[Phase]:
@@ -3073,21 +3133,31 @@ def _tick_failure(
     The subprocess may have persisted a tick id and spawned detached workers
     before failing, so the id is re-read and attached to the error for shutdown.
     When *known_tick_id* is given (a pinned run whose registration is already
-    recovered) whatever spawned belongs to that tick. Otherwise, when no new id
-    is readable the sandbox is not provably idle: ``workers_unaccounted``.
+    recovered) the error carries that tick, and the sandbox counts as idle only
+    while no *other* tick registered (see below). Otherwise, when no new id is
+    readable the sandbox is not provably idle: ``workers_unaccounted``.
     """
     if not isinstance(exc, HarnessTickError):
         exc = HarnessTickError("tick_failed", f"{type(exc).__name__}: {exc}"[:_ERROR_MESSAGE_MAX])
     if known_tick_id is not None:
-        # Invariant for a pinned run past its first tick: the run's issue is no
-        # longer eligible (it carries an in-flight registration), so the only
-        # tick a later ``tpo tick`` can persist is a worker-less ``picked_none``
-        # one. Nothing new can have spawned, so pinning the id to the registered
-        # tick and reporting ``workers_unaccounted=False`` is correct -- the
-        # registered tick is exactly what shutdown must quiesce. A genuinely new
-        # registered tick is caught separately by ``assert_tick_id_unchanged``.
+        # A pinned run past its first tick expects the run's issue to be
+        # ineligible (it carries an in-flight registration), so the only tick a
+        # later ``tpo tick`` should persist is a worker-less ``picked_none`` one.
+        # That is an expectation, not a guarantee, so it is checked rather than
+        # asserted: the id is re-read and, unless it is provably ``picked_none``
+        # (or unchanged, or never written -- the CLI persists before it spawns),
+        # agents may be running under a tick shutdown will not cancel, so the
+        # sandbox is not provably idle. The registered tick is still the id
+        # shutdown must quiesce; ``workers_unaccounted`` is what forbids
+        # destructive remote cleanup.
         exc.tick_id = known_tick_id
-        return exc, False
+        current_tick_id = read_current_tick_id(project_state)
+        registered_new_tick = (
+            current_tick_id is not None
+            and current_tick_id != known_tick_id
+            and not _tick_picked_no_work(project_state, current_tick_id)
+        )
+        return exc, registered_new_tick
     current_tick_id = read_current_tick_id(project_state)
     if current_tick_id is not None and current_tick_id != previous_tick_id:
         exc.tick_id = current_tick_id
@@ -3431,6 +3501,10 @@ def _drive_pinned_ticks(
             except HarnessTickError as exc:
                 tick_error = exc
                 failure_code = exc.code
+                # An ``unexpected_selection`` for a genuinely registered id means
+                # agents may be running under a tick shutdown cannot cancel; the
+                # flag is what stops the run from deleting the branch they push.
+                workers_unaccounted = workers_unaccounted or exc.workers_unaccounted
                 _log_tick_error(exc, tick_log)
                 break
 
@@ -3524,9 +3598,13 @@ def _drive_pinned_ticks(
         # the keys seen so far and the error rather than unwinding past them.
         return _partial(poll_cancelled=True, pending_error=exc)
     except Exception as exc:
-        # Nothing here proved the sandbox idle, and a tick may already have
-        # spawned detached workers, so the caller must assume they exist.
-        workers_unaccounted = True
+        # Nothing here proved the sandbox idle. Without a registration there is
+        # no tick id to cancel and a tick may already have spawned detached
+        # workers, so the caller must assume they exist and touch nothing
+        # remote. With one, shutdown can cancel that tick's cards and prove
+        # quiescence, so forfeiting cleanup would only strand the sandbox
+        # branch and PR.
+        workers_unaccounted = workers_unaccounted or registration is None
         return _partial(pending_error=exc)
 
     return _partial()
@@ -3661,6 +3739,16 @@ def _close_issue_leftover(project_dir: Path, sandbox: SandboxRepo, number: int, 
     return []
 
 
+def _not_quiescent_leftover(
+    tick_id: str, pointer: str, inspect_hint: str, remote_hint: str
+) -> str:
+    """The leftover naming a tick whose board never went fully terminal."""
+    return (
+        f"kanban not quiescent for tick {tick_id} ({pointer}); branch/PR cleanup skipped;"
+        f" inspect: {inspect_hint}; {remote_hint}"
+    )
+
+
 def shutdown_run(
     project_dir: Path,
     sandbox: SandboxRepo,
@@ -3700,7 +3788,12 @@ def shutdown_run(
     is passed like ``exc.tick_id`` above; when none is readable pass ``tick_id=None``
     with ``assume_workers_may_exist=True``, which closes the issue only (nothing
     remote is deleted) and reports ``kanban_quiescent=False`` with a leftover
-    pointer, since a worker may have spawned under an unknown tick. Order:
+    pointer, since a worker may have spawned under an unknown tick.
+    ``assume_workers_may_exist`` is honoured with a known *tick_id* too: a later
+    tick of a plan-pinned run can register a tick of its own, and quiescence
+    proven on *tick_id*'s cards says nothing about the agents that one spawned,
+    so the tick is still cancelled and quiesced but nothing remote is deleted.
+    Order:
     cancel the tick's kanban tasks, wait for proven quiescence on the
     archived-inclusive snapshot, then (only when proven) discover and delete remote
     artifacts. Destructive branch/PR cleanup never runs while an agent may still be
@@ -3798,12 +3891,33 @@ def shutdown_run(
             leftovers=(kept_leftover,), branch_deletion_skipped=True,
         )
 
+    if assume_workers_may_exist:
+        # Quiescence was proven for *tick_id*'s cards only. Some other tick
+        # registered and may have spawned agents the cancel above never reached,
+        # so the branch this run would force-delete can still be pushed to.
+        unknown = (
+            f"workers may exist under an unrecovered tick ({pointer}); branch/PR cleanup"
+            f" skipped; inspect: {inspect_hint}; {remote_hint}"
+        )
+        log.warning("harness shutdown: %s", unknown)
+        leftovers = _close_issue_leftover(project_dir, sandbox, issue.number, log=log)
+        leftovers.append(unknown)
+        if not kanban_quiescent:
+            # Two different manual recoveries, so the operator is owed both
+            # facts: agents may be running under a tick this run cannot name,
+            # *and* this tick's own board never went terminal.
+            leftovers.append(_not_quiescent_leftover(tick_id, pointer, inspect_hint, remote_hint))
+            log.warning(
+                "harness shutdown: kanban not quiescent for tick %s either (%s)", tick_id, pointer
+            )
+        return ShutdownReport(
+            tick_id=tick_id, kanban_quiescent=kanban_quiescent, remote_all_ok=False,
+            leftovers=tuple(leftovers), branch_deletion_skipped=True,
+        )
+
     if not kanban_quiescent:
         leftovers = _close_issue_leftover(project_dir, sandbox, issue.number, log=log)
-        leftovers.append(
-            f"kanban not quiescent for tick {tick_id} ({pointer}); branch/PR cleanup skipped;"
-            f" inspect: {inspect_hint}; {remote_hint}"
-        )
+        leftovers.append(_not_quiescent_leftover(tick_id, pointer, inspect_hint, remote_hint))
         log.warning(
             "harness shutdown: kanban not quiescent for tick %s; branch/PR cleanup skipped, live remote"
             " artifacts may remain (%s)", tick_id, pointer,
@@ -4136,7 +4250,11 @@ def run_harness(
                 provenance_dir=provenance_dir,
                 staging_root=staging_root,
                 keep_remote=keep_dir,
-                assume_workers_may_exist=workers_unaccounted and shutdown_tick_id is None,
+                # Not gated on a missing tick id: a pinned run can learn that a
+                # *second* tick registered, whose agents shutdown cannot cancel
+                # even though the pinned tick id is known. Destructive cleanup
+                # must be skipped whenever workers may still be pushing.
+                assume_workers_may_exist=workers_unaccounted,
             )
         except Exception as exc:
             log.error("harness shutdown failed (%s: %s) after %s", type(exc).__name__, exc, pointer)

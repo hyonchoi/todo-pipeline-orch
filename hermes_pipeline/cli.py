@@ -1567,7 +1567,13 @@ def _tick_project(
             assignee="pipeline",
             capabilities=tuple(sorted(required_capabilities(phases))),
             profile=LEGACY_IMPLICIT_PROFILE,
+            # No contract declares nothing, so the profile is as implicit as it
+            # gets: this is the population ADR-0004 most needs to reach with the
+            # migration hint, and the default (declared) would silence it.
+            profile_declared=False,
         )
+        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
+            log.warning("project %s: %s", project_slug, notice)
         try:
             result = _cli_sp.run(
                 ["hermes", "profile", "show", contract.assignee],

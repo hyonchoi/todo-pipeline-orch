@@ -82,6 +82,9 @@ Out of scope:
   agent-skills plugin skills are installed (out of scope, see Decisions).
 - Migrating existing projects — `profile` defaults to `"gstack"`, matching
   current behavior with zero contract changes required.
+  *Superseded by [ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md)
+  (2026-09-02): the default profile is `native-sdd`; `gstack` is deprecated.
+  Contracts without a `profile` key still resolve to `gstack`.*
 
 ## Agent-skills profile phase mapping
 

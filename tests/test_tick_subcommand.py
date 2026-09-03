@@ -1102,5 +1102,16 @@ class TestTickProjectContractWarning:
             and "tpo init" in r.getMessage() and r.levelname == "WARNING"
             for r in caplog.records
         )
-        # The contract-missing fallback stays silent about profile deprecation.
-        assert not any("deprecated" in r.getMessage() for r in caplog.records)
+        # A contract-less project resolves to the same deprecated implicit
+        # profile as a contract that omits `profile`, and it is the population
+        # that most needs the migration hint (ADR-0004), so it gets the same
+        # single notice.
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        assert deprecations == [
+            "project demo: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]

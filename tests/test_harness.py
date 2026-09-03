@@ -1398,6 +1398,74 @@ class TestRunHarness:
         assert live.kwargs["shutdown_run"]["expected_phase_keys"] is None
         assert live.kwargs["shutdown_run"]["assume_workers_may_exist"] is False
 
+    def test_native_sdd_new_registration_blocks_destructive_cleanup(self, live):
+        """A later tick that genuinely registers may have spawned live workers.
+
+        Shutdown cancels only the pinned tick, so those workers keep pushing:
+        the run must hand shutdown ``assume_workers_may_exist`` so no branch or
+        PR is deleted underneath them.
+        """
+        live.pin([{"plan:task-1": "done", "validate:task-1": "blocked"}, _delivered_board()])
+        scripted_tick = live.tick
+        ticks = {"n": 0}
+
+        def tick(*args, **kwargs):
+            ticks["n"] += 1
+            result = scripted_tick(*args, **kwargs)
+            if ticks["n"] == 2:
+                outcomes = live.project_dir / ".hermes" / "outcomes"
+                outcomes.mkdir(parents=True, exist_ok=True)
+                (outcomes / "T2-phases.json").write_text(
+                    json.dumps({"outcome": "tick_started"}) + "\n"
+                )
+                live.current_tick_id = "T2"
+            return result
+
+        live.tick = tick
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 1
+        assert result.summary.startswith("[unexpected_selection] ")
+        assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
+        assert live.kwargs["shutdown_run"]["assume_workers_may_exist"] is True
+        assert "discover_remote_artifacts" not in live.order
+
+    def test_native_sdd_picked_none_tick_keeps_cleanup_on_the_observed_cards(self, live):
+        """A worker-less ``picked_none`` tick is no-progress, not a rogue run.
+
+        Nothing spawned under the new id, so shutdown keeps its observed-card
+        completeness set and remote cleanup still runs.
+        """
+        live.pin([{"plan:task-1": "done", "validate:task-1": "blocked"}, _delivered_board()])
+        scripted_tick = live.tick
+        ticks = {"n": 0}
+
+        def tick(*args, **kwargs):
+            ticks["n"] += 1
+            result = scripted_tick(*args, **kwargs)
+            if ticks["n"] == 2:
+                outcomes = live.project_dir / ".hermes" / "outcomes"
+                outcomes.mkdir(parents=True, exist_ok=True)
+                (outcomes / "T2-phases.json").write_text(
+                    json.dumps({"outcome": "picked_none"}) + "\n"
+                )
+                live.current_tick_id = "T2"
+            return result
+
+        live.tick = tick
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 1
+        assert result.summary.startswith("[tick_stalled] ")
+        assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
+        assert live.kwargs["shutdown_run"]["assume_workers_may_exist"] is False
+        assert live.kwargs["shutdown_run"]["expected_phase_keys"] == (
+            "plan:task-1",
+            "validate:task-1",
+        )
+
     def test_native_sdd_stall_shuts_down_the_cards_it_observed(self, live):
         """A stalled pinned run registered fully, but its board is only partly built.
 
@@ -2717,7 +2785,34 @@ class TestPollPinnedRun:
         mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={})
         monitor, detector = self._monitor(tmp_path)
         with pytest.raises(ValueError):
-            self._poll(monitor, detector, [])
+            self._poll(monitor, detector, [], cancel_event=self._Waiter())
+
+    def test_cancel_event_is_required(self, tmp_path, mocker):
+        """The event is the poller's only bound: without it the loop never ends."""
+        from hermes_pipeline.harness import poll_pinned_run
+
+        monitor, detector = self._monitor(tmp_path)
+        status = mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={}
+        )
+        # Not an Exception: a poller that falls back to sleeping would otherwise
+        # spin here forever instead of failing.
+        mocker.patch(
+            "time.sleep",
+            side_effect=self._ScriptExhausted("poll_pinned_run slept without a cancel_event"),
+        )
+
+        with pytest.raises(TypeError, match="cancel_event"):
+            poll_pinned_run(
+                project_slug="demo",
+                tick_id="01TICK",
+                todo_id="TODO-1",
+                step_keys=["plan"],
+                monitor=monitor,
+                detector=detector,
+            )
+
+        status.assert_not_called()
 
 
 class TestResolveSandboxRepo:
@@ -6010,6 +6105,53 @@ class TestShutdownRun:
         stubs.cancel.assert_not_called()
         assert any("kept remote artifacts" in leftover for leftover in report.leftovers)
 
+    def test_known_tick_with_possible_workers_never_deletes_the_remote(
+        self, stubs, tmp_path: Path, caplog
+    ):
+        """Quiescence on the known tick proves nothing about an unrecovered one.
+
+        A second tick can register its own id and spawn workers the cancel above
+        never reaches; deleting the branch they are pushing is the worst outcome
+        the harness can produce, so the destructive step is skipped even though
+        the known board went quiescent.
+        """
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            report, _sleeps = self._run(tmp_path, assume_workers_may_exist=True)
+
+        assert report.tick_id == "tick-1"
+        assert report.kanban_quiescent is True
+        assert report.remote_all_ok is False
+        assert report.branch_deletion_skipped is True
+        stubs.cancel.assert_called_once()
+        stubs.discover.assert_not_called()
+        stubs.cleanup.assert_not_called()
+        stubs.close.assert_called_once_with(tmp_path / "clone", 7, repo="acme/sandbox")
+        assert any(
+            "workers may exist" in leftover and "branch/PR cleanup skipped" in leftover
+            for leftover in report.leftovers
+        )
+
+    def test_known_tick_neither_quiescent_nor_accounted_reports_both_leftovers(
+        self, stubs, tmp_path: Path
+    ):
+        """Skipping cleanup for possible workers must not hide a live board.
+
+        Both facts drive different manual recovery, so the operator gets both.
+        """
+        stubs.snapshot.return_value = []
+
+        report, _sleeps = self._run(tmp_path, assume_workers_may_exist=True)
+
+        assert report.kanban_quiescent is False
+        assert report.remote_all_ok is False
+        assert report.branch_deletion_skipped is True
+        assert any("workers may exist" in leftover for leftover in report.leftovers)
+        assert any(
+            "kanban not quiescent for tick tick-1" in leftover for leftover in report.leftovers
+        )
+        stubs.discover.assert_not_called()
+        stubs.cleanup.assert_not_called()
+
     def test_no_tick_id_closes_issue_only(self, stubs, tmp_path: Path, caplog):
         with caplog.at_level(logging.INFO, logger="hermes_pipeline.harness"):
             report, sleeps = self._run(tmp_path, tick_id=None)
@@ -6452,6 +6594,37 @@ _PINNED_BRANCH = "feat/pinned-run"
 _PINNED_STEPS = ("plan:task-1", "validate:task-1")
 
 
+def _delivered_path_boards() -> tuple[dict[str, str], ...]:
+    """The boards a delivered plan-pinned run settles on, one per tick.
+
+    Shared between ``test_native_sdd_reaches_delivered_after_four_ticks``, which
+    pins the tick count, and ``TestPinnedTickBudget``, which needs a bound that
+    moves with the drive instead of a literal: if the delivered path ever needs
+    another tick, the budget's lower bound tightens with it.
+    """
+    from hermes_pipeline.kanban_tasks import BLOCKED
+    from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+    return (
+        {"plan:task-1": "done", "validate:task-1": BLOCKED},
+        {"plan:task-1": "done", "validate:task-1": "done", "review:0": "done"},
+        {
+            "plan:task-1": "done",
+            "validate:task-1": "done",
+            "review:0": "done",
+            "review-acceptance": "done",
+        },
+        {
+            "plan:task-1": "done",
+            "validate:task-1": "done",
+            "review:0": "done",
+            "review-acceptance": "done",
+            FINISH_KEY: "done",
+            HUMAN_GATE_KEY: BLOCKED,
+        },
+    )
+
+
 def _pinned_manifest(todo_id: str) -> str:
     payload = {
         "schema_version": 1,
@@ -6803,8 +6976,26 @@ class TestAssertTickIdUnchanged:
 
         assert assert_tick_id_unchanged(tmp_path, expected="01TICK") is None
 
-    def test_changed_is_unexpected_selection(self, tmp_path: Path):
+    @staticmethod
+    def _sentinel(tmp_path: Path, tick_id: str, outcome: str) -> None:
+        outcomes = tmp_path / "outcomes"
+        outcomes.mkdir(parents=True, exist_ok=True)
+        (outcomes / f"{tick_id}-phases.json").write_text(json.dumps({"outcome": outcome}) + "\n")
+
+    @pytest.mark.parametrize(
+        "outcome", [None, "tick_started"], ids=["no-sentinel", "tick_started"]
+    )
+    def test_changed_is_unexpected_selection_with_unaccounted_workers(
+        self, tmp_path: Path, outcome
+    ):
+        """A new id that is not a worker-less ``picked_none`` tick may have spawned.
+
+        Its workers run under an id shutdown never cancels, so the run must not
+        be allowed to delete the branch they may still be pushing.
+        """
         (tmp_path / "current_tick_id.txt").write_text("02TICK\n")
+        if outcome is not None:
+            self._sentinel(tmp_path, "02TICK", outcome)
 
         with pytest.raises(HarnessTickError) as excinfo:
             assert_tick_id_unchanged(tmp_path, expected="01TICK")
@@ -6812,9 +7003,29 @@ class TestAssertTickIdUnchanged:
         assert excinfo.value.code == "unexpected_selection"
         assert excinfo.value.detail == "02TICK != 01TICK"
         assert excinfo.value.tick_id == "01TICK"
+        assert excinfo.value.workers_unaccounted is True
+
+    def test_picked_none_new_id_is_a_stall_not_a_rogue_registration(self, tmp_path: Path):
+        """A ``picked_none`` tick persists a new id but registers and spawns nothing.
+
+        Reporting it as ``unexpected_selection`` would hide the real fault (the
+        run's board stopped progressing) and forfeit the observed-card
+        completeness check, so it is reported as a stall instead.
+        """
+        (tmp_path / "current_tick_id.txt").write_text("02TICK\n")
+        self._sentinel(tmp_path, "02TICK", "picked_none")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            assert_tick_id_unchanged(tmp_path, expected="01TICK")
+
+        assert excinfo.value.code == "tick_stalled"
+        assert "02TICK" in excinfo.value.detail
+        assert excinfo.value.tick_id == "01TICK"
+        assert excinfo.value.workers_unaccounted is False
 
     @pytest.mark.parametrize("content", [None, " \n"], ids=["absent", "blank"])
     def test_missing_is_unexpected_selection(self, tmp_path: Path, content):
+        """No id at all means nothing persisted, and the CLI persists before it spawns."""
         if content is not None:
             (tmp_path / "current_tick_id.txt").write_text(content)
 
@@ -6824,6 +7035,7 @@ class TestAssertTickIdUnchanged:
         assert excinfo.value.code == "unexpected_selection"
         assert excinfo.value.detail == "missing"
         assert excinfo.value.tick_id == "01TICK"
+        assert excinfo.value.workers_unaccounted is False
 
 
 class TestClassifyPinnedRun:
@@ -7003,12 +7215,24 @@ class TestPinnedTickBudget:
         return MAX_REVIEW_ROUNDS
 
     @pytest.mark.parametrize("count", [1, 2, 3, 4, 9, 20])
-    def test_formula(self, count):
+    def test_budget_outlasts_the_delivered_path_and_never_shrinks(self, count):
+        """A budget too small to reach the handoff fails every run before it.
+
+        Restating the formula here could only detect a *changed* formula, never
+        a wrong one. The bound with force is the delivered path's own script:
+        one tick per board it settles, plus the two ticks every review round the
+        reconciler may add. Grow that script and this lower bound grows with it.
+        """
         from hermes_pipeline.harness import pinned_tick_budget
 
         step_keys = tuple(f"plan:task-{i}" for i in range(count))
+        delivered_ticks = len(_delivered_path_boards())
 
-        assert pinned_tick_budget(step_keys) == count // 2 + 5 + 2 * self._rounds()
+        budget = pinned_tick_budget(step_keys)
+
+        assert budget >= delivered_ticks + 2 * self._rounds()
+        # More tasks can never buy fewer ticks.
+        assert budget >= pinned_tick_budget(step_keys[:-1])
 
     def test_tracks_max_review_rounds_rather_than_a_literal(self):
         from hermes_pipeline import harness as mod
@@ -7084,6 +7308,13 @@ class TestDriveTicks:
         now = {"t": start}
         mocker.patch("hermes_pipeline.harness.time.monotonic", side_effect=lambda: now["t"])
         return now
+
+    @staticmethod
+    def _phases_sentinel(state: Path, tick_id: str, outcome: str) -> None:
+        """Write the first ``outcomes/<tick_id>-phases.json`` entry the CLI writes."""
+        outcomes = state / "outcomes"
+        outcomes.mkdir(parents=True, exist_ok=True)
+        (outcomes / f"{tick_id}-phases.json").write_text(json.dumps({"outcome": outcome}) + "\n")
 
     def _fake_run_tick(self, state: Path, tick_ids, recorder=None, clock=None, cost=0.0):
         """A ``run_tick`` stand-in that persists the next scripted tick id."""
@@ -7346,29 +7577,12 @@ class TestDriveTicks:
 
     def test_native_sdd_reaches_delivered_after_four_ticks(self, tmp_path: Path, mocker):
         from hermes_pipeline.harness import drive_ticks
-        from hermes_pipeline.kanban_tasks import BLOCKED
         from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
-        maps = [
-            {"plan:task-1": "done", "validate:task-1": BLOCKED},
-            {"plan:task-1": "done", "validate:task-1": "done", "review:0": "done"},
-            {
-                "plan:task-1": "done",
-                "validate:task-1": "done",
-                "review:0": "done",
-                "review-acceptance": "done",
-            },
-            {
-                "plan:task-1": "done",
-                "validate:task-1": "done",
-                "review:0": "done",
-                "review-acceptance": "done",
-                FINISH_KEY: "done",
-                HUMAN_GATE_KEY: BLOCKED,
-            },
-        ]
+        maps = list(_delivered_path_boards())
+        assert len(maps) == 4
         order: list[str] = []
         registration, run_tick, poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 4, maps=maps, recorder=order
@@ -7733,8 +7947,129 @@ class TestDriveTicks:
         assert drive.tick_error.code == "unexpected_selection"
         assert drive.tick_error.tick_id == _PINNED_TICK
         assert drive.registration is registration
+        assert drive.workers_unaccounted is True
         assert len(poll.calls) == 1
         assert drive.ticks_run == 2
+
+    def test_native_sdd_picked_none_tick_is_a_stall_with_workers_accounted(
+        self, tmp_path: Path, mocker
+    ):
+        """A later tick that selected nothing registered nothing: no new workers.
+
+        It is the diagnosable no-progress signal (``tick_stalled``), and it must
+        keep the observed-card completeness set so shutdown can still prove
+        quiescence and clean the remote up.
+        """
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration, _run, poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK, "02NONE"],
+            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+        )
+        self._phases_sentinel(state, "02NONE", "picked_none")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is False
+        assert drive.failure_code == "tick_stalled"
+        assert drive.tick_error is not None
+        assert drive.tick_error.code == "tick_stalled"
+        assert drive.tick_error.tick_id == _PINNED_TICK
+        assert drive.workers_unaccounted is False
+        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+        assert drive.ticks_run == 2
+
+    @pytest.mark.parametrize(
+        ("outcome", "unaccounted"),
+        [("tick_started", True), ("picked_none", False)],
+        ids=["registered", "picked_none"],
+    )
+    def test_native_sdd_tick_failure_after_a_new_id_re_reads_the_sentinel(
+        self, tmp_path: Path, mocker, outcome, unaccounted
+    ):
+        """A pinned tick can still fail *after* persisting a new id.
+
+        Only a genuinely registered one may have spawned workers under an id
+        shutdown cannot cancel; a ``picked_none`` one never spawns.
+        """
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration = self._registration(state)
+        registration.run_dir.mkdir(parents=True, exist_ok=True)
+        ticks = {"n": 0}
+
+        def _run(slug, *, cwd, log_path, timeout):
+            ticks["n"] += 1
+            if ticks["n"] == 1:
+                (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+                return 0
+            (state / "current_tick_id.txt").write_text("02NEW\n")
+            self._phases_sentinel(state, "02NEW", outcome)
+            raise HarnessTickError("tick_timeout", "60s")
+
+        mocker.patch("hermes_pipeline.harness.run_tick", side_effect=_run)
+        mocker.patch(
+            "hermes_pipeline.harness.recover_pinned_registration", return_value=registration
+        )
+        mocker.patch(
+            "hermes_pipeline.harness.poll_pinned_run",
+            return_value={"plan:task-1": "done", "validate:task-1": "blocked"},
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert ticks["n"] == 2
+        assert drive.failure_code == "tick_timeout"
+        assert drive.tick_error is not None
+        assert drive.tick_error.tick_id == _PINNED_TICK
+        assert drive.workers_unaccounted is unaccounted
+
+    @pytest.mark.parametrize(
+        ("registered", "unaccounted"),
+        [(True, False), (False, True)],
+        ids=["known-registration", "unknown-registration"],
+    )
+    def test_native_sdd_internal_error_forfeits_cleanup_only_when_unregistered(
+        self, tmp_path: Path, mocker, registered, unaccounted
+    ):
+        """An internal driver error is not by itself evidence of rogue workers.
+
+        With the registration in hand shutdown can cancel that tick's cards and
+        prove quiescence, so remote cleanup is still safe and skipping it would
+        strand the sandbox branch and PR. Without one there is no id to cancel
+        and a tick may already have spawned.
+        """
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration, _run, _poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK],
+            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+        )
+        if registered:
+            mocker.patch(
+                "hermes_pipeline.harness.classify_pinned_run", side_effect=RuntimeError("boom")
+            )
+        else:
+            mocker.patch(
+                "hermes_pipeline.harness.recover_pinned_registration",
+                side_effect=RuntimeError("boom"),
+            )
+
+        drive = drive_ticks(**kwargs)
+
+        assert isinstance(drive.pending_error, RuntimeError)
+        assert (drive.registration is registration) is registered
+        assert drive.workers_unaccounted is unaccounted
 
     def test_native_sdd_budget_exhaustion(self, tmp_path: Path, mocker):
         from hermes_pipeline.harness import drive_ticks, pinned_tick_budget

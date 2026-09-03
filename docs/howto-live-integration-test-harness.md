@@ -137,7 +137,9 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    `tick_completed` `{tick_no, status_map}`; a board identical to the previous
    tick's also emits `tick_stalled` `{tick_no, status_map}` and fails the run
    with `tick_stalled`. Every tick re-asserts that `current_tick_id.txt` still
-   names the run (`unexpected_selection`). The loop is bounded by
+   names the run: a tick that registered a different run fails with
+   `unexpected_selection`, while one that merely selected nothing counts as no
+   progress and reports `tick_stalled`. The loop is bounded by
    `pinned_tick_budget(step_keys)` = `len(step_keys) // 2 + 5 + 2 *
    MAX_REVIEW_ROUNDS`; exhausting it fails with `tick_budget_exhausted`, which
    means the run is stuck rather than out of legitimate work. The run is
@@ -270,7 +272,7 @@ is where the run is supposed to stop.
 | `registration_invalid` | The run's `registration.json` was rejected by the production contract loader; the detail is the contract error |
 | `registration_base_mismatch` | The run pinned a `base_sha` other than the harness's Plan commit |
 | `registration_plan_mismatch` | The registered `plan_hash` is not the hash of the Plan text the harness committed (what a `git replace` forgery in the clone would produce) |
-| `unexpected_selection` | A later tick persisted a different `current_tick_id.txt`, or none; the harness refuses to keep driving another run's cards |
+| `unexpected_selection` | A later tick registered a *different* run in `current_tick_id.txt`, or persisted none; the harness refuses to keep driving another run's cards, and because that run's workers are unaccounted for it closes the issue but skips branch and PR cleanup. A later tick that merely selected nothing (`picked_none`) is treated as no progress and reported as `tick_stalled` instead |
 | `tick_stalled` | Two consecutive ticks settled on an identical, undelivered board — no card progressed. Re-run with `--keep` and read `artifacts/tick.log` plus the last `tick_stalled` event's `status_map` |
 | `tick_budget_exhausted` | The plan-pinned run consumed `pinned_tick_budget(step_keys)` ticks without reaching a verdict; the budget is deliberately generous, so this means the run is stuck |
 | `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head` | PR invariant failed (none, several, a non-open attributable PR, a PR whose base is not the default branch, or — plan-pinned only — a PR raised from a head other than the registered branch; a wrong-base PR is still cleaned up) |
