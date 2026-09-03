@@ -1461,11 +1461,15 @@ class TestCmdInit:
         _cmd_init(FakeArgs(project="demo", force=False), config)
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         contract.write_text('schema_version = 2\nassignee = "custom"\n')
+        capsys.readouterr()  # drop the fresh-write output
 
         result = _cmd_init(FakeArgs(project="demo", force=False), config)
 
         assert result == 0
-        assert "already exists" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "already exists" in out
+        # The deprecation note belongs to a fresh write, not the no-op path.
+        assert "deprecated" not in out
         assert 'assignee = "custom"' in contract.read_text()
 
     def test_init_force_overwrites(self, tmp_path):
@@ -1546,7 +1550,7 @@ class TestInitProfile:
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         assert 'profile = "agent-skills"' in contract.read_text()
 
-    def test_init_without_profile_flag_defaults_to_gstack(self, tmp_path):
+    def test_init_without_profile_flag_defaults_to_gstack(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         _create_project(projects_dir, "demo")
@@ -1557,6 +1561,27 @@ class TestInitProfile:
         assert result == 0
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         assert 'profile = "gstack"' in contract.read_text()
+        out = capsys.readouterr().out
+        assert "Wrote pipeline execution contract" in out
+        assert (
+            "note: profile 'gstack' is deprecated; new projects default to "
+            "'native-sdd' (see docs/howto-native-sdd-profile.md)\n"
+        ) in out
+
+    def test_init_native_sdd_prints_no_deprecation_note(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="native-sdd"), config
+        )
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Wrote pipeline execution contract" in out
+        assert "deprecated" not in out
 
     def test_init_unknown_profile_returns_error(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"
@@ -1679,6 +1704,12 @@ class TestCmdDoctor:
         assert "Plan readiness: eligible=0 blocked=0\n" in output
         assert "todos-manager" not in output
         assert "Skill parity" not in output
+        assert (
+            "DEPRECATED: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd\n"
+        ) in output
+        assert output.count("DEPRECATED:") == 1
 
     def test_doctor_drift_returns_1(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"
@@ -1868,7 +1899,29 @@ class TestDoctorProfileAware:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 0
-        assert "profile=gstack" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "profile=gstack" in out
+        assert (
+            "DEPRECATED: profile 'gstack' is deprecated; migrate with: "
+            "tpo init demo --force --profile native-sdd\n"
+        ) in out
+        assert "does not declare a profile" not in out
+
+    def test_doctor_native_sdd_emits_no_deprecation(
+        self, monkeypatch, tmp_path, capsys, fake_gh
+    ):
+        _seed_doctor_github(fake_gh)
+        args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            _allow_hermes_registry_skill_check,
+        )
+
+        assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+
+        out = capsys.readouterr().out
+        assert "profile=native-sdd" in out
+        assert "DEPRECATED:" not in out
 
 
 class TestDoctorMissingProfile:

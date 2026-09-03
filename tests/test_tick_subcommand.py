@@ -566,8 +566,8 @@ class TestTickSubcommand:
             counts_as_no_progress=True,
         )
 
-    def test_tick_no_prior_proceeds(self, tmp_path, mocker):
-        """No prior tick -> proceed normally."""
+    def test_tick_no_prior_proceeds(self, tmp_path, mocker, caplog):
+        """No prior tick -> proceed normally; undeclared profile warns once."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
         mock_selection.return_value = _make_decision()
 
@@ -579,8 +579,56 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
-        result = _cmd_tick(FakeArgs(), config)
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            result = _cmd_tick(FakeArgs(), config)
         assert result == 0
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        # Exactly one notice: the undeclared case already carries the migration.
+        assert deprecations == [
+            "project demo: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+    def test_tick_explicit_gstack_profile_warns_deprecated(self, tmp_path, mocker, caplog):
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "gstack"\n'
+        )
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        assert deprecations == [
+            "project demo: profile 'gstack' is deprecated; migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+    def test_tick_native_sdd_profile_emits_no_deprecation(self, tmp_path, mocker, caplog):
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "native-sdd"\n'
+        )
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        assert not any("deprecated" in r.getMessage() for r in caplog.records)
 
     def test_tick_selection_uses_project_state_dir(self, tmp_path, mocker):
         """Selection decisions are persisted under the project, not global state."""
@@ -1001,3 +1049,5 @@ class TestTickProjectContractWarning:
             and "tpo init" in r.getMessage() and r.levelname == "WARNING"
             for r in caplog.records
         )
+        # The contract-missing fallback stays silent about profile deprecation.
+        assert not any("deprecated" in r.getMessage() for r in caplog.records)

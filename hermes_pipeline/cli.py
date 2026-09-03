@@ -1451,6 +1451,30 @@ def _record_tracker_error(
         )
 
 
+def _profile_deprecation_notices(contract, phase_profile, project_slug: str) -> list[str]:
+    """Return deprecation notices for the contract's profile selection.
+
+    Emits at most one notice: when ``pipeline.toml`` omits ``profile`` (the
+    implicit legacy default is deprecated), or else when the resolved profile
+    is itself marked ``deprecated`` in its phases.yaml. Informational only:
+    callers must not change exit codes based on these.
+    """
+    from .contract import DEFAULT_PROFILE
+
+    migrate = f"tpo init {project_slug} --force --profile {DEFAULT_PROFILE}"
+    notices = []
+    if not contract.profile_declared:
+        notices.append(
+            "pipeline.toml does not declare a profile; the implicit default "
+            f"'{contract.profile}' is deprecated. Migrate with: {migrate}"
+        )
+    elif phase_profile.deprecated:
+        notices.append(
+            f"profile '{contract.profile}' is deprecated; migrate with: {migrate}"
+        )
+    return notices
+
+
 def _tick_project(
     *,
     project_dir: Path,
@@ -1508,6 +1532,8 @@ def _tick_project(
         phase_profile = load_phase_profile(phases_path)
         phases = list(phase_profile.phases)
         prerequisites = load_profile_prerequisites(contract.profile)
+        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
+            log.warning("project %s: %s", project_slug, notice)
     except ContractMissingError:
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
@@ -2500,7 +2526,7 @@ def _cmd_init(args, config: Config) -> int:
         contract_path,
         write_default_contract,
     )
-    from .phases import resolve_profile_phases_path
+    from .phases import load_phase_profile, resolve_profile_phases_path
     from .project_config import _get_project_state_dir
 
     profile = getattr(args, "profile", "gstack") or "gstack"
@@ -2513,7 +2539,7 @@ def _cmd_init(args, config: Config) -> int:
         print(f"ERROR: {msg}")
         return 2
     try:
-        resolve_profile_phases_path(profile)
+        phase_profile = load_phase_profile(resolve_profile_phases_path(profile))
     except ContractSchemaError as e:
         log.error("invalid profile: %s", e)
         print(f"ERROR: {e}")
@@ -2561,6 +2587,13 @@ def _cmd_init(args, config: Config) -> int:
     else:
         print(
             f"Pipeline execution contract already exists: {path} (use --force to regenerate)"
+        )
+    if written and phase_profile.deprecated:
+        from .contract import DEFAULT_PROFILE
+
+        print(
+            f"note: profile '{profile}' is deprecated; new projects default to "
+            f"'{DEFAULT_PROFILE}' (see docs/howto-native-sdd-profile.md)"
         )
     return 0
 
@@ -2638,7 +2671,9 @@ def _cmd_doctor(args, config: Config) -> int:
     Exit codes: 0 clean; 1 drift (capability mismatch, registration or issue
     drift) or any ``WARNING:``/``INVALID:`` line from the GitHub checks (auth,
     repository identity, label vocabulary, plan readiness, runs); 2 missing or
-    INVALID contract, unknown project, or missing profile.
+    INVALID contract, unknown project, or missing profile. ``DEPRECATED:``
+    lines (undeclared or deprecated profile) are informational and never
+    change the exit code.
     """
     project_dir = _resolve_project_dir(config, args.project)
     if project_dir is None:
@@ -2685,6 +2720,9 @@ def _cmd_doctor(args, config: Config) -> int:
             f"INVALID: failed to load profile data for '{contract.profile}': {e}"
         )
         return 2
+
+    for notice in _profile_deprecation_notices(contract, phase_profile, args.project):
+        print(f"DEPRECATED: {notice}")
 
     missing = missing_capabilities(contract, phases)
     if missing:
