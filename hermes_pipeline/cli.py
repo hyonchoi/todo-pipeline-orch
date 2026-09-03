@@ -2128,6 +2128,13 @@ def _tick_project(
     plan_source = selected.plan_source
     issue = selected.entry
     plan_reference = None
+    if plan_source is not None and plan_source.kind == "legacy_path" and plan_source.plan_path:
+        # A repository-path Plan is its own authority: the reference value is
+        # the source's own validated path (see plan_manifest.validate_plan_reference).
+        # The embedded kind is bound below, from the pinned registration instead.
+        from .plan_manifest import PlanReference
+
+        plan_reference = PlanReference(plan_source.plan_path, plan_source)
 
     # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
     from .kanban_tasks import (

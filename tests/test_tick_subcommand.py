@@ -1115,3 +1115,79 @@ class TestTickProjectContractWarning:
             "default 'gstack' is deprecated. Migrate with: "
             "tpo init demo --force --profile native-sdd"
         ]
+
+
+class TestTickLegacyPathPlan:
+    """A repository-path Plan must spawn cards under a ``requires_plan`` profile."""
+
+    @staticmethod
+    def _git(cwd, *args):
+        import subprocess
+
+        return subprocess.run(
+            ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
+        )
+
+    def test_tick_legacy_path_plan_prepares_cards_under_native_sdd(
+        self, tmp_path, mocker, fake_gh, caplog
+    ):
+        """A manifest-free ``### Plan`` repository path is a valid plan source.
+
+        The tick must build its ``PlanReference`` from the compiled plan source
+        and prepare cards; it must not record ``failed_to_spawn``.
+        """
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "native-sdd"\n'
+        )
+        docs = project_dir / "docs"
+        docs.mkdir()
+        (docs / "legacy.md").write_text("# Legacy plan\n\nDo the bounded thing.\n")
+        self._git(project_dir, "init", "-q", "-b", "main")
+        self._git(project_dir, "config", "user.email", "test@example.com")
+        self._git(project_dir, "config", "user.name", "Test")
+        self._git(project_dir, "add", "docs")
+        self._git(project_dir, "commit", "-qm", "base")
+        self._git(
+            project_dir, "remote", "add", "origin", "https://github.com/acme/repo.git"
+        )
+
+        body = (
+            "### What\n\nWidget\n\n### Plan\n\ndocs/legacy.md\n\n### Branch\n\nfeat/todo\n"
+        )
+        seed_project_issues(fake_gh, [todo_payload(10, title="test", body=body)])
+        mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision(picked="TODO-10"),
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["t_1"],
+        )
+        # ``cli._cli_sp`` IS the ``subprocess`` module, so patching its ``run``
+        # would also blind ``run_registration``'s git calls. Only stub ``hermes``.
+        import subprocess
+
+        real_run = subprocess.run
+
+        def run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "hermes":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return real_run(cmd, *args, **kwargs)
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.ERROR, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        outcomes = project_dir / ".hermes" / "outcomes"
+        recorded = "".join(
+            path.read_text() for path in sorted(outcomes.glob("*")) if path.is_file()
+        )
+        assert "failed_to_spawn" not in recorded, caplog.text
+        assert create.called, caplog.text
+        prepared = create.call_args.kwargs["prepared"]
+        assert prepared, "the tick prepared no phase cards"

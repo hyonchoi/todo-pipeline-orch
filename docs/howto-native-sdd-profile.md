@@ -101,12 +101,15 @@ Migrate one project explicitly:
    `"default"` / `"default"` / the computed set. Adding `--assignee <name>`
    re-renders `review_assignee` as a *copy* of `assignee`, not as your previous
    value, so re-apply all three by editing `.hermes/pipeline.toml` afterwards.
-3. **Give every eligible TODO a Plan that carries a manifest.** `native-sdd` is
-   plan-gated, so each `tpo:todo` issue needs exactly one repo-relative `Plan:`
-   path and that Plan must embed one `json tpo-plan` block. Start from the
-   [Plan template](templates/tpo-plan.md). A manifest-free Plan that ran fine
-   under `gstack` is blocked as `plan_invalid:manifest_required` — this is the
-   block `tpo doctor`'s `Hint:` line points at.
+3. **Give every eligible TODO a Plan, and a manifest if you want per-task
+   cards.** `native-sdd` is plan-gated, so each `tpo:todo` issue needs exactly
+   one Plan authority: either one repo-relative `Plan:` path or one embedded
+   Plan block. Start from the [Plan template](templates/tpo-plan.md). An
+   embedded Plan must carry a `json tpo-plan` block; without one it is blocked
+   as `plan_invalid:manifest_required`, which is what `tpo doctor`'s `Hint:`
+   line points at. A `Plan:` path stays eligible without a manifest, but it
+   compiles to a single development card instead of one worker card and
+   controller gate per task.
 4. **Validate before the next tick.**
 
    ```bash
