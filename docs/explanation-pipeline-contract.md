@@ -18,14 +18,14 @@ The contract is a declarative manifest — not a configuration file. It lives at
 
 - **`schema_version`** — which version of the contract format is in use
 - **`assignee`** — the Hermes profile that runs phases for this project
-- **`profile`** — which pipeline skill-set profile's phases to run (e.g., `gstack`, `agent-skills`)
+- **`profile`** — which pipeline skill-set profile's phases to run (`native-sdd` by default, or `agent-skills`; `gstack` is deprecated)
 - **`capabilities`** — the tools phases are allowed to use
 
 At tick start, `_tick_project` loads the contract, resolves the profile's phases, and validates capabilities. The validation has two paths:
 
 1. **Contract exists.** Load it. Validate schema version and field types. Resolve the phase list from the contract's `profile` field. Check that every tool required by the profile's phases is in the contract capabilities. If anything is wrong, the tick fails with a specific error and exit code.
 
-2. **Contract does not exist.** Auto-compute a contract from the default (`gstack`) profile's capabilities and default assignee. The tick proceeds. This makes the contract additive — projects that predate it keep working.
+2. **Contract does not exist.** Auto-compute a contract from the legacy implicit profile (`gstack`) — deliberately *not* the profile `tpo init` now writes — using its capabilities and the default assignee. The tick proceeds. This makes the contract additive — projects that predate it keep working.
 
 ```
 _tick_project(project)

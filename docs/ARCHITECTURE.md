@@ -63,7 +63,7 @@ invokes Claude or Codex directly: Hermes dispatches every assigned worker card.
 Review is reconciled from structured Kanban result metadata and Git facts.
 
 ### Lane E: Finish Branch
-Phase 8 runs `/ship` in Claude Code or `$ship` in Codex, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the default gstack phase profile.
+Phase 8 runs `/ship` in Claude Code or `$ship` in Codex, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the (now deprecated) `gstack` phase profile.
 
 Phase 8 records the work branch in `.hermes/pipeline_branch.txt`. After the
 terminal kanban task completes, the next `tpo tick` checks that branch's PR and
@@ -126,6 +126,11 @@ cli._tick_project(config, contract)
 There is no combined prepare-and-create wrapper: every caller uses the split
 API so tick persistence stays immediately before the first external mutation.
 
+`tpo init` writes `profile = "native-sdd"` unless `--profile` says otherwise,
+and `native-sdd` is plan-gated; `gstack` is deprecated but still bundled, and a
+contract with no `profile` key keeps resolving to `gstack`, the legacy implicit
+default ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)).
+
 Profiles may set top-level `requires_plan: true`. After normal TODO selection
 and before phase rendering or tick persistence, `_tick_project` resolves the
 selected entry's single `Plan:` path, verifies that it stays inside the project
@@ -134,7 +139,8 @@ after symlink resolution, and requires a readable regular file. Failure records
 
 The `native-sdd` profile uses that gate. A manifest Plan compiles to ordered
 worker cards separated by unassigned controller gates. A manifest-free legacy
-Plan remains one development card and emits a warning. Independent review uses
+Plan is not selectable under a plan-gated profile: eligibility blocks the issue
+as `plan_invalid:manifest_required`. Independent review uses
 a distinct session; findings compile into at most five `review-fix` /
 fix-validation / re-review rounds. A clean result enables verified PR creation,
 deterministic TODO closeout, and an unassigned terminal human-review gate.
@@ -191,9 +197,11 @@ All pipeline state lives under `<project>/.hermes/`:
 1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent`
    chains. A non-spawnable registration barrier prevents partial chains from
    running; it is completed only after the complete chain is durable. Profiles
-   may define manual gates with sticky `needs_input` blocks, but the default
-   `gstack` profile ends at Phase 8 PR handoff. `native-sdd` keeps the same
-   merge-aware Phase 8 handoff key and follows it with a terminal human gate.
+   may define manual gates with sticky `needs_input` blocks; the deprecated
+   `gstack` profile ends at Phase 8 PR handoff. `native-sdd`, the default
+   profile ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)),
+   keeps the same merge-aware Phase 8 handoff key and follows it with a terminal
+   human gate.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Review reconciliation is metadata-driven** — TPO validates the independent
    review card's bounded result and Git facts; it does not run a local
@@ -217,7 +225,10 @@ and `TODOS-archive.md` are retired (see
   Manifest-free Markdown remains a legacy compatibility contract that compiles
   to one development card, but only non-plan profiles accept it: a plan-gated
   profile (`requires_plan`) blocks such an issue as
-  `plan_invalid:manifest_required`. Validate a Plan with
+  `plan_invalid:manifest_required` — and `native-sdd`, the default profile for
+  new contracts ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)),
+  is plan-gated, so a manifest is effectively mandatory for new projects.
+  Validate a Plan with
   `tpo plan validate <project> --todo <n> --require-manifest`.
 - **Label vocabulary and eligibility** — `tpo:todo` + `ready-for-agent` make an
   issue selectable; `tpo:on-hold`, `tpo:in-progress`, and pending-triage labels

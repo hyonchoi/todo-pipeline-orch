@@ -5,6 +5,11 @@ The `native-sdd` profile is the Plan-to-Kanban compiler. The production flow is
 worker`. Hermes >= 0.19.0 dispatches workers; TPO never invokes Claude or Codex
 directly.
 
+It is the default profile for every new contract `tpo init` writes
+([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)); `gstack` is
+deprecated but still bundled and supported. If you are moving an existing
+project off `gstack`, read [Migrating from gstack](#migrating-from-gstack).
+
 ## Prepare the TODO
 
 Store an implementation-ready Plan inside the project and attach it to the
@@ -36,12 +41,16 @@ For visible per-task execution, embed exactly one manifest (maximum 50 tasks):
 }
 ```
 
-A valid legacy Markdown Plan without the block still runs as exactly one
-development card. `tpo plan validate` and `tpo doctor` warn because its internal
-steps cannot be exposed as separate Kanban cards. On retries, TPO validates its
-pinned base authority and then leaves the existing static development, review,
-finish, and human-gate chain to the legacy lifecycle; manifest-only result,
-dynamic review, and closeout reconciliation do not intercept that chain.
+The manifest is mandatory here. A Plan that is valid legacy Markdown but
+carries no `json tpo-plan` block is **not selectable** under `native-sdd`:
+because the profile is plan-gated (`requires_plan`), eligibility blocks the
+issue with `plan_invalid:manifest_required`, so the tick picks nothing from it.
+`tpo doctor` counts it in `Plan readiness: ... blocked=N (plan_invalid=N)` and
+prints the migration `Hint:`. `tpo plan validate <project> --todo N` still
+reports such a Plan as valid legacy Markdown with a no-manifest warning; pass
+`--require-manifest` to turn that warning into a failure. Manifest-free
+Markdown remains a compatibility contract only for the non-plan profiles
+(`gstack`, `agent-skills`), which compile it to a single development card.
 
 ## Initialize and verify
 
@@ -53,6 +62,56 @@ tpo doctor <project>
 The only skill prerequisite is Hermes `ai-coding-agents`. The selected worker
 client must still be installed and callable as `claude -p` or `codex exec`, but
 no gstack, superpowers, or client-side workflow skill is used.
+
+`tpo init` needs no `--profile` for a new project — `native-sdd` is the
+default; the flag above is explicit for clarity and is required only when
+regenerating a contract that names another profile.
+
+## Migrating from gstack
+
+`gstack` is deprecated
+([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)). It stays
+bundled and fully supported until a later major release removes it, and nothing
+migrates automatically: `tpo doctor` and `tpo tick` only emit an informational
+deprecation notice (`DEPRECATED:` from `doctor`, a warning line from `tick`)
+for a gstack contract, and a contract with no `profile` key keeps resolving to
+`gstack`, the legacy implicit default. Existing `.hermes/` state and in-flight
+ticks are unaffected until you migrate.
+
+Migrate one project explicitly:
+
+1. **Finish or abandon in-flight gstack runs first.** Exactly one run is active
+   per project. Migrate while the board is quiescent so a gstack phase chain is
+   never reconciled by the native-sdd reconcilers.
+2. **Rewrite the contract.**
+
+   ```bash
+   tpo init <project> --force --profile native-sdd
+   tpo doctor <project>
+   ```
+
+   `--force` rewrites the whole contract from the profile defaults: it
+   recomputes `capabilities` from `native-sdd`'s `phases.yaml` and resets a
+   customized `assignee`, `review_assignee`, and `capabilities` to
+   `"default"` / `"default"` / the computed set. Adding `--assignee <name>`
+   re-renders `review_assignee` as a *copy* of `assignee`, not as your previous
+   value, so re-apply all three by editing `.hermes/pipeline.toml` afterwards.
+3. **Give every eligible TODO a Plan that carries a manifest.** `native-sdd` is
+   plan-gated, so each `tpo:todo` issue needs exactly one repo-relative `Plan:`
+   path and that Plan must embed one `json tpo-plan` block. Start from the
+   [Plan template](templates/tpo-plan.md). A manifest-free Plan that ran fine
+   under `gstack` is blocked as `plan_invalid:manifest_required` — this is the
+   block `tpo doctor`'s `Hint:` line points at.
+4. **Validate before the next tick.**
+
+   ```bash
+   tpo plan validate <project> --todo <n> --require-manifest
+   ```
+
+Client-side gstack work has no equivalent here: the Phase 8 `/ship` and
+`$ship` prompts, `tpo approve`, and the `/review`, `/cso`, `/qa` skills are not
+part of this profile. PR creation, review, closeout, and the human merge gate
+are reconciled from Kanban results instead.
 
 ## Compiled sequence
 

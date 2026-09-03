@@ -81,11 +81,16 @@ uv run tpo test --repo OWNER/NAME --keep --loop
 
 - `--fixture` defaults to `happy-path` and is the only fixture
   (`unknown_fixture` otherwise).
-- `--profile` defaults to `gstack`. Only profiles on the live-safe allow-list
-  (`gstack`, `agent-skills`) are accepted; every other profile fails with
-  `unsafe_terminal` before anything remote is touched. Unknown profiles,
-  `Unverified` profile/client pairs, and missing locally verifiable Conditional
-  Hermes skills are also rejected up front.
+- `--profile` defaults to `native-sdd`, the default phase profile
+  ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)). All three
+  bundled profiles (`native-sdd`, `agent-skills`, `gstack`) are on the live-safe
+  allow-list; any other profile fails with `unsafe_terminal` before anything
+  remote is touched. Unknown profiles, `Unverified` profile/client pairs, and
+  missing locally verifiable Conditional Hermes skills are also rejected up
+  front.
+- A plan-gated (`requires_plan`) profile — `native-sdd` — is driven across
+  **multiple ticks**; `gstack` and `agent-skills` complete in one. The fixture
+  Plan carries a `json tpo-plan` manifest, so the plan gate is exercised live.
 - `--timeout` is the overall watchdog (default 86400 s).
 - `--convergence-threshold` (default 3) halts the run after N consecutive phase
   failures of the same error class (`dependency_error`, `hermes_error`,
@@ -116,15 +121,39 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    seconds; `issue_not_visible` after 60 s), then run the production `tpo tick`
    as a subprocess with an isolated `TPO_CONFIG_FILE` (log at
    `artifacts/tick.log`) and recover its registration (`tick_id`, expected
-   phase keys).
-5. **Poll** — follow the registered kanban cards until every card is terminal,
-   auto-completing gate cards behind their predecessors.
+   phase keys). A plan-gated profile recovers the registration through the
+   production trust boundary — `registration.json` is read against the clone
+   and validated — and additionally requires that the run pinned the harness's
+   own Plan commit and Plan bytes (`registration_invalid`,
+   `registration_base_mismatch`, `registration_plan_mismatch`). The
+   `tick_registered` event records `tick_id`, `phase_keys` and, for a pinned
+   run, `pinned`, `worktree` and `branch` — the isolated checkout the run owns.
+5. **Poll / drive** — a non-plan profile polls the registered kanban cards once
+   until every card is terminal, auto-completing gate cards behind their
+   predecessors. A plan-gated run instead loops: poll the registered cards until
+   the board *settles* (gates are never auto-completed — the production
+   reconcilers own them), classify the settled board, then run another
+   `tpo tick` under the same tick id. Each settled board emits
+   `tick_completed` `{tick_no, status_map}`; a board identical to the previous
+   tick's also emits `tick_stalled` `{tick_no, status_map}` and fails the run
+   with `tick_stalled`. Every tick re-asserts that `current_tick_id.txt` still
+   names the run (`unexpected_selection`). The loop is bounded by
+   `pinned_tick_budget(step_keys)` = `len(step_keys) // 2 + 5 + 2 *
+   MAX_REVIEW_ROUNDS`; exhausting it fails with `tick_budget_exhausted`, which
+   means the run is stuck rather than out of legitimate work. The run is
+   `delivered` when the `finish` card is `done`, the `human-gate` card is
+   `blocked` (a `done` human gate means someone merged the PR and is reported as
+   a failure), and closeout wrote its `finish-verified` marker into the run
+   directory.
 6. **PR invariant** — exactly one open, unmerged pull request attributable to
    this run must exist and target the default branch (a `pr_invariant_failed`
    event with `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, or
-   `pr_wrong_base` otherwise). When discovery itself cannot classify every
-   branch or PR the run fails with `pr_discovery_incomplete` instead; no
-   `pr_invariant_failed` event is emitted for that case.
+   `pr_wrong_base` otherwise). A plan-pinned run adds `pr_wrong_head`: the PR
+   must be raised from the branch the registration pinned, so a PR attributable
+   to the issue but pushed from any other head is not this run's delivery. When
+   discovery itself cannot classify every branch or PR the run fails with
+   `pr_discovery_incomplete` instead; no `pr_invariant_failed` event is emitted
+   for that case.
 7. **Shutdown** (always runs once the issue exists, even after a failure) —
    cancel the tick's kanban tasks, prove quiescence from the archived-inclusive
    snapshot, discover remote artifacts by run provenance (every non-default
@@ -139,13 +168,16 @@ uv run tpo test --repo OWNER/NAME --keep --loop
 ## Output and exit codes
 
 ```
-[kanban] tenant=mock-project tick_id=01ARZ3... profile=gstack repo=OWNER/mock-project issue=#12 pr=#13 phases={...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
+[kanban] tenant=mock-project tick_id=01ARZ3... profile=native-sdd ticks=4 repo=OWNER/mock-project issue=#12 pr=#13 phases={...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
 ```
+
+`ticks=<n>` counts the production `tpo tick` invocations the run consumed: `1`
+for a non-plan profile, one per reconciler hop for a plan-gated one.
 
 | Code | Meaning |
 |------|---------|
 | 0 | Every phase passed, the PR invariant held, and cleanup completed |
-| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (`pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`), `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`). The workspace is deleted after a clean shutdown. |
+| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (`pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head`), `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`, plus the plan-pinned drive's `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown. |
 | 2 | Profile, preflight, or cleanup error (`cleanup_incomplete`, including when the shutdown discovery fails as well) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory). A `HarnessCleanupError` message prints the retained path; `cleanup_incomplete` prints the remote leftovers with their manual commands. |
 
 ## `--keep` and manual cleanup
@@ -201,9 +233,16 @@ uv run pytest tests/test_harness.py tests/test_harness_e2e.py -q
 ```
 
 A passing live run exits 0, logs `phase <key>: ... -> done` for every phase,
-prints a `[kanban]` line with `pr=#M` and `phases={...: done, ...}`, and its
-`report.json` (kept with `--keep`) records every phase `done`, the issue and PR
-numbers, and no leftovers.
+prints a `[kanban]` line with `pr=#M`, `ticks=<n>` and `phases={...: done, ...}`,
+and its `report.json` (kept with `--keep`) records every phase `done`, the issue
+and PR numbers, and no leftovers.
+
+For a plan-gated run, `events.jsonl` additionally carries one `tick_registered`
+(with `pinned`, `worktree` and `branch`) and one `tick_completed`
+`{tick_no, status_map}` per settled board; a `tick_stalled` event marks the
+repeated board that failed the run. A delivered run's final board has the
+`finish` card `done` and the `human-gate` card `blocked` — the human merge gate
+is where the run is supposed to stop.
 
 ## Troubleshooting
 
@@ -225,10 +264,16 @@ numbers, and no leftovers.
 | `sandbox_not_quiescent` | Another open `tpo:todo` + `ready-for-agent` issue exists (detail lists the numbers); close it |
 | `issue_not_visible` | GitHub's label-filtered listing did not show the run's issue as ready within 60 s of creation; check `gh issue view <N> --repo <owner/name>` (labels present?) and re-run |
 | `unknown_fixture` | Only `happy-path` exists |
-| `unsafe_terminal` | Profile is not live-safe; `native-sdd` is excluded because it is multi-tick |
+| `unsafe_terminal` | Profile is not on the live-safe allow-list (`native-sdd`, `agent-skills`, `gstack`); a locally added profile is rejected before anything remote is touched |
 | `picked_none` | The tick selected no issue; re-run with `--keep`, then read `artifacts/tick.log` and check the issue labels |
 | `failed_to_spawn`, `tick_timeout`, `tick_failed` | Production tick problems; re-run with `--keep`, then read `artifacts/tick.log` |
-| `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base` | PR invariant failed (none, several, a non-open attributable PR, or a PR whose base is not the default branch; a wrong-base PR is still cleaned up) |
+| `registration_invalid` | The run's `registration.json` was rejected by the production contract loader; the detail is the contract error |
+| `registration_base_mismatch` | The run pinned a `base_sha` other than the harness's Plan commit |
+| `registration_plan_mismatch` | The registered `plan_hash` is not the hash of the Plan text the harness committed (what a `git replace` forgery in the clone would produce) |
+| `unexpected_selection` | A later tick persisted a different `current_tick_id.txt`, or none; the harness refuses to keep driving another run's cards |
+| `tick_stalled` | Two consecutive ticks settled on an identical, undelivered board — no card progressed. Re-run with `--keep` and read `artifacts/tick.log` plus the last `tick_stalled` event's `status_map` |
+| `tick_budget_exhausted` | The plan-pinned run consumed `pinned_tick_budget(step_keys)` ticks without reaching a verdict; the budget is deliberately generous, so this means the run is stuck |
+| `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head` | PR invariant failed (none, several, a non-open attributable PR, a PR whose base is not the default branch, or — plan-pinned only — a PR raised from a head other than the registered branch; a wrong-base PR is still cleaned up) |
 | `pr_discovery_incomplete` | Provenance could not classify every branch/PR at the post-run check (exit 1; the workspace is removed after a clean shutdown). If the shutdown discovery fails too, cleanup is skipped for safety, the run ends with `cleanup_incomplete` (exit 2) and the leftovers list the manual commands |
 | `cleanup_incomplete` | At least one remote operation failed; the detail names the retained workspace; finish the printed commands, then remove it |
 | `issue_unverified`, `issue_ambiguous` | The created issue could not be reconciled by title/token after a `gh` failure; close duplicates by hand |
@@ -251,6 +296,9 @@ turns `events.jsonl` into the reports and `cli.py` wires the `test` subcommand.
 | `clone_sandbox`, `sandbox_seed_check`, `take_baseline` | Clone, verify seed, snapshot remote heads |
 | `create_harness_issue`, `reconcile_created_issue`, `commit_plan` | Live issue with mirror labels; Plan committed locally |
 | `run_tick`, `recover_tick_registration` | Production `tpo tick` subprocess and its registration |
+| `recover_pinned_registration`, `assert_tick_id_unchanged` | Plan-pinned registration recovered through the production trust boundary; per-tick tick-id re-assertion |
+| `drive_ticks`, `_drive_single_tick`, `_drive_pinned_ticks` | One-tick and bounded multi-tick drives; emit `tick_registered`, `tick_completed`, `tick_stalled` |
+| `poll_pinned_run`, `classify_pinned_run`, `pinned_tick_budget` | Settle a pinned board without completing gates, classify it, bound the tick count |
 | `poll_registered_phases`, `_auto_complete_gate_tasks`, `_ConvergenceMonitor` | Kanban poll loop and convergence halt |
 | `discover_remote_artifacts`, `branch_has_run_provenance`, `verify_pull_request` | Provenance-based attribution and the one-open-PR invariant |
 | `shutdown_run`, `cleanup_remote` | Fail-closed cancel → quiesce → discover → close/delete with lease |
@@ -274,12 +322,24 @@ turns `events.jsonl` into the reports and `cli.py` wires the `test` subcommand.
   branch that moved after discovery is reported, not deleted.
 - An interrupt (`Ctrl-C`) starts no remote operation; the workspace is retained
   and recovery pointers are logged.
+- Accepted residual: the production circuit breaker observes the harness's
+  ticks. Its counter (`circuit.json`) lives in the isolated harness state, but
+  the alert itself is a **real** `hermes chan message` subprocess. A multi-tick
+  plan-gated run whose reconcile ticks pick nothing new can reach
+  `circuit_breaker.no_progress_threshold` (default 3) and fire that alert before
+  the harness's own `tick_stalled` / `tick_budget_exhausted` stops the run. The
+  isolated config sets no `slack_channel`, so the send normally goes nowhere and
+  failures are swallowed, but a channel resolved from your environment would
+  receive a live post. Alerts are deduped per `alert_dedup_hours` (default 24).
 
 ## Known limitations
 
-- The plan gate (`Plan` field and manifest) is not exercised live: `gstack` and
-  `agent-skills` have `requires_plan` false. `native-sdd` is excluded
-  (`unsafe_terminal`) because it is multi-tick.
+- The plan gate is exercised live by the default `native-sdd` profile: the
+  fixture Plan carries a `json tpo-plan` manifest and the harness drives the run
+  across ticks to its human merge gate. Under `gstack` and `agent-skills`
+  (`requires_plan` false) the gate is still not exercised.
+- A plan-gated run stops at the human merge gate by design: the merge itself,
+  and therefore post-merge closeout, is never exercised live.
 - Only the `happy-path` fixture exists.
 - Loop snapshots do not carry across CLI invocations, so cross-invocation
   auto-diff is unavailable.

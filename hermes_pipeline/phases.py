@@ -294,7 +294,12 @@ def load_phase_profile(config_path: Path | str | None = None) -> PhaseProfile:
 
 
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:
-    """Load the phase list while preserving the historical public API."""
+    """Load the phase list while preserving the historical public API.
+
+    With no argument this inherits :func:`load_phase_profile`'s fallback to the
+    bundled ``contract.LEGACY_IMPLICIT_PROFILE`` — the profile a contract
+    without a ``profile`` key resolves to, not ``contract.DEFAULT_PROFILE``.
+    """
     return list(load_phase_profile(config_path).phases)
 
 

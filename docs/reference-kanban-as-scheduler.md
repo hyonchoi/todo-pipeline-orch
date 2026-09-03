@@ -29,7 +29,7 @@ reconcilers.
 
 Hermes >= 0.19.0 is required for the Kanban and closing-result contracts.
 
-For the default `gstack` profile, completion of the terminal Phase 8 task means
+For the deprecated `gstack` profile, completion of the terminal Phase 8 task means
 the branch was handed to a PR, not merged. `tpo tick` reads
 `.hermes/pipeline_branch.txt` and skips new selection while that PR is open,
 closed without merge, or temporarily unverifiable. Once GitHub reports the PR as
@@ -362,7 +362,7 @@ prepare_todo_phases(
 | `todo_id` | `str` | — | TODO ID (e.g., "TODO-10"). Embedded in task body JSON header. |
 | `tick_id` | `str` | — | ULID tick ID embedded in each task body header. |
 | `board_slug` | `str` | — | Project slug embedded in each task body header. |
-| `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is packaged `gstack`; production resolves `contract.profile` and passes its path explicitly. |
+| `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is the packaged legacy implicit profile (`contract.LEGACY_IMPLICIT_PROFILE`, i.e. `gstack`), never the `tpo init` default; production resolves `contract.profile` and passes its path explicitly. |
 | `prompt_client` | `PromptClient` | `"claude"` | Renders the fixed product label, verified skill invocation vocabulary, and external-client delegation guidance. |
 
 **Returns:** All `PreparedPhaseTask` values in profile order.

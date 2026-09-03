@@ -93,9 +93,14 @@ tpo init myproject --profile native-sdd
 | `project` | Yes | Project slug |
 | `--force` | No | Overwrite an existing contract |
 | `--assignee` | No | Set the assignee field (e.g. `--assignee pipeline`) |
-| `--profile` | No | Pipeline workflow profile (`gstack`, `agent-skills`, or `native-sdd`). Default: `gstack`. Determines which `phases.yaml` and capabilities the contract uses. See [profile selection](howto-agent-skills-profile.md) and [native SDD](howto-native-sdd-profile.md). |
+| `--profile` | No | Pipeline workflow profile (`native-sdd`, `agent-skills`, or `gstack`). Default: `native-sdd` ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)). Determines which `phases.yaml` and capabilities the contract uses. `gstack` is deprecated: writing a gstack contract prints one `note: profile 'gstack' is deprecated; new projects default to 'native-sdd' ...` line (exit code unchanged). See [profile selection](howto-agent-skills-profile.md) and [native SDD](howto-native-sdd-profile.md). |
 
 Capabilities are computed from `phases.yaml` at write time, not hardcoded.
+
+The default profile is plan-gated (`requires_plan`), so a freshly initialized
+project selects nothing until each `tpo:todo` issue carries a `Plan:` path whose
+document embeds one `json tpo-plan` manifest. See
+[Migrating from gstack](howto-native-sdd-profile.md#migrating-from-gstack).
 
 ---
 
@@ -112,11 +117,19 @@ tpo doctor myproject
 **Exit codes:**
 | Code | Meaning |
 |------|---------|
-| 0 | Clean; contract, GitHub checks, and the active registration all verified (legacy Plan warnings may still be present) |
+| 0 | Clean; contract, GitHub checks, and the active registration all verified (an informational `DEPRECATED:` line, blocked Plan-readiness counts, and the manifest `Hint:` may still be present) |
 | 1 | Drift: contract capability mismatch, registration or issue drift, or any `WARNING:`/`INVALID:` line from the GitHub checks |
 | 2 | Missing/invalid contract, unsupported Hermes version, unknown project, missing Hermes profile, or an `Unverified` prerequisite |
 
 If the contract assignee is non-default (e.g. `pipeline`), verifies the Hermes profile exists.
+
+Before the capability check, `doctor` prints at most one informational
+`DEPRECATED:` line (it never changes the exit code):
+
+| Line | Meaning |
+|------|---------|
+| `DEPRECATED: pipeline.toml does not declare a profile; the implicit default 'gstack' is deprecated. Migrate with: tpo init <project> --force --profile native-sdd` | The contract has no `profile` key, so it resolves to the legacy implicit profile |
+| `DEPRECATED: profile 'gstack' is deprecated; migrate with: tpo init <project> --force --profile native-sdd` | The contract names a profile whose `phases.yaml` sets `deprecated: true` |
 
 After the prerequisite and Hermes version lines, the GitHub checks print, in order:
 
@@ -126,6 +139,7 @@ After the prerequisite and Hermes version lines, the GitHub checks print, in ord
 | `Repository: <owner>/<repo>` / `INVALID: repository identity: ...` | The github.com `origin` remote |
 | `Label vocabulary: ok` / `INVALID: missing <labels>; Fix: tpo todos labels sync <project>` | Every pipeline label exists |
 | `Plan readiness: eligible=N blocked=N (<reason>=N ...)` | Selectable `tpo:todo` issues and blocked reasons grouped by prefix (`dependency_incomplete`, `branch_invalid`, `plan_invalid`, ...) |
+| `Hint: native-sdd requires a Plan manifest ...` — names [the Plan template](templates/tpo-plan.md) and the [Migrating from gstack](howto-native-sdd-profile.md#migrating-from-gstack) section | Printed only under a plan-gated (`requires_plan`) profile and only when at least one blocked reason is `plan_invalid:manifest_required`; informational, so the exit code is unchanged |
 | `Runs: active=N delivered=N abandoned=N [unsupported=N]` | Run registrations under `.hermes/runs/`; `unsupported` counts malformed or schema v1 registrations |
 | `tick <id> → #N` | Each active run and the issue it pins; a run that is not the current tick prints a `WARNING` and a `Fix` line (complete or abandon it, then `git worktree remove --force <worktree> && git branch -D <branch>`) |
 | `tick <id> → #N (active; no current tick)` | An active run while no `current_tick_id.txt` exists |
@@ -359,8 +373,9 @@ for the evidence protocol.
 
 Run the live integration test harness: clones a disposable GitHub sandbox
 repository, files a real `tpo:todo` issue, commits a Plan, runs the production
-`tpo tick` as a subprocess, follows its Hermes kanban cards, requires exactly one
-attributable open pull request, and tears everything down fail-closed. The kanban
+`tpo tick` as a subprocess (repeatedly, for a plan-gated profile, until the run
+reaches its human merge gate), follows its Hermes kanban cards, requires exactly
+one attributable open pull request, and tears everything down fail-closed. The kanban
 tenant is the sandbox repository name. Requires `gh` >= 2.44 authenticated with
 `repo` scope, `git` >= 2.32, `hermes login`, and `TPO_GH_BIN` unset. See
 [howto-live-integration-test-harness.md](howto-live-integration-test-harness.md).
@@ -379,7 +394,7 @@ tpo test --repo OWNER/NAME --keep --loop
 | `--repo` | Yes (or `TPO_HARNESS_REPO`) | — | Sandbox repository as `OWNER/NAME`. Must be a dedicated disposable repo; the harness closes issues/PRs and deletes branches in it. |
 | `--init-sandbox` | No | — | Seed the sandbox default branch once (README, `.gitignore` ignoring `.hermes/`, `pyproject.toml`, `tests/__init__.py`, `docs/harness/SANDBOX.md`) and exit. Refuses repositories tracking files outside the seed set and `.github/**`. |
 | `--fixture` | No | `happy-path` | Fixture name. Only `happy-path` is implemented. |
-| `--profile` | No | `gstack` | Bundled phase profile to test. Only live-safe profiles (`gstack`, `agent-skills`) are accepted; `native-sdd` fails with `unsafe_terminal`. Unknown profiles and profile/client pairs with `Unverified` prerequisites fail before workspace creation. |
+| `--profile` | No | `native-sdd` | Bundled phase profile to test. All three bundled profiles (`native-sdd`, `agent-skills`, `gstack`) are on the live-safe allow-list; any other profile fails with `unsafe_terminal`. Unknown profiles and profile/client pairs with `Unverified` prerequisites fail before workspace creation. A plan-gated (`requires_plan`) profile is driven across multiple ticks; the non-plan profiles complete in one. |
 | `--timeout` | No | `86400` | Overall run timeout in seconds. Cooperatively stops polling, then reclaims and archives the tick's Hermes tasks before remote cleanup. |
 | `--convergence-threshold` | No | `3` | Consecutive same-class phase failures before the run halts. |
 | `--keep` | No | — | Preserve the workspace and the remote artifacts (issue, PR, branch). The next run fails `sandbox_not_quiescent` until they are cleaned up manually. |
@@ -389,7 +404,7 @@ tpo test --repo OWNER/NAME --keep --loop
 | Code | Meaning |
 |------|---------|
 | 0 | All phases passed, the PR invariant held, and cleanup completed |
-| 1 | Phase failure, convergence halt, overall timeout, PR invariant failure (`pr_missing`/`pr_ambiguous`/`pr_closed`/`pr_merged`/`pr_wrong_base`) or `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`). The workspace is deleted after a clean shutdown; re-run with `--keep` to inspect it. |
+| 1 | Phase failure, convergence halt, overall timeout, PR invariant failure (`pr_missing`/`pr_ambiguous`/`pr_closed`/`pr_merged`/`pr_wrong_base`/`pr_wrong_head`) or `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`, and for a plan-gated profile `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown; re-run with `--keep` to inspect it. |
 | 2 | Profile or preflight error (`unsafe_terminal`, `Unverified` prerequisites, missing dependency, `repo_missing`, `invalid_repo`, `invalid_slug`, `gh_permission`, `gh_override_forbidden`, `sandbox_not_seeded`, `sandbox_not_quiescent`, `issue_not_visible`, unknown fixture) or `cleanup_incomplete` (also when the shutdown discovery fails after `pr_discovery_incomplete`) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory); `HarnessCleanupError` messages and the `cleanup_incomplete` detail print the path, `cleanup_incomplete` also prints the remote leftovers |
 
 **Preflight and run behavior:**
@@ -397,12 +412,13 @@ tpo test --repo OWNER/NAME --keep --loop
 - Verifies locally discoverable Conditional Hermes skills against the `pipeline` assignee before workspace creation.
 - Verifies `gh` auth, the viewer login, push permission, and that no other open `tpo:todo` + `ready-for-agent` issue exists in the sandbox.
 - Runs `hermes kanban list --tenant <repo-name>` before phase execution. Timeouts after 15 s.
-- Clones the sandbox, verifies the seed (`sandbox_seed_check`), ensures labels, creates the issue `[harness <token>] Implement mock name normalization`, commits the Plan locally, and runs the production tick (log at `artifacts/tick.log`).
+- Clones the sandbox, verifies the seed (`sandbox_seed_check`), ensures labels, creates the issue `[harness <token>] Implement mock name normalization`, commits the Plan locally (the fixture Plan carries a `json tpo-plan` manifest, which a plan-gated profile requires), and runs the production tick (log at `artifacts/tick.log`).
+- A plan-gated (`requires_plan`) profile is driven across up to `pinned_tick_budget(step_keys)` ticks under one tick id: each tick's board is polled until it settles, classified (`in_progress`, `delivered`, `failed`), and the next tick is run until the run reaches its human merge gate. Registration is recovered through the production trust boundary, so a rejected, re-based, or re-pinned registration fails the run (`registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`), and a board that stops moving or exhausts the budget fails with `tick_stalled` or `tick_budget_exhausted`. Non-plan profiles still complete in a single tick.
 - Kanban cards are created by the production tick in the tenant named after the repository (never suffixed with tick ID).
 - Shutdown cancels the tick's tasks, proves kanban quiescence, discovers artifacts by run provenance, closes the issue and PR, and deletes the branch with `git push --force-with-lease`; unfinished operations are printed as leftovers with manual commands.
 - Prints a `[kanban]` summary line after report generation:
   ```
-  [kanban] tenant=<repo-name> tick_id=01ARZ3... profile=gstack repo=OWNER/NAME issue=#12 pr=#13 phases={phase_1 kickoff: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
+  [kanban] tenant=<repo-name> tick_id=01ARZ3... profile=native-sdd ticks=4 repo=OWNER/NAME issue=#12 pr=#13 phases={plan:task-1: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
   ```
 
 **Timeout and exceptional poll cleanup:**

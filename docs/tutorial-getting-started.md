@@ -79,9 +79,10 @@ tpo config get projects_dir
 tpo config get prompt_client
 ```
 
-`prompt_client` defaults to `claude`. Keep it for Claude Code prompts such as
-`/review` and `/ship`, or select Codex vocabulary (`$review` and `$ship`) for
-every project under this `projects_dir`:
+`prompt_client` defaults to `claude`. It selects the client vocabulary used
+wherever a profile's prompts name a client skill (Claude Code `/review` and
+`/ship` versus Codex `$review` and `$ship`) and the worker invocation Hermes
+dispatches. Change it for every project under this `projects_dir` with:
 
 ```bash
 tpo config set prompt_client codex
@@ -105,12 +106,23 @@ tpo doctor demo-app
 `tpo todos labels sync` creates the pipeline label vocabulary once per
 repository; `doctor` reports any label still missing.
 
-For the supported `gstack` profile, doctor first prints the selected prompt
-client and prerequisite diagnostics. Successful output ends with:
+`tpo init` writes `profile = "native-sdd"`, the default phase profile
+([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)). Pass
+`--profile agent-skills` (or the deprecated `--profile gstack`) to select
+another one. `native-sdd` is **plan-gated**: every TODO it picks must carry a
+Plan document with a machine manifest, which Step 7 covers.
+
+`doctor` first prints the selected prompt client and prerequisite diagnostics
+for that profile. Successful output ends with:
 
 ```text
-OK: schema_version=2
+OK: schema_version=3 assignee=default profile=native-sdd capabilities=['Bash', 'Edit', 'Read', 'Write']
 ```
+
+A project whose contract still selects `gstack`, or one whose contract predates
+the `profile` key, additionally prints one informational `DEPRECATED:` line with
+the migration command; it does not change the exit code. See
+[Migrating from gstack](howto-native-sdd-profile.md#migrating-from-gstack).
 
 ## Step 6: File and triage a TODO
 
@@ -135,7 +147,35 @@ Only issues carrying both `tpo:todo` and `ready-for-agent` are selectable; see
 [issue tracker conventions](agents/issue-tracker.md#tpo-backlog-items) for the
 full label vocabulary and body contract.
 
-## Step 7: Run a manual tick
+## Step 7: Attach a Plan with a manifest
+
+`native-sdd` is plan-gated, so the tick in Step 8 will pick nothing until the
+issue names a Plan and that Plan carries a `json tpo-plan` manifest. Copy
+[the Plan template](templates/tpo-plan.md) into the project, fill in the tasks,
+and commit it:
+
+```bash
+mkdir -p docs/plans
+cp <tpo-checkout>/docs/templates/tpo-plan.md docs/plans/TODO-<N>.md
+# edit: set "todo_id": "TODO-<N>" and one entry per ordered task
+git add docs/plans/TODO-<N>.md && git commit -m "docs: plan for TODO-<N>"
+```
+
+Then point the issue's `### Plan` section at it with a repo-relative path
+(exactly one path, e.g. `docs/plans/TODO-<N>.md`) and validate:
+
+```bash
+tpo plan validate demo-app --todo <N> --require-manifest
+tpo doctor demo-app
+```
+
+`doctor` should now report `Plan readiness: eligible=1 blocked=0`. A Plan with
+no manifest is blocked as `plan_invalid:manifest_required` and `doctor` prints a
+`Hint:` line naming the template and the migration section — the Plan is the
+execution authority ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)),
+so it is never rewritten for you.
+
+## Step 8: Run a manual tick
 
 ```bash
 tpo tick demo-app
@@ -154,7 +194,7 @@ tpo tick
 
 See [Run a manual tick](howto-pipeline-tick.md) for detailed tick behavior and recovery.
 
-## Step 8: Inspect phase progress
+## Step 9: Inspect phase progress
 
 ```bash
 hermes kanban list --tenant demo-app
@@ -162,11 +202,14 @@ hermes kanban list --tenant demo-app
 
 See [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) for how phase tasks are chained.
 
-## Step 9: Inspect PR handoff
+## Step 10: Inspect PR handoff
 
-The default `gstack` profile finishes at Phase 8. That phase runs `/ship` in
-Claude Code or `$ship` in Codex, pushes all intended branch changes, and opens
-or updates a PR without merging it. Inspect the PR in GitHub or from the
+Under the default `native-sdd` profile the compiled run finishes each Plan task
+behind a controller gate, reconciles independent review and the verified PR
+handoff from Kanban results, and then stops at a terminal human merge gate. The
+deprecated `gstack` profile instead finishes at Phase 8, which runs `/ship` in
+Claude Code or `$ship` in Codex. Either way the branch is pushed and a PR is
+opened or updated without being merged. Inspect the PR in GitHub or from the
 project worktree:
 
 ```bash
@@ -178,7 +221,7 @@ Later ticks leave the project idle while that PR is open, closed without merge,
 or temporarily unverifiable. After the PR is merged, closeout closes the issue
 and the next tick can select new TODO work.
 
-## Step 10: Automate ticks later
+## Step 11: Automate ticks later
 
 Manual ticks are enough for first setup. For scheduled operation, see [Run a manual tick](howto-pipeline-tick.md) and the Hermes cron guidance in the operations docs.
 
@@ -189,7 +232,8 @@ You now have:
 - `tpo` installed and verified
 - a GitHub repository with the `tpo:todo` label vocabulary and one triaged TODO issue
 - a configured `projects_dir`
-- a pipeline contract in `.hermes/pipeline.toml`
+- a pipeline contract in `.hermes/pipeline.toml` selecting `native-sdd`
+- a committed Plan with a `tpo-plan` manifest for that TODO
 - a manual tick path
 
 ## Next steps
