@@ -53,6 +53,7 @@ def request() -> dict:
 
 def write_request(path: Path, payload: dict) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
+    path.chmod(0o600)
 
 
 def test_request_renders_marker_fields_and_canonical_embedded_manifest(tmp_path):
@@ -90,8 +91,36 @@ def test_request_rejects_invalid_contract(tmp_path, mutation, code):
 def test_duplicate_json_key_is_rejected(tmp_path):
     path = tmp_path / "request.json"
     path.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
+    path.chmod(0o600)
     with pytest.raises(TodoCreateError, match="duplicate_json_key"):
         load_create_request(path)
+
+
+def test_request_load_rejects_symlinks_and_public_modes(tmp_path):
+    path = tmp_path / "request.json"
+    write_request(path, request())
+    path.chmod(0o644)
+    with pytest.raises(TodoCreateError, match="request_mode"):
+        load_create_request(path)
+    path.chmod(0o600)
+    link = tmp_path / "link.json"
+    link.symlink_to(path)
+    with pytest.raises(TodoCreateError, match="invalid_request_file"):
+        load_create_request(link)
+
+
+@pytest.mark.parametrize(
+    "plan_markdown, code",
+    [
+        ("<proposed_plan># Draft</proposed_plan>", "forbidden_plan_structure"),
+        ("Authorization: Bearer ghp_abcdefghijklmnopqrstuvwxyz123456", "secret_content"),
+    ],
+)
+def test_request_rejects_draft_and_secret_fixtures(tmp_path, plan_markdown, code):
+    payload = request()
+    payload["plan_markdown"] = plan_markdown
+    with pytest.raises(TodoCreateError, match=code):
+        load_create_request(_write(tmp_path / "request.json", payload))
 
 
 def test_persisted_request_is_private(tmp_path):
@@ -124,7 +153,9 @@ def test_execute_create_orders_ready_before_triage_removal_and_cleans_request(tm
         "hermes_pipeline.cli._audit_issue",
         side_effect=[(["label:missing:priority:P1"], ["priority:P1"], []), ([], [], [])],
     )
-    number = execute_create(tmp_path, tmp_path / "state", loaded)
+    number = execute_create(
+        tmp_path, tmp_path / "state", loaded, approved_repo="acme/repo"
+    )
     assert number == 42
     assert [call.args[2] for call in add.call_args_list] == ["priority:P1", "ready-for-agent"]
     assert remove.call_args.args[2] == "needs-triage"
@@ -147,7 +178,9 @@ def test_execute_create_retains_request_after_label_failure(tmp_path, mocker):
     mocker.patch("hermes_pipeline.cli._audit_default_branch", return_value="main")
     mocker.patch("hermes_pipeline.cli._audit_issue", return_value=(["label:missing:priority:P1"], ["priority:P1"], []))
     with pytest.raises(RuntimeError, match="failed"):
-        execute_create(tmp_path, tmp_path / "state", loaded)
+        execute_create(
+            tmp_path, tmp_path / "state", loaded, approved_repo="acme/repo"
+        )
     assert (tmp_path / "state" / "todo-create" / f"{loaded.transaction_id}.json").exists()
 
 
@@ -202,7 +235,7 @@ def test_duplicate_transaction_markers_across_issues_fail_closed(tmp_path, mocke
     second = SimpleNamespace(**{**partial.__dict__, "number": 43})
     _patch_machine(mocker, req, [partial, second])
     with pytest.raises(TodoCreateError, match="duplicate_marker"):
-        execute_create(tmp_path, tmp_path / "state", req)
+        execute_create(tmp_path, tmp_path / "state", req, approved_repo="acme/repo")
 
 
 def test_unknown_create_outcome_recovers_marker_without_second_create(tmp_path, mocker):
@@ -222,8 +255,12 @@ def test_unknown_create_outcome_recovers_marker_without_second_create(tmp_path, 
     # First discovery must look empty, then recovery observes the partial issue.
     github_issues.list_all_issues.side_effect = [(), (partial,)]
     mocker.patch.object(github_issues, "fetch_issue", return_value=complete)
-    assert execute_create(tmp_path, tmp_path / "state", req) == 42
+    assert execute_create(
+        tmp_path, tmp_path / "state", req, approved_repo="acme/repo"
+    ) == 42
     assert create.call_count == 1
+    github_issues.repository_identity.assert_called_once_with(tmp_path)
+    assert create.call_args.kwargs["repo"] == "acme/repo"
 
 
 @pytest.mark.parametrize(
@@ -253,7 +290,9 @@ def test_partial_label_states_converge_and_complete_retry_is_idempotent(tmp_path
         issues[0] = _issue(req, body, tuple(x for x in issues[0].labels if x != label))
     add_mock = mocker.patch.object(github_issues, "add_label", side_effect=add)
     remove_mock = mocker.patch.object(github_issues, "remove_label", side_effect=remove)
-    assert execute_create(tmp_path, tmp_path / "state", req) == 42
+    assert execute_create(
+        tmp_path, tmp_path / "state", req, approved_repo="acme/repo"
+    ) == 42
     assert "needs-triage" not in issues[0].labels
     if labels == ("tpo:todo", "priority:P1", "ready-for-agent"):
         assert not add_mock.called and not remove_mock.called
@@ -266,7 +305,7 @@ def test_lock_contention_fails_without_persisting_request(tmp_path, mocker):
     state = tmp_path / "state"
     mocker.patch.object(github_issues, "repository_identity", return_value="acme/repo")
     with create_lock(state), pytest.raises(TodoCreateError, match="create_locked"):
-        execute_create(tmp_path, state, req)
+        execute_create(tmp_path, state, req, approved_repo="acme/repo")
     assert not (state / "todo-create" / f"{req.transaction_id}.json").exists()
 
 
@@ -291,5 +330,5 @@ def test_late_drift_and_label_timeout_retain_recovery_request(tmp_path, mocker, 
         )
         expected = "gh_unavailable"
     with pytest.raises(Exception, match=expected):
-        execute_create(tmp_path, tmp_path / "state", req)
+        execute_create(tmp_path, tmp_path / "state", req, approved_repo="acme/repo")
     assert (tmp_path / "state" / "todo-create" / f"{req.transaction_id}.json").exists()

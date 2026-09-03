@@ -645,6 +645,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     create_parser.add_argument("project", help="Project name")
     create_parser.add_argument("--request-file", required=True, type=Path)
+    create_parser.add_argument(
+        "--approved-repo",
+        default=None,
+        help="Exact OWNER/REPO shown in the approved preview; required with --yes",
+    )
     create_parser.add_argument("--issue", type=int, default=None, help="Resume this partial issue")
     create_parser.add_argument(
         "--yes", action="store_true", help="Use only after the displayed request was approved"
@@ -2240,12 +2245,14 @@ def _tick_project(
 
 def _cmd_todos_create(args, config: Config) -> int:
     """Create or converge one transaction-marked embedded-Plan issue."""
+    from . import github_issues
     from .project_config import _get_project_state_dir
     from .todos_create import (
         TodoCreateError,
         execute_create,
         load_create_request,
         render_create_preview,
+        validate_create_input_path,
     )
 
     project_dir = _resolve_project_dir(config, args.project)
@@ -2254,14 +2261,33 @@ def _cmd_todos_create(args, config: Config) -> int:
         return 2
     try:
         request = load_create_request(args.request_file)
+        state_dir = _get_project_state_dir(project_dir)
+        validate_create_input_path(
+            args.request_file, state_dir, transaction_id=request.transaction_id
+        )
     except TodoCreateError as exc:
         print(f"Error: {exc.code}", file=sys.stderr)
         return 2
     try:
-        print(render_create_preview(request, issue_number=args.issue), end="")
-    except TodoCreateError as exc:
+        repository = github_issues.repository_identity(project_dir)
+        print(
+            render_create_preview(
+                request,
+                project=args.project,
+                repository=repository,
+                issue_number=args.issue,
+            ),
+            end="",
+        )
+    except (TodoCreateError, github_issues.GitHubIssuesError) as exc:
         print(f"Error: {exc.code}", file=sys.stderr)
         return 2
+    if args.yes and args.approved_repo is None:
+        print("Error: approved_repo_required", file=sys.stderr)
+        return 2
+    if args.approved_repo is not None and args.approved_repo != repository:
+        print("Error: repository_drift", file=sys.stderr)
+        return 1
     if not args.yes:
         try:
             confirmation = input("Type create to continue: ")
@@ -2272,7 +2298,11 @@ def _cmd_todos_create(args, config: Config) -> int:
             return 1
     try:
         number = execute_create(
-            project_dir, _get_project_state_dir(project_dir), request, issue_number=args.issue
+            project_dir,
+            state_dir,
+            request,
+            approved_repo=args.approved_repo or repository,
+            issue_number=args.issue,
         )
     except (TodoCreateError, OSError) as exc:
         code = exc.code if isinstance(exc, TodoCreateError) else "create_io_error"

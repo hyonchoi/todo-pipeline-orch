@@ -6,6 +6,7 @@ import fcntl
 import json
 import os
 import re
+import stat
 import tempfile
 import uuid
 from collections.abc import Iterator
@@ -34,6 +35,9 @@ PLAN_MAX_CHARS = 60_000
 MAX_ISSUE_NUMBER = 9_999_999_999_999_999_999
 MARKER_PREFIX = "<!-- tpo-create:"
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_SENSITIVE_RE = re.compile(
+    r"(?i)(?:authorization\s*:\s*bearer\s+\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{20,})"
+)
 
 
 class TodoCreateError(ValueError):
@@ -71,13 +75,44 @@ def _text(value: object, *, code: str, maximum: int, empty: bool = False) -> str
 
 
 def load_create_request(path: Path) -> CreateRequest:
+    descriptor = -1
     try:
-        raw = path.read_text(encoding="utf-8")
+        before = path.lstat()
+        descriptor = os.open(
+            path,
+            os.O_RDONLY
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0),
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or stat.S_ISLNK(before.st_mode)
+            or not stat.S_ISREG(opened.st_mode)
+            or before.st_nlink != 1
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            raise TodoCreateError("invalid_request_file")
+        if stat.S_IMODE(opened.st_mode) != 0o600:
+            raise TodoCreateError("request_mode")
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            descriptor = -1
+            raw = handle.read()
+        after = path.lstat()
+        if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
+            raise TodoCreateError("invalid_request_file")
+        if _SENSITIVE_RE.search(raw):
+            raise TodoCreateError("secret_content")
         value = json.loads(raw, object_pairs_hook=_object)
     except TodoCreateError:
         raise
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except OSError as exc:
+        raise TodoCreateError("invalid_request_file") from exc
+    except (UnicodeError, json.JSONDecodeError) as exc:
         raise TodoCreateError("invalid_request") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
     if not isinstance(value, dict) or set(value) != REQUEST_KEYS:
         raise TodoCreateError("unknown_keys")
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
@@ -176,7 +211,37 @@ def render_create_body(request: CreateRequest, *, issue_number: int) -> str:
     return body
 
 
-def render_create_preview(request: CreateRequest, *, issue_number: int | None) -> str:
+def validate_create_input_path(
+    path: Path, state_dir: Path, *, transaction_id: str
+) -> None:
+    expected = state_dir / "todo-create-input" / f"{transaction_id}.json"
+    try:
+        input_dir = state_dir / "todo-create-input"
+        state_info = state_dir.lstat()
+        input_info = input_dir.lstat()
+        if (
+            stat.S_ISLNK(state_info.st_mode)
+            or not stat.S_ISDIR(state_info.st_mode)
+            or stat.S_ISLNK(input_info.st_mode)
+            or not stat.S_ISDIR(input_info.st_mode)
+            or stat.S_IMODE(input_info.st_mode) != 0o700
+            or path.absolute().parent != input_dir.absolute()
+            or path.resolve(strict=True) != expected.resolve(strict=True)
+            or state_dir.resolve(strict=True).parent
+            != state_dir.parent.resolve(strict=True)
+        ):
+            raise TodoCreateError("invalid_request_path")
+    except OSError as exc:
+        raise TodoCreateError("invalid_request_path") from exc
+
+
+def render_create_preview(
+    request: CreateRequest,
+    *,
+    project: str,
+    repository: str,
+    issue_number: int | None,
+) -> str:
     """Render the normalized title/body preview, with an explicit unassigned-ID token."""
     if issue_number is not None:
         body = render_create_body(request, issue_number=issue_number)
@@ -187,7 +252,10 @@ def render_create_preview(request: CreateRequest, *, issue_number: int | None) -
             '  "todo_id": "TODO-<assigned-by-github>",',
             1,
         )
-    return f"Title:\n{request.title}\n\nBody:\n{body}"
+    return (
+        f"Project: {project}\nRepository: {repository}\n"
+        f"Title:\n{request.title}\n\nBody:\n{body}"
+    )
 
 
 def persist_create_request(state_dir: Path, request: CreateRequest) -> Path:
@@ -247,8 +315,17 @@ def _matching_issues(project_dir: Path, repo: str, marker: str):
     return matches
 
 
-def execute_create(project_dir: Path, state_dir: Path, request: CreateRequest, *, issue_number: int | None = None) -> int:
-    repo = github_issues.repository_identity(project_dir)
+def execute_create(
+    project_dir: Path,
+    state_dir: Path,
+    request: CreateRequest,
+    *,
+    approved_repo: str,
+    issue_number: int | None = None,
+) -> int:
+    if github_issues.repository_identity(project_dir) != approved_repo:
+        raise TodoCreateError("repository_drift")
+    repo = approved_repo
     marker = creation_marker(request.transaction_id)
     # The issue number changes only a few manifest characters; validate the complete
     # body limit before the first remote mutation as well as after the real ID exists.
