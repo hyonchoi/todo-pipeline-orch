@@ -25,6 +25,7 @@ from typing import Any
 import yaml
 
 from .config import PromptClient, _validate_project_slug
+from .contract import DEFAULT_PROFILE
 from .profile_prerequisites import (
     HERMES_SKILL_REGISTRY_ROOT,
     unverified_prerequisite_ids,
@@ -3881,7 +3882,7 @@ def run_harness(
     timeout: int,
     convergence_threshold: int,
     config: Any = None,
-    profile_name: str = "gstack",
+    profile_name: str = DEFAULT_PROFILE,
 ) -> HarnessResult:
     """Main orchestration: drive one production run against a live GitHub sandbox.
 

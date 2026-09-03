@@ -1137,11 +1137,25 @@ class _LiveRunStubs:
             return []
         return [json.loads(line) for line in log_path.read_text().splitlines() if line.strip()]
 
+    #: Every argument ``run_harness`` needs except ``profile_name``.
+    _RUN_KWARGS: ClassVar[dict] = dict(
+        fixture_name="happy-path", repo="acme/sandbox", loop=False, keep_dir=False,
+        timeout=60, convergence_threshold=3, config=None,
+    )
+
     def run(self, **overrides):
-        kwargs = dict(
-            fixture_name="happy-path", repo="acme/sandbox", loop=False, keep_dir=False,
-            timeout=60, convergence_threshold=3, config=None,
-        )
+        """Run naming the profile explicitly (``gstack`` unless overridden).
+
+        These runs exercise a profile's drive, not ``run_harness``'s own
+        default — see :meth:`run_profile_default` for that.
+        """
+        kwargs = dict(self._RUN_KWARGS, profile_name="gstack")
+        kwargs.update(overrides)
+        return run_harness(**kwargs)
+
+    def run_profile_default(self, **overrides):
+        """Run without ``profile_name``, so run_harness's default applies."""
+        kwargs = dict(self._RUN_KWARGS)
         kwargs.update(overrides)
         return run_harness(**kwargs)
 
@@ -1298,6 +1312,19 @@ class TestRunHarness:
         assert seen["repo"] == "acme/sandbox"
         assert seen["plan_sha"] == "a" * 40
         assert seen["plan_text"] == harness_mod._plan_document(live.issue.todo_id)
+
+    def test_profile_defaults_to_native_sdd(self, live):
+        """No ``profile_name``: the harness runs DEFAULT_PROFILE's pinned drive."""
+        from hermes_pipeline.contract import DEFAULT_PROFILE
+
+        live.pin([_delivered_board()])
+
+        result = live.run_profile_default()
+
+        assert result.exit_code == 0
+        assert f"profile={DEFAULT_PROFILE}" in result.summary
+        assert "profile=native-sdd" in result.summary
+        assert live.order == _LIVE_PINNED_ORDER
 
     def test_native_sdd_shuts_down_registered_and_observed_keys(self, live):
         """Dynamic reconciler cards are not registered step keys, so shutdown gets the union."""

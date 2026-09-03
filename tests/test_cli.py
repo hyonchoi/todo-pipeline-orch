@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_pipeline.cli import _cmd_test, build_parser, main
+from hermes_pipeline.contract import DEFAULT_PROFILE
 
 
 class TestBuildParser:
@@ -55,7 +56,7 @@ def _test_args(**overrides):
         fixture="happy-path",
         repo=None,
         init_sandbox=False,
-        profile="gstack",
+        profile=DEFAULT_PROFILE,
         loop=False,
         keep=False,
         timeout=60,
@@ -85,7 +86,8 @@ def test_test_subcommand_parsing():
     args = parser.parse_args(["test", "--fixture", "happy-path"])
     assert args.command == "test"
     assert args.fixture == "happy-path"
-    assert args.profile == "gstack"
+    assert args.profile == DEFAULT_PROFILE
+    assert args.profile == "native-sdd"
 
 
 def test_test_subcommand_profile_flag():
@@ -154,6 +156,18 @@ def test_cmd_test_forwards_repo_and_no_phase_only(mocker):
         "config": "cfg",
         "profile_name": "agent-skills",
     }
+
+
+def test_cmd_test_without_profile_flag_runs_the_default_profile(mocker):
+    """`tpo test` with no --profile drives DEFAULT_PROFILE, not the legacy one."""
+    run = mocker.patch("hermes_pipeline.harness.run_harness")
+    run.return_value = _result()
+    args = build_parser().parse_args(["test"])
+
+    assert _cmd_test(args, config=None) == 0
+
+    assert run.call_args.kwargs["profile_name"] == DEFAULT_PROFILE
+    assert run.call_args.kwargs["profile_name"] == "native-sdd"
 
 
 def test_cmd_test_prints_summary_and_leftovers(mocker, capsys):

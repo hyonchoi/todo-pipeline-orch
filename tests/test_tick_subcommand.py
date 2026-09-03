@@ -630,6 +630,59 @@ class TestTickSubcommand:
 
         assert not any("deprecated" in r.getMessage() for r in caplog.records)
 
+    def test_tick_without_a_contract_prepares_legacy_implicit_phases(
+        self, tmp_path, mocker
+    ):
+        """No pipeline.toml -> the tick still prepares the legacy implicit
+        profile's phases, independent of what new projects now default to."""
+        import hermes_pipeline.contract as contract_mod
+        from hermes_pipeline.contract import DEFAULT_PROFILE, LEGACY_IMPLICIT_PROFILE
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+        # The spy relies on _tick_project importing PipelineContract inside the
+        # function: hoisting that import to module scope would leave built empty.
+        real_contract = contract_mod.PipelineContract
+        built: list = []
+        mocker.patch.object(
+            contract_mod,
+            "PipelineContract",
+            side_effect=lambda **kw: built.append(real_contract(**kw)) or built[-1],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision(picked="TODO-10"),
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["t_1"],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo", contract=False)
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        legacy_keys = [
+            phase.phase_key
+            for phase in load_phases(resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE))
+        ]
+        default_keys = [
+            phase.phase_key
+            for phase in load_phases(resolve_profile_phases_path(DEFAULT_PROFILE))
+        ]
+        assert legacy_keys != default_keys  # the regression would be invisible otherwise
+        prepared = create.call_args.kwargs["prepared"]
+        assert [task.phase_key for task in prepared] == legacy_keys
+        # The synthesized contract must name the legacy profile too, so the run
+        # is never recorded as DEFAULT_PROFILE while running legacy phases.
+        assert built, "the spy saw no PipelineContract construction"
+        assert built[0].profile == LEGACY_IMPLICIT_PROFILE
+
     def test_tick_selection_uses_project_state_dir(self, tmp_path, mocker):
         """Selection decisions are persisted under the project, not global state."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")

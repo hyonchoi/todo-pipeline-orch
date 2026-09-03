@@ -592,6 +592,8 @@ def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
+    from .contract import DEFAULT_PROFILE
+
     parser = argparse.ArgumentParser(
         prog="tpo",
         description="Hermes pipeline orchestrator: tick projects, manage pipeline setup, and handle legacy approval gates.",
@@ -704,9 +706,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument(
         "--profile",
-        default="gstack",
-        help="Pipeline skill-set profile (e.g., gstack, agent-skills). Default: gstack. "
-        "Each profile defines a different set of phases and required capabilities.",
+        default=DEFAULT_PROFILE,
+        help=(
+            "Pipeline skill-set profile (e.g., native-sdd, gstack, agent-skills). "
+            f"Default: {DEFAULT_PROFILE}. Each profile defines a different set of "
+            "phases and required capabilities."
+        ),
     )
     init_parser.set_defaults(func=_cmd_init)
 
@@ -775,8 +780,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test_parser.add_argument(
         "--profile",
-        default="gstack",
-        help="Bundled phase profile to test (default: gstack)",
+        default=DEFAULT_PROFILE,
+        help=f"Bundled phase profile to test (default: {DEFAULT_PROFILE})",
     )
     test_parser.add_argument(
         "--loop",
@@ -1519,6 +1524,7 @@ def _tick_project(
     """
     from .contract import (
         CONTRACT_SCHEMA_VERSION,
+        LEGACY_IMPLICIT_PROFILE,
         CapabilityMismatchError,
         ContractMissingError,
         ContractSchemaError,
@@ -1544,17 +1550,23 @@ def _tick_project(
         for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
             log.warning("project %s: %s", project_slug, notice)
     except ContractMissingError:
+        # A contract-less project keeps resolving to the legacy implicit
+        # profile — same as a contract that omits `profile` — regardless of
+        # what `tpo init` now writes for new projects. Passed explicitly so a
+        # change to PipelineContract.profile's default can't migrate an
+        # existing project's phases underneath it.
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
-        phases_path = resolve_profile_phases_path("gstack")
+        phases_path = resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE)
         phase_profile = load_phase_profile(phases_path)
         phases = list(phase_profile.phases)
-        prerequisites = load_profile_prerequisites("gstack")
+        prerequisites = load_profile_prerequisites(LEGACY_IMPLICIT_PROFILE)
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
             assignee="pipeline",
             capabilities=tuple(sorted(required_capabilities(phases))),
+            profile=LEGACY_IMPLICIT_PROFILE,
         )
         try:
             result = _cli_sp.run(
@@ -2530,6 +2542,7 @@ def _cmd_init(args, config: Config) -> int:
         return 2
 
     from .contract import (
+        DEFAULT_PROFILE,
         PROFILE_NAME_RE,
         ContractSchemaError,
         contract_path,
@@ -2538,7 +2551,7 @@ def _cmd_init(args, config: Config) -> int:
     from .phases import load_phase_profile, resolve_profile_phases_path
     from .project_config import _get_project_state_dir
 
-    profile = getattr(args, "profile", "gstack") or "gstack"
+    profile = getattr(args, "profile", DEFAULT_PROFILE) or DEFAULT_PROFILE
     if not PROFILE_NAME_RE.match(profile):
         msg = (
             f"invalid profile {profile!r}: must be a lowercase alphanumeric/hyphen "
@@ -2574,17 +2587,20 @@ def _cmd_init(args, config: Config) -> int:
             data = tomllib.loads(path.read_text())
             from .contract import (
                 DEFAULT_CAPABILITIES,
+                LEGACY_IMPLICIT_PROFILE,
                 PipelineContract,
                 _render_contract_toml,
             )
 
+            # Re-rendering an existing contract: an absent `profile` key means
+            # the legacy implicit profile, never the new authoring default.
             contract = PipelineContract(
                 schema_version=data["schema_version"],
                 assignee=assignee,
                 capabilities=tuple(
                     data.get("capabilities", list(DEFAULT_CAPABILITIES))
                 ),
-                profile=data.get("profile", "gstack"),
+                profile=data.get("profile", LEGACY_IMPLICIT_PROFILE),
             )
             path.write_text(_render_contract_toml(contract))
         except (tomllib.TOMLDecodeError, KeyError) as e:
@@ -2598,8 +2614,6 @@ def _cmd_init(args, config: Config) -> int:
             f"Pipeline execution contract already exists: {path} (use --force to regenerate)"
         )
     if written and phase_profile.deprecated:
-        from .contract import DEFAULT_PROFILE
-
         print(
             f"note: profile '{profile}' is deprecated; new projects default to "
             f"'{DEFAULT_PROFILE}' (see docs/howto-native-sdd-profile.md)"

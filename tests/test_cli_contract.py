@@ -1584,10 +1584,13 @@ class TestInitAssignee:
 
 
 class TestInitProfile:
-    def test_init_profile_parser_defaults_to_gstack(self):
+    def test_init_profile_parser_defaults_to_native_sdd(self):
+        from hermes_pipeline.contract import DEFAULT_PROFILE
+
         parser = build_parser()
         args = parser.parse_args(["init", "demo"])
-        assert args.profile == "gstack"
+        assert args.profile == DEFAULT_PROFILE
+        assert args.profile == "native-sdd"
 
     def test_init_profile_parser_accepts_flag(self):
         parser = build_parser()
@@ -1608,13 +1611,41 @@ class TestInitProfile:
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         assert 'profile = "agent-skills"' in contract.read_text()
 
-    def test_init_without_profile_flag_defaults_to_gstack(self, tmp_path, capsys):
+    def test_init_without_profile_flag_defaults_to_native_sdd(self, tmp_path, capsys):
+        """No --profile: init writes DEFAULT_PROFILE and its capabilities."""
+        import tomllib
+
+        from hermes_pipeline.contract import DEFAULT_PROFILE, required_capabilities
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         _create_project(projects_dir, "demo")
         config = Config(projects_dir=projects_dir)
 
         result = _cmd_init(FakeArgs(project="demo", force=False, assignee=None), config)
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        data = tomllib.loads(contract.read_text())
+        assert data["profile"] == DEFAULT_PROFILE == "native-sdd"
+        assert data["capabilities"] == sorted(
+            required_capabilities(load_phases(resolve_profile_phases_path(DEFAULT_PROFILE)))
+        )
+        out = capsys.readouterr().out
+        assert "Wrote pipeline execution contract" in out
+        assert "deprecated" not in out
+
+    def test_init_explicit_gstack_prints_deprecation_note(self, tmp_path, capsys):
+        """Opting into the deprecated legacy profile still warns."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="gstack"), config
+        )
 
         assert result == 0
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
@@ -1640,6 +1671,35 @@ class TestInitProfile:
         out = capsys.readouterr().out
         assert "Wrote pipeline execution contract" in out
         assert "deprecated" not in out
+
+    def test_init_assignee_patch_keeps_the_legacy_implicit_profile(self, tmp_path):
+        """Patching --assignee into a profile-less contract must not migrate it.
+
+        An absent ``profile`` key means the legacy implicit profile, so the
+        re-render keeps it rather than adopting the new authoring default.
+        """
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        state = project_dir / ".hermes"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "pipeline.toml").write_text(
+            "schema_version = 3\n"
+            'assignee = "default"\n'
+            'review_assignee = "default"\n'
+            'capabilities = ["Bash", "Edit", "Read", "Write"]\n'
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee="pipeline"), config
+        )
+
+        assert result == 0
+        text = (state / "pipeline.toml").read_text()
+        assert 'assignee = "pipeline"' in text
+        assert 'profile = "gstack"' in text
+        assert "native-sdd" not in text
 
     def test_init_unknown_profile_returns_error(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"
