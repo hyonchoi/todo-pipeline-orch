@@ -1,9 +1,17 @@
-# TPO Plan Template
+# Embedded TPO Plan Template
 
-Describe the implementation in ordinary Markdown, then include exactly one
-machine-readable block. Replace `TODO-N` with the TODO's canonical ID — `N` is
-the GitHub issue number of the `tpo:todo` issue this Plan belongs to — and keep
-task IDs unique and safe.
+New TODOs store the Plan once, as the final folded block in the issue body.
+`tpo todos create` renders this wrapper and substitutes the created issue
+number; request files contain only the human Markdown and task objects. The
+result has this canonical shape:
+
+````markdown
+<details>
+<summary>Implementation Plan</summary>
+---
+# Implementation Plan
+
+Describe the implementation here.
 
 ```json tpo-plan
 {
@@ -22,7 +30,13 @@ task IDs unique and safe.
 }
 ```
 
+---
+</details>
+````
+
 TPO permits at most 50 ordered tasks and rejects unknown keys, duplicate blocks
 or IDs, unsafe IDs, empty required fields, mismatched TODO IDs, and oversized
-values. Commit the Plan before execution and reference it from the issue's
-`### Plan` section.
+values. The block must be final and unique. Human Plan Markdown cannot contain
+structural `details`/matching `summary` tags, a `tpo-plan` fence, or
+`proposed_plan` wrappers. Existing repository-path Plans remain supported only
+as the legacy format.

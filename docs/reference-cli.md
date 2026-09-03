@@ -140,18 +140,44 @@ when the pinned issue still matches, `ISSUE DRIFT: <code>` (`issue_drift`,
 `REGISTRATION UNSUPPORTED: schema_version 1 ...` for a run registered under the
 retired TODOS.md schema, or `Current tick <id>: no registration (no TODO
 selected)` when the last tick picked nothing. It compares the registered
-repository, worktree, branch, base commit, and Plan bytes read from that
-immutable base and reports the current head and clean/dirty lifecycle state
-separately, so a valid later implementation or closeout commit is not
-misreported as authority drift. See
+repository, worktree, branch, and base commit. For an embedded source it
+verifies the Plan from the pinned issue snapshot and its private run artifact;
+for a legacy-path source it verifies Plan bytes read from the immutable base
+commit. It reports the current head and clean/dirty lifecycle state separately,
+so a valid later implementation or closeout commit is not misreported as
+authority drift. See
 [recovering runs and issue state](howto-debugging-and-recovery.md#recovering-runs-and-issue-state).
 
 ---
 
 ### `todos`
 
-Manage the GitHub Issues backlog. All three subcommands run `gh` against the
+Manage the GitHub Issues backlog. All four subcommands run `gh` against the
 project's `origin` and exit 2 for an unknown project.
+
+#### `todos create`
+
+Preview, create, or resume one validated issue with an embedded Plan:
+
+```bash
+tpo todos create myproject --request-file <project>/.hermes/todo-create-input/<uuid>.json
+tpo todos create myproject --request-file <project>/.hermes/todo-create-input/<uuid>.json --approved-repo owner/repo --yes
+tpo todos create myproject --request-file <project>/.hermes/todo-create-input/<uuid>.json --approved-repo owner/repo --issue 42 --yes
+```
+
+The request at `<state-dir>/todo-create-input/<uuid>.json` has exact mode
+`0600` inside an exact-mode-`0700` directory and has exactly `schema_version`,
+`transaction_id`,
+`title`, `fields`, `plan_markdown`, and `tasks`. Without `--yes`, TPO prints the
+complete canonical preview and accepts only `create`. With `--yes`,
+`--approved-repo` must exactly match that preview. `--issue` resumes a
+previously confirmed partial issue; normally rerun without it so the durable
+transaction marker can discover the issue.
+
+One creator at a time may use a configured state directory. TPO retains the
+approved request until the issue is observed with its embedded manifest,
+derived labels, `ready-for-agent`, and no `needs-triage`. It never closes or
+deletes a partial issue.
 
 #### `todos complete`
 
@@ -218,10 +244,11 @@ tpo todos audit myproject --fix
 | `--dry-run` | No | With `--fix`: print the changes as `would fix` without applying them |
 
 Findings print as `TODO-<N>: <finding>` using the vocabulary
-`missing-section:<Name>`, `duplicate-section:<Name>`, `plan:missing`,
+`missing-section:<Name>`, `duplicate-section:<Name>`, `plan:missing`, `plan:legacy_path`,
 `plan:duplicate`, `plan:invalid:<code>`, `branch:invalid`, `branch:default`,
 `decision:<Name>:<value>`, `label:missing:<label>`, `label:extra:<label>`,
-`state:closed`, and `not-a-todo`. The summary is
+`state:closed`, and `not-a-todo`. `plan:legacy_path` is informational and is
+never rewritten. The summary is
 `audit: issues=N findings=N fixable=N`, extended with `skipped=N applied=N`
 under `--fix`. Only `label:*` findings are fixable; `plan:missing` and
 `state:closed` are informational. A `gh` failure while fixing one issue prints
@@ -241,8 +268,8 @@ finding table with remediation.
 
 ### `plan validate`
 
-Validate a TODO's Plan attachment and optional `tpo-plan` manifest. Without
-`--plan`, the Plan path is read from the issue's `### Plan` section:
+Validate a TODO's embedded or legacy-path Plan. Without `--plan`, the source is
+resolved from the issue snapshot:
 
 ```bash
 tpo plan validate myproject --todo TODO-42
@@ -255,7 +282,7 @@ tpo plan validate myproject --todo 42 --plan docs/pipeline/TODO-42-plan.md --req
 |-----|----------|-------------|
 | `project` | Yes | Project slug |
 | `--todo` | Yes | TODO to validate (`TODO-42` or `42`) |
-| `--plan` | No | Repository-relative Plan candidate to validate instead of the issue's Plan |
+| `--plan` | No | Legacy repository-relative Plan candidate to validate instead of the issue source |
 | `--require-manifest` | No | Reject a valid legacy Plan that has no `json tpo-plan` block |
 
 Success prints `Plan has a valid manifest for TODO-N: <k> tasks` (exit 0) or,
@@ -271,6 +298,26 @@ line ends with
 `; warning: issue is closed (<reason>)`. Exit 2 for an unknown project.
 
 See the [Plan template](templates/tpo-plan.md).
+
+---
+
+### `skills`
+
+Transactionally manage the bundled `todo-manager` skill:
+
+```bash
+tpo skills install todo-manager --target codex --scope user [--reinstall]
+tpo skills uninstall todo-manager --target claude --scope project --yes [--force]
+tpo skills recover todo-manager --target codex --scope user --finish
+tpo skills recover todo-manager --target codex --scope user --rollback
+```
+
+`--target` is required and accepts `codex` or `claude`; scope defaults to
+`user`. Codex destinations are `.agents/skills/todo-manager`, and Claude
+destinations are `.claude/skills/todo-manager`, below the home directory or
+Git top level. Adjacent lock, journal, and receipt files make each single-target
+operation recoverable. A pending journal blocks new mutations. Recovery can
+roll back only before the recorded commit point; afterward use `--finish`.
 
 ---
 

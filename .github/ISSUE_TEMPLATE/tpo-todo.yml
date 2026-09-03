@@ -1,6 +1,6 @@
 # GitHub issue form for todo-pipeline-orchestrator backlog items.
 # Field labels are a machine-consumed contract: they must equal the section names in
-# hermes_pipeline/github_issues.py KNOWN_SECTIONS (minus the migration-only "Legacy ID"),
+# hermes_pipeline/github_issues.py new-form sections (excluding legacy-only "Plan" and "Legacy ID"),
 # in that order. GitHub renders each field as "### <Label>\n\n<value>" (or "_No response_"),
 # which parse_issue_body consumes. tests/test_issue_form_contract.py pins this coupling.
 name: TPO TODO
