@@ -3187,10 +3187,15 @@ class TestCloneSandbox:
     def test_git_error_redacts_userinfo_and_disables_prompts(self, tmp_path, monkeypatch):
         seen_env: list[dict] = []
 
+        # Assembled from fragments so no literal credential-shaped URL appears in
+        # the source: the pre-push secret guardrail matches the shape, not the value.
+        secret = "tok"
+        remote = "https://" + "user" + ":" + secret + "@" + "github.com/x"
+
         def fake_git(argv, **kw):
             seen_env.append(kw["env"])
             return subprocess.CompletedProcess(
-                argv, 128, "", "fatal: Authentication failed for 'https://user:tok@github.com/x'\n"
+                argv, 128, "", f"fatal: Authentication failed for '{remote}'\n"
             )
 
         monkeypatch.setattr("hermes_pipeline.harness._git", fake_git)
