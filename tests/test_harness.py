@@ -231,6 +231,9 @@ class TestHarnessProfileTopology:
             "hermes_pipeline.phases.load_profile_prerequisites",
             return_value=load_profile_prerequisites("gstack"),
         )
+        # Every bundled profile is live-safe today, so the allow-list is narrowed
+        # here to prove the rejection still precedes preflight and the workspace.
+        mocker.patch.object(harness_mod, "_LIVE_SAFE_PROFILES", frozenset({"gstack"}))
         preflight = mocker.patch("hermes_pipeline.harness.preflight_check")
         mkdtemp = mocker.patch("hermes_pipeline.harness.tempfile.mkdtemp")
 
@@ -1005,6 +1008,11 @@ class _LiveRunStubs:
     """
 
     SANDBOX = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
+    #: Registered step keys of a plan-pinned run (one plan/validate pair per task).
+    PINNED_KEYS = ("plan:task-1", "validate:task-1")
+    #: Deliberately NOT ``issue.branch``: the pipeline records the branch it
+    #: actually created, and the PR head invariant is checked against that one.
+    PINNED_BRANCH = "feat/pipeline-created-branch"
 
     def __init__(self, monkeypatch, workspace: Path) -> None:
         self.workspace = workspace
@@ -1023,13 +1031,25 @@ class _LiveRunStubs:
             tick_id="tick-1", kanban_quiescent=True, remote_all_ok=True, leftovers=(), branch_deletion_skipped=False
         )
         self.status_map: dict[str, str] = {}
+        self.pinned_registration = TickRegistration(
+            tick_id="tick-1",
+            todo_id="TODO-42",
+            phase_keys=self.PINNED_KEYS,
+            worktree=self.project_dir / ".worktrees" / "pinned",
+            branch=self.PINNED_BRANCH,
+            base_sha="a" * 40,
+            run_dir=self.project_dir / ".hermes" / "runs" / "tick-1",
+            pinned=True,
+        )
         # Overridable steps.
         self.clone = lambda sandbox, project_dir, branch=None: (project_dir / ".hermes").mkdir(parents=True)
         self.wait_visible = lambda *_a, **_k: None
         self.recover = lambda *_a, **_k: self.registration
+        self.recover_pinned = lambda *_a, **_k: self.pinned_registration
         self.tick = lambda *_a, **_k: 0
         self.current_tick_id: str | None = None
         self.poll = lambda **_k: True
+        self.poll_pinned = lambda **_k: {}
         self.verify = lambda artifacts: self.pr
 
         self.real_mkdtemp = real_mkdtemp = harness_mod.tempfile.mkdtemp
@@ -1070,7 +1090,11 @@ class _LiveRunStubs:
         self._stub(monkeypatch, "read_current_tick_id", lambda *_a, **_k: self.current_tick_id)
         self._stub(monkeypatch, "run_tick", lambda *a, **k: self.tick(*a, **k))
         self._stub(monkeypatch, "recover_tick_registration", lambda *a, **k: self.recover(*a, **k))
+        self._stub(
+            monkeypatch, "recover_pinned_registration", lambda *a, **k: self.recover_pinned(*a, **k)
+        )
         self._stub(monkeypatch, "poll_registered_phases", lambda **k: self.poll(**k))
+        self._stub(monkeypatch, "poll_pinned_run", lambda **k: self.poll_pinned(**k))
         self._stub(monkeypatch, "discover_remote_artifacts", lambda *_a, **_k: self.artifacts)
         self._stub(monkeypatch, "verify_pull_request", lambda artifacts, **_k: self.verify(artifacts))
         self._stub(monkeypatch, "shutdown_run", lambda *_a, **_k: self.shutdown_report)
@@ -1083,6 +1107,29 @@ class _LiveRunStubs:
             return fn(*args, **kwargs)
 
         monkeypatch.setattr(harness_mod, name, recorded)
+
+    def pin(self, maps) -> None:
+        """Script a plan-pinned run whose poller settles on *maps*, in order.
+
+        The tick id stays the one the registration carries so later ticks pass
+        ``assert_tick_id_unchanged``, and the ``finish-verified`` marker
+        ``classify_pinned_run`` demands is written by the tick preceding each
+        poll — i.e. after ``clone_sandbox`` created the clone.
+        """
+        remaining = list(maps)
+        self.current_tick_id = self.pinned_registration.tick_id
+        # The pipeline pushes the branch its registration recorded, not the one
+        # the issue asked for, so the run's PR is headed by that branch.
+        self.pr = dataclasses.replace(self.pr, head_ref=self.pinned_registration.branch)
+
+        def tick(*_a, **_k):
+            run_dir = self.pinned_registration.run_dir
+            run_dir.mkdir(parents=True, exist_ok=True)
+            (run_dir / "finish-verified").write_text("a" * 40 + "\n")
+            return 0
+
+        self.tick = tick
+        self.poll_pinned = lambda **_k: remaining.pop(0)
 
     def events(self) -> list[dict]:
         log_path = self.artifacts_dir / "events.jsonl"
@@ -1106,6 +1153,31 @@ _LIVE_HAPPY_ORDER = [
     "recover_tick_registration", "poll_registered_phases", "discover_remote_artifacts",
     "verify_pull_request", "shutdown_run",
 ]
+
+_LIVE_PINNED_ORDER = [
+    "resolve_sandbox_repo", "_run_token", "preflight_check", "github_preflight", "_kanban_preflight",
+    "clone_sandbox", "sandbox_seed_check", "take_baseline", "write_project_contract",
+    "create_harness_issue", "commit_plan", "wait_for_issue_visible", "read_current_tick_id", "run_tick",
+    "recover_pinned_registration", "poll_pinned_run", "discover_remote_artifacts",
+    "verify_pull_request", "shutdown_run",
+]
+
+
+def _delivered_board(keys=_LiveRunStubs.PINNED_KEYS, extra=("review:0",)) -> dict[str, str]:
+    """A settled, delivered plan-pinned board: finish done and the human gate blocked.
+
+    ``extra`` are the dynamic reconciler cards that are not registered step keys,
+    which is exactly what the shutdown key union has to pick up.
+    """
+    from hermes_pipeline.kanban_tasks import BLOCKED
+    from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+    return {
+        **dict.fromkeys(keys, "done"),
+        **dict.fromkeys(extra, "done"),
+        FINISH_KEY: "done",
+        HUMAN_GATE_KEY: BLOCKED,
+    }
 
 
 class TestRunHarness:
@@ -1197,6 +1269,202 @@ class TestRunHarness:
         }
         assert "repo=acme/sandbox issue=#42 pr=#11" in capsys.readouterr().out
         assert "profile=gstack" in result.summary
+
+    def test_gstack_drives_one_unpinned_tick(self, live, monkeypatch):
+        """The non-pinned profiles keep today's single-tick drive, unpinned."""
+        seen: dict = {}
+        real = harness_mod.drive_ticks
+        live._stub(monkeypatch, "drive_ticks", lambda **kw: (seen.update(kw), real(**kw))[1])
+
+        result = live.run()
+
+        assert result.exit_code == 0
+        assert seen["pinned"] is False
+        assert seen["repo"] is None
+        assert seen["plan_sha"] is None
+        assert seen["plan_text"] is None
+
+    def test_native_sdd_pins_the_drive_to_the_committed_plan(self, live, monkeypatch):
+        """A ``requires_plan`` profile drives pinned, against the Plan commit_plan wrote."""
+        seen: dict = {}
+        real = harness_mod.drive_ticks
+        live._stub(monkeypatch, "drive_ticks", lambda **kw: (seen.update(kw), real(**kw))[1])
+        live.pin([_delivered_board()])
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 0
+        assert seen["pinned"] is True
+        assert seen["repo"] == "acme/sandbox"
+        assert seen["plan_sha"] == "a" * 40
+        assert seen["plan_text"] == harness_mod._plan_document(live.issue.todo_id)
+
+    def test_native_sdd_shuts_down_registered_and_observed_keys(self, live):
+        """Dynamic reconciler cards are not registered step keys, so shutdown gets the union."""
+        delivered = _delivered_board()
+        live.pin([delivered])
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 0
+        assert live.order == _LIVE_PINNED_ORDER
+        registered = live.pinned_registration.phase_keys
+        keys = live.kwargs["shutdown_run"]["expected_phase_keys"]
+        assert keys[: len(registered)] == registered
+        assert set(keys) == set(registered) | set(delivered)
+        assert len(keys) == len(set(keys))
+        assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
+
+    def test_native_sdd_accepts_a_pr_from_the_registered_branch(self, live):
+        """The head invariant's referent is the registration, not the issue.
+
+        The pipeline records the branch it actually created, which need not be
+        the one the issue asked for, so a PR headed by the registered branch is
+        this run's delivery even when that differs from ``issue.branch``.
+        """
+        live.pin([_delivered_board()])
+        assert live.pinned_registration.branch != live.issue.branch
+        assert live.pr.head_ref == live.pinned_registration.branch
+
+        result = live.run(keep_dir=True, profile_name="native-sdd")
+
+        assert result.exit_code == 0
+        assert result.pr_numbers == (11,)
+        assert not [e for e in live.events() if e["event_type"] == "pr_invariant_failed"]
+
+    def test_native_sdd_pr_head_must_be_the_registered_branch(self, live):
+        live.pin([_delivered_board()])
+        live.pr = _pr(11, head_ref="feat/someone-elses-branch")
+
+        result = live.run(keep_dir=True, profile_name="native-sdd")
+
+        assert result.exit_code == 1
+        assert result.pr_numbers == ()
+        assert "[pr_wrong_head]" in result.summary
+        failed = [event for event in live.events() if event["event_type"] == "pr_invariant_failed"]
+        assert failed and failed[0]["code"] == "pr_wrong_head"
+        assert "feat/someone-elses-branch" in failed[0]["detail"]
+        # The referent is the registered branch, not the one the issue requested.
+        assert f"expected {live.pinned_registration.branch}" in failed[0]["detail"]
+        assert live.issue.branch not in failed[0]["detail"]
+        assert live.order.index("shutdown_run") < live.order.index("_prune_retained_state")
+
+    def test_gstack_pr_head_is_not_pinned_to_a_branch(self, live):
+        """The head invariant is pinned-only: an unpinned run has no registered branch."""
+        live.pr = _pr(11, head_ref="feat/someone-elses-branch")
+
+        result = live.run()
+
+        assert result.exit_code == 0
+        assert result.pr_numbers == (11,)
+
+    def test_native_sdd_unexpected_selection_shuts_down_the_recovered_tick(self, live):
+        live.pin([{"plan:task-1": "done", "validate:task-1": "blocked"}, _delivered_board()])
+        live.current_tick_id = None  # tick 2 persisted no id: a different selection
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 1
+        assert result.summary.startswith("[unexpected_selection] ")
+        assert "discover_remote_artifacts" not in live.order
+        assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
+        assert live.kwargs["shutdown_run"]["expected_phase_keys"] is None
+        assert live.kwargs["shutdown_run"]["assume_workers_may_exist"] is False
+
+    def test_native_sdd_stall_shuts_down_the_cards_it_observed(self, live):
+        """A stalled pinned run registered fully, but its board is only partly built.
+
+        Requiring the registered step keys would demand cards no tick created,
+        so quiescence could never be proven and remote cleanup would be skipped;
+        forfeiting the check entirely would let a missing card read as quiescent.
+        The cards actually observed are the honest completeness set.
+        """
+        stuck = {"plan:task-1": "done", "review:0": "blocked"}
+        live.pin([dict(stuck), dict(stuck)])
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 1
+        assert result.summary.startswith("[tick_stalled] ")
+        keys = live.kwargs["shutdown_run"]["expected_phase_keys"]
+        assert keys == ("plan:task-1", "review:0")
+        assert keys is not None and keys != live.pinned_registration.phase_keys
+        assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
+        assert live.kwargs["shutdown_run"]["assume_workers_may_exist"] is False
+
+    def test_native_sdd_partial_registration_forfeits_the_card_check(self, live):
+        """A registration that never validated names no cards to wait for."""
+        def recover_pinned(*_a, **_k):
+            raise HarnessTickError("registration_invalid", "ValueError", tick_id="tick-1")
+
+        live.recover_pinned = recover_pinned
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 1
+        assert result.summary.startswith("[registration_invalid] ")
+        assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
+        assert live.kwargs["shutdown_run"]["expected_phase_keys"] is None
+        assert "poll_pinned_run" not in live.order
+
+    def test_pending_drive_error_starts_no_pr_discovery(self, live, monkeypatch):
+        """Fail-closed: a drive reporting an error starts no new remote work.
+
+        Unreachable through either real drive (neither reports success alongside
+        an error), so the guard is pinned here rather than left to that invariant.
+        """
+        from hermes_pipeline.harness import TickDrive
+
+        live._stub(
+            monkeypatch,
+            "drive_ticks",
+            lambda **_k: TickDrive(
+                registration=live.registration,
+                success=True,
+                timed_out=False,
+                result_box={},
+                observed_keys=frozenset(),
+                failure_code=None,
+                tick_error=None,
+                workers_unaccounted=False,
+                ticks_run=1,
+                pending_error=RuntimeError("boom"),
+            ),
+        )
+
+        with pytest.raises(RuntimeError, match="boom"):
+            live.run()
+
+        assert "discover_remote_artifacts" not in live.order
+        assert live.order[-1] == "shutdown_run"
+
+    def test_summary_line_reports_how_many_ticks_ran(self, live, capsys):
+        live.pin([{"plan:task-1": "done", "review:0": "blocked"}, _delivered_board()])
+
+        live.run(profile_name="native-sdd")
+
+        assert "ticks=2" in capsys.readouterr().out
+
+    def test_tick_registered_event_names_the_pinned_worktree_and_branch(self, live):
+        live.pin([_delivered_board()])
+
+        live.run(keep_dir=True, profile_name="native-sdd")
+
+        (event,) = [e for e in live.events() if e["event_type"] == "tick_registered"]
+        assert event["tick_id"] == "tick-1"
+        assert event["phase_keys"] == list(live.PINNED_KEYS)
+        assert event["pinned"] is True
+        assert event["worktree"] == str(live.pinned_registration.worktree)
+        assert event["branch"] == live.pinned_registration.branch != live.issue.branch
+
+    def test_tick_registered_event_reports_an_unpinned_registration(self, live):
+        live.run(keep_dir=True)
+
+        (event,) = [e for e in live.events() if e["event_type"] == "tick_registered"]
+        assert event["phase_keys"] == list(_LIVE_KEYS)
+        assert event["pinned"] is False
+        assert event["worktree"] is None
+        assert event["branch"] is None
 
     def test_kanban_summary_line_reads_the_archived_snapshot(self, live, capsys):
         live.snapshot = [
@@ -2507,18 +2775,18 @@ class TestValidateLiveProfile:
         phases = load_phases(resolve_profile_phases_path(name))
         validate_live_profile(phases, name)
 
-    def test_native_sdd_rejected_unsafe_terminal(self):
+    def test_native_sdd_accepted(self):
+        """native-sdd's human-gate terminal is live-safe: the harness drives it across ticks."""
         phases = load_phases(resolve_profile_phases_path("native-sdd"))
-        with pytest.raises(HarnessProfileError) as exc_info:
-            validate_live_profile(phases, "native-sdd")
-        assert exc_info.value.code == "unsafe_terminal"
-        assert exc_info.value.profile_name == "native-sdd"
+        validate_live_profile(phases, "native-sdd")
 
     def test_unknown_profile_rejected(self):
+        """A profile off the allow-list is rejected even with a valid terminal topology."""
         phases = [Phase(phase_key="p1", name="P1", terminal=True)]
         with pytest.raises(HarnessProfileError) as exc_info:
             validate_live_profile(phases, "custom-profile")
         assert exc_info.value.code == "unsafe_terminal"
+        assert exc_info.value.profile_name == "custom-profile"
 
     @pytest.mark.parametrize(
         "phases",
@@ -6334,6 +6602,28 @@ class TestRecoverPinnedRegistration:
         assert excinfo.value.code == "registration_invalid"
         assert excinfo.value.detail == "registration_invalid: unsupported schema_version"
 
+    def test_unmodelled_loader_failure_keeps_the_tick_id(self, tmp_path: Path, mocker):
+        """A failure the contract does not model must not lose the tick id.
+
+        ``registration.json`` is agent-written, so the loader can raise outside
+        ``ResultContractError`` (a lone surrogate reaching ``snapshot_hash``, an
+        unbounded read, an OS error). Without a tick id shutdown takes the "no
+        worker can exist" branch and deletes the workspace under a live worker.
+        """
+        fx = _pinned_registration(tmp_path)
+        mocker.patch(
+            "hermes_pipeline.harness.load_validated_registration",
+            side_effect=UnicodeEncodeError("utf-8", "\ud800", 0, 1, "surrogates not allowed"),
+        )
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_invalid"
+        assert excinfo.value.tick_id == _PINNED_TICK
+        # The type name only: an unmodelled exception's message is not trusted.
+        assert excinfo.value.detail == "UnicodeEncodeError"
+
     def test_forged_plan_via_replace_ref_is_plan_mismatch(self, tmp_path: Path):
         # The clone is agent-controlled: a replace ref makes ``git show
         # <plan_sha>:<plan_path>`` return forged Plan bytes, so the contract's
@@ -7126,6 +7416,66 @@ class TestDriveTicks:
         assert drive.tick_error.code == "tick_stalled"
         assert drive.tick_error.tick_id == _PINNED_TICK
         assert drive.registration is registration
+
+    def test_native_sdd_reports_every_settled_board(self, tmp_path: Path, mocker):
+        """Each settled tick emits ``tick_completed`` so the events log shows the hops."""
+        from hermes_pipeline.harness import drive_ticks
+        from hermes_pipeline.kanban_tasks import BLOCKED
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        first = {"plan:task-1": "done", "validate:task-1": BLOCKED}
+        second = _delivered_board(keys=_PINNED_STEPS, extra=())
+        registration, _run, _poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(first), dict(second)]
+        )
+        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is True
+        events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+        completed = [e for e in events if e["event_type"] == "tick_completed"]
+        assert [(e["tick_no"], e["status_map"]) for e in completed] == [(1, first), (2, second)]
+
+    def test_native_sdd_stall_is_reported_as_an_event(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        stuck = {"plan:task-1": "done", "validate:task-1": "blocked"}
+        self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "tick_stalled"
+        events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+        stalled = [e for e in events if e["event_type"] == "tick_stalled"]
+        assert [(e["tick_no"], e["status_map"]) for e in stalled] == [(2, stuck)]
+
+    def test_native_sdd_unexpected_failure_leaves_workers_unaccounted(
+        self, tmp_path: Path, mocker
+    ):
+        """An unmodelled failure proves nothing about the sandbox being idle."""
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        mocker.patch(
+            "hermes_pipeline.harness.recover_pinned_registration",
+            side_effect=MemoryError("out of memory"),
+        )
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+
+        drive = drive_ticks(**kwargs)
+
+        assert isinstance(drive.pending_error, MemoryError)
+        assert drive.workers_unaccounted is True
+        assert drive.registration is None
+        assert drive.success is False
 
     def test_native_sdd_delivered_beats_stall_detection(self, tmp_path: Path, mocker):
         """The real race: the board is already final on tick 1 and the marker

@@ -1563,7 +1563,13 @@ def _screen_branch_name(name: str) -> None:
 
 
 class PullRequestInvariantError(RuntimeError):
-    """The live run did not leave exactly one open, attributable pull request."""
+    """The live run did not leave exactly one open, attributable pull request.
+
+    Codes: ``pr_missing``, ``pr_ambiguous``, ``pr_merged``, ``pr_closed`` and
+    ``pr_wrong_base`` (all raised by :func:`verify_pull_request`), plus
+    ``pr_wrong_head``, which only a plan-pinned run can violate and which
+    :func:`run_harness` checks against the registered branch afterwards.
+    """
 
     def __init__(self, code: str, detail: str = "") -> None:
         super().__init__(code)
@@ -2462,7 +2468,7 @@ class _ConvergenceMonitor:
         self._inner(event_type, data)
 
 
-_LIVE_SAFE_PROFILES = frozenset({"gstack", "agent-skills"})
+_LIVE_SAFE_PROFILES = frozenset({"gstack", "agent-skills", "native-sdd"})
 
 
 def validate_live_profile(phases: list[Phase], profile_name: str) -> None:
@@ -2811,7 +2817,9 @@ def recover_pinned_registration(
     with ``load_validated_registration`` (schema, path containment, worktree
     identity, Plan hash, issue snapshot); any contract violation is reported as
     ``registration_invalid`` with the contract error message (code, plus its
-    detail when present) as ``detail``. The registration must pin *issue*'s
+    detail when present) as ``detail``; any other exception escaping the loader
+    becomes the same code with the exception's type name as ``detail``, so a
+    failure the contract does not model still reaches shutdown with a tick id. The registration must pin *issue*'s
     number, branch and plan path (``unexpected_registration``, detail naming the
     field); ``base_sha`` must be *plan_sha*, the commit the harness pushed the
     Plan in (``registration_base_mismatch``); ``plan_hash`` must equal the
@@ -2829,6 +2837,17 @@ def recover_pinned_registration(
         validated = load_validated_registration(project_dir, project_state, tick_id, repo=repo)
     except ResultContractError as exc:
         raise HarnessTickError("registration_invalid", str(exc), tick_id=tick_id) from exc
+    except Exception as exc:
+        # The loader reads agent-written bytes, so it can fail in ways the
+        # contract does not model (a lone surrogate reaching ``snapshot_hash``,
+        # an unbounded file, an OS error). Those must still arrive as a tick
+        # error carrying *tick_id*: without it shutdown takes the "no worker can
+        # exist" branch and deletes the workspace while a spawned worker may
+        # still be pushing. The type name is the detail -- an unmodelled
+        # exception's message can carry agent-controlled text.
+        raise HarnessTickError(
+            "registration_invalid", type(exc).__name__, tick_id=tick_id
+        ) from exc
     if validated.issue_number != issue.number:
         raise HarnessTickError(
             "unexpected_registration", f"issue {validated.issue_number}", tick_id=tick_id
@@ -3086,6 +3105,23 @@ def _log_tick_error(exc: HarnessTickError, tick_log: Path) -> None:
         log.error("harness: tick did not register a runnable run: %s %s", exc.code, exc.detail)
 
 
+def _tick_registered_payload(registration: TickRegistration) -> dict[str, Any]:
+    """The ``tick_registered`` event payload describing *registration*.
+
+    ``pinned``/``worktree``/``branch`` name the isolated checkout a plan-pinned
+    run was registered against, so the events log identifies what a later
+    ``pr_wrong_head`` or shutdown leftover refers to; they are ``False``/``None``
+    for a non-pinned registration, which owns no worktree of its own.
+    """
+    return {
+        "tick_id": registration.tick_id,
+        "phase_keys": list(registration.phase_keys),
+        "pinned": registration.pinned,
+        "worktree": str(registration.worktree) if registration.worktree is not None else None,
+        "branch": registration.branch,
+    }
+
+
 def _emit_timeout_phase(
     *,
     slug: str,
@@ -3140,6 +3176,17 @@ def drive_ticks(
     A ``HarnessTickError`` is reported in ``tick_error``/``failure_code`` rather
     than raised: the run may be live, and the caller owes it a shutdown. Other
     exceptions (notably ``PollCancellationError``) propagate.
+
+    Monitor events, all written through *base_monitor* so the driver stays a
+    pure ``TickDrive`` producer and needs no callback wiring from its caller:
+    ``tick_registered`` (once, with ``tick_id``, ``phase_keys`` and — new for the
+    pinned drive — ``pinned``, ``worktree`` and ``branch``; see
+    :func:`_tick_registered_payload`), ``phase_timed_out`` (on the whole-run
+    deadline), and, pinned only, ``tick_completed`` ``{tick_no, status_map}``
+    once per settled board plus ``tick_stalled`` ``{tick_no, status_map}`` when
+    that board is identical to the previous tick's. A non-pinned drive emits no
+    per-tick event: its poller reports no status map, and its single tick is
+    already named by ``tick_registered``.
 
     ``pinned=True`` requires *repo*, *plan_sha* and *plan_text* (``ValueError``),
     and is the only mode that uses *project_dir*: the pinned trust boundary
@@ -3247,10 +3294,7 @@ def _drive_single_tick(
         if tick_error is None:
             assert registration is not None
             registered = registration
-            base_monitor(
-                "tick_registered",
-                {"tick_id": registered.tick_id, "phase_keys": list(registered.phase_keys)},
-            )
+            base_monitor("tick_registered", _tick_registered_payload(registered))
             cancel_event = threading.Event()
 
             def _poll() -> bool:
@@ -3380,13 +3424,7 @@ def _drive_pinned_ticks(
                         previous_tick_id=previous_tick_id,
                     )
                     budget = pinned_tick_budget(registration.phase_keys)
-                    base_monitor(
-                        "tick_registered",
-                        {
-                            "tick_id": registration.tick_id,
-                            "phase_keys": list(registration.phase_keys),
-                        },
-                    )
+                    base_monitor("tick_registered", _tick_registered_payload(registration))
                 else:
                     assert_tick_id_unchanged(project_state, expected=registration.tick_id)
             except HarnessTickError as exc:
@@ -3437,6 +3475,9 @@ def _drive_pinned_ticks(
 
             status_map = settled.get("map", {})
             observed |= set(status_map)
+            base_monitor(
+                "tick_completed", {"tick_no": ticks_run, "status_map": dict(status_map)}
+            )
             if detector.should_halt():
                 # ``poll_pinned_run`` swallows its own ``ConvergenceHaltError`` and
                 # returns the last map, so the halt is not in the return value. The
@@ -3463,6 +3504,9 @@ def _drive_pinned_ticks(
                 )
                 failure_code = tick_error.code
                 log.error("harness: pinned run stalled: %s", tick_error.detail)
+                base_monitor(
+                    "tick_stalled", {"tick_no": ticks_run, "status_map": dict(status_map)}
+                )
                 break
             previous_map = status_map
             if budget is not None and ticks_run >= budget:
@@ -3479,6 +3523,9 @@ def _drive_pinned_ticks(
         # the keys seen so far and the error rather than unwinding past them.
         return _partial(poll_cancelled=True, pending_error=exc)
     except Exception as exc:
+        # Nothing here proved the sandbox idle, and a tick may already have
+        # spawned detached workers, so the caller must assume they exist.
+        workers_unaccounted = True
         return _partial(pending_error=exc)
 
     return _partial()
@@ -3644,7 +3691,10 @@ def shutdown_run(
     ``tick_not_persisted`` and ``picked_none``, where no card can exist.
     ``expected_phase_keys=None`` forfeits the completeness check (quiescence then
     needs only a non-empty, fully terminal set of cards) and is meant solely for
-    those partial-registration callers. After ``tick_timeout`` (or any failure
+    those partial-registration callers. A plan-pinned run that registered fully
+    and then stalled or exhausted its tick budget passes the card keys it
+    actually observed instead: its board is built one reconciler hop at a time,
+    so the registered keys would name cards that were never created. After ``tick_timeout`` (or any failure
     escaping :func:`run_tick`) the caller re-reads ``current_tick_id.txt``: a new id
     is passed like ``exc.tick_id`` above; when none is readable pass ``tick_id=None``
     with ``assume_workers_may_exist=True``, which closes the issue only (nothing
@@ -3803,6 +3853,13 @@ def shutdown_run(
 _HARNESS_FIXTURE = "happy-path"
 
 
+#: Tick errors raised *after* a complete registration, where the cards proven to
+#: exist (``TickDrive.observed_keys``) are the honest completeness set for
+#: shutdown. Every other tick error leaves the registration partial and forfeits
+#: the completeness check with ``None``.
+_OBSERVED_CARDS_TICK_ERRORS = frozenset({"tick_stalled", "tick_budget_exhausted"})
+
+
 def _harness_tmp_root() -> Path:
     """Directory harness workspaces are allocated under (seam for hermetic tests).
 
@@ -3826,11 +3883,13 @@ def run_harness(
     config: Any = None,
     profile_name: str = "gstack",
 ) -> HarnessResult:
-    """Main orchestration: drive one production tick against a live GitHub sandbox.
+    """Main orchestration: drive one production run against a live GitHub sandbox.
 
     Preflight (profile, tools, gh, kanban), clone and verify the sandbox, create
-    the run's issue and plan commit, run ``tpo tick`` and poll its registered
-    cards, verify the pull request, then shut down (kanban quiescence, remote
+    the run's issue and plan commit, drive the run's ticks
+    (:func:`drive_ticks` — one tick for ``gstack``/``agent-skills``, the pinned
+    multi-tick loop for a ``requires_plan`` profile such as ``native-sdd``),
+    verify the pull request, then shut down (kanban quiescence, remote
     cleanup) and report. Once the issue exists :func:`shutdown_run` always runs,
     even when a later step raised (the original exception is re-raised
     afterwards) — except on an interrupt (``KeyboardInterrupt``/``SystemExit``),
@@ -3838,12 +3897,9 @@ def run_harness(
     recovery pointers are logged. A ``HarnessTickError`` is not raised out of
     this function: it becomes exit code 1 with its code in the summary.
     """
-    import threading
-
     from .contract import PROFILE_NAME_RE
-    from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
     from .phases import (
-        load_phases,
+        load_phase_profile,
         load_profile_prerequisites,
         resolve_profile_phases_path,
     )
@@ -3859,7 +3915,11 @@ def run_harness(
     if not isinstance(profile_name, str) or not PROFILE_NAME_RE.fullmatch(profile_name):
         raise HarnessProfileError("invalid_profile_name", "<invalid>")
     profile_path = resolve_profile_phases_path(profile_name)
-    all_phases = load_phases(profile_path)
+    phase_profile = load_phase_profile(profile_path)
+    all_phases = list(phase_profile.phases)
+    # A ``requires_plan`` profile registers once and reconciles across several
+    # ticks, so the drive is pinned to this run's Plan commit; see drive_ticks.
+    pinned = phase_profile.requires_plan
     prerequisites = load_profile_prerequisites(profile_name)
     unverified = unverified_prerequisite_ids(prerequisites, prompt_client)
     if unverified:
@@ -3933,8 +3993,10 @@ def run_harness(
         success = False
         timed_out = False
         poll_cancelled = False
+        observed_keys: frozenset[str] = frozenset()
         pr: PullRequest | None = None
         pending: Exception | None = None
+        ticks_run = 0
         try:
             plan_sha = commit_plan(project_dir, issue)
             with isolate_config(
@@ -3959,96 +4021,65 @@ def run_harness(
                 # our issue is ready before running the tick (also the quiescence re-check).
                 wait_for_issue_visible(project_dir, sandbox, issue_number=issue.number)
 
-                try:
-                    previous_tick_id = read_current_tick_id(project_state)
+                drive = drive_ticks(
+                    project_dir=project_dir,
+                    project_state=project_state,
+                    slug=sandbox.slug,
+                    workspace_dir=workspace_dir,
+                    tick_log=tick_log,
+                    timeout=timeout,
+                    all_phases=all_phases,
+                    issue=issue,
+                    monitor=monitor,
+                    detector=detector,
+                    base_monitor=base_monitor,
+                    pinned=pinned,
+                    repo=sandbox.repo if pinned else None,
+                    plan_sha=plan_sha if pinned else None,
+                    # Exactly the Plan document commit_plan just wrote at plan_sha:
+                    # the pinned trust boundary hashes it to detect a forged clone.
+                    plan_text=_plan_document(issue.todo_id) if pinned else None,
+                )
+                # The drive reports a live run instead of raising, so its outcome
+                # is copied onto the locals shutdown and reporting already use.
+                # failure_code must stay mutable: the PR invariants overwrite it.
+                registration = drive.registration
+                success = drive.success
+                timed_out = drive.timed_out
+                tick_error = drive.tick_error
+                failure_code = drive.failure_code
+                workers_unaccounted = drive.workers_unaccounted
+                observed_keys = drive.observed_keys
+                ticks_run = drive.ticks_run
+                poll_cancelled = drive.poll_cancelled
+                # Never a BaseException: an interrupt propagates out of the drive
+                # untouched rather than being reported (see ``TickDrive``).
+                pending = drive.pending_error
+
+                if pending is None and success and not timed_out:
                     try:
-                        run_tick(sandbox.slug, cwd=workspace_dir, log_path=tick_log, timeout=timeout)
-                    except Exception as exc:
-                        # The subprocess may have persisted a tick and spawned workers
-                        # before failing: re-read the id so shutdown can quiesce it.
-                        if not isinstance(exc, HarnessTickError):
-                            exc = HarnessTickError("tick_failed", f"{type(exc).__name__}: {exc}"[:_ERROR_MESSAGE_MAX])
-                        current_tick_id = read_current_tick_id(project_state)
-                        if current_tick_id is not None and current_tick_id != previous_tick_id:
-                            exc.tick_id = current_tick_id
-                        else:
-                            workers_unaccounted = True
-                        raise exc
-                    registration = recover_tick_registration(
-                        project_state,
-                        expected_issue=issue.number,
-                        tick_log=tick_log,
-                        previous_tick_id=previous_tick_id,
-                    )
-                    cards = cards_for_registered_keys(all_phases, registration.phase_keys)
-                except HarnessTickError as exc:
-                    tick_error = exc
-                    failure_code = exc.code
-                    if exc.code == "tick_not_persisted":
-                        # The detail is the tick log tail and may carry sensitive tool output.
-                        log.error(
-                            "harness: tick did not register a runnable run: %s; see %s",
-                            exc.code, tick_log,
+                        artifacts = discover_remote_artifacts(
+                            project_dir, sandbox, issue=issue, baseline=baseline,
+                            plan_sha=plan_sha, provenance_dir=provenance_dir,
                         )
-                        log.debug("harness: tick log tail:\n%s", exc.detail)
-                    else:
-                        log.error("harness: tick did not register a runnable run: %s %s", exc.code, exc.detail)
-
-                if tick_error is None:
-                    assert registration is not None
-                    base_monitor(
-                        "tick_registered",
-                        {"tick_id": registration.tick_id, "phase_keys": list(registration.phase_keys)},
-                    )
-                    cancel_event = threading.Event()
-
-                    def _poll() -> bool:
-                        return poll_registered_phases(
-                            project_slug=sandbox.slug,
-                            tick_id=registration.tick_id,
-                            state_dir=project_state,
-                            todo_id=registration.todo_id,
-                            cards=cards,
-                            monitor=monitor,
-                            detector=detector,
-                            cancel_event=cancel_event,
-                        )
-
-                    success, timed_out, result_box = _run_with_timeout(
-                        _poll, timeout=timeout, cancel_event=cancel_event
-                    )
-                    if timed_out:
-                        timed_out_phase: str | None = None
-                        try:
-                            in_flight = get_todo_kanban_status(sandbox.slug, registration.tick_id)
-                            timed_out_phase = next(
-                                (k for k, v in in_flight.items() if v not in TERMINAL_STATUSES),
-                                None,
-                            )
-                        except Exception:
-                            pass
-                        timed_out_phase = timed_out_phase or monitor.current_phase_key
-                        if timed_out_phase:
-                            base_monitor("phase_timed_out", {"phase_key": timed_out_phase})
-                    elif "convergence_error" in result_box:
-                        # Convergence-halt fired during polling; the cards are already
-                        # terminal on the board. Name it in the summary.
-                        log.warning("convergence-halt: %s", result_box["convergence_error"])
-                        failure_code = "convergence_halt"
-
-                    if success and not timed_out:
-                        try:
-                            artifacts = discover_remote_artifacts(
-                                project_dir, sandbox, issue=issue, baseline=baseline,
-                                plan_sha=plan_sha, provenance_dir=provenance_dir,
-                            )
-                            pr = verify_pull_request(artifacts, default_branch=baseline.default_branch)
-                        except PullRequestInvariantError as exc:
-                            base_monitor(*pr_invariant_event(exc))
-                            failure_code = exc.code
-                        except HarnessRemoteCleanupError as exc:
-                            log.error("harness: PR discovery failed: %s %s", exc.code, exc.detail)
-                            failure_code = exc.code
+                        verified = verify_pull_request(artifacts, default_branch=baseline.default_branch)
+                        if pinned and registration is not None:
+                            # A pinned run pushes the branch the registration
+                            # pinned; a PR from any other head is not this run's
+                            # delivery even though it is attributable to the issue.
+                            if verified.head_ref != registration.branch:
+                                raise PullRequestInvariantError(
+                                    "pr_wrong_head",
+                                    f"#{verified.number} -> {verified.head_ref}"
+                                    f" (expected {registration.branch})",
+                                )
+                        pr = verified
+                    except PullRequestInvariantError as exc:
+                        base_monitor(*pr_invariant_event(exc))
+                        failure_code = exc.code
+                    except HarnessRemoteCleanupError as exc:
+                        log.error("harness: PR discovery failed: %s %s", exc.code, exc.detail)
+                        failure_code = exc.code
         except PollCancellationError as exc:
             poll_cancelled = True
             pending = exc
@@ -4068,9 +4099,30 @@ def run_harness(
         shutdown_keys: tuple[str, ...] | None = (
             registration.phase_keys if registration is not None else None
         )
+        if shutdown_keys is not None and observed_keys:
+            # A pinned run's reconcilers add cards that are not registered step
+            # keys (``review:0``, ``finish``, ``human-gate``). Requiring those
+            # too is what stops shutdown from reading a board that is still
+            # missing a dynamic card as quiescent. Registered order first, then
+            # the extras, so the value stays deterministic; a non-pinned drive
+            # observes no keys and its registered tuple passes through unchanged.
+            shutdown_keys = (*shutdown_keys, *sorted(observed_keys - set(shutdown_keys)))
         if tick_error is not None:
             shutdown_tick_id = tick_error.tick_id or shutdown_tick_id
-            shutdown_keys = None
+            if tick_error.code in _OBSERVED_CARDS_TICK_ERRORS:
+                # The registration is complete, but a pinned board is built one
+                # reconciler hop at a time: when the run stalls or exhausts its
+                # budget only the cards created so far exist. Requiring the
+                # registered keys would demand cards that never will, so
+                # quiescence could not be proven, the whole timeout would be
+                # burned and remote cleanup skipped -- leaving the branch and an
+                # open PR on the sandbox. Require exactly what was observed.
+                shutdown_keys = tuple(sorted(observed_keys)) or None
+            else:
+                # A partial registration (``tick_not_started``,
+                # ``failed_to_spawn``, ``registration_*``, ...): cards may exist
+                # but not which ones, so the completeness check is forfeited.
+                shutdown_keys = None
         try:
             report = shutdown_run(
                 project_dir,
@@ -4165,7 +4217,7 @@ def run_harness(
         pr_display = f"#{pr.number}" if pr is not None else "none"
         print(
             f"[kanban] tenant={sandbox.slug} tick_id={shutdown_tick_id} "
-            f"profile={profile_name} "
+            f"profile={profile_name} ticks={ticks_run} "
             f"repo={sandbox.repo} issue=#{issue.number} pr={pr_display} "
             f"phases={status_map} "
             f"report={report_json} keep={'yes' if keep_dir else 'no (temp dir will be removed)'}"
