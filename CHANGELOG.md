@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.0
+
+### Major Changes
+
+- Move the TODO backlog from TODOS.md to GitHub Issues. A TODO is now an open issue labelled tpo:todo on the project's github.com origin; its ID is TODO-<issue-number> (legacy IDs are preserved as legacy-id labels and in docs/migration/todos-to-issues.md). The selected issue is pinned as an identity-bound snapshot in registration.json (schema 2; v1 registrations are rejected — finish or abandon active runs before upgrading), closeout closes the issue instead of committing TODOS.md, and the selection prompt changed (re-pin selection.expected_prompt_sha). TODOS.md, TODOS-archive.md, the todos-manager skill, tpo skills install/uninstall, tpo recover-counter, and the skill test environment are removed; tpo todos audit and tpo todos labels sync are added.
+
+### Minor Changes
+
+- Embed implementation Plans in GitHub TODO issues and add recoverable todo-manager workflows.
+
 ## 0.9.0
 
 ### Minor Changes
