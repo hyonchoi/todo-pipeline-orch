@@ -497,6 +497,12 @@ class TestTodosAudit:
          "decision:Test Coverage:maybe"),
         (FULL_BODY + "\n### Plan\n\ndocs/nope.md\n", FULL_LABELS, "plan:invalid:missing_file"),
         (FULL_BODY + "\n### Plan\n\ndocs/a.md\n\n### Plan\n\ndocs/b.md\n", FULL_LABELS, "plan:duplicate"),
+        (
+            FULL_BODY
+            + "\n<details>\n<summary>Implementation Plan</summary>\nmalformed\n</details>\n",
+            FULL_LABELS,
+            "plan:invalid:malformed_embedded_plan",
+        ),
         (FULL_BODY, FULL_LABELS[:-1], "label:missing:ui-review:not-required"),
         (FULL_BODY, (*FULL_LABELS, "priority:P3"), "label:extra:priority:P3"),
     ])
@@ -573,7 +579,9 @@ class TestTodosAudit:
         docs.mkdir()
         (docs / "plan.md").write_text(document)
         assert self._run(config) == 0
-        assert capsys.readouterr().out.splitlines() == ["audit: issues=1 findings=0 fixable=0"]
+        assert capsys.readouterr().out.splitlines() == [
+            "TODO-7: plan:legacy_path", "audit: issues=1 findings=1 fixable=0"
+        ]
 
     def test_issues_are_grouped_in_number_order(self, tmp_path, fake_gh, capsys):
         from tests.gh_fakes import issue_payload
@@ -2508,11 +2516,11 @@ class TestPriorTickId:
         assert any(r.levelname == "ERROR" and "tick id" in r.getMessage() for r in caplog.records)
 
 
-class TestSkillsRemoved:
-    def test_skills_install_is_rejected(self):
+class TestSkillsCommands:
+    def test_skills_requires_an_operation(self):
         with pytest.raises(SystemExit) as excinfo:
-            build_parser().parse_args(["skills", "install"])
+            build_parser().parse_args(["skills"])
         assert excinfo.value.code == 2
 
-    def test_skills_absent_from_usage(self):
-        assert "skills" not in build_parser().format_usage()
+    def test_skills_present_in_usage(self):
+        assert "skills" in build_parser().format_usage()

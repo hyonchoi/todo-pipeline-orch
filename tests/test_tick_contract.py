@@ -8,6 +8,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
+
+def test_post_registration_failure_is_durably_abandoned(tmp_path):
+    from hermes_pipeline.cli import _abandon_run_if_registered
+    from hermes_pipeline.run_registration import registration_state
+
+    run_dir = tmp_path / "runs" / "01ORPHAN"
+    run_dir.mkdir(parents=True)
+    (run_dir / "registration.json").write_text("{}\n")
+
+    assert _abandon_run_if_registered(tmp_path, "01ORPHAN", "prompt_failed")
+    assert registration_state(run_dir) == "abandoned"
+    assert (run_dir / "abandoned").read_text() == "prompt_failed\n"
+    assert (run_dir / "registration.json").exists()
+
 from hermes_pipeline.cli import _cmd_tick, _tick_project
 from hermes_pipeline.config import CircuitBreakerConfig, Config
 from hermes_pipeline.phases import PhasePromptRenderError
@@ -718,6 +732,58 @@ class TestTickPlanRequirement:
             "Priority": "P1", "Security Review": "not-required",
         }
 
+    def test_embedded_tick_materializes_before_prompt_handoff(
+        self, tmp_path, mocker, fake_gh
+    ):
+        from hermes_pipeline.plan_manifest import render_embedded_plan
+
+        project_dir = _create_project(tmp_path, "demo")
+        (project_dir / ".hermes").mkdir()
+        self._configure_profile(project_dir, tmp_path, mocker)
+        _commit_plan(project_dir, "README.md", "base\n")
+        body = PLAN_BODY.replace("### Plan\n\ndocs/plan.md\n\n", "")
+        body += render_embedded_plan(MANIFEST_PLAN, expected_todo_id="TODO-10")
+        seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=body)])
+        order = []
+        registration = SimpleNamespace(step_keys=("phase_4_development",), worktree=project_dir)
+        register = mocker.patch(
+            "hermes_pipeline.run_registration.register_pinned_run",
+            side_effect=lambda **_kwargs: (order.append("register") or registration),
+        )
+        resolved_source = object()
+        resolved_reference = object()
+        mocker.patch(
+            "hermes_pipeline.result_contract.load_validated_registration",
+            side_effect=lambda *_args, **_kwargs: (
+                order.append("load")
+                or SimpleNamespace(
+                    plan_source=resolved_source, plan_reference=resolved_reference,
+                    step_keys=("phase_4_development",),
+                )
+            ),
+        )
+        prepare = mocker.patch(
+            "hermes_pipeline.kanban_tasks.prepare_todo_phases",
+            side_effect=lambda **_kwargs: (
+                order.append("prepare")
+                or [SimpleNamespace(phase_key="phase_4_development")]
+            ),
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            side_effect=lambda **_kwargs: (order.append("create") or ["task"]),
+        )
+
+        _run_project_tick(
+            project_dir=project_dir, config=Config(prompt_client="codex"),
+            tick_id="01EMBED", mocker=mocker, patch_registration=False,
+        )
+
+        assert order == ["register", "load", "prepare", "create"]
+        assert register.call_args.kwargs["plan_path"] is None
+        assert prepare.call_args.kwargs["plan_source"] is resolved_source
+        assert prepare.call_args.kwargs["plan_reference"] is resolved_reference
+
     def test_untracked_plan_is_blocked_before_selection_without_demotion(
         self, tmp_path, mocker, fake_gh
     ):
@@ -893,9 +959,11 @@ class TestTickPlanRequirement:
         assert "TODO-10" in context.selection_markdown
         assert "TODO-11" not in context.selection_markdown
         assert "TODO-12" not in context.selection_markdown
-        assert "TODO-13" not in context.selection_markdown
-        assert context.candidate_ids == ("TODO-10",)
-        assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset({"TODO-10"})
+        assert "TODO-13" in context.selection_markdown
+        assert context.candidate_ids == ("TODO-10", "TODO-13")
+        assert selection.call_args.kwargs["eligible_todo_ids"] == frozenset(
+            {"TODO-10", "TODO-13"}
+        )
 
     def test_requires_plan_with_zero_candidates_skips_selection_call(
         self, tmp_path, mocker, fake_gh

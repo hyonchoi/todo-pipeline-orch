@@ -106,8 +106,8 @@ See [agent client release qualification](docs/release-qualification-agent-client
 for the evidence required to advertise a `Conditional` pair.
 
 Use `tpo init <project> --profile native-sdd` for the compiled workflow:
-Hermes cron invokes TPO, TPO selects an eligible TODO and pins its tracked Plan
-in a linked worktree, then Hermes Kanban dispatches workers. A `tpo-plan`
+Hermes cron invokes TPO, TPO selects an eligible TODO and pins its embedded Plan
+from the issue snapshot, then Hermes Kanban dispatches workers. A `tpo-plan`
 manifest produces one visible worker card and controller gate per ordered task;
 a legacy Markdown Plan remains compatible as one development card with a
 doctor warning. Independent review, bounded review-fix rounds, PR closeout, and
@@ -148,8 +148,8 @@ cd ~/my-projects/my-project
 tpo init my-project
 tpo todos labels sync my-project
 # copy .github/ISSUE_TEMPLATE/tpo-todo.yml from this repository into the project and commit it
-gh issue create --web --template "TPO TODO"        # files TODO-<N> with tpo:todo + needs-triage
-gh issue edit <N> --remove-label needs-triage --add-label ready-for-agent
+tpo skills install todo-manager --target codex --scope user
+# use the todo-manager skill to preview and approve `tpo todos create`
 tpo doctor my-project
 ```
 
@@ -176,8 +176,10 @@ tpo tick my-project
 | `init` | Write `.hermes/pipeline.toml` for an existing project. |
 | `doctor` | Verify a project's pipeline contract, GitHub backlog state, and run registrations. |
 | `todos complete` | Close a delivered TODO issue by hand after its pull request merged. |
+| `todos create` | Preview, create, or resume a validated TODO with an embedded Plan. |
 | `todos labels sync` | Create the missing pipeline label vocabulary in the project's repository. |
 | `todos audit` | Check TODO issue bodies against the backlog contract and normalize mirror labels. |
+| `skills install/uninstall/recover` | Transactionally manage the bundled `todo-manager` skill. |
 | `plan validate` | Validate a TODO's Plan attachment and optional `tpo-plan` manifest. |
 | `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
 | `config` | Read and write global `tpo` configuration. |

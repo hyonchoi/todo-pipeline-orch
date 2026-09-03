@@ -730,6 +730,8 @@ def prepare_todo_phases(
     phases_path: str | Path | None = None,
     prompt_client: PromptClient = "claude",
     plan_path: str | None = None,
+    plan_source=None,
+    plan_reference=None,
     spec_path: str | None = None,
     reference_paths: Sequence[str] = (),
     project_dir: str | Path | None = None,
@@ -747,12 +749,27 @@ def prepare_todo_phases(
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
     profile = load_phase_profile(phases_path)
     manifest = None
+    plan_reference_value = plan_path
     if profile.requires_plan:
-        if not plan_path:
+        if plan_source is not None:
+            from .plan_manifest import PlanReference, validate_plan_reference
+
+            if not isinstance(plan_reference, PlanReference) or plan_reference.source != plan_source:
+                from .plan_manifest import TodoPlanValidationError
+                raise TodoPlanValidationError("invalid_plan_reference")
+            validate_plan_reference(plan_reference, expected_todo_id=todo_id)
+            manifest = plan_source.manifest
+            plan_reference_value = plan_reference.value
+        elif plan_path:
+            if plan_reference is not None:
+                from .plan_manifest import TodoPlanValidationError
+                raise TodoPlanValidationError("invalid_plan_reference")
+            plan_reference_value = plan_path
+        else:
             from .plan_manifest import TodoPlanValidationError
 
             raise TodoPlanValidationError("missing")
-        if project_dir is not None:
+        if plan_source is None and project_dir is not None:
             from .plan_manifest import validate_plan_candidate
 
             manifest = validate_plan_candidate(
@@ -799,7 +816,8 @@ def prepare_todo_phases(
                     todo_id=todo_id,
                     tick_id=tick_id,
                     project_slug=board_slug,
-                    plan_path=plan_path,
+                    plan_path=plan_reference_value,
+                    plan_hash=plan_source.plan_hash if plan_source is not None else None,
                     spec_path=spec_paths[0] if spec_paths else None,
                     reference_paths=references,
                     prompt_client=prompt_client,
@@ -867,7 +885,8 @@ def prepare_todo_phases(
             todo_id=todo_id,
             tick_id=tick_id,
             project_slug=board_slug,
-            plan_path=plan_path,
+            plan_path=plan_reference_value,
+            plan_hash=plan_source.plan_hash if plan_source is not None else None,
             # Every worker sees the Spec/Reference context; gates never do.
             spec_path=spec_paths[0] if spec_paths and not phase.gate else None,
             reference_paths=None if phase.gate else references,
@@ -910,6 +929,23 @@ def prepare_todo_phases(
             )
         )
     return prepared
+
+
+def planned_phase_keys(phases_path: str | Path | None, plan_source) -> tuple[str, ...]:
+    """Compute registration keys without rendering prompts or touching Hermes."""
+    keys: list[str] = []
+    manifest = plan_source.manifest
+    for phase in load_phases(phases_path):
+        if manifest is not None and phase.phase_key in {
+            "phase_5_review", "phase_8_finish_branch", "phase_9_human_review",
+        }:
+            continue
+        if getattr(phase, "compile_plan_tasks", False) and manifest is not None:
+            for task in manifest.tasks:
+                keys.extend((f"plan:{task.id}", f"validate:{task.id}"))
+        else:
+            keys.append(phase.phase_key)
+    return tuple(keys)
 
 
 def _registration_barrier_body(*, tick_id: str, project_slug: str) -> str:

@@ -458,7 +458,11 @@ def test_registration_rejects_unknown_keys_and_mutable_plan_drift(tmp_path):
     assert authority.manifest.tasks[0].id == "task-1"
 
 
-def _registered_repo(tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str = "plan.md"):
+def _registered_repo(
+    tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str | None = "plan.md",
+    embedded: bool = False,
+):
+    from hermes_pipeline.plan_manifest import render_embedded_plan
     from hermes_pipeline.run_registration import register_pinned_run
 
     repo = tmp_path / "repo"
@@ -472,6 +476,10 @@ def _registered_repo(tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str =
     _git(repo, "commit", "-qm", "base")
     parent = _git(repo, "rev-parse", "HEAD")
     state = repo / ".hermes"
+    if embedded:
+        issue_body = ISSUE_BODY.replace("### Plan\n\nplan.md\n\n", "")
+        issue_body += render_embedded_plan(PLAN, expected_todo_id="TODO-42")
+        plan_path = None
     registration = register_pinned_run(
         project_dir=repo,
         state_dir=state,
@@ -507,6 +515,105 @@ def test_registration_authority_is_the_issue_snapshot(tmp_path):
     assert authority.worktree == (repo / ".worktrees" / "todo-42-do-it").resolve()
     assert authority.manifest.tasks[0].id == "task-1"
     assert not (repo / "TODOS.md").exists()
+
+
+def test_embedded_registration_exposes_verified_artifact_reference(tmp_path):
+    from hermes_pipeline.plan_manifest import render_embedded_plan
+    from hermes_pipeline.run_registration import register_pinned_run
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "remote", "add", "origin", f"git@github.com:{REPO}.git")
+    (repo / "README.md").write_text("base\n")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    body = ISSUE_BODY.replace("### Plan\n\nplan.md\n\n", "")
+    body += render_embedded_plan(PLAN, expected_todo_id="TODO-42")
+    state = repo / ".hermes"
+    registration = register_pinned_run(
+        project_dir=repo, state_dir=state, tick_id="01TICK",
+        selected_issue=make_issue(42, repo=REPO, title="Do it", body=body),
+        plan_path=None, profile="native-sdd", prompt_client="claude",
+        assignee="pipeline", review_assignee=None,
+        step_keys=("plan:task-1", "validate:task-1"),
+    )
+
+    authority = load_validated_registration(repo, state, "01TICK")
+
+    artifact = (state / "runs" / "01TICK" / "plan.md").resolve()
+    assert authority.plan_source_kind == "embedded"
+    assert authority.plan_path is None
+    assert authority.plan_reference is not None
+    assert authority.plan_reference.value == str(artifact)
+    assert authority.plan_source is not None
+    assert authority.plan_source.kind == "embedded"
+    assert Path(authority.plan_reference.value).read_text() == PLAN
+    assert registration.plan_path is None
+
+
+def test_embedded_plan_result_validation_scenario(tmp_path):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, embedded=True)
+
+    authority = load_validated_registration(repo, state, "01TICK", repo=REPO)
+
+    assert authority.plan_source is not None
+    assert authority.plan_source.kind == "embedded"
+    assert authority.manifest is not None
+    assert authority.manifest.tasks[0].id == "task-1"
+
+
+def test_embedded_plan_reconciliation_scenario(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import reconcile_plan_task_results
+
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, embedded=True)
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        return_value={
+            "plan:task-1": SimpleNamespace(task_id="worker", status="todo"),
+            "validate:task-1": SimpleNamespace(task_id="gate", status="blocked"),
+        },
+    )
+
+    assert reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK", repo=REPO
+    )
+
+
+def test_embedded_plan_closeout_scenario(tmp_path, mocker):
+    from hermes_pipeline.todos_completion import reconcile_todo_completion
+
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, embedded=True)
+    mocker.patch("hermes_pipeline.todos_completion.get_todo_kanban_tasks", return_value={})
+
+    assert reconcile_todo_completion(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK", repo=REPO
+    )
+
+
+def test_doctor_accepts_valid_embedded_artifact(tmp_path, mocker, capsys):
+    from hermes_pipeline.cli import _doctor_active_registration
+
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, embedded=True)
+    (state / "current_tick_id.txt").write_text("01TICK\n")
+    mocker.patch("hermes_pipeline.github_issues.check_issue_drift", return_value=None)
+
+    assert _doctor_active_registration(repo, state)
+    assert "Issue authority: pinned" in capsys.readouterr().out
+
+
+def test_doctor_rejects_embedded_artifact_digest_drift(tmp_path, mocker, capsys):
+    from hermes_pipeline.cli import _doctor_active_registration
+
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, embedded=True)
+    (state / "current_tick_id.txt").write_text("01TICK\n")
+    (state / "runs" / "01TICK" / "plan.md").write_text("drift\n")
+    mocker.patch("hermes_pipeline.github_issues.check_issue_drift", return_value=None)
+
+    assert not _doctor_active_registration(repo, state)
+    assert "REGISTRATION DRIFT: plan_hash" in capsys.readouterr().out
 
 
 def test_registration_rejects_schema_v1_payload(tmp_path):

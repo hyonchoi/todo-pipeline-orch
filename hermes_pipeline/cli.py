@@ -90,7 +90,7 @@ def _doctor_github_checks(
     from collections.abc import Mapping
 
     from . import github_issues
-    from .github_issues import REGISTRATION_SCHEMA_VERSION, GitHubIssuesError
+    from .github_issues import SUPPORTED_REGISTRATION_SCHEMA_VERSIONS, GitHubIssuesError
     from .run_registration import (
         _registration_issue_number,
         active_registration_issue_numbers,
@@ -177,7 +177,7 @@ def _doctor_github_checks(
             number = _registration_issue_number(payload)
             if (
                 not isinstance(payload, Mapping)
-                or payload.get("schema_version") != REGISTRATION_SCHEMA_VERSION
+                or payload.get("schema_version") not in SUPPORTED_REGISTRATION_SCHEMA_VERSIONS
                 or number is None
             ):
                 unsupported.append(tick_id)
@@ -246,9 +246,9 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
     fix = f"Fix (tick {tick_id}):"
     try:
         registration = json.loads(registration_path.read_text(encoding="utf-8"))
-        from .github_issues import REGISTRATION_SCHEMA_VERSION
+        from .github_issues import SUPPORTED_REGISTRATION_SCHEMA_VERSIONS
 
-        if registration.get("schema_version") != REGISTRATION_SCHEMA_VERSION:
+        if registration.get("schema_version") not in SUPPORTED_REGISTRATION_SCHEMA_VERSIONS:
             print(
                 f"REGISTRATION UNSUPPORTED: schema_version {registration.get('schema_version')}; "
                 "finish or abandon this run before upgrading"
@@ -285,19 +285,31 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
         actual["base_sha"] = (
             base.stdout.strip() if base.returncode == 0 else "<unavailable>"
         )
-        plan_at_base = _cli_sp.run(
-            ["git", "show", f"{registration['base_sha']}:{registration['plan_path']}"],
-            cwd=worktree,
-            capture_output=True,
-        )
-        plan_bytes = plan_at_base.stdout
-        if isinstance(plan_bytes, str):
-            plan_bytes = plan_bytes.encode()
-        actual["plan_hash"] = (
-            hashlib.sha256(plan_bytes).hexdigest()
-            if plan_at_base.returncode == 0
-            else "<missing>"
-        )
+        if registration.get("plan_source_kind", "legacy_path") == "embedded":
+            from .run_registration import RunRegistrationError, _read_verified_artifact
+
+            try:
+                plan_bytes = _read_verified_artifact(
+                    registration_path.parent / "plan.md", registration["plan_hash"]
+                )
+            except RunRegistrationError:
+                actual["plan_hash"] = "<missing>"
+            else:
+                actual["plan_hash"] = hashlib.sha256(plan_bytes).hexdigest()
+        else:
+            plan_at_base = _cli_sp.run(
+                ["git", "show", f"{registration['base_sha']}:{registration['plan_path']}"],
+                cwd=worktree,
+                capture_output=True,
+            )
+            plan_bytes = plan_at_base.stdout
+            if isinstance(plan_bytes, str):
+                plan_bytes = plan_bytes.encode()
+            actual["plan_hash"] = (
+                hashlib.sha256(plan_bytes).hexdigest()
+                if plan_at_base.returncode == 0
+                else "<missing>"
+            )
         snapshot = registration.get("issue_snapshot")
         actual["selected_entry_hash"] = (
             hashlib.sha256(snapshot.encode()).hexdigest()
@@ -628,6 +640,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     todos_parser = subparsers.add_parser("todos", help="GitHub issue completion")
     todos_subparsers = todos_parser.add_subparsers(dest="todos_command", required=True)
+    create_parser = todos_subparsers.add_parser(
+        "create", help="Create or resume a validated TODO with an embedded Plan"
+    )
+    create_parser.add_argument("project", help="Project name")
+    create_parser.add_argument("--request-file", required=True, type=Path)
+    create_parser.add_argument(
+        "--approved-repo",
+        default=None,
+        help="Exact OWNER/REPO shown in the approved preview; required with --yes",
+    )
+    create_parser.add_argument("--issue", type=int, default=None, help="Resume this partial issue")
+    create_parser.add_argument(
+        "--yes", action="store_true", help="Use only after the displayed request was approved"
+    )
+    create_parser.set_defaults(func=_cmd_todos_create)
     complete_parser = todos_subparsers.add_parser(
         "complete", help="Close one delivered TODO issue after its pull request merged"
     )
@@ -788,6 +815,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="Consecutive same-class failures to halt run (default: 3)",
     )
     test_parser.set_defaults(func=_cmd_test)
+
+    skills_parser = subparsers.add_parser(
+        "skills", help="Install, uninstall, or recover bundled agent skills"
+    )
+    skills_subparsers = skills_parser.add_subparsers(
+        dest="skills_command", required=True
+    )
+
+    skills_install = skills_subparsers.add_parser("install")
+    skills_install.add_argument("skill", choices=["todo-manager"])
+    skills_install.add_argument("--target", choices=["codex", "claude"], required=True)
+    skills_install.add_argument("--scope", choices=["user", "project"], default="user")
+    skills_install.add_argument("--reinstall", action="store_true")
+    skills_install.set_defaults(func=_cmd_skills_install)
+
+    skills_uninstall = skills_subparsers.add_parser("uninstall")
+    skills_uninstall.add_argument("skill", choices=["todo-manager"])
+    skills_uninstall.add_argument("--target", choices=["codex", "claude"], required=True)
+    skills_uninstall.add_argument("--scope", choices=["user", "project"], default="user")
+    skills_uninstall.add_argument("--yes", action="store_true")
+    skills_uninstall.add_argument("--force", action="store_true")
+    skills_uninstall.set_defaults(func=_cmd_skills_uninstall)
+
+    skills_recover = skills_subparsers.add_parser("recover")
+    skills_recover.add_argument("skill", choices=["todo-manager"])
+    skills_recover.add_argument("--target", choices=["codex", "claude"], required=True)
+    skills_recover.add_argument("--scope", choices=["user", "project"], default="user")
+    recovery_mode = skills_recover.add_mutually_exclusive_group(required=True)
+    recovery_mode.add_argument("--finish", action="store_true")
+    recovery_mode.add_argument("--rollback", action="store_true")
+    skills_recover.set_defaults(func=_cmd_skills_recover)
 
     # config: read/write global tpo configuration
     config_parser = subparsers.add_parser(
@@ -1341,6 +1399,17 @@ _TRACKER_CONFIG_FAULT_CODES = frozenset({
 _CONTENT_REGISTRATION_CODES = frozenset({"plan_invalid", "branch_invalid", "branch_exists"})
 
 _PLAN_TRACKED_TIMEOUT = 30.0
+
+
+def _abandon_run_if_registered(state_dir: Path, tick_id: str, reason: str) -> bool:
+    """Durably retire a pre-dispatch registration while preserving its evidence."""
+    run_dir = state_dir / "runs" / tick_id
+    if not (run_dir / "registration.json").is_file():
+        return False
+    from .state import _atomic_write_text
+
+    _atomic_write_text(run_dir / "abandoned", reason + "\n")
+    return True
 
 
 def _plan_tracked_at_head(project_dir: Path, plan_path: str) -> bool:
@@ -1996,10 +2065,45 @@ def _tick_project(
     if selected is None:
         raise RuntimeError(f"selection returned a non-candidate id: {picked}")
     plan_path = selected.plan_path
+    plan_source = selected.plan_source
     issue = selected.entry
+    plan_reference = None
 
     # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
-    from .kanban_tasks import create_prepared_todo_phases, prepare_todo_phases
+    from .kanban_tasks import (
+        create_prepared_todo_phases,
+        planned_phase_keys,
+        prepare_todo_phases,
+    )
+
+    registration = None
+    if phase_profile.requires_plan and plan_source is not None and plan_source.kind == "embedded":
+        from .result_contract import ResultContractError, load_validated_registration
+        from .run_registration import RunRegistrationError, register_pinned_run
+
+        try:
+            registration = register_pinned_run(
+                project_dir=project_dir, state_dir=project_state, tick_id=tick_id,
+                selected_issue=issue, plan_path=None, repo=repo, profile=contract.profile,
+                prompt_client=config.prompt_client, assignee=contract.assignee,
+                review_assignee=getattr(contract, "review_assignee", None),
+                step_keys=planned_phase_keys(phases_path, plan_source),
+            )
+            validated = load_validated_registration(project_dir, project_state, tick_id, repo=repo)
+            plan_source = validated.plan_source
+            plan_reference = validated.plan_reference
+        except (RunRegistrationError, ResultContractError) as exc:
+            _abandon_run_if_registered(project_state, tick_id, "run_registration_failed")
+            _record_failed_to_spawn(project_state, tick_id, picked, exc, reason="run_registration_failed")
+            cb.observe(picked=None, counts_as_no_progress=True)
+            code = getattr(exc, "code", "registration_invalid")
+            log.error(
+                "project %s: pinned embedded run registration failed: code=%s",
+                project_slug, code,
+            )
+            if code in _CONTENT_REGISTRATION_CODES:
+                _demote_issue(project_dir, issue, repo=repo, project_slug=project_slug, code=code)
+            return
 
     log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
     try:
@@ -2010,12 +2114,18 @@ def _tick_project(
             phases_path=phases_path,
             prompt_client=config.prompt_client,
             plan_path=plan_path,
+            plan_source=plan_source,
+            plan_reference=plan_reference,
             spec_path=issue.spec,
             reference_paths=issue.references,
             project_dir=project_dir,
             decisions=github_issues.issue_decisions(issue),
         )
     except Exception as exc:  # PhasePromptRenderError, path validation, manifest errors
+        if registration is not None:
+            _abandon_run_if_registered(
+                project_state, tick_id, "phase_prompt_preparation_failed"
+            )
         _record_failed_to_spawn(
             project_state,
             tick_id,
@@ -2031,8 +2141,16 @@ def _tick_project(
         )
         return
 
-    registration = None
-    if phase_profile.requires_plan:
+    if registration is not None and tuple(phase.phase_key for phase in prepared) != registration.step_keys:
+        _abandon_run_if_registered(project_state, tick_id, "phase_key_drift")
+        _record_failed_to_spawn(
+            project_state, tick_id, picked, RuntimeError("registered phase keys drifted"),
+            reason="phase_prompt_preparation_failed",
+        )
+        cb.observe(picked=None, counts_as_no_progress=True)
+        return
+
+    if phase_profile.requires_plan and registration is None:
         from .run_registration import RunRegistrationError, register_pinned_run
 
         try:
@@ -2123,6 +2241,81 @@ def _tick_project(
 
     # Observe circuit breaker
     cb.observe(picked=picked, counts_as_no_progress=False)
+
+
+def _cmd_todos_create(args, config: Config) -> int:
+    """Create or converge one transaction-marked embedded-Plan issue."""
+    from . import github_issues
+    from .project_config import _get_project_state_dir
+    from .todos_create import (
+        TodoCreateError,
+        execute_create,
+        load_create_request,
+        render_create_preview,
+        validate_create_input_path,
+    )
+
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None or (args.issue is not None and args.issue <= 0):
+        print("Error: invalid project or issue", file=sys.stderr)
+        return 2
+    try:
+        request = load_create_request(args.request_file)
+        state_dir = _get_project_state_dir(project_dir)
+        validate_create_input_path(
+            args.request_file, state_dir, transaction_id=request.transaction_id
+        )
+    except TodoCreateError as exc:
+        print(f"Error: {exc.code}", file=sys.stderr)
+        return 2
+    try:
+        repository = github_issues.repository_identity(project_dir)
+        print(
+            render_create_preview(
+                request,
+                project=args.project,
+                repository=repository,
+                issue_number=args.issue,
+            ),
+            end="",
+        )
+    except (TodoCreateError, github_issues.GitHubIssuesError) as exc:
+        print(f"Error: {exc.code}", file=sys.stderr)
+        return 2
+    if args.yes and args.approved_repo is None:
+        print("Error: approved_repo_required", file=sys.stderr)
+        return 2
+    if args.approved_repo is not None and args.approved_repo != repository:
+        print("Error: repository_drift", file=sys.stderr)
+        return 1
+    if not args.yes:
+        try:
+            confirmation = input("Type create to continue: ")
+        except EOFError:
+            confirmation = ""
+        if confirmation != "create":
+            print("Creation cancelled.")
+            return 1
+    try:
+        number = execute_create(
+            project_dir,
+            state_dir,
+            request,
+            approved_repo=args.approved_repo or repository,
+            issue_number=args.issue,
+        )
+    except (TodoCreateError, OSError) as exc:
+        code = exc.code if isinstance(exc, TodoCreateError) else "create_io_error"
+        print(f"Error: {code}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        from .github_issues import GitHubIssuesError
+        if not isinstance(exc, GitHubIssuesError):
+            raise
+        print(f"Error: {exc.code}", file=sys.stderr)
+        return 1
+    print(f"created: TODO-{number}")
+    return 0
 
 
 def _cmd_todos_complete(args, config: Config) -> int:
@@ -2220,7 +2413,7 @@ _AUDIT_MIRROR_PREFIXES: dict[str, str] = {
     "Security Review": "security-review",
     "UI Review": "ui-review",
 }
-_AUDIT_INFORMATIONAL = frozenset({"plan:missing", "state:closed"})
+_AUDIT_INFORMATIONAL = frozenset({"plan:missing", "plan:legacy_path", "state:closed"})
 _AUDIT_FRAGMENT_MAX = 120
 
 
@@ -2328,11 +2521,16 @@ def _audit_issue(
         f"duplicate-section:{name}" for name in KNOWN_SECTIONS if len(sections.get(name, ())) > 1
     )
 
-    if not issue.plan_values:
+    if issue.plan_error is not None:
+        findings.append(f"plan:invalid:{issue.plan_error}")
+    elif issue.plan_source is not None:
+        pass
+    elif not issue.plan_values:
         findings.append("plan:missing")
     elif len(issue.plan_values) > 1:
         findings.append("plan:duplicate")
     else:
+        findings.append("plan:legacy_path")
         try:
             validate_plan_candidate(
                 project_dir, issue.plan_values[0], expected_todo_id=issue.todo_id
@@ -2564,7 +2762,12 @@ def _cmd_plan_validate(args, config: Config) -> int:
     if project_dir is None:
         return 2
     todo_id = f"TODO-{args.todo}"
-    from .github_issues import GitHubIssuesError, fetch_issue, repository_identity
+    from .github_issues import (
+        GitHubIssuesError,
+        fetch_issue,
+        repository_identity,
+        resolve_plan_source,
+    )
     from .plan_manifest import (
         PlanManifestValidationError,
         TodoPlanValidationError,
@@ -2581,21 +2784,25 @@ def _cmd_plan_validate(args, config: Config) -> int:
             todo_id = issue.todo_id
             if issue.state != "open":
                 closed_note = f"; warning: issue is closed ({issue.state_reason or 'unknown'})"
-            if len(issue.plan_values) != 1:
-                reason = "missing" if len(issue.plan_values) < 2 else "duplicate"
-                print(f"Plan validation failed for {todo_id}: plan_invalid:{reason}{closed_note}")
-                return 1
-            relative_plan = issue.plan_values[0]
-        manifest = validate_plan_candidate(
-            project_dir,
-            relative_plan,
-            expected_todo_id=todo_id,
-        )
+            source = resolve_plan_source(project_dir, issue)
+            manifest = source.manifest
+        else:
+            # ``--plan`` intentionally remains the legacy filesystem-candidate path.
+            manifest = validate_plan_candidate(
+                project_dir,
+                relative_plan,
+                expected_todo_id=todo_id,
+            )
     except GitHubIssuesError as exc:
         print(f"Plan validation failed for {todo_id}: {exc.code}")
         return 1
     except TodoPlanValidationError as exc:
-        print(f"Plan validation failed for {todo_id}: attachment_{exc.code}{closed_note}")
+        prefix = (
+            "plan_invalid:"
+            if getattr(args, "plan", None) is None and exc.code in {"missing", "duplicate"}
+            else "attachment_"
+        )
+        print(f"Plan validation failed for {todo_id}: {prefix}{exc.code}{closed_note}")
         return 1
     except PlanManifestValidationError as exc:
         print(f"Plan validation failed for {todo_id}: {exc.code}{closed_note}")
@@ -3145,6 +3352,39 @@ def _cmd_test(args, config: Config) -> int:
         return 2
 
 
+def _cmd_skills_install(args, config: Config | None) -> int:
+    from .skill_installer import install
+
+    return install(
+        args.skill,
+        target=args.target,
+        scope=args.scope,
+        reinstall=args.reinstall,
+    )
+
+
+def _cmd_skills_uninstall(args, config: Config | None) -> int:
+    from .skill_installer import uninstall
+
+    return uninstall(
+        args.skill,
+        target=args.target,
+        scope=args.scope,
+        yes=args.yes,
+        force=args.force,
+    )
+
+
+def _cmd_skills_recover(args, config: Config | None) -> int:
+    from .skill_installer import recover
+
+    return recover(
+        args.skill,
+        target=args.target,
+        scope=args.scope,
+        finish=args.finish,
+        rollback=args.rollback,
+    )
 def main(argv: list[str] | None = None) -> int:
     """
     Main entry point for the CLI.
@@ -3163,7 +3403,7 @@ def main(argv: list[str] | None = None) -> int:
     # `tpo config` runs before pipeline runtime config exists (state dir,
     # projects dir) — skip Config.from_env() so it works even when that env
     # isn't configured yet.
-    if getattr(args, "command", None) == "config":
+    if getattr(args, "command", None) in {"config", "skills"}:
         if hasattr(args, "func"):
             return args.func(args, None)
         parser.parse_args([*remaining, "--help"])

@@ -1,6 +1,6 @@
 # GitHub issue form for todo-pipeline-orchestrator backlog items.
 # Field labels are a machine-consumed contract: they must equal the section names in
-# hermes_pipeline/github_issues.py KNOWN_SECTIONS (minus the migration-only "Legacy ID"),
+# hermes_pipeline/github_issues.py new-form sections (excluding legacy-only "Plan" and "Legacy ID"),
 # in that order. GitHub renders each field as "### <Label>\n\n<value>" (or "_No response_"),
 # which parse_issue_body consumes. tests/test_issue_form_contract.py pins this coupling.
 name: TPO TODO
@@ -45,12 +45,6 @@ body:
     id: assumptions
     attributes:
       label: Assumptions
-  - type: input
-    id: plan
-    attributes:
-      label: Plan
-      description: "Repo-relative path to the execution-authority Plan (ADR-0001). Note: the Plan manifest's todo_id must equal TODO-<this issue's number>, so file the issue first."
-      placeholder: docs/pipeline/TODO-<n>-plan.md
   - type: input
     id: spec
     attributes:
