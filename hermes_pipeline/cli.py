@@ -78,6 +78,13 @@ def _doctor_hermes_version() -> tuple[bool, str]:
     return True, rendered
 
 
+_MANIFEST_REQUIRED_HINT = (
+    "Hint: native-sdd requires a Plan manifest (```json tpo-plan``` block); "
+    "see docs/templates/tpo-plan.md and the \"Migrating from gstack\" section of "
+    "docs/howto-native-sdd-profile.md"
+)
+
+
 def _doctor_github_checks(
     project_dir: Path, state_dir: Path, *, project: str, requires_plan: bool
 ) -> bool:
@@ -155,6 +162,8 @@ def _doctor_github_checks(
             if summary:
                 line += " (" + " ".join(f"{key}={summary[key]}" for key in sorted(summary)) + ")"
             print(line)
+            if "plan_invalid:manifest_required" in readiness.blocked_reasons.values():
+                print(_MANIFEST_REQUIRED_HINT)
         except GitHubIssuesError as exc:
             print(f"WARNING: Plan readiness unavailable ({exc.code})")
             ok = False

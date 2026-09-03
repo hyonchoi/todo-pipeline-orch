@@ -883,9 +883,67 @@ def test_doctor_reports_plan_readiness_from_github_issues(tmp_path, mocker, caps
     assert "Repository: acme/repo" in output
     assert "Label vocabulary: ok" in output
     assert "Plan readiness: eligible=1 blocked=2 (not_ready=1 plan_invalid=1)" in output
+    assert "Hint:" not in output
     assert "Runs: active=0 delivered=0 abandoned=0" in output
     assert "TODOS.md" not in output
     assert "OK:" in output
+
+
+_LEGACY_PLAN = "# Plan\n\n1. Do the thing\n"
+
+
+def _seed_doctor_legacy_plans(tmp_path, fake_gh, count=2):
+    from tests.gh_fakes import issue_payload
+
+    project = tmp_path / "demo"
+    (project / "docs").mkdir()
+    (project / "docs" / "legacy.md").write_text(_LEGACY_PLAN)
+    _seed_doctor_github(fake_gh, [
+        issue_payload(
+            n,
+            body=f"### Plan\n\ndocs/legacy.md\n\n### Branch\n\nfeat/{n}\n",
+        )
+        for n in range(1, count + 1)
+    ])
+
+
+_MANIFEST_HINT = (
+    "Hint: native-sdd requires a Plan manifest (```json tpo-plan``` block); "
+    "see docs/templates/tpo-plan.md and the \"Migrating from gstack\" section of "
+    "docs/howto-native-sdd-profile.md"
+)
+
+
+def test_doctor_hints_manifest_migration_once_for_manifest_free_plans(
+    tmp_path, mocker, capsys, fake_gh
+):
+    args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+    _seed_doctor_legacy_plans(tmp_path, fake_gh, count=2)
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+    readiness_index = lines.index("Plan readiness: eligible=0 blocked=2 (plan_invalid=2)")
+    assert lines[readiness_index + 1] == _MANIFEST_HINT
+    assert output.count("Hint:") == 1
+
+
+def test_doctor_omits_manifest_hint_under_gstack_profile(tmp_path, mocker, capsys, fake_gh):
+    args = _create_valid_doctor_project(tmp_path, profile="gstack")
+    _seed_doctor_legacy_plans(tmp_path, fake_gh, count=1)
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    assert "Plan readiness: eligible=1 blocked=0" in output
+    assert "Hint:" not in output
 
 
 def test_doctor_github_checks_are_offline_tolerant(tmp_path, mocker, capsys, fake_gh):
