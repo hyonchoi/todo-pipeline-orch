@@ -14,7 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -2014,6 +2014,73 @@ def _auto_complete_gate_tasks(
             log.warning("gate task %s (%s) remains blocked: auto-complete after %s done failed", info.task_id, phase_key, completed_phase_key)
 
 
+_PRE_RUN_STATUSES = (None, "todo", "ready", "blocked")
+_UNSTARTED_STATUSES = (None, "todo", "ready")
+
+
+def _emit_status_transitions(
+    previous: dict[str, str],
+    current: dict[str, str],
+    *,
+    monitor: _ConvergenceMonitor,
+    todo_id: str,
+    on_completed: Callable[[str], None],
+) -> None:
+    """Emit monitor events for every status transition between two snapshots.
+
+    Shared by ``poll_registered_phases`` and ``poll_pinned_run``. Keys are
+    ordinary keys — dynamic cards (``review:0``, ``finish``) that appear
+    mid-run transition from ``None`` like any other. ``on_completed`` runs
+    after each ``phase_completed`` emission. ``ConvergenceHaltError`` raised by
+    the monitor propagates to the caller.
+    """
+    for phase_key, status in current.items():
+        prev = previous.get(phase_key)
+
+        if prev in _PRE_RUN_STATUSES and status == "running":
+            log.info("phase %s: %s -> running", phase_key, prev or "none")
+            monitor.current_phase_key = phase_key
+            monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
+
+        elif prev == "running" and status == "done":
+            log.info("phase %s: running -> done", phase_key)
+            monitor.current_phase_key = None
+            monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+            on_completed(phase_key)
+
+        elif prev == "running" and status == "failed":
+            log.info("phase %s: running -> failed", phase_key)
+            monitor.current_phase_key = None
+            # monitor() records the failure with the detector and raises
+            # ConvergenceHaltError itself if the threshold is tripped —
+            # see _ConvergenceMonitor.__call__.
+            monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+
+        elif prev == "running" and status == "blocked":
+            log.info("phase %s: running -> blocked", phase_key)
+            monitor.current_phase_key = None
+            monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
+
+        elif prev in _UNSTARTED_STATUSES and status == "blocked":
+            log.info("phase %s: %s -> blocked", phase_key, prev or "none")
+            monitor.current_phase_key = None
+            monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
+
+        elif prev in _PRE_RUN_STATUSES and status == "done":
+            # Completed between polls without ever being observed as "running"
+            # (fast phase, coarse poll interval). Still emit the event and run
+            # the completion hook so downstream gates aren't left blocked.
+            log.info("phase %s: %s -> done", phase_key, prev or "none")
+            monitor.current_phase_key = None
+            monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+            on_completed(phase_key)
+
+        elif prev in _PRE_RUN_STATUSES and status == "failed":
+            log.info("phase %s: %s -> failed", phase_key, prev or "none")
+            monitor.current_phase_key = None
+            monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+
+
 def poll_registered_phases(
     *,
     project_slug: str,
@@ -2069,8 +2136,10 @@ def poll_registered_phases(
     # Completion means every *registered* card is terminal — keying this on the
     # profile phases would spin forever under a manifest fan-out.
     expected_phase_keys = frozenset(card_by_key)
-    pre_run_statuses = (None, "todo", "ready", "blocked")
-    unstarted_statuses = (None, "todo", "ready")
+
+    def _on_completed(phase_key: str) -> None:
+        # Auto-complete any gate task whose predecessor just finished.
+        _auto_complete_gate_tasks(project_slug, tick_id, completed_phase_key=phase_key, phases=cards)
 
     def _is_terminal_status(phase_key: str, status: str) -> bool:
         if status in TERMINAL_STATUSES:
@@ -2100,58 +2169,10 @@ def poll_registered_phases(
             continue
 
         try:
-            for phase_key, status in status_map.items():
-                prev = previous_status.get(phase_key)
-
-                if prev in pre_run_statuses and status == "running":
-                    log.info("phase %s: %s -> running", phase_key, prev or "none")
-                    monitor.current_phase_key = phase_key
-                    monitor("phase_started", {"phase_key": phase_key, "todo_id": todo_id})
-
-                elif prev == "running" and status == "done":
-                    log.info("phase %s: running -> done", phase_key)
-                    monitor.current_phase_key = None
-                    monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                    # Auto-complete any gate task whose predecessor just finished
-                    _auto_complete_gate_tasks(
-                        project_slug, tick_id, completed_phase_key=phase_key, phases=cards
-                    )
-
-                elif prev == "running" and status == "failed":
-                    log.info("phase %s: running -> failed", phase_key)
-                    monitor.current_phase_key = None
-                    # monitor() records the failure with the detector and raises
-                    # ConvergenceHaltError itself if the threshold is tripped —
-                    # see _ConvergenceMonitor.__call__. No separate detector.record()
-                    # call is needed here.
-                    monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-
-                elif prev == "running" and status == "blocked":
-                    log.info("phase %s: running -> blocked", phase_key)
-                    monitor.current_phase_key = None
-                    monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
-
-                elif prev in unstarted_statuses and status == "blocked":
-                    log.info("phase %s: %s -> blocked", phase_key, prev or "none")
-                    monitor.current_phase_key = None
-                    monitor("phase_blocked", {"phase_key": phase_key, "todo_id": todo_id})
-
-                elif prev in pre_run_statuses and status == "done":
-                    # Phase completed between polls without ever being observed
-                    # as "running" (fast phase, coarse poll interval). Still
-                    # emit the event and run gate auto-complete so downstream
-                    # gates aren't left blocked.
-                    log.info("phase %s: %s -> done", phase_key, prev or "none")
-                    monitor.current_phase_key = None
-                    monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-                    _auto_complete_gate_tasks(
-                        project_slug, tick_id, completed_phase_key=phase_key, phases=cards
-                    )
-
-                elif prev in pre_run_statuses and status == "failed":
-                    log.info("phase %s: %s -> failed", phase_key, prev or "none")
-                    monitor.current_phase_key = None
-                    monitor("phase_failed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
+            _emit_status_transitions(
+                previous_status, status_map,
+                monitor=monitor, todo_id=todo_id, on_completed=_on_completed,
+            )
         except ConvergenceHaltError:
             log.warning(
                 "convergence detector: %d+ consecutive phase_failure, halting",
@@ -2181,6 +2202,126 @@ def poll_registered_phases(
     return expected_phase_keys.issubset(previous_status) and all(
         status == "done" for status in previous_status.values()
     )
+
+
+def poll_pinned_run(
+    *,
+    project_slug: str,
+    tick_id: str,
+    todo_id: str,
+    step_keys: Iterable[str],
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    poll_interval: float = 5.0,
+    max_poll_interval: float = _KANBAN_POLL_MAX_INTERVAL,
+    cancel_event: Any = None,
+) -> dict[str, str]:
+    """Poll a ``requires_plan`` (native-sdd) run under one tick id until it settles.
+
+    Unlike ``poll_registered_phases`` this never completes cards: gates
+    (``validate:*``, ``review-acceptance``, ``human-gate``) belong to the
+    ``tpo tick`` reconcilers, and dynamic cards (``review:0``, ``finish``)
+    appear on later ticks under the same tick id. Transition events are
+    emitted for every key that *changes* relative to the initial fetch, which
+    seeds the baseline: cards already terminal when this call starts (settled by
+    an earlier tick under the same tick id) are reported in the returned map but
+    emit no event and are not re-recorded with the detector.
+
+    Settled means the status map is non-empty, contains every ``step_keys``
+    entry, and every status is in ``TERMINAL_STATUSES`` or ``BLOCKED``
+    (``failed`` settles too; classification is the caller's job).
+
+    Returns the settled map, the last observed map on convergence halt, or
+    ``{}`` when ``cancel_event`` fires.
+
+    Raises ValueError when ``step_keys`` is empty.
+    """
+    from .kanban_tasks import BLOCKED, TERMINAL_STATUSES, get_todo_kanban_status
+
+    expected_keys = frozenset(step_keys)
+    if not expected_keys:
+        raise ValueError("poll_pinned_run requires a non-empty step_keys set")
+    settled_statuses = TERMINAL_STATUSES | {BLOCKED}
+    # Statuses this poller understands. Anything else (notably "unknown", which
+    # get_todo_kanban_status substitutes for a card whose JSON omits "status")
+    # can never settle, so it is logged per poll to keep a stuck run diagnosable.
+    known_statuses = settled_statuses | {"todo", "ready", "running"}
+
+    # Not a fail-fast probe: get_todo_kanban_status returns {} for the failures
+    # it handles (TimeoutExpired, FileNotFoundError, JSONDecodeError), so an
+    # unreachable board just yields an empty baseline and the loop keeps polling.
+    # An OSError raised by subprocess.run itself still escapes to the caller.
+    initial_status = get_todo_kanban_status(project_slug, tick_id)
+    log.info(
+        "initial pinned-run status: %s",
+        ", ".join(f"{k}={v}" for k, v in sorted(initial_status.items())) or "(none)",
+    )
+
+    def _noop(_phase_key: str) -> None:
+        return None
+
+    # Seed from the initial snapshot: this poller is called once per tick against
+    # a long-lived tick id, sharing one monitor and one ConvergenceDetector across
+    # calls. Starting from {} would re-emit phase_completed/phase_failed for every
+    # card an earlier tick already settled (None is a _PRE_RUN_STATUSES member) and
+    # re-record those failures with the detector, which could halt the run
+    # spuriously. poll_registered_phases runs once per run and keeps its {} start.
+    previous_status: dict[str, str] = dict(initial_status)
+    current_interval = poll_interval
+    while True:
+        if cancel_event is not None:
+            if cancel_event.wait(current_interval):
+                return {}
+        else:
+            time.sleep(current_interval)
+        current_interval = min(current_interval * 1.5, max_poll_interval)
+
+        try:
+            status_map = get_todo_kanban_status(project_slug, tick_id)
+        except Exception as e:
+            log.warning("kanban status poll failed: %s", e)
+            continue
+
+        if not status_map:
+            continue
+
+        unrecognized = {k: v for k, v in sorted(status_map.items()) if v not in known_statuses}
+        if unrecognized:
+            log.warning(
+                "pinned-run poll sees unrecognized card status(es) that can never settle: %s",
+                ", ".join(f"{k}={v}" for k, v in unrecognized.items()),
+            )
+
+        halted = False
+        try:
+            _emit_status_transitions(
+                previous_status, status_map, monitor=monitor, todo_id=todo_id, on_completed=_noop
+            )
+        except ConvergenceHaltError:
+            log.warning(
+                "convergence detector: %d+ consecutive phase_failure, halting",
+                detector.threshold,
+            )
+            halted = True
+
+        # Defensive (R-H2.2): a card can reach a settled status with no emitted
+        # transition — the shared emitter has no "-> archived" branch — which
+        # would leave current_phase_key naming a finished phase and let an
+        # overall-timeout partial report blame it. Clear it whenever the key it
+        # names has settled. The emitter itself stays untouched.
+        in_flight = monitor.current_phase_key
+        if in_flight is not None and status_map.get(in_flight) in settled_statuses:
+            monitor.current_phase_key = None
+
+        if status_map != previous_status:
+            current_interval = poll_interval
+        previous_status = dict(status_map)
+
+        if halted or (
+            expected_keys.issubset(status_map)
+            and all(status in settled_statuses for status in status_map.values())
+        ):
+            return previous_status
 
 
 def _classify_error_class(exc: Exception) -> str:

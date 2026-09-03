@@ -1981,7 +1981,19 @@ class TestPollRegisteredPhaseTransitions:
         mock_observe.assert_called_once()
 
     def test_auto_completes_blocked_gates(self, tmp_path, mocker):
-        mock_auto = mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
+        # Record what had already been emitted at each auto-complete call: the
+        # gate hook must run *after* the phase_completed event for that key, so
+        # the event log never lags the board mutation.
+        emitted_at_call = []
+
+        def _record(*_args, completed_phase_key, **_kwargs):
+            written = (tmp_path / "events.jsonl").exists()
+            last = [e["event_type"] for e in self._events(tmp_path)][-1:] if written else []
+            emitted_at_call.append((completed_phase_key, last))
+
+        mock_auto = mocker.patch(
+            "hermes_pipeline.harness._auto_complete_gate_tasks", side_effect=_record
+        )
         call_count = [0]
 
         def fake_status(*args, **kwargs):
@@ -2004,6 +2016,10 @@ class TestPollRegisteredPhaseTransitions:
         mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2_autoplan", phases=cards)
         mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2b_plan_gate", phases=cards)
         assert mock_auto.call_count == 2
+        assert emitted_at_call == [
+            ("phase_2_autoplan", ["phase_completed"]),
+            ("phase_2b_plan_gate", ["phase_completed"]),
+        ]
 
     def test_emits_phase_failed_when_ready_transitions_directly_to_failed(self, tmp_path, mocker):
         """Regression: a phase can jump straight from ready/blocked to failed
@@ -2059,6 +2075,354 @@ class TestPollRegisteredPhaseTransitions:
         # First two sleeps stay at the base interval: poll 1 sees the initial
         # empty->running "change" and resets before poll 2 fires.
         assert sleep_calls[0] == sleep_calls[1] == 1.0
+
+
+class TestPollPinnedRun:
+    """poll_pinned_run(): settle-only poller for requires_plan (native-sdd) runs.
+
+    Gates are controlled by ``tpo tick`` reconcilers, so the poller never
+    completes cards; it only emits transitions and reports the settled map.
+    """
+
+    _monitor = staticmethod(TestPollRegisteredPhaseTransitions._monitor)
+    _events = staticmethod(TestPollRegisteredPhaseTransitions._events)
+
+    @staticmethod
+    def _poll(monitor, detector, step_keys, **overrides):
+        from hermes_pipeline.harness import poll_pinned_run
+
+        kwargs = dict(
+            project_slug="demo", tick_id="01TICK", todo_id="TODO-1",
+            step_keys=step_keys, monitor=monitor, detector=detector, poll_interval=0.1,
+        )
+        kwargs.update(overrides)
+        return poll_pinned_run(**kwargs)
+
+    @staticmethod
+    def _forbid_auto_complete(mocker):
+        def _boom(*_args, **_kwargs):
+            raise AssertionError("poll_pinned_run must never complete cards")
+
+        return mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks", side_effect=_boom)
+
+    class _ScriptExhausted(BaseException):
+        """Not an Exception: poll_pinned_run's ``except Exception: continue``
+        must not be able to swallow the end-of-script signal."""
+
+    class _Waiter:
+        """Stand-in cancel_event: records requested intervals, never blocks.
+
+        The poller waits on ``cancel_event`` instead of ``time.sleep`` whenever
+        one is supplied, so this doubles as the backoff recorder.
+        """
+
+        def __init__(self):
+            self.waits: list[float] = []
+            self._set = False
+
+        def set(self):
+            self._set = True
+
+        def is_set(self):
+            return self._set
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            return self._set
+
+    @classmethod
+    def _fake_status(cls, mocker, snapshots, waiter=None, before_call=None):
+        """Patch get_todo_kanban_status with a *self-bounding* scripted fake.
+
+        A bare ``side_effect`` list is unsafe here: the exhausted list raises
+        StopIteration, which the poller's ``except Exception: continue`` swallows,
+        so a mutant that stops settling would spin forever instead of failing.
+        This fake instead cancels the poll when the script runs out, and escalates
+        to a BaseException if the poller ignores the cancel.
+        """
+        waiter = waiter if waiter is not None else cls._Waiter()
+        remaining = list(snapshots)
+        state = {"last": {}, "overruns": 0}
+
+        def _next(*_args, **_kwargs):
+            if before_call is not None:
+                before_call()
+            if remaining:
+                state["last"] = remaining.pop(0)
+                return state["last"]
+            state["overruns"] += 1
+            if state["overruns"] > 2:
+                raise cls._ScriptExhausted(
+                    "poll_pinned_run kept polling after the scripted snapshots ran out "
+                    "and after cancel_event was set"
+                )
+            waiter.set()
+            return state["last"]
+
+        status = mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=_next
+        )
+        return status, waiter
+
+    def _run(self, tmp_path, mocker, snapshots, step_keys, **overrides):
+        self._forbid_auto_complete(mocker)
+        mocker.patch("time.sleep")
+        status, waiter = self._fake_status(mocker, snapshots)
+        monitor, detector = self._monitor(tmp_path)
+        overrides.setdefault("cancel_event", waiter)
+        result = self._poll(monitor, detector, step_keys, **overrides)
+        return result, status
+
+    def test_settles_when_every_card_done(self, tmp_path, mocker):
+        final = {"plan": "done", "validate:plan": "done"}
+        result, _ = self._run(tmp_path, mocker, [final, final], ["plan", "validate:plan"])
+        assert result == final
+
+    def test_settles_when_gate_blocked(self, tmp_path, mocker):
+        final = {"plan": "done", "human-gate": "blocked"}
+        result, _ = self._run(tmp_path, mocker, [final, final], ["plan", "human-gate"])
+        assert result == final
+
+    def test_settles_with_failed_card(self, tmp_path, mocker):
+        final = {"plan": "failed", "validate:plan": "done"}
+        # The initial fetch seeds the baseline, so the failure has to happen
+        # *after* it for phase_failed to be emitted.
+        snapshots = [{"plan": "running", "validate:plan": "running"}, final]
+        result, _ = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
+        assert result == final
+        failed = [e for e in self._events(tmp_path) if e["event_type"] == "phase_failed"]
+        assert [e["phase_key"] for e in failed] == ["plan"]
+
+    @pytest.mark.parametrize("pending", ["ready", "running", "todo"])
+    def test_keeps_polling_while_any_card_pending(self, tmp_path, mocker, pending):
+        snapshots = [
+            {"plan": "done", "validate:plan": pending},
+            {"plan": "done", "validate:plan": pending},
+            {"plan": "done", "validate:plan": pending},
+            {"plan": "done", "validate:plan": "done"},
+        ]
+        result, status = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
+        assert result == {"plan": "done", "validate:plan": "done"}
+        assert status.call_count == 4
+
+    def test_does_not_settle_while_step_key_missing(self, tmp_path, mocker):
+        snapshots = [
+            {"plan": "done"},
+            {"plan": "done"},
+            {"plan": "done"},
+            {"plan": "done", "validate:plan": "done"},
+        ]
+        result, status = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
+        assert result == {"plan": "done", "validate:plan": "done"}
+        assert status.call_count == 4
+
+    def test_does_not_settle_on_empty_map(self, tmp_path, mocker):
+        snapshots = [{}, {}, {}, {"plan": "done"}]
+        result, status = self._run(tmp_path, mocker, snapshots, ["plan"])
+        assert result == {"plan": "done"}
+        assert status.call_count == 4
+
+    def test_emits_transitions_for_dynamic_key(self, tmp_path, mocker):
+        snapshots = [
+            {"plan": "ready"},
+            {"plan": "running"},
+            {"plan": "done", "review:0": "running"},
+            {"plan": "done", "review:0": "done"},
+        ]
+        result, _ = self._run(tmp_path, mocker, snapshots, ["plan"])
+        assert result == {"plan": "done", "review:0": "done"}
+        events = [(e["event_type"], e["phase_key"]) for e in self._events(tmp_path)]
+        assert events == [
+            ("phase_started", "plan"),
+            ("phase_completed", "plan"),
+            ("phase_started", "review:0"),
+            ("phase_completed", "review:0"),
+        ]
+
+    def test_never_calls_auto_complete_gate_tasks(self, tmp_path, mocker):
+        snapshots = [
+            {"plan": "running", "validate:plan": "blocked"},
+            {"plan": "running", "validate:plan": "blocked"},
+            # The tick reconciler, not the poller, moves the gate on after plan is done.
+            {"plan": "done", "validate:plan": "ready"},
+            {"plan": "done", "validate:plan": "done"},
+        ]
+        self._forbid_auto_complete(mocker)
+        mocker.patch("time.sleep")
+        _, waiter = self._fake_status(mocker, snapshots)
+        monitor, detector = self._monitor(tmp_path)
+        from hermes_pipeline import harness
+
+        result = self._poll(monitor, detector, ["plan", "validate:plan"], cancel_event=waiter)
+        assert result == {"plan": "done", "validate:plan": "done"}
+        harness._auto_complete_gate_tasks.assert_not_called()
+
+    def test_cancel_before_first_poll_returns_empty_map(self, tmp_path, mocker):
+        import threading
+
+        cancel_event = threading.Event()
+
+        def _initial_status(*_args, **_kwargs):
+            cancel_event.set()
+            return {"plan": "running"}
+
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=_initial_status)
+        sleep = mocker.patch("hermes_pipeline.harness.time.sleep")
+        monitor, detector = self._monitor(tmp_path)
+
+        result = self._poll(monitor, detector, ["plan"], cancel_event=cancel_event)
+
+        assert result == {}
+        sleep.assert_not_called()
+
+    def test_cancel_after_populated_poll_returns_empty_map(self, tmp_path, mocker):
+        """Cancellation is not a result: the last observed map is discarded, so a
+        cancelled poll can never be mistaken for a settled one."""
+        self._forbid_auto_complete(mocker)
+        sleep = mocker.patch("hermes_pipeline.harness.time.sleep")
+        populated = {"plan": "running", "validate:plan": "done"}
+        # Script ends on a non-settling but populated poll; the fake then cancels.
+        status, waiter = self._fake_status(mocker, [{"plan": "ready"}, populated])
+        monitor, detector = self._monitor(tmp_path)
+
+        result = self._poll(monitor, detector, ["plan", "validate:plan"], cancel_event=waiter)
+
+        assert waiter.is_set()
+        assert status.call_count >= 2  # initial fetch plus at least one populated poll
+        assert result == {}
+        sleep.assert_not_called()
+
+    def test_convergence_halt_stops_polling(self, tmp_path, mocker):
+        # Mirrors TestPollRegisteredPhaseTransitions.test_convergence_halt_stops_polling:
+        # the detector trips on the third consecutive failure and the poller stops
+        # even though p3 is still pending.
+        snapshots = [
+            {"p1": "running", "p2": "ready", "p3": "ready"},
+            {"p1": "failed", "p2": "running", "p3": "ready"},
+            {"p1": "failed", "p2": "failed", "p3": "running"},
+            {"p1": "failed", "p2": "failed", "p3": "failed"},
+        ]
+        result, status = self._run(tmp_path, mocker, snapshots, ["p1", "p2", "p3"])
+        assert result == {"p1": "failed", "p2": "failed", "p3": "failed"}
+        assert status.call_count == 4
+        assert len([e for e in self._events(tmp_path) if e["event_type"] == "phase_failed"]) == 3
+
+    def test_poll_interval_backs_off_and_resets_on_change(self, tmp_path, mocker):
+        self._forbid_auto_complete(mocker)
+        # The poller waits on cancel_event rather than time.sleep, so the waiter
+        # records the backoff schedule.
+        snapshots = [{"plan": "ready"}] + [{"plan": "running"}] * 4 + [{"plan": "done"}]
+        _, waiter = self._fake_status(mocker, snapshots)
+        monitor, detector = self._monitor(tmp_path)
+
+        self._poll(
+            monitor, detector, ["plan"],
+            poll_interval=1.0, max_poll_interval=10.0, cancel_event=waiter,
+        )
+
+        waits = waiter.waits
+        # ready -> running on the first poll resets the interval for the second.
+        assert waits[0] == waits[1] == 1.0
+        assert waits[2] > waits[1]
+        assert waits[3] > waits[2]
+
+    def test_tracks_current_phase_key_across_the_run(self, tmp_path, mocker):
+        """current_phase_key drives partial reports on overall-timeout: it must
+        name the in-flight phase mid-poll and clear once that phase completes."""
+        self._forbid_auto_complete(mocker)
+        monitor, detector = self._monitor(tmp_path)
+        observed: list[str | None] = []
+        snapshots = [
+            {"plan": "ready"},
+            {"plan": "running"},
+            {"plan": "running"},
+            {"plan": "done"},
+        ]
+        _, waiter = self._fake_status(
+            mocker, snapshots, before_call=lambda: observed.append(monitor.current_phase_key)
+        )
+
+        result = self._poll(monitor, detector, ["plan"], cancel_event=waiter)
+
+        assert result == {"plan": "done"}
+        # Sampled just before each fetch: nothing in flight for the initial fetch
+        # and the first poll, then "plan" while it runs.
+        assert observed == [None, None, "plan", "plan"]
+        assert monitor.current_phase_key is None
+
+    def test_clears_current_phase_key_when_in_flight_card_settles_silently(self, tmp_path, mocker):
+        """Defensive (R-H2.2): "archived" is terminal but the shared emitter has
+        no branch for it, so a running -> archived card emits nothing. Left alone,
+        current_phase_key would keep naming it and an overall-timeout partial
+        report would blame a phase that already settled."""
+        self._forbid_auto_complete(mocker)
+        monitor, detector = self._monitor(tmp_path)
+        snapshots = [{"plan": "ready"}, {"plan": "running"}, {"plan": "archived"}]
+        _, waiter = self._fake_status(mocker, snapshots)
+
+        result = self._poll(monitor, detector, ["plan"], cancel_event=waiter)
+
+        assert result == {"plan": "archived"}
+        # No transition event exists for the silent settle...
+        assert [e["event_type"] for e in self._events(tmp_path)] == ["phase_started"]
+        # ...but nothing is still in flight at settle.
+        assert monitor.current_phase_key is None
+
+    def test_second_call_does_not_replay_events_from_earlier_ticks(self, tmp_path, mocker):
+        """Regression: per-tick calls share one monitor/detector. Cards already
+        terminal at the initial fetch must not be re-emitted or re-recorded."""
+        self._forbid_auto_complete(mocker)
+        first = {"plan": "failed", "build": "failed"}
+        second = {"plan": "failed", "build": "failed", "review:0": "done"}
+        _, waiter = self._fake_status(
+            mocker, [{"plan": "running", "build": "running"}, first, first, second]
+        )
+        monitor, detector = self._monitor(tmp_path, threshold=3)
+
+        assert self._poll(monitor, detector, ["plan", "build"], cancel_event=waiter) == first
+        events_after_first = self._events(tmp_path)
+        assert [(e["event_type"], e["phase_key"]) for e in events_after_first] == [
+            ("phase_failed", "plan"),
+            ("phase_failed", "build"),
+        ]
+        assert not detector.should_halt()
+
+        assert self._poll(monitor, detector, ["plan", "build", "review:0"], cancel_event=waiter) == second
+
+        new_events = self._events(tmp_path)[len(events_after_first):]
+        assert [(e["event_type"], e["phase_key"]) for e in new_events] == [("phase_completed", "review:0")]
+        # Replaying the two earlier failures would have tripped the threshold-3
+        # detector on this second call.
+        assert not detector.should_halt()
+
+    def test_transition_between_initial_fetch_and_first_snapshot_is_emitted(self, tmp_path, mocker):
+        snapshots = [{"plan": "running"}, {"plan": "done"}]
+        result, _ = self._run(tmp_path, mocker, snapshots, ["plan"])
+        assert result == {"plan": "done"}
+        assert [(e["event_type"], e["phase_key"]) for e in self._events(tmp_path)] == [
+            ("phase_completed", "plan"),
+        ]
+
+    def test_warns_once_per_poll_on_unknown_status(self, tmp_path, mocker, caplog):
+        import logging
+
+        snapshots = [
+            {"plan": "unknown", "validate:plan": "unknown"},
+            {"plan": "unknown", "validate:plan": "unknown"},
+            {"plan": "done", "validate:plan": "done"},
+        ]
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
+            result, _ = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
+        assert result == {"plan": "done", "validate:plan": "done"}
+        warnings = [r for r in caplog.records if "unknown" in r.getMessage()]
+        assert len(warnings) == 1
+        assert "plan" in warnings[0].getMessage()
+
+    def test_empty_step_keys_rejected(self, tmp_path, mocker):
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={})
+        monitor, detector = self._monitor(tmp_path)
+        with pytest.raises(ValueError):
+            self._poll(monitor, detector, [])
 
 
 class TestResolveSandboxRepo:
