@@ -115,9 +115,10 @@ class HarnessTickError(RuntimeError):
     committed, as a ``git replace`` forgery in the clone would produce),
     ``unexpected_selection`` (raised by
     :func:`assert_tick_id_unchanged` when a later tick persisted a different, or
-    no, tick id), and, reserved for the multi-tick driver, ``tick_stalled`` (no
-    card progressed within the stall window) and ``tick_budget_exhausted`` (the
-    tick budget ran out before the run completed).
+    no, tick id), and, raised by the multi-tick driver :func:`drive_ticks`,
+    ``tick_stalled`` (two consecutive ticks settled on an identical, undelivered
+    status map, so no card progressed) and ``tick_budget_exhausted`` (the run
+    consumed :func:`pinned_tick_budget` ticks without reaching a verdict).
     """
 
     def __init__(self, code: str, detail: str = "", *, tick_id: str | None = None) -> None:
@@ -2324,6 +2325,74 @@ def poll_pinned_run(
             return previous_status
 
 
+# ``todos_completion`` writes this marker under ``<state>/runs/<tick_id>/`` once the
+# delivery contract on the ``finish`` card has been verified (see ``_run_marker``).
+_FINISH_VERIFIED_MARKER = "finish-verified"
+
+
+def classify_pinned_run(status_map: Mapping[str, str], run_dir: Path | None) -> str:
+    """Classify one settled status map of a plan-pinned (``requires_plan``) run.
+
+    * ``"failed"`` -- any card is ``failed``, or ``archived``: archiving cannot
+      happen under a pinned run, but it is terminal and must never be read as a
+      card still on its way to done.
+    * ``"delivered"`` -- the reconcilers' ``finish`` card is ``done``, the
+      ``human-gate`` card is ``blocked`` (the gate is waiting for a human merge,
+      which is where a pinned run ends), and ``todos_completion`` wrote its
+      ``finish-verified`` marker into *run_dir*. The marker, not the closed card,
+      is the proof the delivery contract was verified. ``blocked`` only: a
+      ``done`` human gate is a merged pull request, reported as ``"failed"``.
+    * ``"in_progress"`` -- anything else; the driver runs another tick.
+
+    The card keys are ``todos_completion.FINISH_KEY`` / ``HUMAN_GATE_KEY`` and
+    ``kanban_tasks.BLOCKED``, imported rather than restated so a rename in the
+    reconcilers cannot silently turn a delivered run into an endless one.
+    """
+    from .kanban_tasks import BLOCKED
+    from .todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+    if any(status in ("failed", "archived") for status in status_map.values()):
+        return "failed"
+    finish_done = status_map.get(FINISH_KEY) == "done"
+    if finish_done and status_map.get(HUMAN_GATE_KEY) == "done":
+        # A completed human gate means someone merged the pull request, which
+        # ``verify_pull_request`` rejects as ``pr_merged``: the run can never
+        # reach delivered, so fail it informatively rather than tick until the
+        # budget runs out.
+        return "failed"
+    if (
+        finish_done
+        and status_map.get(HUMAN_GATE_KEY) == BLOCKED
+        and run_dir is not None
+        and (run_dir / _FINISH_VERIFIED_MARKER).exists()
+    ):
+        return "delivered"
+    return "in_progress"
+
+
+def pinned_tick_budget(step_keys: Iterable[str]) -> int:
+    """How many ``tpo tick`` invocations one plan-pinned run may consume.
+
+    ``len(step_keys) // 2 + 5 + 2 * MAX_REVIEW_ROUNDS``:
+
+    * ``len(step_keys) // 2`` -- the registered cards are one ``plan:<task>``
+      plus one ``validate:<task>`` per plan task, so half the step keys is the
+      task count, and one tick reconciles a task's validate gate and starts the
+      next task.
+    * ``5`` -- the fixed reconciler hops that own no step key: opening the first
+      review round, ``review-acceptance``, ``finish``, ``human-gate``, and one
+      slack tick for a retryable registration.
+    * ``2 * MAX_REVIEW_ROUNDS`` -- each review round can need one tick to
+      register the round and another to reconcile its outcome.
+
+    Deliberately generous: exhausting the budget means the run is stuck
+    (``tick_budget_exhausted``), not that it ran out of legitimate work.
+    """
+    from .review_reconciliation import MAX_REVIEW_ROUNDS
+
+    return len(tuple(step_keys)) // 2 + 5 + 2 * MAX_REVIEW_ROUNDS
+
+
 def _classify_error_class(exc: Exception) -> str:
     """Bucket an exception into a coarse error class for convergence tracking / reports."""
     from .hermes_adapter import (
@@ -2926,6 +2995,493 @@ def _run_with_timeout(
     if "exception" in result_box:
         raise result_box["exception"]
     return result_box["success"], False, result_box
+
+
+@dataclass(frozen=True)
+class TickDrive:
+    """The outcome of driving one harness run's production ticks.
+
+    ``registration`` is the recovered registration, or ``None`` when no tick
+    ever registered one; it is retained even on a mid-loop timeout so the caller
+    can still quiesce the live run. ``observed_keys`` are the card keys seen in
+    any settled pinned status map -- dynamic cards (``review:0``, ``finish``,
+    ``human-gate``) included -- for the caller to union with the registered step
+    keys at shutdown; it is empty for a non-pinned drive, whose poller reports no
+    map. ``ticks_run`` counts ``run_tick`` invocations, always 1 for a
+    non-pinned drive. ``failure_code`` is ``None`` for a plain card failure:
+    ``success`` already reports that, and the shutdown report names the cards.
+
+    ``timed_out`` means the whole-run deadline expired with the run still live;
+    a ``run_tick`` *subprocess* timeout is a tick failure and is reported through
+    ``failure_code``/``tick_error`` (``tick_timeout``) instead.
+
+    ``pending_error`` is an exception that escaped the drive body -- the drive
+    converts it into a partial result rather than propagating, so the caller
+    keeps ``registration``, ``observed_keys`` and ``ticks_run`` and can still
+    quiesce the run; the caller re-raises or records it afterwards.
+    ``poll_cancelled`` marks the ``PollCancellationError`` subset of that, where
+    a poll worker ignored cooperative cancellation. A ``BaseException``
+    (``KeyboardInterrupt``/``SystemExit``) is never converted: it propagates
+    untouched so the caller can retain the workspace and re-raise.
+
+    ``result_box`` is excluded from equality and hashing: it is a mutable dict
+    that can carry live exception objects.
+    """
+
+    registration: TickRegistration | None
+    success: bool
+    timed_out: bool
+    result_box: dict[str, Any] = field(compare=False)
+    observed_keys: frozenset[str]
+    failure_code: str | None
+    tick_error: HarnessTickError | None
+    workers_unaccounted: bool
+    ticks_run: int
+    poll_cancelled: bool = False
+    pending_error: BaseException | None = None
+
+
+def _tick_failure(
+    exc: Exception,
+    *,
+    project_state: Path,
+    previous_tick_id: str | None,
+    known_tick_id: str | None = None,
+) -> tuple[HarnessTickError, bool]:
+    """Normalize a ``run_tick`` failure; report whether workers are unaccounted for.
+
+    The subprocess may have persisted a tick id and spawned detached workers
+    before failing, so the id is re-read and attached to the error for shutdown.
+    When *known_tick_id* is given (a pinned run whose registration is already
+    recovered) whatever spawned belongs to that tick. Otherwise, when no new id
+    is readable the sandbox is not provably idle: ``workers_unaccounted``.
+    """
+    if not isinstance(exc, HarnessTickError):
+        exc = HarnessTickError("tick_failed", f"{type(exc).__name__}: {exc}"[:_ERROR_MESSAGE_MAX])
+    if known_tick_id is not None:
+        # Invariant for a pinned run past its first tick: the run's issue is no
+        # longer eligible (it carries an in-flight registration), so the only
+        # tick a later ``tpo tick`` can persist is a worker-less ``picked_none``
+        # one. Nothing new can have spawned, so pinning the id to the registered
+        # tick and reporting ``workers_unaccounted=False`` is correct -- the
+        # registered tick is exactly what shutdown must quiesce. A genuinely new
+        # registered tick is caught separately by ``assert_tick_id_unchanged``.
+        exc.tick_id = known_tick_id
+        return exc, False
+    current_tick_id = read_current_tick_id(project_state)
+    if current_tick_id is not None and current_tick_id != previous_tick_id:
+        exc.tick_id = current_tick_id
+        return exc, False
+    return exc, True
+
+
+def _log_tick_error(exc: HarnessTickError, tick_log: Path) -> None:
+    if exc.code == "tick_not_persisted":
+        # The detail is the tick log tail and may carry sensitive tool output.
+        log.error(
+            "harness: tick did not register a runnable run: %s; see %s", exc.code, tick_log
+        )
+        log.debug("harness: tick log tail:\n%s", exc.detail)
+    else:
+        log.error("harness: tick did not register a runnable run: %s %s", exc.code, exc.detail)
+
+
+def _emit_timeout_phase(
+    *,
+    slug: str,
+    tick_id: str,
+    monitor: _ConvergenceMonitor,
+    base_monitor: HarnessMonitor,
+) -> None:
+    """Name the phase that was still in flight when the overall timeout fired."""
+    from .kanban_tasks import TERMINAL_STATUSES, get_todo_kanban_status
+
+    timed_out_phase: str | None = None
+    try:
+        in_flight = get_todo_kanban_status(slug, tick_id)
+        timed_out_phase = next(
+            (k for k, v in in_flight.items() if v not in TERMINAL_STATUSES),
+            None,
+        )
+    except Exception:
+        pass
+    timed_out_phase = timed_out_phase or monitor.current_phase_key
+    if timed_out_phase:
+        base_monitor("phase_timed_out", {"phase_key": timed_out_phase})
+
+
+def drive_ticks(
+    *,
+    project_dir: Path,
+    project_state: Path,
+    slug: str,
+    workspace_dir: Path,
+    tick_log: Path,
+    timeout: int,
+    all_phases: Sequence[Phase],
+    issue: HarnessIssue,
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    base_monitor: HarnessMonitor,
+    pinned: bool = False,
+    repo: str | None = None,
+    plan_sha: str | None = None,
+    plan_text: str | None = None,
+) -> TickDrive:
+    """Run the production ticks of one harness run and report what they did.
+
+    Non-pinned profiles (``gstack``, ``agent-skills``) complete in a single
+    tick: run it, recover its registration, poll its registered cards to a
+    terminal board, done. Plan-pinned (``requires_plan``) profiles register once
+    and then need one tick per reconciler hop, so ``pinned=True`` loops up to
+    :func:`pinned_tick_budget` ticks under the same tick id, classifying each
+    settled board with :func:`classify_pinned_run`.
+
+    A ``HarnessTickError`` is reported in ``tick_error``/``failure_code`` rather
+    than raised: the run may be live, and the caller owes it a shutdown. Other
+    exceptions (notably ``PollCancellationError``) propagate.
+
+    ``pinned=True`` requires *repo*, *plan_sha* and *plan_text* (``ValueError``),
+    and is the only mode that uses *project_dir*: the pinned trust boundary
+    resolves ``registration.json`` against the clone. A non-pinned drive recovers
+    from *project_state* alone, so *project_dir* is deliberately not forwarded.
+
+    Neither mode raises for a live run: see ``TickDrive.pending_error``.
+    """
+    if pinned:
+        if repo is None or plan_sha is None or plan_text is None:
+            raise ValueError("drive_ticks(pinned=True) requires repo, plan_sha and plan_text")
+        return _drive_pinned_ticks(
+            project_dir=project_dir,
+            project_state=project_state,
+            slug=slug,
+            workspace_dir=workspace_dir,
+            tick_log=tick_log,
+            timeout=timeout,
+            issue=issue,
+            repo=repo,
+            plan_sha=plan_sha,
+            plan_text=plan_text,
+            monitor=monitor,
+            detector=detector,
+            base_monitor=base_monitor,
+        )
+    return _drive_single_tick(
+        project_state=project_state,
+        slug=slug,
+        workspace_dir=workspace_dir,
+        tick_log=tick_log,
+        timeout=timeout,
+        all_phases=all_phases,
+        issue=issue,
+        monitor=monitor,
+        detector=detector,
+        base_monitor=base_monitor,
+    )
+
+
+def _drive_single_tick(
+    *,
+    project_state: Path,
+    slug: str,
+    workspace_dir: Path,
+    tick_log: Path,
+    timeout: int,
+    all_phases: Sequence[Phase],
+    issue: HarnessIssue,
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    base_monitor: HarnessMonitor,
+) -> TickDrive:
+    """One tick, one poll: the non-pinned (``gstack``/``agent-skills``) drive."""
+    import threading
+
+    registration: TickRegistration | None = None
+    tick_error: HarnessTickError | None = None
+    failure_code: str | None = None
+    workers_unaccounted = False
+    success = False
+    timed_out = False
+    result_box: dict[str, Any] = {}
+    cards: list[Phase] = []
+
+    def _partial(
+        *, poll_cancelled: bool = False, pending_error: BaseException | None = None
+    ) -> TickDrive:
+        return TickDrive(
+            registration=registration,
+            success=success,
+            timed_out=timed_out,
+            result_box=result_box,
+            observed_keys=frozenset(),
+            failure_code=failure_code,
+            tick_error=tick_error,
+            workers_unaccounted=workers_unaccounted,
+            ticks_run=1,
+            poll_cancelled=poll_cancelled,
+            pending_error=pending_error,
+        )
+
+    try:
+        try:
+            previous_tick_id = read_current_tick_id(project_state)
+            try:
+                run_tick(slug, cwd=workspace_dir, log_path=tick_log, timeout=timeout)
+            except Exception as exc:
+                tick_exc, workers_unaccounted = _tick_failure(
+                    exc, project_state=project_state, previous_tick_id=previous_tick_id
+                )
+                raise tick_exc
+            registration = recover_tick_registration(
+                project_state,
+                expected_issue=issue.number,
+                tick_log=tick_log,
+                previous_tick_id=previous_tick_id,
+            )
+            cards = cards_for_registered_keys(all_phases, registration.phase_keys)
+        except HarnessTickError as exc:
+            tick_error = exc
+            failure_code = exc.code
+            _log_tick_error(exc, tick_log)
+
+        if tick_error is None:
+            assert registration is not None
+            registered = registration
+            base_monitor(
+                "tick_registered",
+                {"tick_id": registered.tick_id, "phase_keys": list(registered.phase_keys)},
+            )
+            cancel_event = threading.Event()
+
+            def _poll() -> bool:
+                return poll_registered_phases(
+                    project_slug=slug,
+                    tick_id=registered.tick_id,
+                    state_dir=project_state,
+                    todo_id=registered.todo_id,
+                    cards=cards,
+                    monitor=monitor,
+                    detector=detector,
+                    cancel_event=cancel_event,
+                )
+
+            success, timed_out, result_box = _run_with_timeout(
+                _poll, timeout=timeout, cancel_event=cancel_event
+            )
+            if timed_out:
+                _emit_timeout_phase(
+                    slug=slug,
+                    tick_id=registered.tick_id,
+                    monitor=monitor,
+                    base_monitor=base_monitor,
+                )
+            elif "convergence_error" in result_box:
+                # Convergence-halt fired during polling; the cards are already
+                # terminal on the board. Name it in the summary.
+                log.warning("convergence-halt: %s", result_box["convergence_error"])
+                failure_code = "convergence_halt"
+    except PollCancellationError as exc:
+        # The run may still be live and is owed a shutdown, so the registration
+        # travels back with the error instead of being lost to the stack unwind.
+        return _partial(poll_cancelled=True, pending_error=exc)
+    except Exception as exc:
+        return _partial(pending_error=exc)
+
+    return _partial()
+
+
+def _drive_pinned_ticks(
+    *,
+    project_dir: Path,
+    project_state: Path,
+    slug: str,
+    workspace_dir: Path,
+    tick_log: Path,
+    timeout: int,
+    issue: HarnessIssue,
+    repo: str,
+    plan_sha: str,
+    plan_text: str,
+    monitor: _ConvergenceMonitor,
+    detector: ConvergenceDetector,
+    base_monitor: HarnessMonitor,
+) -> TickDrive:
+    """Drive a plan-pinned run: many ticks, one tick id, one settled board each.
+
+    The first tick registers the run (:func:`recover_pinned_registration`) and
+    fixes the budget; every later tick must reuse that tick id
+    (:func:`assert_tick_id_unchanged`). *timeout* is the whole run's wall clock,
+    shared by the ticks and their polls: each tick and each poll gets only what
+    is left of it, and an expired deadline ends the drive with ``timed_out``.
+    """
+    import threading
+
+    registration: TickRegistration | None = None
+    tick_error: HarnessTickError | None = None
+    failure_code: str | None = None
+    workers_unaccounted = False
+    success = False
+    timed_out = False
+    result_box: dict[str, Any] = {}
+    observed: set[str] = set()
+    previous_map: dict[str, str] | None = None
+    budget: int | None = None
+    ticks_run = 0
+    deadline = time.monotonic() + timeout
+
+    def _partial(
+        *, poll_cancelled: bool = False, pending_error: BaseException | None = None
+    ) -> TickDrive:
+        return TickDrive(
+            registration=registration,
+            success=success,
+            timed_out=timed_out,
+            result_box=result_box,
+            observed_keys=frozenset(observed),
+            failure_code=failure_code,
+            tick_error=tick_error,
+            workers_unaccounted=workers_unaccounted,
+            ticks_run=ticks_run,
+            poll_cancelled=poll_cancelled,
+            pending_error=pending_error,
+        )
+
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                return _partial()
+
+            previous_tick_id = read_current_tick_id(project_state)
+            ticks_run += 1
+            try:
+                try:
+                    run_tick(slug, cwd=workspace_dir, log_path=tick_log, timeout=remaining)
+                except Exception as exc:
+                    tick_exc, workers_unaccounted = _tick_failure(
+                        exc,
+                        project_state=project_state,
+                        previous_tick_id=previous_tick_id,
+                        known_tick_id=(
+                            registration.tick_id if registration is not None else None
+                        ),
+                    )
+                    raise tick_exc
+                if registration is None:
+                    registration = recover_pinned_registration(
+                        project_dir,
+                        project_state,
+                        issue=issue,
+                        repo=repo,
+                        plan_sha=plan_sha,
+                        plan_text=plan_text,
+                        tick_log=tick_log,
+                        previous_tick_id=previous_tick_id,
+                    )
+                    budget = pinned_tick_budget(registration.phase_keys)
+                    base_monitor(
+                        "tick_registered",
+                        {
+                            "tick_id": registration.tick_id,
+                            "phase_keys": list(registration.phase_keys),
+                        },
+                    )
+                else:
+                    assert_tick_id_unchanged(project_state, expected=registration.tick_id)
+            except HarnessTickError as exc:
+                tick_error = exc
+                failure_code = exc.code
+                _log_tick_error(exc, tick_log)
+                break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                return _partial()
+
+            registered = registration
+            cancel_event = threading.Event()
+            settled: dict[str, dict[str, str]] = {}
+
+            def _poll(
+                _registered: TickRegistration = registered,
+                _cancel: Any = cancel_event,
+                _settled: dict[str, dict[str, str]] = settled,
+            ) -> bool:
+                # ``_run_with_timeout`` wants a ``Callable[[], bool]``; the settled
+                # map goes out through ``_settled`` rather than the return value.
+                _settled["map"] = poll_pinned_run(
+                    project_slug=slug,
+                    tick_id=_registered.tick_id,
+                    todo_id=_registered.todo_id,
+                    step_keys=_registered.phase_keys,
+                    monitor=monitor,
+                    detector=detector,
+                    cancel_event=_cancel,
+                )
+                return True
+
+            _polled, timed_out, result_box = _run_with_timeout(
+                _poll, timeout=max(1, int(remaining)), cancel_event=cancel_event
+            )
+            if timed_out:
+                _emit_timeout_phase(
+                    slug=slug,
+                    tick_id=registered.tick_id,
+                    monitor=monitor,
+                    base_monitor=base_monitor,
+                )
+                # The registration is kept: the run is live and owed a shutdown.
+                return _partial()
+
+            status_map = settled.get("map", {})
+            observed |= set(status_map)
+            if detector.should_halt():
+                # ``poll_pinned_run`` swallows its own ``ConvergenceHaltError`` and
+                # returns the last map, so the halt is not in the return value. The
+                # detector's own state is the honest signal: it latches at the
+                # threshold and only a non-failing phase resets it, so it can only
+                # read true here if the poller halted on this or an earlier tick --
+                # and an earlier halt already ended the drive. Inferring it from a
+                # ``failed`` card instead would be wrong: a single failed card is a
+                # normal, non-halting outcome.
+                failure_code = "convergence_halt"
+            verdict = classify_pinned_run(status_map, registered.run_dir)
+            if verdict == "failed":
+                break
+            if verdict == "delivered":
+                # Checked before the stall test: a delivered board is by construction
+                # the same map every later tick would settle on.
+                success = True
+                break
+            if previous_map is not None and status_map == previous_map:
+                tick_error = HarnessTickError(
+                    "tick_stalled",
+                    f"tick {ticks_run} settled on the same board as tick {ticks_run - 1}",
+                    tick_id=registered.tick_id,
+                )
+                failure_code = tick_error.code
+                log.error("harness: pinned run stalled: %s", tick_error.detail)
+                break
+            previous_map = status_map
+            if budget is not None and ticks_run >= budget:
+                tick_error = HarnessTickError(
+                    "tick_budget_exhausted",
+                    f"{ticks_run} ticks",
+                    tick_id=registered.tick_id,
+                )
+                failure_code = tick_error.code
+                log.error("harness: pinned run exhausted its %d-tick budget", budget)
+                break
+    except PollCancellationError as exc:
+        # The run is live and owed a shutdown: hand the caller the registration,
+        # the keys seen so far and the error rather than unwinding past them.
+        return _partial(poll_cancelled=True, pending_error=exc)
+    except Exception as exc:
+        return _partial(pending_error=exc)
+
+    return _partial()
 
 
 def _cancel_registered_tasks(

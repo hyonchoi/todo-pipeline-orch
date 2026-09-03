@@ -6507,3 +6507,1239 @@ class TestAssertTickIdUnchanged:
         assert excinfo.value.code == "unexpected_selection"
         assert excinfo.value.detail == "missing"
         assert excinfo.value.tick_id == "01TICK"
+
+
+class TestClassifyPinnedRun:
+    """classify_pinned_run(): the pinned driver's per-tick verdict.
+
+    The keys are the reconcilers' own card keys, so the assertions read them
+    from ``todos_completion`` rather than restating string literals.
+    """
+
+    @staticmethod
+    def _keys():
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        return FINISH_KEY, HUMAN_GATE_KEY
+
+    @staticmethod
+    def _run_dir(tmp_path: Path, *, verified: bool) -> Path:
+        run_dir = tmp_path / "runs" / "01PINNED"
+        run_dir.mkdir(parents=True)
+        if verified:
+            (run_dir / "finish-verified").write_text("a" * 40 + "\n")
+        return run_dir
+
+    @staticmethod
+    def _delivered_map():
+        from hermes_pipeline.kanban_tasks import BLOCKED
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        return {
+            "plan:task-1": "done",
+            "review-acceptance": "done",
+            FINISH_KEY: "done",
+            HUMAN_GATE_KEY: BLOCKED,
+        }
+
+    def test_delivered_needs_finish_done_gate_blocked_and_marker(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        run_dir = self._run_dir(tmp_path, verified=True)
+
+        assert classify_pinned_run(self._delivered_map(), run_dir) == "delivered"
+
+    def test_missing_finish_verified_marker_is_in_progress(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        run_dir = self._run_dir(tmp_path, verified=False)
+
+        assert classify_pinned_run(self._delivered_map(), run_dir) == "in_progress"
+
+    @pytest.mark.parametrize("gate_status", ["todo", "ready", "running"])
+    def test_gate_not_yet_blocked_is_in_progress(self, tmp_path: Path, gate_status):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        _finish, gate = self._keys()
+        run_dir = self._run_dir(tmp_path, verified=True)
+        status_map = dict(self._delivered_map(), **{gate: gate_status})
+
+        assert classify_pinned_run(status_map, run_dir) == "in_progress"
+
+    def test_finish_not_done_is_in_progress(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        finish, _gate = self._keys()
+        run_dir = self._run_dir(tmp_path, verified=True)
+        status_map = dict(self._delivered_map(), **{finish: "blocked"})
+
+        assert classify_pinned_run(status_map, run_dir) == "in_progress"
+
+    def test_in_progress_mid_run(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        run_dir = self._run_dir(tmp_path, verified=False)
+
+        assert (
+            classify_pinned_run({"plan:task-1": "done", "validate:task-1": "blocked"}, run_dir)
+            == "in_progress"
+        )
+
+    def test_failed_card_is_failed(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        run_dir = self._run_dir(tmp_path, verified=False)
+
+        assert (
+            classify_pinned_run({"plan:task-1": "failed", "validate:task-1": "done"}, run_dir)
+            == "failed"
+        )
+
+    def test_archived_card_is_failed_not_progress(self, tmp_path: Path):
+        """``archived`` should never appear under a pinned run, but it is terminal
+        and must never be mistaken for a card still on its way to done."""
+        from hermes_pipeline.harness import classify_pinned_run
+
+        run_dir = self._run_dir(tmp_path, verified=False)
+
+        assert (
+            classify_pinned_run({"plan:task-1": "archived", "validate:task-1": "done"}, run_dir)
+            == "failed"
+        )
+
+    def test_failed_wins_over_delivered(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        run_dir = self._run_dir(tmp_path, verified=True)
+        status_map = dict(self._delivered_map(), **{"review:0": "failed"})
+
+        assert classify_pinned_run(status_map, run_dir) == "failed"
+
+    def test_empty_map_is_in_progress(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        run_dir = self._run_dir(tmp_path, verified=True)
+
+        assert classify_pinned_run({}, run_dir) == "in_progress"
+
+    def test_absent_run_dir_is_in_progress(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+
+        assert classify_pinned_run(self._delivered_map(), tmp_path / "nope") == "in_progress"
+
+    def test_merged_human_gate_is_failed(self, tmp_path: Path):
+        """A ``done`` human gate means the PR was merged, which
+        ``verify_pull_request`` rejects as ``pr_merged``. Fail informatively
+        instead of ticking to the budget waiting for a ``blocked`` gate."""
+        from hermes_pipeline.harness import classify_pinned_run
+        from hermes_pipeline.todos_completion import HUMAN_GATE_KEY
+
+        run_dir = self._run_dir(tmp_path, verified=True)
+        status_map = dict(self._delivered_map(), **{HUMAN_GATE_KEY: "done"})
+
+        assert classify_pinned_run(status_map, run_dir) == "failed"
+
+    def test_merged_human_gate_is_failed_without_the_marker_too(self, tmp_path: Path):
+        from hermes_pipeline.harness import classify_pinned_run
+        from hermes_pipeline.todos_completion import HUMAN_GATE_KEY
+
+        run_dir = self._run_dir(tmp_path, verified=False)
+        status_map = dict(self._delivered_map(), **{HUMAN_GATE_KEY: "done"})
+
+        assert classify_pinned_run(status_map, run_dir) == "failed"
+
+    def test_done_human_gate_without_finish_is_still_in_progress(self, tmp_path: Path):
+        """Only a *delivered* finish plus a merged gate is the pr_merged shape."""
+        from hermes_pipeline.harness import classify_pinned_run
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        run_dir = self._run_dir(tmp_path, verified=False)
+
+        assert (
+            classify_pinned_run(
+                {"plan:task-1": "done", FINISH_KEY: "running", HUMAN_GATE_KEY: "done"},
+                run_dir,
+            )
+            == "in_progress"
+        )
+
+    def test_marker_path_matches_the_reconciler(self, tmp_path: Path):
+        """The marker the driver looks for is the one ``todos_completion`` writes."""
+        from hermes_pipeline.harness import classify_pinned_run
+        from hermes_pipeline.todos_completion import _run_marker
+
+        state_dir = tmp_path / ".hermes"
+        marker = _run_marker(state_dir, "01PINNED", "finish-verified")
+        marker.parent.mkdir(parents=True)
+        marker.write_text("a" * 40 + "\n")
+
+        assert classify_pinned_run(self._delivered_map(), marker.parent) == "delivered"
+
+
+class TestPinnedTickBudget:
+    """pinned_tick_budget(): how many ticks a pinned run may consume."""
+
+    @staticmethod
+    def _rounds():
+        from hermes_pipeline.review_reconciliation import MAX_REVIEW_ROUNDS
+
+        return MAX_REVIEW_ROUNDS
+
+    @pytest.mark.parametrize("count", [1, 2, 3, 4, 9, 20])
+    def test_formula(self, count):
+        from hermes_pipeline.harness import pinned_tick_budget
+
+        step_keys = tuple(f"plan:task-{i}" for i in range(count))
+
+        assert pinned_tick_budget(step_keys) == count // 2 + 5 + 2 * self._rounds()
+
+    def test_tracks_max_review_rounds_rather_than_a_literal(self):
+        from hermes_pipeline import harness as mod
+        from hermes_pipeline.harness import pinned_tick_budget
+
+        base = pinned_tick_budget(("a", "b"))
+
+        with patch("hermes_pipeline.review_reconciliation.MAX_REVIEW_ROUNDS", self._rounds() + 1):
+            assert mod.pinned_tick_budget(("a", "b")) == base + 2
+
+    def test_accepts_any_iterable(self):
+        from hermes_pipeline.harness import pinned_tick_budget
+
+        assert pinned_tick_budget(iter(["a", "b", "c"])) == 3 // 2 + 5 + 2 * self._rounds()
+
+
+class TestDriveTicks:
+    """drive_ticks(): one call per harness run, driving one tick (gstack) or
+    the whole pinned tick loop (native-sdd)."""
+
+    # One self-bounding script signal for the whole file. Not an ``Exception``:
+    # a driver that keeps ticking past the script must fail loudly instead of
+    # hanging, and no ``except Exception`` can swallow it. ``_run_with_timeout``
+    # re-wraps a non-``KeyboardInterrupt`` ``BaseException`` raised on its worker
+    # thread as ``PollCancellationError`` with this as ``__cause__`` -- still loud.
+    _ScriptExhausted = TestPollPinnedRun._ScriptExhausted
+
+    @staticmethod
+    def _monitors(tmp_path: Path, threshold: int = 3):
+        base = HarnessMonitor(tmp_path / "events.jsonl")
+        detector = ConvergenceDetector(threshold=threshold)
+        return base, _ConvergenceMonitor(base, detector, {}), detector
+
+    @staticmethod
+    def _issue():
+        return HarnessIssue(
+            number=_PINNED_ISSUE,
+            todo_id=f"TODO-{_PINNED_ISSUE}",
+            branch=_PINNED_BRANCH,
+            plan_path=_PINNED_PLAN,
+            title="Pinned run",
+            run_token="tok00000",
+        )
+
+    def _kwargs(self, tmp_path: Path, **overrides):
+        project_dir = tmp_path / "clone"
+        state = project_dir / ".hermes"
+        state.mkdir(parents=True, exist_ok=True)
+        base, monitor, detector = self._monitors(tmp_path)
+        kwargs = dict(
+            project_dir=project_dir,
+            project_state=state,
+            slug="demo",
+            workspace_dir=tmp_path,
+            tick_log=tmp_path / "tick.log",
+            timeout=600,
+            all_phases=[Phase(phase_key=key, name=key) for key in _PINNED_STEPS],
+            issue=self._issue(),
+            monitor=monitor,
+            detector=detector,
+            base_monitor=base,
+        )
+        kwargs.update(overrides)
+        return kwargs
+
+    @staticmethod
+    def _clock(mocker, start: float = 1000.0) -> dict:
+        """A controllable ``time.monotonic`` for the drive's deadline arithmetic.
+
+        ``threading`` captured its own reference at import, so joins and waits
+        are unaffected; only the drive's own budget arithmetic moves.
+        """
+        now = {"t": start}
+        mocker.patch("hermes_pipeline.harness.time.monotonic", side_effect=lambda: now["t"])
+        return now
+
+    def _fake_run_tick(self, state: Path, tick_ids, recorder=None, clock=None, cost=0.0):
+        """A ``run_tick`` stand-in that persists the next scripted tick id."""
+        remaining = list(tick_ids)
+        calls: list[dict] = []
+
+        def _run(slug, *, cwd, log_path, timeout):
+            if recorder is not None:
+                recorder.append("run_tick")
+            if not remaining:
+                raise self._ScriptExhausted(
+                    "drive_ticks ran more ticks than the script provides"
+                )
+            calls.append({"slug": slug, "cwd": cwd, "log_path": log_path, "timeout": timeout})
+            state.mkdir(parents=True, exist_ok=True)
+            (state / "current_tick_id.txt").write_text(remaining.pop(0) + "\n")
+            if clock is not None:
+                clock["t"] += cost
+            return 0
+
+        _run.calls = calls
+        return _run
+
+    def _fake_poll_pinned(self, maps, recorder=None, clock=None, cost=0.0, on_call=None):
+        remaining = list(maps)
+        calls: list[dict] = []
+
+        def _poll(**kwargs):
+            if recorder is not None:
+                recorder.append("poll_pinned_run")
+            if not remaining:
+                raise self._ScriptExhausted(
+                    "drive_ticks polled more times than the script provides"
+                )
+            calls.append(kwargs)
+            settled = remaining.pop(0)
+            if on_call is not None:
+                on_call(len(calls), kwargs)
+            if clock is not None:
+                clock["t"] += cost
+            return settled
+
+        _poll.calls = calls
+        return _poll
+
+    @staticmethod
+    def _registration(state: Path, tick_id: str = _PINNED_TICK) -> TickRegistration:
+        return TickRegistration(
+            tick_id=tick_id,
+            todo_id=f"TODO-{_PINNED_ISSUE}",
+            phase_keys=_PINNED_STEPS,
+            worktree=state.parent / ".worktrees" / "pinned",
+            branch=_PINNED_BRANCH,
+            base_sha="a" * 40,
+            run_dir=state / "runs" / tick_id,
+            pinned=True,
+        )
+
+    def _pinned_patches(
+        self,
+        mocker,
+        state: Path,
+        *,
+        tick_ids,
+        maps,
+        recorder=None,
+        clock=None,
+        tick_cost=0.0,
+        poll_cost=0.0,
+        on_poll=None,
+    ):
+        run_tick = self._fake_run_tick(
+            state, tick_ids, recorder=recorder, clock=clock, cost=tick_cost
+        )
+        poll = self._fake_poll_pinned(
+            maps, recorder=recorder, clock=clock, cost=poll_cost, on_call=on_poll
+        )
+        registration = self._registration(state)
+        registration.run_dir.mkdir(parents=True, exist_ok=True)
+
+        def _recover(*_args, **_kwargs):
+            if recorder is not None:
+                recorder.append("recover_pinned_registration")
+            return registration
+
+        mocker.patch("hermes_pipeline.harness.run_tick", side_effect=run_tick)
+        mocker.patch("hermes_pipeline.harness.poll_pinned_run", side_effect=poll)
+        mocker.patch("hermes_pipeline.harness.recover_pinned_registration", side_effect=_recover)
+        return registration, run_tick, poll
+
+    # -- non-pinned (gstack / agent-skills): today's single tick ------------
+
+    def test_gstack_runs_exactly_one_tick_in_order(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        state = kwargs["project_state"]
+        (state / "current_tick_id.txt").write_text("00OLD\n")
+        order: list[str] = []
+        registration = self._registration(state)
+
+        def _run(slug, *, cwd, log_path, timeout):
+            order.append("run_tick")
+            (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+            return 0
+
+        def _recover(*_args, **kw):
+            order.append("recover_tick_registration")
+            assert kw["previous_tick_id"] == "00OLD"
+            return registration
+
+        def _poll(**_kw):
+            order.append("poll_registered_phases")
+            return True
+
+        mocker.patch("hermes_pipeline.harness.run_tick", side_effect=_run)
+        mocker.patch("hermes_pipeline.harness.recover_tick_registration", side_effect=_recover)
+        mocker.patch("hermes_pipeline.harness.poll_registered_phases", side_effect=_poll)
+        mocker.patch(
+            "hermes_pipeline.harness.poll_pinned_run",
+            side_effect=AssertionError("non-pinned drive must not use the pinned poller"),
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert order == ["run_tick", "recover_tick_registration", "poll_registered_phases"]
+        assert drive.ticks_run == 1
+        assert drive.success is True
+        assert drive.timed_out is False
+        assert drive.registration is registration
+        assert drive.tick_error is None
+        assert drive.failure_code is None
+        assert drive.workers_unaccounted is False
+        assert drive.observed_keys == frozenset()
+        events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+        assert [e["event_type"] for e in events] == ["tick_registered"]
+
+    def test_gstack_tick_failure_without_new_id_leaves_workers_unaccounted(
+        self, tmp_path: Path, mocker
+    ):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        mocker.patch(
+            "hermes_pipeline.harness.run_tick",
+            side_effect=HarnessTickError("tick_timeout", "600s"),
+        )
+        recover = mocker.patch("hermes_pipeline.harness.recover_tick_registration")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.workers_unaccounted is True
+        assert drive.failure_code == "tick_timeout"
+        assert drive.tick_error is not None and drive.tick_error.tick_id is None
+        assert drive.registration is None
+        assert drive.success is False
+        assert drive.ticks_run == 1
+        recover.assert_not_called()
+
+    def test_gstack_tick_failure_with_new_id_records_it(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        state = kwargs["project_state"]
+
+        def _run(slug, *, cwd, log_path, timeout):
+            (state / "current_tick_id.txt").write_text("01NEW\n")
+            raise RuntimeError("boom")
+
+        mocker.patch("hermes_pipeline.harness.run_tick", side_effect=_run)
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.workers_unaccounted is False
+        assert drive.failure_code == "tick_failed"
+        assert drive.tick_error is not None and drive.tick_error.tick_id == "01NEW"
+
+    def test_gstack_timeout_emits_phase_timed_out(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration = self._registration(state)
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+        mocker.patch(
+            "hermes_pipeline.harness.recover_tick_registration", return_value=registration
+        )
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout", return_value=(False, True, {})
+        )
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            return_value={"plan:task-1": "done", "validate:task-1": "running"},
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.timed_out is True
+        assert drive.success is False
+        assert drive.ticks_run == 1
+        events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
+        assert ("phase_timed_out", "validate:task-1") in [
+            (e["event_type"], e.get("phase_key")) for e in events
+        ]
+
+    def test_gstack_convergence_halt_sets_failure_code(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        state = kwargs["project_state"]
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+        mocker.patch(
+            "hermes_pipeline.harness.recover_tick_registration",
+            return_value=self._registration(state),
+        )
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout",
+            return_value=(False, False, {"convergence_error": ConvergenceHaltError("halt")}),
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "convergence_halt"
+        assert drive.success is False
+        assert drive.timed_out is False
+        assert "convergence_error" in drive.result_box
+
+    def test_gstack_unknown_registered_key_is_a_tick_error(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path, all_phases=[])
+        state = kwargs["project_state"]
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+        mocker.patch(
+            "hermes_pipeline.harness.recover_tick_registration",
+            return_value=self._registration(state),
+        )
+        poll = mocker.patch("hermes_pipeline.harness.poll_registered_phases")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "unexpected_registration"
+        assert drive.success is False
+        poll.assert_not_called()
+
+    # -- pinned (native-sdd): the multi-tick loop ---------------------------
+
+    def _pinned_kwargs(self, tmp_path: Path, **overrides):
+        return self._kwargs(
+            tmp_path,
+            pinned=True,
+            repo=_PINNED_REPO,
+            plan_sha="a" * 40,
+            plan_text="# Plan\n",
+            **overrides,
+        )
+
+    def test_native_sdd_reaches_delivered_after_four_ticks(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+        from hermes_pipeline.kanban_tasks import BLOCKED
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        maps = [
+            {"plan:task-1": "done", "validate:task-1": BLOCKED},
+            {"plan:task-1": "done", "validate:task-1": "done", "review:0": "done"},
+            {
+                "plan:task-1": "done",
+                "validate:task-1": "done",
+                "review:0": "done",
+                "review-acceptance": "done",
+            },
+            {
+                "plan:task-1": "done",
+                "validate:task-1": "done",
+                "review:0": "done",
+                "review-acceptance": "done",
+                FINISH_KEY: "done",
+                HUMAN_GATE_KEY: BLOCKED,
+            },
+        ]
+        order: list[str] = []
+        registration, run_tick, poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * 4, maps=maps, recorder=order
+        )
+        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is True
+        assert drive.timed_out is False
+        assert drive.ticks_run == 4
+        assert drive.tick_error is None
+        assert drive.failure_code is None
+        assert drive.registration is registration
+        assert drive.observed_keys == frozenset(
+            {
+                "plan:task-1",
+                "validate:task-1",
+                "review:0",
+                "review-acceptance",
+                FINISH_KEY,
+                HUMAN_GATE_KEY,
+            }
+        )
+        # Registration is recovered on tick 1 only; later ticks re-assert the id.
+        assert order.count("recover_pinned_registration") == 1
+        assert order[:3] == ["run_tick", "recover_pinned_registration", "poll_pinned_run"]
+        assert order.count("run_tick") == 4
+        assert order.count("poll_pinned_run") == 4
+        assert [c["step_keys"] for c in poll.calls] == [_PINNED_STEPS] * 4
+        assert {c["tick_id"] for c in poll.calls} == {_PINNED_TICK}
+
+    def test_native_sdd_failed_card_stops_the_loop(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        maps = [
+            {"plan:task-1": "done", "validate:task-1": "blocked"},
+            {"plan:task-1": "done", "validate:task-1": "failed"},
+        ]
+        registration, _run, _poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=maps
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is False
+        assert drive.timed_out is False
+        assert drive.ticks_run == 2
+        assert drive.registration is registration
+        assert drive.tick_error is None
+        # A plain card failure is not a tick error: success already reports it.
+        assert drive.failure_code is None
+
+    def test_native_sdd_identical_settled_maps_stall(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        stuck = {"plan:task-1": "done", "validate:task-1": "blocked"}
+        registration, _run, _poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is False
+        assert drive.ticks_run == 2
+        assert drive.failure_code == "tick_stalled"
+        assert drive.tick_error is not None
+        assert drive.tick_error.code == "tick_stalled"
+        assert drive.tick_error.tick_id == _PINNED_TICK
+        assert drive.registration is registration
+
+    def test_native_sdd_delivered_beats_stall_detection(self, tmp_path: Path, mocker):
+        """The real race: the board is already final on tick 1 and the marker
+        only lands during tick 2, so both settled maps are identical and the
+        classify-before-stall ordering is the only thing that decides. Testing
+        it with a *changing* map would let a stall-first driver pass.
+        """
+        from hermes_pipeline.harness import drive_ticks
+        from hermes_pipeline.kanban_tasks import BLOCKED
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        done = {
+            "plan:task-1": "done",
+            "validate:task-1": "done",
+            FINISH_KEY: "done",
+            HUMAN_GATE_KEY: BLOCKED,
+        }
+        marker = self._registration(state).run_dir / "finish-verified"
+
+        def _marker_lands_during_tick_two(call_number, _kwargs):
+            # ``todos_completion`` verifies the delivery and writes the marker on
+            # the tick *after* the finish card closed: the board does not move,
+            # so tick 1 and tick 2 settle on byte-identical maps.
+            if call_number == 2:
+                marker.parent.mkdir(parents=True, exist_ok=True)
+                marker.write_text("a" * 40 + "\n")
+
+        registration, _run, poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK] * 2,
+            maps=[dict(done), dict(done)],
+            on_poll=_marker_lands_during_tick_two,
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert poll.calls and len(poll.calls) == 2
+        assert drive.success is True
+        assert drive.failure_code is None
+        assert drive.tick_error is None
+        assert drive.ticks_run == 2
+
+    def test_native_sdd_stall_compares_the_immediately_previous_tick(
+        self, tmp_path: Path, mocker
+    ):
+        """S2: the stall test is against the *previous* tick, not the first one.
+
+        ``A, B, C, C`` stalls on tick 4; a driver comparing every map to tick 1's
+        would never see a repeat.
+        """
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        maps = [
+            {"plan:task-1": "done", "validate:task-1": "todo"},
+            {"plan:task-1": "done", "validate:task-1": "ready"},
+            {"plan:task-1": "done", "validate:task-1": "blocked"},
+            {"plan:task-1": "done", "validate:task-1": "blocked"},
+        ]
+        registration, _run, poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * 4, maps=maps
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "tick_stalled"
+        assert drive.ticks_run == 4
+        assert len(poll.calls) == 4
+        assert drive.tick_error is not None
+        assert drive.tick_error.code == "tick_stalled"
+
+    def test_native_sdd_observed_keys_keep_a_card_that_disappears(
+        self, tmp_path: Path, mocker
+    ):
+        """S3: accumulation, not last-map capture.
+
+        ``review:0`` shows up mid-run and is gone from the final board, so a
+        driver that resets its key set each tick loses it -- and shutdown would
+        then skip the card it must quiesce.
+        """
+        from hermes_pipeline.harness import drive_ticks
+        from hermes_pipeline.kanban_tasks import BLOCKED
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        maps = [
+            {"plan:task-1": "done", "validate:task-1": "done", "review:0": "done"},
+            {
+                "plan:task-1": "done",
+                "validate:task-1": "done",
+                FINISH_KEY: "done",
+                HUMAN_GATE_KEY: BLOCKED,
+            },
+        ]
+        registration, _run, _poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=maps
+        )
+        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is True
+        assert "review:0" in drive.observed_keys
+        assert drive.observed_keys == frozenset(
+            {"plan:task-1", "validate:task-1", "review:0", FINISH_KEY, HUMAN_GATE_KEY}
+        )
+
+    # -- S4: the whole-run deadline is shared by every tick and poll ---------
+
+    def test_native_sdd_ticks_share_one_shrinking_deadline(self, tmp_path: Path, mocker):
+        from hermes_pipeline import harness as mod
+        from hermes_pipeline.harness import drive_ticks
+        from hermes_pipeline.kanban_tasks import BLOCKED
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        kwargs = self._pinned_kwargs(tmp_path, timeout=100)
+        state = kwargs["project_state"]
+        clock = self._clock(mocker)
+        maps = [
+            {"plan:task-1": "done", "validate:task-1": "blocked"},
+            {
+                "plan:task-1": "done",
+                "validate:task-1": "done",
+                FINISH_KEY: "done",
+                HUMAN_GATE_KEY: BLOCKED,
+            },
+        ]
+        registration, run_tick, _poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK] * 2,
+            maps=maps,
+            clock=clock,
+            tick_cost=4.0,
+            poll_cost=6.0,
+        )
+        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
+        real = mod._run_with_timeout
+        poll_timeouts: list[int] = []
+
+        def _record(fn, *, timeout, cancel_event=None):
+            poll_timeouts.append(timeout)
+            return real(fn, timeout=timeout, cancel_event=cancel_event)
+
+        mocker.patch("hermes_pipeline.harness._run_with_timeout", side_effect=_record)
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is True
+        # Tick 1 gets the whole budget; tick 2 only what tick 1 and its poll left.
+        assert [c["timeout"] for c in run_tick.calls] == [100.0, 90.0]
+        assert run_tick.calls[1]["timeout"] < run_tick.calls[0]["timeout"]
+        # Each poll is bounded by the budget remaining after its own tick ran.
+        assert poll_timeouts == [96, 86]
+
+    def test_native_sdd_expired_deadline_runs_no_further_tick(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path, timeout=100)
+        state = kwargs["project_state"]
+        clock = self._clock(mocker)
+        registration, run_tick, poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK],
+            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+            clock=clock,
+            poll_cost=200.0,
+        )
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={})
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.timed_out is True
+        assert drive.success is False
+        assert drive.ticks_run == 1
+        assert len(run_tick.calls) == 1
+        assert len(poll.calls) == 1
+        assert drive.registration is registration
+
+    def test_native_sdd_deadline_spent_by_the_tick_skips_the_poll(
+        self, tmp_path: Path, mocker
+    ):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path, timeout=100)
+        state = kwargs["project_state"]
+        clock = self._clock(mocker)
+        registration, run_tick, poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK],
+            maps=[],
+            clock=clock,
+            tick_cost=200.0,
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.timed_out is True
+        assert drive.ticks_run == 1
+        assert len(run_tick.calls) == 1
+        assert poll.calls == []
+        assert drive.registration is registration
+
+    def test_native_sdd_new_tick_id_is_unexpected_selection(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration, _run, poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK, "02OTHER"],
+            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is False
+        assert drive.failure_code == "unexpected_selection"
+        assert drive.tick_error is not None
+        assert drive.tick_error.code == "unexpected_selection"
+        assert drive.tick_error.tick_id == _PINNED_TICK
+        assert drive.registration is registration
+        assert len(poll.calls) == 1
+        assert drive.ticks_run == 2
+
+    def test_native_sdd_budget_exhaustion(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks, pinned_tick_budget
+
+        budget = pinned_tick_budget(_PINNED_STEPS)
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        # Every map differs so the stall check never fires before the budget does.
+        maps = [
+            {"plan:task-1": "done", "validate:task-1": "done", f"review:{i}": "done"}
+            for i in range(budget)
+        ]
+        registration, _run, poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK] * budget, maps=maps
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is False
+        assert drive.ticks_run == budget
+        assert len(poll.calls) == budget
+        assert drive.failure_code == "tick_budget_exhausted"
+        assert drive.tick_error is not None
+        assert drive.tick_error.code == "tick_budget_exhausted"
+        assert drive.tick_error.tick_id == _PINNED_TICK
+        assert drive.registration is registration
+
+    def test_native_sdd_mid_loop_timeout_keeps_registration(self, tmp_path: Path, mocker):
+        from hermes_pipeline import harness as mod
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration, _run, _poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK] * 2,
+            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+        )
+        real = mod._run_with_timeout
+        calls = {"n": 0}
+
+        def _timeout_on_second(fn, *, timeout, cancel_event=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real(fn, timeout=timeout, cancel_event=cancel_event)
+            return False, True, {}
+
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout", side_effect=_timeout_on_second
+        )
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={})
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.timed_out is True
+        assert drive.success is False
+        assert drive.registration is registration
+        assert drive.ticks_run == 2
+        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+
+    def test_native_sdd_tick_error_on_first_tick_has_no_registration(
+        self, tmp_path: Path, mocker
+    ):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+        mocker.patch(
+            "hermes_pipeline.harness.recover_pinned_registration",
+            side_effect=HarnessTickError("registration_invalid", "bad", tick_id=_PINNED_TICK),
+        )
+        poll = mocker.patch("hermes_pipeline.harness.poll_pinned_run")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.registration is None
+        assert drive.failure_code == "registration_invalid"
+        assert drive.tick_error is not None and drive.tick_error.tick_id == _PINNED_TICK
+        assert drive.ticks_run == 1
+        poll.assert_not_called()
+
+    def test_native_sdd_run_tick_timeout_is_reported(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration = self._registration(state)
+        registration.run_dir.mkdir(parents=True, exist_ok=True)
+        ticks = {"n": 0}
+
+        def _run(slug, *, cwd, log_path, timeout):
+            ticks["n"] += 1
+            if ticks["n"] == 1:
+                (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+                return 0
+            raise HarnessTickError("tick_timeout", "600s")
+
+        mocker.patch("hermes_pipeline.harness.run_tick", side_effect=_run)
+        mocker.patch(
+            "hermes_pipeline.harness.recover_pinned_registration", return_value=registration
+        )
+        mocker.patch(
+            "hermes_pipeline.harness.poll_pinned_run",
+            return_value={"plan:task-1": "done", "validate:task-1": "blocked"},
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "tick_timeout"
+        assert drive.registration is registration
+        assert drive.ticks_run == 2
+        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+        # The tick id is pinned and already recovered, so shutdown can quiesce it.
+        assert drive.workers_unaccounted is False
+        assert drive.tick_error is not None and drive.tick_error.tick_id == _PINNED_TICK
+
+    def test_native_sdd_run_tick_timeout_uses_remaining_budget(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+        from hermes_pipeline.kanban_tasks import BLOCKED
+        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+
+        kwargs = self._pinned_kwargs(tmp_path, timeout=120)
+        state = kwargs["project_state"]
+        registration, run_tick, _poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK],
+            maps=[
+                {
+                    "plan:task-1": "done",
+                    "validate:task-1": "done",
+                    FINISH_KEY: "done",
+                    HUMAN_GATE_KEY: BLOCKED,
+                }
+            ],
+        )
+        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is True
+        assert run_tick.calls[0]["timeout"] <= 120
+        assert run_tick.calls[0]["timeout"] > 0
+
+    def test_native_sdd_requires_pinning_inputs(self, tmp_path: Path):
+        from hermes_pipeline.harness import drive_ticks
+
+        with pytest.raises(ValueError):
+            drive_ticks(**self._kwargs(tmp_path, pinned=True))
+
+    # -- exceptions become partial results, never a lost registration ------
+
+    def test_gstack_poll_exception_becomes_a_partial_drive(self, tmp_path: Path, mocker):
+        """R-H3.1: shutdown needs the tick id, and ``_prune_retained_state``
+        cannot re-derive one from disk, so an escaping exception must come back
+        inside the ``TickDrive`` rather than unwind past the registration."""
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration = self._registration(state)
+        boom = RuntimeError("kanban unreachable")
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+        mocker.patch(
+            "hermes_pipeline.harness.recover_tick_registration", return_value=registration
+        )
+        mocker.patch("hermes_pipeline.harness.poll_registered_phases", side_effect=boom)
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.pending_error is boom
+        assert drive.poll_cancelled is False
+        assert drive.registration is registration
+        assert drive.success is False
+        assert drive.timed_out is False
+        assert drive.ticks_run == 1
+
+    def test_gstack_poll_cancellation_is_reported_not_raised(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import PollCancellationError, drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration = self._registration(state)
+        cancelled = PollCancellationError("poll worker did not stop")
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+        mocker.patch(
+            "hermes_pipeline.harness.recover_tick_registration", return_value=registration
+        )
+        mocker.patch("hermes_pipeline.harness._run_with_timeout", side_effect=cancelled)
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.poll_cancelled is True
+        assert drive.pending_error is cancelled
+        assert drive.registration is registration
+
+    @pytest.mark.parametrize("interrupt", [KeyboardInterrupt, SystemExit])
+    def test_gstack_base_exception_propagates(self, tmp_path: Path, mocker, interrupt):
+        """An interrupt is not converted: the caller retains the workspace."""
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._kwargs(tmp_path)
+        state = kwargs["project_state"]
+        mocker.patch("hermes_pipeline.harness.run_tick", return_value=0)
+        (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+        mocker.patch(
+            "hermes_pipeline.harness.recover_tick_registration",
+            return_value=self._registration(state),
+        )
+        mocker.patch("hermes_pipeline.harness._run_with_timeout", side_effect=interrupt)
+
+        with pytest.raises(interrupt):
+            drive_ticks(**kwargs)
+
+    def test_native_sdd_poll_exception_keeps_registration_and_keys(
+        self, tmp_path: Path, mocker
+    ):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        boom = RuntimeError("kanban unreachable")
+        registration = self._registration(state)
+        registration.run_dir.mkdir(parents=True, exist_ok=True)
+        polls = {"n": 0}
+
+        def _poll(**_kwargs):
+            polls["n"] += 1
+            if polls["n"] == 1:
+                return {"plan:task-1": "done", "review:0": "running"}
+            raise boom
+
+        mocker.patch(
+            "hermes_pipeline.harness.run_tick",
+            side_effect=self._fake_run_tick(state, [_PINNED_TICK] * 2),
+        )
+        mocker.patch(
+            "hermes_pipeline.harness.recover_pinned_registration", return_value=registration
+        )
+        mocker.patch("hermes_pipeline.harness.poll_pinned_run", side_effect=_poll)
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.pending_error is boom
+        assert drive.poll_cancelled is False
+        assert drive.registration is registration
+        assert drive.ticks_run == 2
+        assert drive.observed_keys == frozenset({"plan:task-1", "review:0"})
+
+    def test_native_sdd_poll_cancellation_is_reported_not_raised(
+        self, tmp_path: Path, mocker
+    ):
+        from hermes_pipeline import harness as mod
+        from hermes_pipeline.harness import PollCancellationError, drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration, _run, _poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK] * 2,
+            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+        )
+        cancelled = PollCancellationError("poll worker did not stop")
+        real = mod._run_with_timeout
+        calls = {"n": 0}
+
+        def _cancel_on_second(fn, *, timeout, cancel_event=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real(fn, timeout=timeout, cancel_event=cancel_event)
+            raise cancelled
+
+        mocker.patch("hermes_pipeline.harness._run_with_timeout", side_effect=_cancel_on_second)
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.poll_cancelled is True
+        assert drive.pending_error is cancelled
+        assert drive.registration is registration
+        assert drive.ticks_run == 2
+        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+
+    def test_native_sdd_base_exception_propagates(self, tmp_path: Path, mocker):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK], maps=[{"plan:task-1": "done"}]
+        )
+        mocker.patch(
+            "hermes_pipeline.harness._run_with_timeout", side_effect=KeyboardInterrupt
+        )
+
+        with pytest.raises(KeyboardInterrupt):
+            drive_ticks(**kwargs)
+
+    # -- convergence halt on the pinned path -------------------------------
+
+    def test_native_sdd_convergence_halt_sets_failure_code(self, tmp_path: Path, mocker):
+        """``poll_pinned_run`` swallows its own halt and returns the last map, so
+        the driver reads the detector's latched state -- not a ``failed`` card,
+        which is a normal non-halting outcome."""
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        detector = kwargs["detector"]
+        failed = {"plan:task-1": "failed", "validate:task-1": "blocked"}
+
+        def _halt(_call_number, _kwargs):
+            # What poll_pinned_run's shared emitter does before it halts.
+            for key in ("p1", "p2", "p3"):
+                detector.record(key, "phase_failure")
+
+        registration, _run, _poll = self._pinned_patches(
+            mocker, state, tick_ids=[_PINNED_TICK], maps=[failed], on_poll=_halt
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert detector.should_halt() is True
+        assert drive.failure_code == "convergence_halt"
+        assert drive.success is False
+        assert drive.ticks_run == 1
+        assert drive.registration is registration
+
+    def test_native_sdd_plain_card_failure_is_not_a_convergence_halt(
+        self, tmp_path: Path, mocker
+    ):
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK],
+            maps=[{"plan:task-1": "failed", "validate:task-1": "blocked"}],
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert kwargs["detector"].should_halt() is False
+        assert drive.failure_code is None
+        assert drive.success is False
+
+    def test_tick_drive_is_frozen_and_ignores_result_box_identity(
+        self, tmp_path: Path, mocker
+    ):
+        from hermes_pipeline.harness import TickDrive
+
+        assert dataclasses.fields(TickDrive)
+
+        def _make(**overrides):
+            fields = dict(
+                registration=None,
+                success=False,
+                timed_out=False,
+                result_box={},
+                observed_keys=frozenset(),
+                failure_code=None,
+                tick_error=None,
+                workers_unaccounted=False,
+                ticks_run=0,
+                poll_cancelled=False,
+                pending_error=None,
+            )
+            fields.update(overrides)
+            return TickDrive(**fields)
+
+        drive = _make()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            drive.success = True
+        # result_box is a mutable dict that can carry live exceptions: excluding
+        # it from compare keeps __eq__ meaningful and __hash__ usable.
+        assert _make(result_box={"exception": RuntimeError("x")}) == drive
+        assert hash(_make(result_box={"exception": RuntimeError("x")})) == hash(drive)
+        assert _make(ticks_run=1) != drive
