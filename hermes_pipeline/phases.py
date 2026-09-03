@@ -105,6 +105,7 @@ class Phase:
 class PhaseProfile:
     phases: tuple[Phase, ...]
     requires_plan: bool = False
+    deprecated: bool = False
 
 
 @dataclass(frozen=True)
@@ -255,14 +256,26 @@ def load_profile_prerequisites(profile: str) -> ProfilePrerequisites:
 
 
 def load_phase_profile(config_path: Path | str | None = None) -> PhaseProfile:
+    """Load a phase profile from ``config_path``.
+
+    With no argument, falls back to the bundled legacy implicit profile
+    (``contract.LEGACY_IMPLICIT_PROFILE``) — the one a contract without a
+    ``profile`` key resolves to.
+    """
     if config_path is None:
-        config_path = resolve_profile_phases_path("gstack")
+        # Lazy import: contract.py imports this module at top level.
+        from .contract import LEGACY_IMPLICIT_PROFILE
+
+        config_path = resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE)
     config_path = Path(config_path)
     with open(config_path) as f:
         data = yaml.safe_load(f)
     requires_plan = data.get("requires_plan", False) if isinstance(data, dict) else False
     if type(requires_plan) is not bool:
         raise ValueError(f"{config_path}: requires_plan must be a boolean")
+    deprecated = data.get("deprecated", False) if isinstance(data, dict) else False
+    if type(deprecated) is not bool:
+        raise ValueError(f"{config_path}: deprecated must be a boolean")
     raw_phases = data.get("phases") if isinstance(data, dict) else None
     if not isinstance(raw_phases, list) or not raw_phases:
         raise ValueError(f"{config_path}: phases must contain at least one phase")
@@ -275,7 +288,9 @@ def load_phase_profile(config_path: Path | str | None = None) -> PhaseProfile:
                 f"{config_path}:{source}: timeout must be a positive integer"
             )
         phases.append(phase)
-    return PhaseProfile(phases=tuple(phases), requires_plan=requires_plan)
+    return PhaseProfile(
+        phases=tuple(phases), requires_plan=requires_plan, deprecated=deprecated
+    )
 
 
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:

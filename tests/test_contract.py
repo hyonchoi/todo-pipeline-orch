@@ -5,6 +5,8 @@ import pytest
 
 from hermes_pipeline.contract import (
     CONTRACT_SCHEMA_VERSION,
+    DEFAULT_PROFILE,
+    LEGACY_IMPLICIT_PROFILE,
     ContractMissingError,
     ContractSchemaError,
     ContractVersionMismatchError,
@@ -85,7 +87,12 @@ def test_load_contract_current_schema_requires_and_loads_review_assignee(tmp_pat
     assert contract.review_assignee == "reviewer"
 
 
-def test_load_contract_profile_defaults_to_gstack_when_missing(tmp_path):
+def test_profile_constants():
+    assert DEFAULT_PROFILE == "native-sdd"
+    assert LEGACY_IMPLICIT_PROFILE == "gstack"
+
+
+def test_load_contract_profile_defaults_to_legacy_implicit_gstack_when_missing(tmp_path):
     project_state = tmp_path / ".hermes"
     project_state.mkdir(parents=True)
     (project_state / "pipeline.toml").write_text(
@@ -95,6 +102,34 @@ def test_load_contract_profile_defaults_to_gstack_when_missing(tmp_path):
     contract = load_contract(project_state)
 
     assert contract.profile == "gstack"
+    assert contract.profile == LEGACY_IMPLICIT_PROFILE
+
+
+def test_load_contract_marks_missing_profile_as_undeclared(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+    )
+
+    contract = load_contract(project_state)
+
+    assert contract.profile == "gstack"
+    assert contract.profile_declared is False
+
+
+def test_load_contract_marks_explicit_profile_declared(tmp_path):
+    project_state = tmp_path / ".hermes"
+    project_state.mkdir(parents=True)
+    (project_state / "pipeline.toml").write_text(
+        'schema_version = 2\nassignee = "default"\ncapabilities = ["Read"]\n'
+        'profile = "gstack"\n'
+    )
+
+    contract = load_contract(project_state)
+
+    assert contract.profile == "gstack"
+    assert contract.profile_declared is True
 
 
 def test_load_contract_malformed_toml_raises_schema_error(tmp_path):
