@@ -311,6 +311,23 @@ def test_partial_label_states_converge_and_complete_retry_is_idempotent(tmp_path
         assert not add_mock.called and not remove_mock.called
 
 
+def test_final_refetch_with_ready_and_pending_triage_remains_recoverable(tmp_path, mocker):
+    from hermes_pipeline import github_issues
+
+    req = load_create_request(_write(tmp_path / "request.json", request()))
+    body = render_create_body(req, issue_number=42)
+    issues = [_issue(req, body, ("tpo:todo", "priority:P1", "ready-for-agent", "needs-triage"))]
+    _patch_machine(mocker, req, issues)
+    mocker.patch.object(github_issues, "remove_label")
+
+    state_dir = tmp_path / "state"
+    with pytest.raises(TodoCreateError, match="create_pending"):
+        execute_create(tmp_path, state_dir, req, approved_repo="acme/repo")
+
+    persisted = state_dir / "todo-create" / f"{req.transaction_id}.json"
+    assert persisted.exists()
+
+
 def test_lock_contention_fails_without_persisting_request(tmp_path, mocker):
     from hermes_pipeline import github_issues
 
