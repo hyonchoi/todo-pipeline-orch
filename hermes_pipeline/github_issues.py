@@ -827,6 +827,12 @@ def list_todo_issues(project_dir: Path, *, repo: str | None = None) -> tuple[Iss
     return find_issues_by_label(project_dir, TODO_LABEL, state="open", repo=repo)
 
 
+def list_all_issues(project_dir: Path, *, repo: str | None = None) -> tuple[IssueTodo, ...]:
+    """All issues, regardless of labels/state, using the paginated REST boundary."""
+    repo = _repo(project_dir, repo)
+    return _list_issues(project_dir, repo, "state=all&per_page=100")
+
+
 def fetch_issue(project_dir: Path, number: int, *, repo: str | None = None) -> IssueTodo:
     number = _issue_number(number)
     repo = _repo(project_dir, repo)
@@ -971,6 +977,19 @@ def remove_label(project_dir: Path, number: int, label: str, *, repo: str | None
     number = _issue_number(number)
     repo = _repo(project_dir, repo)
     _gh(project_dir, ["issue", "edit", str(number), "--repo", repo, "--remove-label", label])
+
+
+def update_issue_body(
+    project_dir: Path, number: int, body: str, *, repo: str | None = None
+) -> None:
+    """Replace an issue body using a temporary file (GitHub has no conditional update)."""
+    number = _issue_number(number)
+    body = _check_body(body)
+    repo = _repo(project_dir, repo)
+    _run_with_body_file(
+        project_dir, body,
+        lambda path: ["issue", "edit", str(number), "--repo", repo, "--body-file", path],
+    )
 
 
 def _check_body(body: str) -> str:

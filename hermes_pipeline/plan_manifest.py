@@ -137,10 +137,14 @@ def render_embedded_plan(document: str, *, expected_todo_id: str) -> str:
     normalized = _normalized_document(document)
     if not normalized.strip():
         raise TodoPlanValidationError("empty_embedded_plan")
-    if any(
-        token in normalized
-        for token in ("<details>", "</details>", _EMBEDDED_SUMMARY)
-    ) or re.search(r"(?i)</?proposed_plan(?:\s|>)", normalized):
+    if (
+        re.search(r"(?i)</?details(?:\s|>)", normalized)
+        or re.search(
+            r"(?i)<summary\s*>\s*Implementation Plan\s*</summary\s*>", normalized
+        )
+        or re.search(r"(?i)<!--\s*tpo-create:", normalized)
+        or re.search(r"(?i)</?proposed_plan(?:\s|>)", normalized)
+    ):
         raise TodoPlanValidationError("forbidden_plan_structure")
     try:
         manifest = parse_plan_manifest(normalized, expected_todo_id=expected_todo_id)

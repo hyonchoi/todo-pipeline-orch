@@ -640,6 +640,16 @@ def build_parser() -> argparse.ArgumentParser:
 
     todos_parser = subparsers.add_parser("todos", help="GitHub issue completion")
     todos_subparsers = todos_parser.add_subparsers(dest="todos_command", required=True)
+    create_parser = todos_subparsers.add_parser(
+        "create", help="Create or resume a validated TODO with an embedded Plan"
+    )
+    create_parser.add_argument("project", help="Project name")
+    create_parser.add_argument("--request-file", required=True, type=Path)
+    create_parser.add_argument("--issue", type=int, default=None, help="Resume this partial issue")
+    create_parser.add_argument(
+        "--yes", action="store_true", help="Use only after the displayed request was approved"
+    )
+    create_parser.set_defaults(func=_cmd_todos_create)
     complete_parser = todos_subparsers.add_parser(
         "complete", help="Close one delivered TODO issue after its pull request merged"
     )
@@ -2195,6 +2205,56 @@ def _tick_project(
 
     # Observe circuit breaker
     cb.observe(picked=picked, counts_as_no_progress=False)
+
+
+def _cmd_todos_create(args, config: Config) -> int:
+    """Create or converge one transaction-marked embedded-Plan issue."""
+    from .project_config import _get_project_state_dir
+    from .todos_create import (
+        TodoCreateError,
+        execute_create,
+        load_create_request,
+        render_create_preview,
+    )
+
+    project_dir = _resolve_project_dir(config, args.project)
+    if project_dir is None or (args.issue is not None and args.issue <= 0):
+        print("Error: invalid project or issue", file=sys.stderr)
+        return 2
+    try:
+        request = load_create_request(args.request_file)
+    except TodoCreateError as exc:
+        print(f"Error: {exc.code}", file=sys.stderr)
+        return 2
+    try:
+        print(render_create_preview(request, issue_number=args.issue), end="")
+    except TodoCreateError as exc:
+        print(f"Error: {exc.code}", file=sys.stderr)
+        return 2
+    if not args.yes:
+        try:
+            confirmation = input("Type create to continue: ")
+        except EOFError:
+            confirmation = ""
+        if confirmation != "create":
+            print("Creation cancelled.")
+            return 1
+    try:
+        number = execute_create(
+            project_dir, _get_project_state_dir(project_dir), request, issue_number=args.issue
+        )
+    except (TodoCreateError, OSError) as exc:
+        code = exc.code if isinstance(exc, TodoCreateError) else "create_io_error"
+        print(f"Error: {code}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        from .github_issues import GitHubIssuesError
+        if not isinstance(exc, GitHubIssuesError):
+            raise
+        print(f"Error: {exc.code}", file=sys.stderr)
+        return 1
+    print(f"created: TODO-{number}")
+    return 0
 
 
 def _cmd_todos_complete(args, config: Config) -> int:
