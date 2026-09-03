@@ -497,6 +497,12 @@ class TestTodosAudit:
          "decision:Test Coverage:maybe"),
         (FULL_BODY + "\n### Plan\n\ndocs/nope.md\n", FULL_LABELS, "plan:invalid:missing_file"),
         (FULL_BODY + "\n### Plan\n\ndocs/a.md\n\n### Plan\n\ndocs/b.md\n", FULL_LABELS, "plan:duplicate"),
+        (
+            FULL_BODY
+            + "\n<details>\n<summary>Implementation Plan</summary>\nmalformed\n</details>\n",
+            FULL_LABELS,
+            "plan:invalid:malformed_embedded_plan",
+        ),
         (FULL_BODY, FULL_LABELS[:-1], "label:missing:ui-review:not-required"),
         (FULL_BODY, (*FULL_LABELS, "priority:P3"), "label:extra:priority:P3"),
     ])
@@ -573,7 +579,9 @@ class TestTodosAudit:
         docs.mkdir()
         (docs / "plan.md").write_text(document)
         assert self._run(config) == 0
-        assert capsys.readouterr().out.splitlines() == ["audit: issues=1 findings=0 fixable=0"]
+        assert capsys.readouterr().out.splitlines() == [
+            "TODO-7: plan:legacy_path", "audit: issues=1 findings=1 fixable=0"
+        ]
 
     def test_issues_are_grouped_in_number_order(self, tmp_path, fake_gh, capsys):
         from tests.gh_fakes import issue_payload
@@ -893,6 +901,11 @@ _LEGACY_PLAN = "# Plan\n\n1. Do the thing\n"
 
 
 def _seed_doctor_legacy_plans(tmp_path, fake_gh, count=2):
+    """Seed issues whose Plan is a manifest-free repository path.
+
+    A ``legacy_path`` Plan needs no manifest, so these stay selectable; they
+    exist to prove the migration hint does NOT fire for them.
+    """
     from tests.gh_fakes import issue_payload
 
     project = tmp_path / "demo"
@@ -907,8 +920,28 @@ def _seed_doctor_legacy_plans(tmp_path, fake_gh, count=2):
     ])
 
 
+def _seed_doctor_manifest_free_embedded_plans(fake_gh, count=2):
+    """Seed issues carrying an embedded Plan with no ``tpo-plan`` manifest.
+
+    Only the embedded authority requires a manifest, so this is the shape that
+    blocks with ``plan_invalid:manifest_required``.
+    """
+    from tests.gh_fakes import issue_payload
+
+    # The block must be the body's final element, so Branch comes first.
+    embedded = (
+        "<details>\n<summary>Implementation Plan</summary>\n---\n"
+        "# Plan\n\nDo the thing, with no manifest block.\n"
+        "---\n</details>\n"
+    )
+    _seed_doctor_github(fake_gh, [
+        issue_payload(n, body=f"### Branch\n\nfeat/{n}\n\n{embedded}")
+        for n in range(1, count + 1)
+    ])
+
+
 _MANIFEST_HINT = (
-    "Hint: native-sdd requires a Plan manifest (```json tpo-plan``` block); "
+    "Hint: an embedded Plan needs a manifest (```json tpo-plan``` block); "
     "see docs/templates/tpo-plan.md and the \"Migrating from gstack\" section of "
     "docs/howto-native-sdd-profile.md"
 )
@@ -918,7 +951,7 @@ def test_doctor_hints_manifest_migration_once_for_manifest_free_plans(
     tmp_path, mocker, capsys, fake_gh
 ):
     args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
-    _seed_doctor_legacy_plans(tmp_path, fake_gh, count=2)
+    _seed_doctor_manifest_free_embedded_plans(fake_gh, count=2)
     mocker.patch(
         "hermes_pipeline.cli._cli_sp.run",
         side_effect=_allow_hermes_registry_skill_check,
@@ -2679,11 +2712,11 @@ class TestPriorTickId:
         assert any(r.levelname == "ERROR" and "tick id" in r.getMessage() for r in caplog.records)
 
 
-class TestSkillsRemoved:
-    def test_skills_install_is_rejected(self):
+class TestSkillsCommands:
+    def test_skills_requires_an_operation(self):
         with pytest.raises(SystemExit) as excinfo:
-            build_parser().parse_args(["skills", "install"])
+            build_parser().parse_args(["skills"])
         assert excinfo.value.code == 2
 
-    def test_skills_absent_from_usage(self):
-        assert "skills" not in build_parser().format_usage()
+    def test_skills_present_in_usage(self):
+        assert "skills" in build_parser().format_usage()

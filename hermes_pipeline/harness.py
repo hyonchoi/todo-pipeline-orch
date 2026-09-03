@@ -2885,6 +2885,16 @@ def recover_pinned_registration(
         raise HarnessTickError(
             "unexpected_registration", f"issue {validated.issue_number}", tick_id=tick_id
         )
+    if validated.plan_source_kind != "legacy_path":
+        # The harness always authors a `Plan:` path and commits that file, so a
+        # run of its own can only be legacy_path. An embedded plan would carry
+        # plan_path=None and a plan_hash taken over the normalized issue body,
+        # so the checks below would be comparing the wrong things.
+        raise HarnessTickError(
+            "unexpected_registration",
+            f"plan_source_kind {validated.plan_source_kind}"[:_ERROR_MESSAGE_MAX],
+            tick_id=tick_id,
+        )
     for name, actual, wanted in (
         ("branch", validated.branch, issue.branch),
         ("plan_path", validated.plan_path, issue.plan_path),

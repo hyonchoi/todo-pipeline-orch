@@ -32,6 +32,55 @@ def _register_todo_phases(**kwargs):
         cancel_event=cancel_event,
     )
 
+def test_prepare_embedded_plan_requires_verified_digest_bound_reference(tmp_path):
+    import hashlib
+    import os
+
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.plan_manifest import (
+        PlanReference,
+        PlanSource,
+        TodoPlanValidationError,
+        parse_plan_manifest,
+    )
+
+    document = (
+        '# Plan\n\n```json tpo-plan\n'
+        '{"schema_version":1,"todo_id":"TODO-1","tasks":['
+        '{"id":"one","title":"One","instructions":"Do one",'
+        '"acceptance_criteria":["Works"],"verification":["pytest"],'
+        '"commit_message":"feat: one"}]}\n```\n'
+    )
+    digest = hashlib.sha256(document.encode()).hexdigest()
+    source = PlanSource(
+        "embedded", document, digest,
+        parse_plan_manifest(document, expected_todo_id="TODO-1"), None,
+    )
+    artifact = tmp_path / "plan.md"
+    artifact.write_text(document)
+    os.chmod(artifact, 0o600)
+    profile = tmp_path / "phases.yaml"
+    profile.write_text(
+        "requires_plan: true\nphases:\n"
+        "  - phase_key: build\n    name: Build\n    prompt: 'Read {plan_path}'\n"
+        "    tools: Read\n    turns: 1\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-1", tick_id="01T", board_slug="demo",
+        phases_path=profile, plan_source=source,
+        plan_reference=PlanReference(str(artifact.resolve()), source),
+    )
+    assert str(artifact.resolve()) in prepared[0].body
+    assert digest in prepared[0].body
+
+    with pytest.raises(TodoPlanValidationError, match="invalid_plan_reference"):
+        prepare_todo_phases(
+            todo_id="TODO-1", tick_id="01T", board_slug="demo",
+            phases_path=profile, plan_source=source,
+            plan_reference=PlanReference(str(tmp_path / "future.md"), source),
+        )
+
 
 class FakeGatePhase:
     def __init__(

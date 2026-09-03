@@ -14,7 +14,7 @@ Tick Loop (Hermes cron or manual)
 [Kanban Registration] -- Build a complete chain behind a registration barrier
     |
     v
-[Compile tracked Plan] --> worker --> controller gate --> next worker
+[Compile pinned Plan source] --> worker --> controller gate --> next worker
     |
     v
 [Independent review] --> review-fix --> validation --> re-review (bounded)
@@ -133,14 +133,16 @@ default ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)).
 
 Profiles may set top-level `requires_plan: true`. After normal TODO selection
 and before phase rendering or tick persistence, `_tick_project` resolves the
-selected entry's single `Plan:` path, verifies that it stays inside the project
-after symlink resolution, and requires a readable regular file. Failure records
-`failed_to_spawn` with `plan_validation_failed` and creates no kanban tasks.
+selected entry's single embedded or legacy-path Plan source. Embedded bytes
+come from the pinned issue snapshot; legacy paths are resolved at the pinned
+base commit. Failure records `failed_to_spawn` with `plan_validation_failed`
+and creates no kanban tasks.
 
 The `native-sdd` profile uses that gate. A manifest Plan compiles to ordered
-worker cards separated by unassigned controller gates. A manifest-free legacy
+worker cards separated by unassigned controller gates. A manifest-free embedded
 Plan is not selectable under a plan-gated profile: eligibility blocks the issue
-as `plan_invalid:manifest_required`. Independent review uses
+as `plan_invalid:manifest_required`. A manifest-free `Plan:` path stays
+selectable and compiles to a single development card. Independent review uses
 a distinct session; findings compile into at most five `review-fix` /
 fix-validation / re-review rounds. A clean result enables verified PR creation,
 deterministic TODO closeout, and an unassigned terminal human-review gate.
@@ -162,7 +164,8 @@ All pipeline state lives under `<project>/.hermes/`:
 <project>/.hermes/
 ├── decisions/                 # Immutable selection decisions (write-once)
 ├── outcomes/                  # Phase completion/failure sidecars
-├── runs/<tick-id>/registration.json # Schema v2: pinned base, issue snapshot, branch/worktree
+├── runs/<tick-id>/registration.json # Schema v3: pinned issue, tagged Plan source, branch/worktree
+├── runs/<tick-id>/plan.md           # Verified mode-0600 artifact for embedded Plans
 ├── runs/<tick-id>/issue-closed    # Marker: run delivered, issue closed at closeout
 ├── runs/<tick-id>/abandoned       # Marker: operator abandoned the run (`touch`)
 ├── ready_for_review/          # Legacy ship-gate sidecars
@@ -218,16 +221,18 @@ issue carrying `tpo:todo`; its canonical ID is `TODO-<issue-number>`. `TODOS.md`
 and `TODOS-archive.md` are retired (see
 [migration notes](migration/todos-to-issues.md)).
 
-- **Plan manifests** — a TODO becomes pipeline-actionable through its `### Plan`
-  section, a repo-relative Plan document that may carry one strict
-  `json tpo-plan` block; its `todo_id` must equal `TODO-<issue-number>`, so file
-  the issue before authoring the manifest ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)).
-  Manifest-free Markdown remains a legacy compatibility contract that compiles
-  to one development card, but only non-plan profiles accept it: a plan-gated
-  profile (`requires_plan`) blocks such an issue as
-  `plan_invalid:manifest_required` — and `native-sdd`, the default profile for
-  new contracts ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)),
-  is plan-gated, so a manifest is effectively mandatory for new projects.
+- **Plan manifests** — new TODOs carry one folded Implementation Plan as the
+  final issue-body content, with exactly one strict schema-v1 `json tpo-plan`
+  block. The extractor removes it before H3 field parsing. Existing `### Plan`
+  repository paths remain `legacy_path` inputs; dual sources are invalid
+  ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)). Manifest-free
+  Markdown remains a legacy compatibility contract that compiles
+  to one development card. A `Plan:` repository path accepts it under any
+  profile; an embedded Plan does not, and a plan-gated profile
+  (`requires_plan`) blocks such an issue as `plan_invalid:manifest_required`.
+  `native-sdd`, the default profile for new contracts
+  ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)), is
+  plan-gated, so a manifest is what makes a Plan's tasks visible as cards.
   Validate a Plan with
   `tpo plan validate <project> --todo <n> --require-manifest`.
 - **Label vocabulary and eligibility** — `tpo:todo` + `ready-for-agent` make an
@@ -235,11 +240,14 @@ and `TODOS-archive.md` are retired (see
   block it. Decisions live in the issue body; labels are mirrors. See
   [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
   [triage labels](agents/triage-labels.md).
-- **Snapshot authority** — registration pins the issue identity (`issue_number`,
-  `issue_url`) and a hashed `issue_snapshot` in `runs/<tick-id>/registration.json`
-  (schema v2). Schema v1 registrations are rejected; finish or abandon those runs
-  before upgrading. The Plan stays git-pinned and remains the sole execution
-  authority (ADR-0001).
+- **Snapshot authority** — schema-v3 registration pins the issue identity,
+  hashed snapshot, `plan_source_kind`, `plan_hash`, and either a legacy
+  `plan_path` or verified embedded `plan_artifact`. Readers accept active
+  schema-v2 and v3 runs. Schema v1 remains unsupported, and versions without v3
+  support must not be installed while a v3 run is active.
+- **Single-writer creation** — one host-local `<state-dir>/todo-create.lock`
+  serializes issue creation. Durable approved requests and transaction markers
+  resume partial GitHub mutations without deleting or closing issues.
 - **Drift is a human boundary** — live issue drift after registration
   (`issue_drift`, `issue_closed`, `issue_on_hold`, `issue_identity_mismatch`)
   blocks the run as `needs_input` and is never auto-repaired;

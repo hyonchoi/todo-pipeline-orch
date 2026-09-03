@@ -352,6 +352,7 @@ def _render_phase_prompt(
     tick_id: str,
     project_slug: str,
     plan_path: str | None = None,
+    plan_hash: str | None = None,
     spec_path: str | None = None,
     reference_paths: list[str] | None = None,
     prompt_client: PromptClient = "claude",
@@ -387,6 +388,11 @@ def _render_phase_prompt(
     spec_reference_block = ""
     if plan_path:
         spec_reference_block += f"Plan (execution authority): {plan_path}\n"
+        if plan_hash:
+            spec_reference_block += (
+                f"Plan SHA-256: {plan_hash}\n"
+                "Before using the Plan, verify its SHA-256 matches exactly; fail closed on drift.\n"
+            )
     if spec_path:
         spec_reference_block += f"Spec (authoritative): {spec_path}\n"
     if reference_paths:

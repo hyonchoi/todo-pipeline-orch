@@ -12,17 +12,16 @@ project off `gstack`, read [Migrating from gstack](#migrating-from-gstack).
 
 ## Prepare the TODO
 
-Store an implementation-ready Plan inside the project and attach it to the
-TODO with a project-relative path:
+Create the TODO with an embedded, implementation-ready Plan:
 
-```markdown
-- [ ] **TODO-42** Example change
-  - **Plan:** docs/plans/TODO-42.md
+```bash
+tpo todos create <project> --request-file <project>/.hermes/todo-create-input/<uuid>.json
 ```
 
-The resolved path must remain inside the project and identify a readable
-regular file. Missing, duplicate, absolute, escaping, symlink-escaping, or
-unreadable Plan targets fail before tick state or kanban tasks are created.
+The command previews the entire issue and mutates GitHub only after `create`
+confirmation. The embedded block is pinned from the issue snapshot and
+materialized as a verified mode-`0600` `runs/<tick-id>/plan.md` artifact before
+worktree or Kanban side effects.
 
 For visible per-task execution, embed exactly one manifest (maximum 50 tasks):
 
@@ -41,16 +40,22 @@ For visible per-task execution, embed exactly one manifest (maximum 50 tasks):
 }
 ```
 
-The manifest is mandatory here. A Plan that is valid legacy Markdown but
-carries no `json tpo-plan` block is **not selectable** under `native-sdd`:
-because the profile is plan-gated (`requires_plan`), eligibility blocks the
-issue with `plan_invalid:manifest_required`, so the tick picks nothing from it.
-`tpo doctor` counts it in `Plan readiness: ... blocked=N (plan_invalid=N)` and
-prints the migration `Hint:`. `tpo plan validate <project> --todo N` still
-reports such a Plan as valid legacy Markdown with a no-manifest warning; pass
-`--require-manifest` to turn that warning into a failure. Manifest-free
-Markdown remains a compatibility contract only for the non-plan profiles
-(`gstack`, `agent-skills`), which compile it to a single development card.
+The manifest is mandatory for an **embedded** Plan, which is how the issue form
+authors one. An embedded Plan carrying no `json tpo-plan` block is rejected as
+`manifest_required`: because the profile is plan-gated (`requires_plan`),
+eligibility blocks the issue with `plan_invalid:manifest_required`, so the tick
+picks nothing from it. `tpo doctor` counts it in
+`Plan readiness: ... blocked=N (plan_invalid=N)` and prints the migration `Hint:`.
+
+A pre-existing `### Plan` repository path remains supported as `legacy_path`,
+and there the manifest stays optional: a valid legacy Markdown Plan without the
+block still runs as exactly one development card. `tpo plan validate` and
+`tpo doctor` warn because its internal steps cannot be exposed as separate
+Kanban cards; pass `--require-manifest` to turn that warning into a failure. On
+retries, TPO validates its pinned base authority and then leaves the existing
+static development, review, finish, and human-gate chain to the legacy
+lifecycle; manifest-only result, dynamic review, and closeout reconciliation do
+not intercept that chain.
 
 ## Initialize and verify
 
@@ -115,8 +120,10 @@ are reconciled from Kanban results instead.
 
 ## Compiled sequence
 
-1. TPO records `.hermes/runs/<tick-id>/registration.json`, including the pinned
-   base SHA, TODO and Plan hashes, branch, linked worktree, roles, and step keys.
+1. TPO records schema-v3 `.hermes/runs/<tick-id>/registration.json`, including
+   the tagged Plan source, pinned base SHA, TODO and Plan hashes, branch,
+   linked worktree, roles, and step keys. Schema-v2 active runs remain readable;
+   do not downgrade while a schema-v3 run is active.
 2. Each Plan task becomes a worker followed by a controller gate. The worker
    reports bounded `metadata.tpo_result`; TPO opens the gate only after metadata
    and Git topology validate.

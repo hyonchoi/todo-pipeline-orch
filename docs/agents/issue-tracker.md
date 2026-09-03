@@ -46,13 +46,25 @@ Used by `/wayfinder`. The **map** is a single issue with **child** issues as tic
 
 ## TPO backlog items
 
-Backlog entries selectable by the pipeline are GitHub issues carrying the `tpo:todo` label. The canonical ID is `TODO-<issue-number>`; the number is assigned by GitHub, so file the issue before authoring a Plan manifest that names it.
+Backlog entries selectable by the pipeline are GitHub issues carrying the
+`tpo:todo` label. The canonical ID is `TODO-<issue-number>`; `tpo todos create`
+obtains that number before rendering the embedded Plan manifest.
 
 - **Bootstrap once per repo**: create the label vocabulary before using the form — GitHub silently drops form labels that do not exist on the repo. Existing labels are left untouched, including color/description. Run `tpo todos labels sync <project>`.
-- **Create**: the "TPO TODO" web form is canonical (`.github/ISSUE_TEMPLATE/tpo-todo.yml`); from the CLI, `gh issue create --web --template "TPO TODO"` opens it (`--template` takes the form *name*; the terminal flow cannot render YAML forms). Scripted, non-interactive creation must render the body with `render_issue_body` and pass `--body-file <file>` plus explicit `--label` flags, as the migration script does. Form-created issues get `tpo:todo` + `needs-triage`; issues migrated from TODOS.md were already triaged and carry `ready-for-agent`.
-- **Body contract**: one `### <Section>` H3 per field, in `KNOWN_SECTIONS` order (`hermes_pipeline/github_issues.py`). `_No response_` means absent. One parser (`parse_issue_body`) reads both form-created and migrated issues; `Legacy ID` is migration-only and not in the form. `Depends on` is **not** a body field — use native issue dependencies as described under Wayfinding operations. Do not use `###` headings inside field text — the parser treats them as new sections.
+- **Create**: new executable TODOs use `tpo todos create <project>
+  --request-file <project>/.hermes/todo-create-input/<uuid>.json`. The bundled
+  `todo-manager` writer exclusively creates
+  `<state-dir>/todo-create-input/<uuid>.json` with mode `0600` inside a
+  mode-`0700` non-symlink directory. Creation previews the full issue, binds
+  `--yes` to `--approved-repo`, and safely resumes partial mutations by UUID.
+- **Body contract**: one `### <Section>` H3 per new-form field, followed by one
+  final folded Implementation Plan with exactly one schema-v1 `json tpo-plan`
+  manifest and no `### Plan` heading. The extractor removes the Plan before H3
+  parsing, so its headings cannot forge fields. `Legacy ID` and path-based
+  `Plan` sections are legacy-only. `Depends on` is **not** a body field — use
+  native issue dependencies as described under Wayfinding operations.
 - **Decisions** (Priority, Effort, Phase, Branch, Test Coverage, Security Review, UI Review) live in the body. Labels are mirrors, normalized by `tpo todos audit <project> --fix`; the body wins on conflict.
-- **Eligibility**: `tpo:todo` and `ready-for-agent` are both required. `tpo:on-hold`, `tpo:in-progress`, and any pending-triage label (`needs-triage`, `needs-info`, `ready-for-human`, `wontfix`) block selection. Non-label gates: the issue must be open (`status_closed`); open native dependencies block (`dependency_incomplete:<n>`; `dependency_unknown` when the summary is unavailable); exactly one `Branch` section (`branch_invalid`); and under a plan-gated profile (`requires_plan`) exactly one valid `Plan` (`plan_invalid:*`). `Plan` is optional when filing but required before a plan-gated profile can select the issue; it must be committed at `HEAD` (`plan_invalid:untracked` otherwise) and carry a `json tpo-plan` manifest (`plan_invalid:manifest_required` otherwise — manifest-free Plans run only under non-plan profiles). Every profile claims the selected issue with `tpo:in-progress`; automatic closeout releases it only under plan-gated (`requires_plan`) profiles. For other profiles the claim stays until `tpo todos complete <project> --todo N --pr N` after the merge, and `in_progress_stale` is the expected signal for a delivered-but-uncompleted issue.
+- **Eligibility**: `tpo:todo` and `ready-for-agent` are both required. `tpo:on-hold`, `tpo:in-progress`, and any pending-triage label (`needs-triage`, `needs-info`, `ready-for-human`, `wontfix`) block selection. Non-label gates: the issue must be open (`status_closed`); open native dependencies block (`dependency_incomplete:<n>`; `dependency_unknown` when the summary is unavailable); exactly one `Branch` section (`branch_invalid`); and under a plan-gated profile (`requires_plan`) exactly one valid embedded or legacy-path Plan (`plan_invalid:*`). Embedded Plans always require a manifest. Legacy paths must be committed at `HEAD` (`plan_invalid:untracked`) and manifest-free legacy Markdown runs only under non-plan profiles. `tpo todos audit` reports valid paths as informational `plan:legacy_path` and never rewrites them. Every profile claims the selected issue with `tpo:in-progress`; automatic closeout releases it only under plan-gated (`requires_plan`) profiles. For other profiles the claim stays until `tpo todos complete <project> --todo N --pr N` after the merge, and `in_progress_stale` is the expected signal for a delivered-but-uncompleted issue.
 - **Demotion**: when run registration fails on a permanent content fault (`plan_invalid`, `branch_invalid`, `branch_exists`), TPO moves the issue from `ready-for-agent` to `needs-info`; fix the body and re-add `ready-for-agent`. Infrastructure or operator-resolvable codes (`authority_untracked`, `authority_invalid`, `branch_mismatch`, git and worktree errors) never demote.
 
 | Label | Meaning |

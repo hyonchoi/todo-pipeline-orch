@@ -35,7 +35,7 @@ REQUIRED_FORM_FIELDS = {
     "Priority", "Effort", "Phase", "Test Coverage", "Security Review", "UI Review",
 }
 PHASE_NAME_RE = re.compile(r"^Phase ([0-9.]+): (.+)$")
-FORM_SECTIONS = tuple(s for s in KNOWN_SECTIONS if s != "Legacy ID")
+FORM_SECTIONS = tuple(s for s in KNOWN_SECTIONS if s not in {"Plan", "Legacy ID"})
 LABEL_NAMES = {name for name, _color, _description in LABEL_VOCABULARY}
 # Dropdown label -> label-vocabulary prefix whose suffixes must equal its options.
 DROPDOWN_LABEL_PREFIX = {

@@ -149,8 +149,10 @@ full label vocabulary and body contract.
 
 ## Step 7: Attach a Plan with a manifest
 
-`native-sdd` is plan-gated, so the tick in Step 8 will pick nothing until the
-issue names a Plan and that Plan carries a `json tpo-plan` manifest. Copy
+`native-sdd` is plan-gated, so the tick in Step 8 needs the issue to name a
+Plan. The `json tpo-plan` manifest is what turns that Plan into one worker card
+and controller gate per task; without it the run compiles to a single
+development card instead. Copy
 [the Plan template](templates/tpo-plan.md) into the project, fill in the tasks,
 and commit it:
 
@@ -169,11 +171,14 @@ tpo plan validate demo-app --todo <N> --require-manifest
 tpo doctor demo-app
 ```
 
-`doctor` should now report `Plan readiness: eligible=1 blocked=0`. A Plan with
-no manifest is blocked as `plan_invalid:manifest_required` and `doctor` prints a
-`Hint:` line naming the template and the migration section — the Plan is the
-execution authority ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)),
-so it is never rewritten for you.
+`doctor` should now report `Plan readiness: eligible=1 blocked=0`. A `Plan:`
+path like this one stays eligible even without a manifest, so `--require-manifest`
+is how you turn that into a failure; an *embedded* Plan in the issue body must
+carry the block, and one that does not is blocked as
+`plan_invalid:manifest_required`, where `doctor` prints a `Hint:` line naming the
+template and the migration section. Either way the Plan is the execution
+authority ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)), so it is
+never rewritten for you.
 
 ## Step 8: Run a manual tick
 

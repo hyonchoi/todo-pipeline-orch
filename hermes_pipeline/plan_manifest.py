@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
 MAX_PLAN_TASKS = 50
 MAX_MANIFEST_BYTES = 64 * 1024
@@ -16,6 +18,11 @@ MAX_CRITERION_LENGTH = 2_000
 MAX_VERIFICATION_LENGTH = 500
 MAX_COMMIT_MESSAGE_LENGTH = 256
 MAX_LIST_ITEMS = 50
+MAX_EMBEDDED_PLAN_CHARS = 65_536
+
+EMBEDDED_PLAN_OPEN = "<details>\n<summary>Implementation Plan</summary>\n---\n"
+EMBEDDED_PLAN_CLOSE = "---\n</details>\n"
+_EMBEDDED_SUMMARY = "<summary>Implementation Plan</summary>"
 
 _MANIFEST_RE = re.compile(
     r"^ {0,3}```json tpo-plan[ \t]*\r?\n(.*?)^ {0,3}```[ \t]*$",
@@ -26,6 +33,7 @@ _PSEUDO_MANIFEST_START_RE = re.compile(
     r"^[ \t]*```json tpo-plan[ \t]*$", re.MULTILINE
 )
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*\Z")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MANIFEST_KEYS = frozenset({"schema_version", "todo_id", "tasks"})
 _TASK_KEYS = frozenset(
     {
@@ -72,8 +80,185 @@ class PlanManifest:
     tasks: tuple[PlanTask, ...]
 
 
+@dataclass(frozen=True)
+class PlanSource:
+    """Resolved execution authority from an issue snapshot or legacy path."""
+
+    kind: Literal["embedded", "legacy_path"]
+    document: str
+    plan_hash: str
+    manifest: PlanManifest | None
+    plan_path: str | None = None
+
+
+@dataclass(frozen=True)
+class PlanReference:
+    """A runtime reference bound to one validated Plan source and digest."""
+
+    value: str
+    source: PlanSource
+
+
+def validate_plan_reference(reference: PlanReference, *, expected_todo_id: str) -> None:
+    source = reference.source
+    if source.kind == "embedded":
+        reference_path = Path(reference.value)
+        if (
+            source.plan_path is not None
+            or not reference_path.is_absolute()
+            or reference_path.name != "plan.md"
+            or reference_path != reference_path.resolve()
+        ):
+            raise TodoPlanValidationError("invalid_plan_reference")
+        from .run_registration import RunRegistrationError, _read_verified_artifact
+
+        try:
+            document = _read_verified_artifact(reference_path, source.plan_hash).decode()
+        except (RunRegistrationError, UnicodeError) as exc:
+            raise TodoPlanValidationError("invalid_plan_reference") from exc
+    elif source.kind == "legacy_path":
+        if not source.plan_path or reference.value != source.plan_path:
+            raise TodoPlanValidationError("invalid_plan_reference")
+        document = source.document
+    else:
+        raise TodoPlanValidationError("invalid_plan_reference")
+    if hashlib.sha256(document.encode()).hexdigest() != source.plan_hash:
+        raise TodoPlanValidationError("invalid_plan_reference")
+    manifest = parse_plan_manifest(document, expected_todo_id=expected_todo_id)
+    if manifest != source.manifest:
+        raise TodoPlanValidationError("invalid_plan_reference")
+
+
+def _normalized_document(document: str) -> str:
+    return document.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n"
+
+
+def render_embedded_plan(document: str, *, expected_todo_id: str) -> str:
+    """Render a complete, manifest-bearing Plan as the canonical folded block."""
+    normalized = _normalized_document(document)
+    if not normalized.strip():
+        raise TodoPlanValidationError("empty_embedded_plan")
+    if (
+        re.search(r"(?i)</?details(?:\s|>)", normalized)
+        or re.search(
+            r"(?i)<summary\s*>\s*Implementation Plan\s*</summary\s*>", normalized
+        )
+        or re.search(r"(?i)<!--\s*tpo-create:", normalized)
+        or re.search(r"(?i)</?proposed_plan(?:\s|>)", normalized)
+    ):
+        raise TodoPlanValidationError("forbidden_plan_structure")
+    try:
+        manifest = parse_plan_manifest(normalized, expected_todo_id=expected_todo_id)
+    except PlanManifestValidationError as exc:
+        raise TodoPlanValidationError(exc.code) from exc
+    if manifest is None:
+        raise TodoPlanValidationError("manifest_required")
+    return EMBEDDED_PLAN_OPEN + normalized + EMBEDDED_PLAN_CLOSE
+
+
+def _embedded_structure(body: str) -> tuple[list[int], list[int]]:
+    """Return top-level candidate starts and matching-summary offsets."""
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    starts: list[int] = []
+    summaries: list[int] = []
+    offset = 0
+    fence: tuple[str, int] | None = None
+    in_comment = False
+    lines = normalized.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        plain = line.removesuffix("\n")
+        was_comment = in_comment
+        if "<!--" in plain and "-->" not in plain.split("<!--", 1)[1]:
+            in_comment = True
+        if not was_comment and not in_comment:
+            fence_match = re.match(r"^ {0,3}(`{3,}|~{3,})(.*)$", plain)
+            if fence is None and fence_match:
+                fence = (fence_match.group(1)[0], len(fence_match.group(1)))
+            elif (
+                fence is not None
+                and fence_match
+                and fence_match.group(1)[0] == fence[0]
+                and len(fence_match.group(1)) >= fence[1]
+                and not fence_match.group(2).strip()
+            ):
+                fence = None
+            elif fence is None:
+                if plain == _EMBEDDED_SUMMARY:
+                    summaries.append(offset)
+                if (
+                    plain == "<details>"
+                    and index + 1 < len(lines)
+                    and lines[index + 1].removesuffix("\n") == _EMBEDDED_SUMMARY
+                ):
+                    starts.append(offset)
+        if "-->" in plain:
+            in_comment = False
+        offset += len(line)
+    return starts, summaries
+
+
+def embedded_plan_candidate_start(body: str) -> int | None:
+    """Locate the first top-level structural candidate, including malformed ones."""
+    starts, _summaries = _embedded_structure(body)
+    return starts[0] if starts else None
+
+
+def extract_embedded_plan(body: str) -> str | None:
+    """Extract the sole canonical final embedded Plan block from an issue body."""
+    normalized = body.replace("\r\n", "\n").replace("\r", "\n")
+    starts, summaries = _embedded_structure(normalized)
+    if not summaries:
+        return None
+    if len(summaries) > 1 or len(starts) > 1:
+        raise TodoPlanValidationError("duplicate_embedded_plan")
+    if len(starts) > 1:
+        raise TodoPlanValidationError("duplicate_embedded_plan")
+    if not starts:
+        raise TodoPlanValidationError("malformed_embedded_plan")
+    start = starts[0]
+    if not normalized[start:].startswith(EMBEDDED_PLAN_OPEN):
+        raise TodoPlanValidationError("malformed_embedded_plan")
+    suffix = normalized[start:]
+    if not suffix.endswith(EMBEDDED_PLAN_CLOSE):
+        if EMBEDDED_PLAN_CLOSE in suffix:
+            raise TodoPlanValidationError("misplaced_embedded_plan")
+        raise TodoPlanValidationError("malformed_embedded_plan")
+    document = suffix[len(EMBEDDED_PLAN_OPEN) : -len(EMBEDDED_PLAN_CLOSE)]
+    if not document.strip():
+        raise TodoPlanValidationError("empty_embedded_plan")
+    if len(document) > MAX_EMBEDDED_PLAN_CHARS:
+        raise TodoPlanValidationError("embedded_plan_too_large")
+    normalized_document = _normalized_document(document)
+    if not _PSEUDO_MANIFEST_START_RE.search(normalized_document):
+        raise TodoPlanValidationError("manifest_required")
+    return normalized_document
+
+
+def embedded_plan_source(body: str, *, expected_todo_id: str) -> PlanSource | None:
+    document = extract_embedded_plan(body)
+    if document is None:
+        return None
+    try:
+        manifest = parse_plan_manifest(document, expected_todo_id=expected_todo_id)
+    except PlanManifestValidationError as exc:
+        raise TodoPlanValidationError(exc.code) from exc
+    if manifest is None:
+        raise TodoPlanValidationError("manifest_required")
+    return PlanSource(
+        kind="embedded",
+        document=document,
+        plan_hash=hashlib.sha256(document.encode("utf-8")).hexdigest(),
+        manifest=manifest,
+    )
+
+
 def _bounded_string(value: object, *, maximum: int, code: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > maximum
+        or _CONTROL_RE.search(value)
+    ):
         raise PlanManifestValidationError(code)
     return value.strip()
 
@@ -206,3 +391,16 @@ def validate_plan_candidate(
     relative_plan = validate_plan_path(project_dir, plan_path)
     document = (project_dir / relative_plan).read_text(encoding="utf-8")
     return parse_plan_manifest(document, expected_todo_id=expected_todo_id)
+
+
+def legacy_plan_source(project_dir: Path, plan_path: str, *, expected_todo_id: str) -> PlanSource:
+    relative_plan = validate_plan_path(project_dir, plan_path)
+    document = (project_dir / relative_plan).read_text(encoding="utf-8")
+    manifest = parse_plan_manifest(document, expected_todo_id=expected_todo_id)
+    return PlanSource(
+        kind="legacy_path",
+        document=document,
+        plan_hash=hashlib.sha256(document.encode("utf-8")).hexdigest(),
+        manifest=manifest,
+        plan_path=relative_plan,
+    )

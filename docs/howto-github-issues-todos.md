@@ -42,32 +42,95 @@ lines), 2 unknown project. `tpo doctor <project>` reports
 `INVALID: missing <labels>; Fix: tpo todos labels sync <project>` until the
 vocabulary is complete.
 
-## File a TODO
+## File a TODO with an embedded Plan
 
-Use the "TPO TODO" issue form (`.github/ISSUE_TEMPLATE/tpo-todo.yml`). From the
-CLI, open it in the browser:
+New executable TODOs are created from a private schema-v1 request file:
 
 ```bash
-gh issue create --web --template "TPO TODO"
+tpo todos create <project> --request-file <project>/.hermes/todo-create-input/<uuid>.json
 ```
 
-`--template` takes the form *name*; the terminal `gh issue create` flow cannot
-render YAML forms. The form applies `tpo:todo` + `needs-triage` and renders one
-`### <Section>` per field, which `parse_issue_body` consumes. Do not put `###`
-headings inside field text.
+The request contains exactly `schema_version`, a canonical lowercase UUIDv4
+`transaction_id`, `title`, all new-form `fields`, `plan_markdown`, and strict
+Plan `tasks`. It cannot provide labels, issue/TODO IDs, `Plan`, or `Legacy ID`.
+Use the bundled skill's `scripts/write_request.py PROJECT_ROOT UUID`, passing
+the JSON on standard input. With the project state directory at
+`<state-dir>` (normally `<project>/.hermes`), the writer exclusively creates
+`<state-dir>/todo-create-input/<uuid>.json`: the
+`todo-create-input` directory is a non-symlink directory with exact mode
+`0700`, and the request is a non-symlink regular file with exact mode `0600`.
+It uses contained, no-follow, exclusive creation and refuses to replace an
+existing request.
 
-For scripted creation, render the body with `render_issue_body`
-(`hermes_pipeline/github_issues.py`) and pass it with `--body-file <file>` plus
-explicit `--label` flags, as the migration script does.
+By default the command validates the request and prints the complete canonical
+preview. Only the exact input `create` proceeds. Automation may use `--yes`
+only after that preview was explicitly approved, and must bind approval to the
+shown repository with `--approved-repo OWNER/REPO`. The command creates the
+issue with `tpo:todo` and `needs-triage`, inserts the issue-numbered manifest,
+validates the refetched snapshot, installs mirror labels and
+`ready-for-agent`, then removes `needs-triage` last.
+
+Creation is single-writer per configured state directory: concurrent creates
+on the same host fail while `<state-dir>/todo-create.lock` is held. The approved
+request is persisted under `<state-dir>/todo-create/<uuid>.json` until success.
+After an uncertain or partial result, rerun the identical request; transaction
+marker discovery resumes it. Use `--issue N` only after independently confirming
+that issue's matching marker. TPO never closes or deletes a partial issue.
+
+The bundled `todo-manager` skill selects the latest finalized plan-mode Plan,
+builds the request, shows the full preview, and requests explicit approval:
+
+```bash
+tpo skills install todo-manager --target codex --scope user
+tpo skills install todo-manager --target claude --scope project
+```
+
+Codex installs to `.agents/skills/todo-manager`; Claude installs to
+`.claude/skills/todo-manager`, relative to the home directory for user scope or
+the Git top level for project scope. See the [CLI reference](reference-cli.md#skills).
 
 `Depends on` is not a body field. Record dependencies as native issue
 dependencies (below) after both issues exist.
 
-## Before you file: Plan readiness
+## Embedded Plan authority and legacy compatibility
 
-`Plan` is optional when filing but required before a plan-gated profile can
-select the issue ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)).
-Attach documents by role and check each candidate before you paste its path:
+The embedded Plan is required for newly created, ready-for-agent TODOs
+([ADR-0001](adr/0001-plan-is-the-execution-authority.md)). It occurs once as
+the final body content, with no `### Plan` heading:
+
+````markdown
+<details>
+<summary>Implementation Plan</summary>
+---
+# Implementation Plan
+
+...human-readable plan...
+
+```json tpo-plan
+{
+  "schema_version": 1,
+  "todo_id": "TODO-42",
+  "tasks": [{
+    "id": "task-1",
+    "title": "Implement behavior",
+    "instructions": "Make the bounded change.",
+    "acceptance_criteria": ["The behavior is observable."],
+    "verification": ["uv run pytest tests/test_example.py"],
+    "commit_message": "feat(scope): implement behavior"
+  }]
+}
+```
+---
+</details>
+````
+
+Newlines are LF with one final LF; manifest JSON uses stable key order and
+two-space indentation. TPO removes the folded block before parsing H3 fields,
+so Plan headings cannot forge issue fields. Duplicate, malformed, misplaced,
+empty, oversized, dual-source, or manifest-free embedded Plans are invalid.
+
+Existing issues may retain one `### Plan` repository-relative path as a
+`legacy_path` source:
 
 - **Roles.** `Plan` is the execution authority and the sole field that makes a
   TODO actionable: ordered implementation work, concrete change targets, and
@@ -95,9 +158,7 @@ Attach documents by role and check each candidate before you paste its path:
   replace an existing `Plan`, `Spec`, or `Reference` value because a new
   candidate was found.
 
-The Plan manifest's `todo_id` must equal `TODO-<issue-number>`, so file the
-issue first, then write the Plan (see the [Plan template](templates/tpo-plan.md))
-and validate it against the issue:
+Validate either source against the issue:
 
 ```bash
 tpo plan validate <project> --todo <N>
@@ -105,14 +166,14 @@ tpo plan validate <project> --todo <N> --require-manifest
 tpo plan validate <project> --todo <N> --plan docs/pipeline/TODO-<N>-plan.md --require-manifest
 ```
 
-Without `--plan`, the Plan path is resolved from the issue body
-(`plan_invalid:missing` / `plan_invalid:duplicate` when there is not exactly one
-`### Plan` value). `--plan` validates a repository-relative candidate before you
-put it in the issue. `--require-manifest` rejects a legacy Markdown Plan with no
+Without `--plan`, TPO resolves the embedded source or legacy path from the issue
+body. `--plan` remains a legacy repository-relative candidate check.
+`--require-manifest` rejects a legacy Markdown Plan with no
 `json tpo-plan` block; without it a manifest-free Plan passes with
-`warning: no tpo-plan manifest` and compiles to a single development card —
-under a non-plan profile only; a plan-gated profile (`requires_plan`) blocks
-the issue as `plan_invalid:manifest_required`. A closed issue appends `warning: issue is closed (...)`. See the
+`warning: no tpo-plan manifest` and compiles to a single development card. That
+compatibility holds for a `Plan:` repository path under any profile; an embedded
+Plan without the block is blocked as `plan_invalid:manifest_required` under a
+plan-gated profile (`requires_plan`). A closed issue appends `warning: issue is closed (...)`. See the
 [CLI reference](reference-cli.md#plan-validate) for the failure codes.
 
 ## Triage to `ready-for-agent`
@@ -150,8 +211,9 @@ Findings are printed as `TODO-<N>: <finding>`:
 |---|---|---|
 | `missing-section:<Name>` | A required `### <Name>` section is absent | no — edit the body |
 | `duplicate-section:<Name>` | A known section appears more than once | no — edit the body |
-| `plan:missing` | No `### Plan` value (informational; blocks only plan-gated profiles) | no |
-| `plan:duplicate` | More than one Plan value | no — edit the body |
+| `plan:missing` | No embedded Plan or legacy path (informational; blocks only plan-gated profiles) | no |
+| `plan:legacy_path` | Valid existing repository-path Plan (informational; never rewritten) | no |
+| `plan:duplicate` | Duplicate or dual Plan sources | no — edit the body |
 | `plan:invalid:<code>` | The Plan path or manifest fails `tpo plan validate` | no — fix the Plan |
 | `branch:invalid` | Not exactly one Branch, or not a valid git ref name | no — edit the body |
 | `branch:default` | Branch equals the repository default branch | no — edit the body |
@@ -239,7 +301,7 @@ different PR (`completion_conflict`). It never overrides an issue closed as
 
 ## When TPO demotes an issue
 
-Under a plan-gated profile, an uncommitted Plan is blocked before selection as
+Under a plan-gated profile, an uncommitted legacy path Plan is blocked before selection as
 `plan_invalid:untracked` (commit it and the next tick reconsiders the issue).
 When run registration itself fails because of the issue's content —
 `plan_invalid`, `branch_invalid`, or `branch_exists` —

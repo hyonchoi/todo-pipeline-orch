@@ -108,17 +108,17 @@ for the evidence required to advertise a `Conditional` pair.
 `native-sdd` is the default profile for every contract `tpo init` writes
 ([ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md)); `gstack`
 is deprecated but still bundled and supported. It runs the compiled workflow:
-Hermes cron invokes TPO, TPO selects an eligible TODO and pins its tracked Plan
-in a linked worktree, then Hermes Kanban dispatches workers. A `tpo-plan`
-manifest produces one visible worker card and controller gate per ordered task.
-Independent review, bounded review-fix rounds, PR closeout, and the human merge
-gate remain visible on the board. It does not require gstack, superpowers, or
-client-side workflow skills.
+Hermes cron invokes TPO, TPO selects an eligible TODO and pins its embedded Plan
+from the issue snapshot in a linked worktree, then Hermes Kanban dispatches
+workers. A `tpo-plan` manifest produces one visible worker card and controller
+gate per ordered task. Independent review, bounded review-fix rounds, PR
+closeout, and the human merge gate remain visible on the board. It does not
+require gstack, superpowers, or client-side workflow skills.
 
-Because the profile is plan-gated, every TODO it picks needs a Plan carrying a
-`json tpo-plan` manifest; a legacy manifest-free Plan is blocked as
-`plan_invalid:manifest_required` and stays compatible only under the non-plan
-profiles. See the
+Because the profile is plan-gated, an embedded Plan must carry a `json tpo-plan`
+manifest; one without it is blocked as `plan_invalid:manifest_required`. A
+legacy `Plan:` repository path still works without a manifest and compiles to a
+single development card. See the
 [native SDD profile guide](docs/howto-native-sdd-profile.md) and
 [Migrating from gstack](docs/howto-native-sdd-profile.md#migrating-from-gstack).
 
@@ -155,8 +155,8 @@ cd ~/my-projects/my-project
 tpo init my-project
 tpo todos labels sync my-project
 # copy .github/ISSUE_TEMPLATE/tpo-todo.yml from this repository into the project and commit it
-gh issue create --web --template "TPO TODO"        # files TODO-<N> with tpo:todo + needs-triage
-gh issue edit <N> --remove-label needs-triage --add-label ready-for-agent
+tpo skills install todo-manager --target codex --scope user
+# use the todo-manager skill to preview and approve `tpo todos create`
 tpo doctor my-project
 ```
 
@@ -183,8 +183,10 @@ tpo tick my-project
 | `init` | Write `.hermes/pipeline.toml` for an existing project. |
 | `doctor` | Verify a project's pipeline contract, GitHub backlog state, and run registrations. |
 | `todos complete` | Close a delivered TODO issue by hand after its pull request merged. |
+| `todos create` | Preview, create, or resume a validated TODO with an embedded Plan. |
 | `todos labels sync` | Create the missing pipeline label vocabulary in the project's repository. |
 | `todos audit` | Check TODO issue bodies against the backlog contract and normalize mirror labels. |
+| `skills install/uninstall/recover` | Transactionally manage the bundled `todo-manager` skill. |
 | `plan validate` | Validate a TODO's Plan attachment and optional `tpo-plan` manifest. |
 | `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
 | `config` | Read and write global `tpo` configuration. |

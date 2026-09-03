@@ -22,8 +22,10 @@ from urllib.parse import quote
 
 from .plan_manifest import (
     PlanManifestValidationError,
+    PlanSource,
     TodoPlanValidationError,
-    validate_plan_candidate,
+    embedded_plan_source,
+    legacy_plan_source,
     validate_plan_path,
 )
 
@@ -41,7 +43,8 @@ IN_PROGRESS_LABEL = "tpo:in-progress"
 TRIAGE_PENDING_LABELS = ("needs-triage", "needs-info", "ready-for-human", "wontfix")
 MAX_ISSUE_BODY_CHARS = 65_536
 MAX_ISSUE_SNAPSHOT_CHARS = MAX_ISSUE_BODY_CHARS + 4096
-REGISTRATION_SCHEMA_VERSION = 2
+REGISTRATION_SCHEMA_VERSION = 3
+SUPPORTED_REGISTRATION_SCHEMA_VERSIONS = frozenset({2, 3})
 SNAPSHOT_HEADER = "tpo-issue-snapshot/1"
 SELECTION_BODY_MAX_CHARS = 4000
 NO_RESPONSE = "_No response_"
@@ -152,6 +155,16 @@ def parse_issue_body(body: str) -> dict[str, tuple[str, ...]]:
     to three spaces) do not start a section; the fenced text stays part of the
     enclosing section. An unterminated fence runs to the end of the body.
     """
+    from .plan_manifest import embedded_plan_candidate_start, extract_embedded_plan
+
+    normalized_body = _normalize_newlines(body)
+    candidate_start = embedded_plan_candidate_start(normalized_body)
+    try:
+        embedded = extract_embedded_plan(normalized_body)
+    except TodoPlanValidationError:
+        embedded = None
+    if embedded is not None or candidate_start is not None:
+        normalized_body = normalized_body[:candidate_start]
     sections: dict[str, list[str]] = {}
     current: str | None = None
     buffer: list[str] = []
@@ -164,7 +177,7 @@ def parse_issue_body(body: str) -> dict[str, tuple[str, ...]]:
         if value and value != NO_RESPONSE:
             sections.setdefault(current, []).append(value)
 
-    for line in _normalize_newlines(body).split("\n"):
+    for line in normalized_body.split("\n"):
         fence_match = _FENCE_RE.match(line)
         if fence is None:
             if fence_match:
@@ -197,6 +210,8 @@ def render_issue_body(fields: Mapping[str, str | None], *, include_empty: bool =
         raise ValueError(f"unknown issue sections: {', '.join(unknown)}")
     blocks: list[str] = []
     for section in KNOWN_SECTIONS:
+        if section == "Plan" and section not in fields:
+            continue
         value = _normalize_newlines(fields.get(section) or "").strip()
         if _H3_LINE_RE.search(value):
             raise ValueError("section values must not contain H3 headings")
@@ -209,10 +224,7 @@ def render_issue_body(fields: Mapping[str, str | None], *, include_empty: bool =
 
 
 def _normalize_body(body: str) -> str:
-    lines = [line.rstrip() for line in _normalize_newlines(body).split("\n")]
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
+    return _normalize_newlines(body).rstrip("\n")
 
 
 def canonical_issue_snapshot(repo: str, number: int, title: str, body: str) -> str:
@@ -249,6 +261,20 @@ def snapshot_hash(snapshot: str) -> str:
     return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
 
 
+def _legacy_v2_snapshot_hash(snapshot: str) -> str:
+    """Hash a current snapshot using the pre-v3 body normalization contract."""
+    repo, number, title, body = split_canonical_snapshot(snapshot)
+    lines = [line.rstrip() for line in body.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    legacy_body = "\n".join(lines)
+    legacy_snapshot = (
+        f"{SNAPSHOT_HEADER}\nrepo: {repo}\nnumber: {number}\n"
+        f"title: {title.strip()}\n\n{legacy_body}\n"
+    )
+    return snapshot_hash(legacy_snapshot)
+
+
 @dataclass(frozen=True)
 class IssueTodo:
     """One GitHub issue viewed as a TODO entry plus its extracted fields."""
@@ -269,6 +295,8 @@ class IssueTodo:
     branch_values: tuple[str, ...]
     snapshot: str
     entry_hash: str
+    plan_source: PlanSource | None = None
+    plan_error: str | None = None
     state_reason: str | None = None
 
 
@@ -340,6 +368,16 @@ def issue_from_api(payload: Mapping, *, repo: str) -> IssueTodo:
             raise ValueError("blocked_by must be an integer")
         blocked_by_open = blocked_by
     sections = parse_issue_body(body)
+    plan_error = None
+    try:
+        plan_source = embedded_plan_source(body, expected_todo_id=f"TODO-{number}")
+    except TodoPlanValidationError as exc:
+        plan_source = None
+        plan_error = exc.code
+    plan_values = first_lines(sections.get("Plan", ()))
+    if plan_source is not None and plan_values:
+        plan_error = "dual_plan_source"
+        plan_source = None
     spec_values = first_lines(sections.get("Spec", ()))
     references = tuple(
         item.strip()
@@ -363,10 +401,12 @@ def issue_from_api(payload: Mapping, *, repo: str) -> IssueTodo:
         blocked_by_open=blocked_by_open,
         spec=spec_values[0] if spec_values else None,
         references=references,
-        plan_values=first_lines(sections.get("Plan", ())),
+        plan_values=plan_values,
         branch_values=first_lines(sections.get("Branch", ())),
         snapshot=snapshot,
         entry_hash=snapshot_hash(snapshot),
+        plan_source=plan_source,
+        plan_error=plan_error,
         state_reason=(
             str(payload["state_reason"]) if payload.get("state_reason") is not None else None
         ),
@@ -378,6 +418,25 @@ class EligibleTodo:
     entry: IssueTodo
     plan_path: str | None
     plan_kind: Literal["manifest", "legacy"] | None
+    plan_source: PlanSource | None = None
+
+
+def resolve_plan_source(project_dir: Path, issue: IssueTodo) -> PlanSource:
+    """Resolve exactly one embedded or legacy path Plan authority."""
+    if issue.plan_error is not None:
+        raise TodoPlanValidationError(issue.plan_error)
+    if issue.plan_source is not None:
+        if issue.plan_values:
+            raise TodoPlanValidationError("dual_plan_source")
+        return issue.plan_source
+    if len(issue.plan_values) == 0:
+        raise TodoPlanValidationError("missing")
+    if len(issue.plan_values) > 1:
+        raise TodoPlanValidationError("duplicate")
+    if not _is_canonical_relative_path(issue.plan_values[0]):
+        raise TodoPlanValidationError("non_canonical")
+    normalized = validate_plan_path(project_dir, issue.plan_values[0])
+    return legacy_plan_source(project_dir, normalized, expected_todo_id=issue.todo_id)
 
 
 @dataclass(frozen=True)
@@ -456,37 +515,31 @@ def compile_eligible_issues(
             active_registration_ids=active_registration_ids,
             kanban_available=kanban_available,
         )
-        plan_path: str | None = None
-        plan_kind: Literal["manifest", "legacy"] | None = None
+        plan_source: PlanSource | None = None
         if reason is None and requires_plan:
-            if len(issue.plan_values) != 1:
-                reason = "plan_invalid:missing" if len(issue.plan_values) < 2 else "plan_invalid:duplicate"
-            elif not _is_canonical_relative_path(issue.plan_values[0]):
-                reason = "plan_invalid:non_canonical"
-            else:
-                try:
-                    plan_path = validate_plan_path(project_dir, issue.plan_values[0])
-                    manifest = validate_plan_candidate(
-                        project_dir, plan_path, expected_todo_id=issue.todo_id
-                    )
-                    plan_kind = "manifest" if manifest is not None else "legacy"
-                    if plan_kind == "legacy":
-                        # Plan-gated closeout reconciles manifest tasks; a
-                        # manifest-free Plan can only run under a non-plan profile.
-                        plan_path = None
-                        reason = "plan_invalid:manifest_required"
-                except (TodoPlanValidationError, PlanManifestValidationError) as exc:
-                    plan_path = None
-                    reason = f"plan_invalid:{exc.code}"
-                except (OSError, UnicodeError, ValueError):
-                    plan_path = None
-                    reason = "plan_invalid:unreadable"
+            try:
+                plan_source = resolve_plan_source(project_dir, issue)
+            except (TodoPlanValidationError, PlanManifestValidationError) as exc:
+                reason = f"plan_invalid:{exc.code}"
+            except (OSError, UnicodeError, ValueError):
+                reason = "plan_invalid:unreadable"
         if reason is None and len(issue.branch_values) != 1:
             reason = "branch_invalid"
         if reason is not None:
             blocked[issue.todo_id] = reason
         else:
-            candidates.append(EligibleTodo(issue, plan_path, plan_kind))
+            candidates.append(
+                EligibleTodo(
+                    issue,
+                    plan_source.plan_path if plan_source else None,
+                    (
+                        "manifest"
+                        if plan_source and plan_source.manifest is not None
+                        else "legacy" if plan_source else None
+                    ),
+                    plan_source,
+                )
+            )
     return EligibilityResult(tuple(candidates), blocked)
 
 
@@ -785,6 +838,12 @@ def list_todo_issues(project_dir: Path, *, repo: str | None = None) -> tuple[Iss
     return find_issues_by_label(project_dir, TODO_LABEL, state="open", repo=repo)
 
 
+def list_all_issues(project_dir: Path, *, repo: str | None = None) -> tuple[IssueTodo, ...]:
+    """All issues, regardless of labels/state, using the paginated REST boundary."""
+    repo = _repo(project_dir, repo)
+    return _list_issues(project_dir, repo, "state=all&per_page=100")
+
+
 def fetch_issue(project_dir: Path, number: int, *, repo: str | None = None) -> IssueTodo:
     number = _issue_number(number)
     repo = _repo(project_dir, repo)
@@ -830,7 +889,13 @@ def check_issue_drift(
         return "issue_closed"
     if ON_HOLD_LABEL in live.labels or "wontfix" in live.labels:
         return "issue_on_hold"
-    if live.entry_hash != pinned_hash:
+    hashes_match = live.entry_hash == pinned_hash
+    if not hashes_match and registration_payload.get("schema_version") == 2:
+        try:
+            hashes_match = _legacy_v2_snapshot_hash(live.snapshot) == pinned_hash
+        except SnapshotFormatError:
+            hashes_match = False
+    if not hashes_match:
         return "issue_drift"
     return None
 
@@ -929,6 +994,19 @@ def remove_label(project_dir: Path, number: int, label: str, *, repo: str | None
     number = _issue_number(number)
     repo = _repo(project_dir, repo)
     _gh(project_dir, ["issue", "edit", str(number), "--repo", repo, "--remove-label", label])
+
+
+def update_issue_body(
+    project_dir: Path, number: int, body: str, *, repo: str | None = None
+) -> None:
+    """Replace an issue body using a temporary file (GitHub has no conditional update)."""
+    number = _issue_number(number)
+    body = _check_body(body)
+    repo = _repo(project_dir, repo)
+    _run_with_body_file(
+        project_dir, body,
+        lambda path: ["issue", "edit", str(number), "--repo", repo, "--body-file", path],
+    )
 
 
 def _check_body(body: str) -> str:
@@ -1071,3 +1149,5 @@ def add_blocked_by(
     except GitHubIssuesError as exc:
         if exc.code != "gh_rejected":
             raise
+    embedded_plan_source,
+    legacy_plan_source,

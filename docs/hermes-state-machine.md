@@ -6,7 +6,7 @@ registration and crash-recovery evidence, never a second mutable workflow.
 | Trigger | Guard | Transition |
 |---|---|---|
 | Hermes cron or manual `tpo tick` | no active project run | compile eligible TODOs |
-| TODO selected | TODO and Plan tracked at base SHA | write `.hermes/runs/<tick-id>/registration.json`; create/reuse exact linked worktree |
+| TODO selected | issue snapshot and embedded Plan pinned, or legacy path tracked at base SHA | write schema-v3 `.hermes/runs/<tick-id>/registration.json` and verified embedded `plan.md` artifact; create/reuse exact linked worktree |
 | manifest compiled | <=50 ordered tasks | register `worker -> controller gate` pairs with stable keys |
 | legacy Plan compiled | valid Markdown, no manifest | register one development worker and warn |
 | worker closes | valid sanitized result metadata and Git facts | complete its controller gate |

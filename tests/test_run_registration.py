@@ -13,6 +13,7 @@ from hermes_pipeline.github_issues import (
     MAX_ISSUE_SNAPSHOT_CHARS,
     snapshot_hash,
 )
+from hermes_pipeline.plan_manifest import render_embedded_plan
 from hermes_pipeline.result_contract import load_validated_registration
 from hermes_pipeline.run_registration import (
     RunRegistrationError,
@@ -21,6 +22,7 @@ from hermes_pipeline.run_registration import (
     register_pinned_run,
     registration_state,
 )
+from hermes_pipeline.todos_create import load_create_request, render_create_body
 from tests.gh_fakes import API_ARGV, issue_payload, make_issue
 
 REPO = "acme/repo"
@@ -28,6 +30,22 @@ BODY = (
     "### What\n\nShip it.\n\n### Plan\n\ndocs/plan.md\n\n"
     "### Branch\n\nfeat/todo-42\n"
 )
+EMBEDDED_DOCUMENT = """# Implementation Plan
+
+Ship it safely.
+
+```json tpo-plan
+{"schema_version":1,"todo_id":"TODO-42","tasks":[{"id":"task-1","title":"Ship","instructions":"Do it","acceptance_criteria":["Works"],"verification":["pytest"],"commit_message":"feat: ship"}]}
+```
+"""
+
+
+def _embedded_issue():
+    body = (
+        "### What\n\nShip it.\n\n### Branch\n\nfeat/todo-42\n\n"
+        + render_embedded_plan(EMBEDDED_DOCUMENT, expected_todo_id="TODO-42")
+    )
+    return _issue(body=body)
 
 
 def _issue(number: int = 42, *, body: str = BODY, repo: str = REPO, **extra):
@@ -101,19 +119,214 @@ def test_registers_hashes_and_creates_linked_worktree(tmp_path):
         "issue_number": 42,
         "issue_snapshot": issue.snapshot,
         "issue_url": "https://github.com/acme/repo/issues/42",
+        "plan_artifact": None,
         "plan_hash": hashlib.sha256(b"# Plan\n").hexdigest(),
         "plan_path": "docs/plan.md",
+        "plan_source_kind": "legacy_path",
         "profile": "native-sdd",
         "prompt_client": "codex",
         "repository": str(repo.resolve()),
         "review_assignee": "reviewer",
-        "schema_version": 2,
+        "schema_version": 3,
         "selected_entry_hash": snapshot_hash(issue.snapshot),
         "step_keys": ["task-1", "gate-1"],
         "tick_id": "01TICK",
         "todo_id": "TODO-42",
         "worktree": str(expected_path.resolve()),
     }
+
+
+def test_embedded_registration_materializes_private_verified_artifact(tmp_path):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+
+    registration = _register(repo, issue=issue, plan_path=None)
+
+    artifact = repo / ".hermes/runs/01TICK/plan.md"
+    assert registration.plan_source_kind == "embedded"
+    assert registration.plan_path is None
+    assert registration.plan_artifact == "plan.md"
+    assert artifact.read_text() == issue.plan_source.document
+    assert artifact.stat().st_mode & 0o777 == 0o600
+    payload = json.loads((artifact.parent / "registration.json").read_text())
+    assert payload["schema_version"] == 3
+    assert payload["plan_hash"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+
+def test_created_issue_registration_preserves_plan_markdown_hard_break_spaces(tmp_path):
+    repo, _ = _repo(tmp_path)
+    request_path = repo / "request.json"
+    payload = {
+        "schema_version": 1,
+        "transaction_id": "12345678-1234-4234-9234-123456789abc",
+        "title": "Ship the feature",
+        "fields": {
+            "Summary": "Ship it", "What": "Build it", "Why": "Users need it",
+            "Pros": "Faster", "Cons": "Risk", "Context": "None",
+            "Assumptions": "None", "Spec": "docs/spec.md", "Reference": "README.md",
+            "Branch": "feat/todo-42", "Priority": "P1", "Effort": "M",
+            "Phase": "4 (Development)", "Test Coverage": "required",
+            "Security Review": "required", "UI Review": "not-required",
+        },
+        "plan_markdown": "# Implementation Plan\n\nFirst step.  \nSecond step.",
+        "tasks": [{
+            "id": "task-1", "title": "Ship", "instructions": "Do it",
+            "acceptance_criteria": ["Works"], "verification": ["pytest"],
+            "commit_message": "feat: ship",
+        }],
+    }
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    request_path.chmod(0o600)
+    create_request = load_create_request(request_path)
+    issue = _issue(body=render_create_body(create_request, issue_number=42))
+
+    _register(repo, issue=issue, plan_path=None)
+
+    artifact = repo / ".hermes/runs/01TICK/plan.md"
+    assert "First step.  \nSecond step." in artifact.read_text()
+
+
+def test_embedded_registration_rejects_issue_object_source_not_bound_to_snapshot(tmp_path):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+    tampered = issue.plan_source.document.replace("Ship it safely.", "Tampered.")
+    forged = replace(
+        issue,
+        plan_source=replace(
+            issue.plan_source,
+            document=tampered,
+            plan_hash=hashlib.sha256(tampered.encode()).hexdigest(),
+        ),
+    )
+
+    with pytest.raises(RunRegistrationError, match="plan_invalid"):
+        _register(repo, issue=forged, plan_path=None)
+
+    assert not (repo / ".hermes/runs/01TICK").exists()
+
+
+@pytest.mark.parametrize("bad_kind", ["symlink", "mode", "digest"])
+def test_embedded_retry_rejects_unsafe_artifact(tmp_path, bad_kind):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+    registration = _register(repo, issue=issue, plan_path=None)
+    artifact = repo / ".hermes/runs/01TICK/plan.md"
+    if bad_kind == "symlink":
+        artifact.unlink()
+        artifact.symlink_to(repo / "docs/plan.md")
+    elif bad_kind == "mode":
+        artifact.chmod(0o644)
+    else:
+        artifact.write_text("drift\n")
+        artifact.chmod(0o600)
+
+    with pytest.raises(RunRegistrationError, match="plan_artifact_invalid"):
+        _register(repo, issue=issue, plan_path=None)
+
+    assert registration.worktree.is_dir()
+
+
+def test_embedded_retry_reconstructs_missing_artifact_from_pinned_snapshot(tmp_path):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+    _register(repo, issue=issue, plan_path=None)
+    artifact = repo / ".hermes/runs/01TICK/plan.md"
+    artifact.unlink()
+
+    _register(repo, issue=issue, plan_path=None)
+
+    assert artifact.read_text() == issue.plan_source.document
+    assert artifact.stat().st_mode & 0o777 == 0o600
+
+
+def test_embedded_registration_is_durable_before_worktree_side_effect(tmp_path, mocker):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+    mocker.patch(
+        "hermes_pipeline.run_registration._validate_or_create_worktree",
+        side_effect=RunRegistrationError("killed"),
+    )
+
+    with pytest.raises(RunRegistrationError, match="killed"):
+        _register(repo, issue=issue, plan_path=None)
+
+    run_dir = repo / ".hermes/runs/01TICK"
+    assert (run_dir / "plan.md").is_file()
+    assert (run_dir / "registration.json").is_file()
+    assert not (repo / ".worktrees/todo-42-ship-the-feature").exists()
+
+
+def test_registration_directory_is_fsynced_before_worktree_side_effect(tmp_path, mocker):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+    events = []
+    real_fsync = __import__("os").fsync
+
+    def record_fsync(fd):
+        events.append("fsync")
+        return real_fsync(fd)
+
+    mocker.patch("hermes_pipeline.run_registration.os.fsync", side_effect=record_fsync)
+    mocker.patch(
+        "hermes_pipeline.run_registration._validate_or_create_worktree",
+        side_effect=lambda registration: events.append("worktree"),
+    )
+
+    _register(repo, issue=issue, plan_path=None)
+
+    assert events[-1] == "worktree"
+    assert events.count("fsync") >= 4
+
+
+def test_first_run_fsyncs_new_state_ancestry_before_worktree(tmp_path, mocker):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+    fsynced_inodes = []
+    real_fsync = __import__("os").fsync
+    real_fstat = __import__("os").fstat
+
+    def record_fsync(fd):
+        fsynced_inodes.append(real_fstat(fd).st_ino)
+        return real_fsync(fd)
+
+    def assert_durable_before_worktree(_registration):
+        assert repo.stat().st_ino in fsynced_inodes
+        assert (repo / ".hermes").stat().st_ino in fsynced_inodes
+        assert (repo / ".hermes/runs").stat().st_ino in fsynced_inodes
+
+    mocker.patch("hermes_pipeline.run_registration.os.fsync", side_effect=record_fsync)
+    mocker.patch(
+        "hermes_pipeline.run_registration._validate_or_create_worktree",
+        side_effect=assert_durable_before_worktree,
+    )
+
+    _register(repo, issue=issue, plan_path=None)
+
+
+def test_embedded_artifact_rejects_lstat_fstat_identity_swap(tmp_path, mocker):
+    repo, _ = _repo(tmp_path)
+    issue = _embedded_issue()
+    _register(repo, issue=issue, plan_path=None)
+    real_fstat = __import__("os").fstat
+
+    def swapped(fd):
+        value = real_fstat(fd)
+        fields = list(value)
+        fields[1] += 1  # st_ino
+        return __import__("os").stat_result(fields)
+
+    mocker.patch("hermes_pipeline.run_registration.os.fstat", side_effect=swapped)
+    with pytest.raises(RunRegistrationError, match="plan_artifact_invalid"):
+        _register(repo, issue=issue, plan_path=None)
+
+
+def test_active_registration_reader_accepts_v2_and_v3(tmp_path):
+    state = tmp_path / ".hermes"
+    _write_registration(state, "v2", {"schema_version": 2, "issue_number": 2})
+    _write_registration(state, "v3", {"schema_version": 3, "issue_number": 3})
+    _write_registration(state, "v4", {"schema_version": 4, "issue_number": 4})
+
+    assert active_registration_issue_numbers(state) == frozenset({2, 3})
 
 
 def test_registration_does_not_read_todos_md(tmp_path):
