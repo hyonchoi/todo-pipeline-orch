@@ -506,6 +506,9 @@ def test_registration_authority_is_the_issue_snapshot(tmp_path):
     assert authority.plan_path == "plan.md"
     assert authority.worktree == (repo / ".worktrees" / "todo-42-do-it").resolve()
     assert authority.manifest.tasks[0].id == "task-1"
+    assert authority.plan_hash == json.loads(
+        (state / "runs" / "01TICK" / "registration.json").read_text()
+    )["plan_hash"]
     assert not (repo / "TODOS.md").exists()
 
 

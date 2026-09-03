@@ -114,6 +114,10 @@ class ValidatedRegistration:
     assignee: str
     review_assignee: str | None
     prompt_client: str
+    # The hash verified against the Plan bytes read at ``base_sha``; callers
+    # that hold the Plan text independently can re-pin it without re-reading
+    # the (worker-writable) registration file.
+    plan_hash: str
 
 
 def sanitize_result_text(value: object, *, maximum: int) -> str:
@@ -542,6 +546,7 @@ def load_validated_registration(
         registration["assignee"],
         registration["review_assignee"],
         registration["prompt_client"],
+        registration["plan_hash"],
     )
 
 

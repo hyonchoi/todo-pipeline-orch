@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import logging
 import os
@@ -52,6 +53,7 @@ from hermes_pipeline.harness import (
     _ConvergenceMonitor,
     _prune_retained_state,
     _validate_profile_prerequisites,
+    assert_tick_id_unchanged,
     branch_has_run_provenance,
     cards_for_registered_keys,
     cleanup_remote,
@@ -73,6 +75,7 @@ from hermes_pipeline.harness import (
     read_recorded_branch,
     ready_issue_numbers,
     reconcile_created_issue,
+    recover_pinned_registration,
     recover_tick_registration,
     resolve_sandbox_repo,
     run_harness,
@@ -5776,3 +5779,367 @@ class TestWaitForIssueVisible:
 
         assert ready_issue_numbers(tmp_path, SANDBOX) == (12,)
         assert other_ready_issues(tmp_path, SANDBOX, exclude_issue=12) == ()
+
+
+# ---------------------------------------------------------------------------
+# Plan-pinned registration recovery (H1)
+# ---------------------------------------------------------------------------
+
+_PINNED_REPO = "acme/sandbox"
+_PINNED_ISSUE = 42
+_PINNED_TICK = "01PINNED"
+_PINNED_PLAN = "docs/harness/tok00000-plan.md"
+_PINNED_BRANCH = "feat/pinned-run"
+_PINNED_STEPS = ("plan:task-1", "validate:task-1")
+
+
+def _pinned_manifest(todo_id: str) -> str:
+    payload = {
+        "schema_version": 1,
+        "todo_id": todo_id,
+        "tasks": [
+            {
+                "id": "task-1",
+                "title": "Pinned task",
+                "instructions": "Implement the change.",
+                "acceptance_criteria": ["Change is observable."],
+                "verification": ["uv run pytest tests/test_change.py"],
+                "commit_message": "feat: change",
+            }
+        ],
+    }
+    return f"# Plan\n\n```json tpo-plan\n{json.dumps(payload)}\n```\n"
+
+
+@dataclasses.dataclass
+class _PinnedFixture:
+    project_dir: Path
+    state: Path
+    issue: HarnessIssue
+    plan_sha: str
+    plan_text: str
+    worktree: Path
+    run_dir: Path
+
+    @property
+    def registration_path(self) -> Path:
+        return self.run_dir / "registration.json"
+
+    def edit_registration(self, **changes: object) -> None:
+        payload = json.loads(self.registration_path.read_text())
+        payload.update(changes)
+        self.registration_path.write_text(json.dumps(payload))
+
+    def write_sentinel(self, keys: object) -> None:
+        outcomes = self.worktree / ".hermes" / "outcomes"
+        outcomes.mkdir(parents=True, exist_ok=True)
+        (outcomes / "expected-phases.json").write_text(json.dumps(keys))
+
+    def recover(self, **overrides: object) -> TickRegistration:
+        kwargs: dict[str, object] = {
+            "issue": self.issue,
+            "repo": _PINNED_REPO,
+            "plan_sha": self.plan_sha,
+            "plan_text": self.plan_text,
+        }
+        kwargs.update(overrides)
+        return recover_pinned_registration(self.project_dir, self.state, **kwargs)
+
+
+def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _PinnedFixture:
+    """A real ``register_pinned_run`` against a temp clone whose HEAD commits the Plan."""
+    from hermes_pipeline.run_registration import register_pinned_run
+
+    project_dir = tmp_path / "clone"
+    (project_dir / _PINNED_PLAN).parent.mkdir(parents=True)
+    _real_git("init", "-q", "-b", "main", cwd=project_dir)
+    _real_git("config", "user.email", "harness@example.com", cwd=project_dir)
+    _real_git("config", "user.name", "Harness", cwd=project_dir)
+    plan_text = _pinned_manifest(f"TODO-{issue}")
+    (project_dir / _PINNED_PLAN).write_text(plan_text)
+    _real_git("add", ".", cwd=project_dir)
+    _real_git("commit", "-qm", "plan", cwd=project_dir)
+    _real_git("remote", "add", "origin", f"https://github.com/{_PINNED_REPO}.git", cwd=project_dir)
+    plan_sha = _real_git("rev-parse", "HEAD", cwd=project_dir)
+
+    body = f"### Plan\n\n{_PINNED_PLAN}\n\n### Branch\n\n{_PINNED_BRANCH}\n"
+    payload = issue_payload(
+        issue,
+        title="Pinned run",
+        body=body,
+        html_url=f"https://github.com/{_PINNED_REPO}/issues/{issue}",
+    )
+    state = project_dir / ".hermes"
+    registration = register_pinned_run(
+        project_dir=project_dir,
+        state_dir=state,
+        tick_id=_PINNED_TICK,
+        selected_issue=issue_from_api(payload, repo=_PINNED_REPO),
+        plan_path=_PINNED_PLAN,
+        profile="native-sdd",
+        prompt_client="claude",
+        assignee="pipeline",
+        review_assignee=None,
+        step_keys=_PINNED_STEPS,
+        repo=_PINNED_REPO,
+    )
+    _write_tick_state(state, tick_id=_PINNED_TICK, expected_phases=None)
+    fixture = _PinnedFixture(
+        project_dir=project_dir,
+        state=state,
+        issue=HarnessIssue(
+            number=issue,
+            todo_id=f"TODO-{issue}",
+            branch=_PINNED_BRANCH,
+            plan_path=_PINNED_PLAN,
+            title="Pinned run",
+            run_token="tok00000",
+        ),
+        plan_sha=plan_sha,
+        plan_text=plan_text,
+        worktree=registration.worktree,
+        run_dir=state / "runs" / _PINNED_TICK,
+    )
+    fixture.write_sentinel(list(_PINNED_STEPS))
+    return fixture
+
+
+@pytest.mark.real_git
+class TestRecoverPinnedRegistration:
+    def test_happy_path_returns_pinned_registration(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+
+        reg = fx.recover()
+
+        assert reg.tick_id == _PINNED_TICK
+        assert reg.todo_id == f"TODO-{_PINNED_ISSUE}"
+        assert reg.phase_keys == _PINNED_STEPS
+        assert reg.worktree == fx.worktree
+        assert reg.branch == _PINNED_BRANCH
+        assert reg.base_sha == fx.plan_sha
+        assert reg.run_dir == fx.run_dir
+        assert reg.pinned is True
+
+    def test_missing_registration_is_invalid(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        fx.registration_path.unlink()
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_invalid"
+        assert excinfo.value.detail == "registration_invalid"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    def test_worktree_outside_repository_is_invalid(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        outside = tmp_path / "elsewhere" / fx.worktree.name
+        fx.edit_registration(worktree=str(outside))
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_invalid"
+        assert excinfo.value.detail == "registration_invalid"
+
+    def test_worktree_on_wrong_branch_is_invalid(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        _real_git("checkout", "-q", "-b", "feat/other", cwd=fx.worktree)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_invalid"
+
+    def test_altered_plan_hash_is_invalid(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        fx.edit_registration(plan_hash="0" * 64)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_invalid"
+
+    def test_contract_detail_is_surfaced(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        fx.edit_registration(schema_version=99)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_invalid"
+        assert excinfo.value.detail == "registration_invalid: unsupported schema_version"
+
+    def test_forged_plan_via_replace_ref_is_plan_mismatch(self, tmp_path: Path):
+        # The clone is agent-controlled: a replace ref makes ``git show
+        # <plan_sha>:<plan_path>`` return forged Plan bytes, so the contract's
+        # own hash check passes against the forgery. The harness must still pin
+        # the hash to the Plan text it committed itself.
+        fx = _pinned_registration(tmp_path)
+        forged = fx.plan_text + "\n<!-- forged -->\n"
+        (fx.project_dir / _PINNED_PLAN).write_text(forged)
+        _real_git("commit", "-qam", "forged", cwd=fx.project_dir)
+        forged_sha = _real_git("rev-parse", "HEAD", cwd=fx.project_dir)
+        _real_git("replace", "-f", fx.plan_sha, forged_sha, cwd=fx.project_dir)
+        shown = _real_git("show", f"{fx.plan_sha}:{_PINNED_PLAN}", cwd=fx.project_dir)
+        assert "forged" in shown
+        true_hash = json.loads(fx.registration_path.read_text())["plan_hash"]
+        fx.edit_registration(plan_hash=hashlib.sha256(forged.encode()).hexdigest())
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_plan_mismatch"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+        # Race variant: the true hash is restored while the replace ref stays in
+        # place, so the contract's own check must fail against the forged bytes.
+        fx.edit_registration(plan_hash=true_hash)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "registration_invalid"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    def test_branch_mismatch_is_unexpected(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover(issue=dataclasses.replace(fx.issue, branch="feat/other"))
+
+        assert excinfo.value.code == "unexpected_registration"
+        assert excinfo.value.detail == f"branch {_PINNED_BRANCH} != feat/other"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    def test_plan_path_mismatch_is_unexpected(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        other = "docs/harness/other000-plan.md"
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover(issue=dataclasses.replace(fx.issue, plan_path=other))
+
+        assert excinfo.value.code == "unexpected_registration"
+        assert excinfo.value.detail == f"plan_path {_PINNED_PLAN} != {other}"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    def test_sentinel_mismatch_detail_is_capped(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        fx.write_sentinel([f"phase:{'x' * 200}-{i}" for i in range(20)])
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "unexpected_registration"
+        assert len(excinfo.value.detail) <= harness_mod._ERROR_MESSAGE_MAX
+
+    def test_malformed_base_sha_is_invalid(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        fx.edit_registration(base_sha="not-a-sha")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover(plan_sha="not-a-sha")
+
+        assert excinfo.value.code == "registration_invalid"
+
+    def test_issue_mismatch_is_unexpected(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover(issue=dataclasses.replace(fx.issue, number=_PINNED_ISSUE + 1))
+
+        assert excinfo.value.code == "unexpected_registration"
+        assert excinfo.value.detail == f"issue {_PINNED_ISSUE}"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    def test_base_sha_mismatch(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        other = "f" * 40
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover(plan_sha=other)
+
+        assert excinfo.value.code == "registration_base_mismatch"
+        assert excinfo.value.detail == f"{fx.plan_sha} != {other}"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    @pytest.mark.parametrize(
+        "sentinel",
+        [
+            ["plan:task-1"],
+            ["plan:task-1", "validate:task-1", "extra"],
+            ["plan:task-1", "validate:task-1", "plan:task-1"],
+        ],
+        ids=["subset", "superset", "duplicate"],
+    )
+    def test_sentinel_keys_must_match_step_keys(self, tmp_path: Path, sentinel):
+        fx = _pinned_registration(tmp_path)
+        fx.write_sentinel(sentinel)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "unexpected_registration"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    def test_sentinel_read_from_worktree_not_clone(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        (fx.state / "outcomes" / "expected-phases.json").write_text(json.dumps(list(_PINNED_STEPS)))
+        (fx.worktree / ".hermes" / "outcomes" / "expected-phases.json").unlink()
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "expected_phases_missing"
+        assert excinfo.value.tick_id == _PINNED_TICK
+
+    def test_tick_not_persisted_propagates(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        log = tmp_path / "tick.log"
+        log.write_text("stderr tail\n")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover(previous_tick_id=_PINNED_TICK, tick_log=log)
+
+        assert excinfo.value.code == "tick_not_persisted"
+        assert "stderr tail" in excinfo.value.detail
+
+    def test_picked_none_propagates(self, tmp_path: Path):
+        fx = _pinned_registration(tmp_path)
+        (fx.state / "outcomes" / f"{_PINNED_TICK}-phases.json").write_text(
+            json.dumps({"outcome": "picked_none"}) + "\n"
+        )
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            fx.recover()
+
+        assert excinfo.value.code == "picked_none"
+
+
+class TestAssertTickIdUnchanged:
+    def test_unchanged_is_ok(self, tmp_path: Path):
+        (tmp_path / "current_tick_id.txt").write_text("01TICK\n")
+
+        assert assert_tick_id_unchanged(tmp_path, expected="01TICK") is None
+
+    def test_changed_is_unexpected_selection(self, tmp_path: Path):
+        (tmp_path / "current_tick_id.txt").write_text("02TICK\n")
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            assert_tick_id_unchanged(tmp_path, expected="01TICK")
+
+        assert excinfo.value.code == "unexpected_selection"
+        assert excinfo.value.detail == "02TICK != 01TICK"
+        assert excinfo.value.tick_id == "01TICK"
+
+    @pytest.mark.parametrize("content", [None, " \n"], ids=["absent", "blank"])
+    def test_missing_is_unexpected_selection(self, tmp_path: Path, content):
+        if content is not None:
+            (tmp_path / "current_tick_id.txt").write_text(content)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            assert_tick_id_unchanged(tmp_path, expected="01TICK")
+
+        assert excinfo.value.code == "unexpected_selection"
+        assert excinfo.value.detail == "missing"
+        assert excinfo.value.tick_id == "01TICK"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json as _json
 import logging
 import math
@@ -29,6 +30,7 @@ from .profile_prerequisites import (
     unverified_prerequisite_ids,
     verify_hermes_skill_registry_prerequisite,
 )
+from .result_contract import ResultContractError, load_validated_registration
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +105,19 @@ class HarnessTickError(RuntimeError):
     may have persisted a tick id and spawned workers before the deadline, so the
     caller must re-read ``current_tick_id.txt`` and, when no new id is readable,
     treat the sandbox as not provably idle.
+
+    Plan-pinned (``requires_plan``) runs add, all carrying the tick id:
+    ``registration_invalid`` (``load_validated_registration`` rejected the
+    persisted ``registration.json``; ``detail`` is the contract error message),
+    ``registration_base_mismatch`` (the run was pinned to a ``base_sha`` other
+    than the harness's Plan commit), ``registration_plan_mismatch`` (the
+    registered ``plan_hash`` is not the hash of the Plan text the harness
+    committed, as a ``git replace`` forgery in the clone would produce),
+    ``unexpected_selection`` (raised by
+    :func:`assert_tick_id_unchanged` when a later tick persisted a different, or
+    no, tick id), and, reserved for the multi-tick driver, ``tick_stalled`` (no
+    card progressed within the stall window) and ``tick_budget_exhausted`` (the
+    tick budget ran out before the run completed).
     """
 
     def __init__(self, code: str, detail: str = "", *, tick_id: str | None = None) -> None:
@@ -2399,6 +2414,11 @@ class TickRegistration:
     tick_id: str
     todo_id: str
     phase_keys: tuple[str, ...]
+    worktree: Path | None = None
+    branch: str | None = None
+    base_sha: str | None = None
+    run_dir: Path | None = None
+    pinned: bool = False
 
 
 def _read_json_file(path: Path) -> Any:
@@ -2502,6 +2522,25 @@ def recover_tick_registration(
     ``failed_to_spawn``, ``expected_phases_missing``) carries it as ``exc.tick_id``
     so :func:`shutdown_run` can still quiesce cards that may exist for it.
     """
+    tick_id, outcomes_dir = _recover_started_tick(
+        project_state, tick_log=tick_log, previous_tick_id=previous_tick_id
+    )
+    return TickRegistration(
+        tick_id=tick_id,
+        todo_id=f"TODO-{expected_issue}",
+        phase_keys=_read_expected_phases(outcomes_dir, tick_id),
+    )
+
+
+def _recover_started_tick(
+    project_state: Path, *, tick_log: Path | None, previous_tick_id: str | None
+) -> tuple[str, Path]:
+    """``(tick_id, outcomes_dir)`` of the newly persisted, started, spawned tick.
+
+    Raises ``tick_not_persisted``/``failed_to_spawn`` when no new tick id exists,
+    ``picked_none``/``tick_not_started`` from the first ``<tick>-phases.json``
+    entry, and ``failed_to_spawn`` from ``<tick>.json``.
+    """
     tick_id = read_current_tick_id(project_state)
     outcomes_dir = project_state / "outcomes"
     if tick_id is None or tick_id == previous_tick_id:
@@ -2529,7 +2568,11 @@ def recover_tick_registration(
     spawn_record = _read_json_file(outcomes_dir / f"{tick_id}.json")
     if isinstance(spawn_record, dict) and spawn_record.get("outcome") == "failed_to_spawn":
         raise HarnessTickError("failed_to_spawn", _compact_detail(spawn_record), tick_id=tick_id)
+    return tick_id, outcomes_dir
 
+
+def _read_expected_phases(outcomes_dir: Path, tick_id: str) -> tuple[str, ...]:
+    """Phase keys from ``<outcomes_dir>/expected-phases.json``, else ``expected_phases_missing``."""
     expected = _read_json_file(outcomes_dir / "expected-phases.json")
     if (
         not isinstance(expected, list)
@@ -2537,12 +2580,103 @@ def recover_tick_registration(
         or not all(isinstance(key, str) for key in expected)
     ):
         raise HarnessTickError("expected_phases_missing", tick_id, tick_id=tick_id)
+    return tuple(expected)
 
+
+def recover_pinned_registration(
+    project_dir: Path,
+    project_state: Path,
+    *,
+    issue: HarnessIssue,
+    repo: str,
+    plan_sha: str,
+    plan_text: str,
+    tick_log: Path | None = None,
+    previous_tick_id: str | None = None,
+) -> TickRegistration:
+    """Recover a plan-pinned (``requires_plan``) tick through the production trust boundary.
+
+    After the started-tick checks of :func:`recover_tick_registration`, the
+    persisted ``<project_state>/runs/<tick_id>/registration.json`` is loaded
+    with ``load_validated_registration`` (schema, path containment, worktree
+    identity, Plan hash, issue snapshot); any contract violation is reported as
+    ``registration_invalid`` with the contract error message (code, plus its
+    detail when present) as ``detail``. The registration must pin *issue*'s
+    number, branch and plan path (``unexpected_registration``, detail naming the
+    field); ``base_sha`` must be *plan_sha*, the commit the harness pushed the
+    Plan in (``registration_base_mismatch``); ``plan_hash`` must equal the
+    SHA-256 of *plan_text*, the Plan the harness committed itself
+    (``registration_plan_mismatch``) -- the contract's own hash check reads the
+    Plan from the agent-controlled clone, where ``git replace`` can forge it;
+    and the ``expected-phases.json`` sentinel under the run worktree must list
+    exactly the registered ``step_keys`` (``expected_phases_missing`` /
+    ``unexpected_registration``, detail capped at ``_ERROR_MESSAGE_MAX``).
+    """
+    tick_id, _ = _recover_started_tick(
+        project_state, tick_log=tick_log, previous_tick_id=previous_tick_id
+    )
+    try:
+        validated = load_validated_registration(project_dir, project_state, tick_id, repo=repo)
+    except ResultContractError as exc:
+        raise HarnessTickError("registration_invalid", str(exc), tick_id=tick_id) from exc
+    if validated.issue_number != issue.number:
+        raise HarnessTickError(
+            "unexpected_registration", f"issue {validated.issue_number}", tick_id=tick_id
+        )
+    for name, actual, wanted in (
+        ("branch", validated.branch, issue.branch),
+        ("plan_path", validated.plan_path, issue.plan_path),
+    ):
+        if actual != wanted:
+            raise HarnessTickError(
+                "unexpected_registration",
+                f"{name} {actual} != {wanted}"[:_ERROR_MESSAGE_MAX],
+                tick_id=tick_id,
+            )
+    if validated.base_sha != plan_sha:
+        raise HarnessTickError(
+            "registration_base_mismatch", f"{validated.base_sha} != {plan_sha}", tick_id=tick_id
+        )
+    expected_hash = hashlib.sha256(plan_text.encode("utf-8")).hexdigest()
+    if validated.plan_hash != expected_hash:
+        raise HarnessTickError(
+            "registration_plan_mismatch",
+            f"{validated.plan_hash} != {expected_hash}",
+            tick_id=tick_id,
+        )
+    expected = _read_expected_phases(validated.worktree / ".hermes" / "outcomes", tick_id)
+    step_keys = tuple(validated.step_keys)
+    # result_contract already rejects duplicate step_keys; only the sentinel can repeat.
+    if set(expected) != set(step_keys) or len(set(expected)) != len(expected):
+        raise HarnessTickError(
+            "unexpected_registration",
+            f"expected phases {list(expected)} != step keys {list(step_keys)}"[:_ERROR_MESSAGE_MAX],
+            tick_id=tick_id,
+        )
     return TickRegistration(
         tick_id=tick_id,
-        todo_id=f"TODO-{expected_issue}",
-        phase_keys=tuple(expected),
+        todo_id=issue.todo_id,
+        phase_keys=step_keys,
+        worktree=validated.worktree,
+        branch=validated.branch,
+        base_sha=validated.base_sha,
+        run_dir=project_state / "runs" / tick_id,
+        pinned=True,
     )
+
+
+def assert_tick_id_unchanged(project_state: Path, *, expected: str) -> None:
+    """Raise ``unexpected_selection`` unless ``current_tick_id.txt`` still reads *expected*.
+
+    Later ticks of a plan-pinned run must not register a new tick; a missing or
+    blank id is reported with detail ``"missing"``. ``tick_id`` is *expected*
+    because that is the tick whose cards may still exist.
+    """
+    current = read_current_tick_id(project_state)
+    if current is None:
+        raise HarnessTickError("unexpected_selection", "missing", tick_id=expected)
+    if current != expected:
+        raise HarnessTickError("unexpected_selection", f"{current} != {expected}", tick_id=expected)
 
 
 def cards_for_registered_keys(phases: Sequence[Phase], keys: Sequence[str]) -> list[Phase]:
