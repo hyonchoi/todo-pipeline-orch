@@ -1,8 +1,8 @@
 # gstack / Codex release qualification
 
 - Evidence status: `release-final`
-- Release: `1.0.0`
-- Source version: `1.0.0`
+- Release: `0.10.0`
+- Source version: `0.10.0`
 - Source commit: `32c108f754abe4fd8d1b54575d0a155455fc9be2`
 - Profile/client: `gstack / codex`
 - Timestamp: `2026-07-30T23:07:18Z`
@@ -17,7 +17,7 @@
 - Result: `PASS`
 
 This release-final artifact records the passing qualification at the source
-commit above for release `1.0.0`.
+commit above for release `0.10.0`.
 
 ## Discovery commands and captured output
 

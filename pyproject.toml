@@ -1,6 +1,6 @@
 [project]
 name = "hermes-pipeline"
-version = "1.0.0"
+version = "0.10.0"
 description = "Autonomous GitHub Issues pipeline orchestrator (Hermes Kanban + Claude Code)"
 requires-python = ">=3.12"
 dependencies = [
