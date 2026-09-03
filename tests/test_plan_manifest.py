@@ -203,6 +203,44 @@ def test_rejects_bounded_string_overflow():
         parse_plan_manifest(_document(_manifest(tasks=[task])), expected_todo_id="TODO-42")
 
 
+@pytest.mark.parametrize(
+    "field",
+    ["id", "title", "instructions", "acceptance_criteria", "verification", "commit_message"],
+)
+@pytest.mark.parametrize("control", ["\x00", "\x1f", "\x7f"])
+def test_manifest_rejects_controls_in_every_task_string(field, control):
+    task = dict(_manifest()["tasks"][0])
+    if isinstance(task[field], list):
+        task[field] = [task[field][0] + control]
+    else:
+        task[field] += control
+
+    with pytest.raises(PlanManifestValidationError, match="invalid_task"):
+        parse_plan_manifest(_document(_manifest(tasks=[task])), expected_todo_id="TODO-42")
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["title", "instructions", "acceptance_criteria", "verification", "commit_message"],
+)
+@pytest.mark.parametrize("allowed_control", ["\n", "\r", "\t"])
+def test_manifest_accepts_safe_whitespace_in_task_text(field, allowed_control):
+    task = dict(_manifest()["tasks"][0])
+    if isinstance(task[field], list):
+        task[field] = [task[field][0] + allowed_control + "continued"]
+    else:
+        task[field] += allowed_control + "continued"
+
+    manifest = parse_plan_manifest(
+        _document(_manifest(tasks=[task])), expected_todo_id="TODO-42"
+    )
+
+    assert manifest is not None
+    parsed = getattr(manifest.tasks[0], field)
+    expected = tuple(task[field]) if isinstance(task[field], list) else task[field]
+    assert parsed == expected
+
+
 def test_accepts_exactly_fifty_tasks_and_rejects_fifty_one():
     template = _manifest()["tasks"][0]
     tasks = [template | {"id": f"task-{index}"} for index in range(1, MAX_PLAN_TASKS + 1)]

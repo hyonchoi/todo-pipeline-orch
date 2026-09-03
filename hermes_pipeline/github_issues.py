@@ -224,10 +224,7 @@ def render_issue_body(fields: Mapping[str, str | None], *, include_empty: bool =
 
 
 def _normalize_body(body: str) -> str:
-    lines = [line.rstrip() for line in _normalize_newlines(body).split("\n")]
-    while lines and not lines[-1]:
-        lines.pop()
-    return "\n".join(lines)
+    return _normalize_newlines(body).rstrip("\n")
 
 
 def canonical_issue_snapshot(repo: str, number: int, title: str, body: str) -> str:
@@ -262,6 +259,20 @@ def split_canonical_snapshot(snapshot: str) -> tuple[str, int, str, str]:
 
 def snapshot_hash(snapshot: str) -> str:
     return hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
+
+
+def _legacy_v2_snapshot_hash(snapshot: str) -> str:
+    """Hash a current snapshot using the pre-v3 body normalization contract."""
+    repo, number, title, body = split_canonical_snapshot(snapshot)
+    lines = [line.rstrip() for line in body.split("\n")]
+    while lines and not lines[-1]:
+        lines.pop()
+    legacy_body = "\n".join(lines)
+    legacy_snapshot = (
+        f"{SNAPSHOT_HEADER}\nrepo: {repo}\nnumber: {number}\n"
+        f"title: {title.strip()}\n\n{legacy_body}\n"
+    )
+    return snapshot_hash(legacy_snapshot)
 
 
 @dataclass(frozen=True)
@@ -878,7 +889,13 @@ def check_issue_drift(
         return "issue_closed"
     if ON_HOLD_LABEL in live.labels or "wontfix" in live.labels:
         return "issue_on_hold"
-    if live.entry_hash != pinned_hash:
+    hashes_match = live.entry_hash == pinned_hash
+    if not hashes_match and registration_payload.get("schema_version") == 2:
+        try:
+            hashes_match = _legacy_v2_snapshot_hash(live.snapshot) == pinned_hash
+        except SnapshotFormatError:
+            hashes_match = False
+    if not hashes_match:
         return "issue_drift"
     return None
 

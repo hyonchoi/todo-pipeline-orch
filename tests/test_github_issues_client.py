@@ -670,9 +670,10 @@ def test_add_blocked_by_treats_rejected_post_as_existing_edge(fake_gh, tmp_path)
 # ---------------------------------------------------------------------------
 
 
-def _drift_registration(number: int = 7) -> dict:
+def _drift_registration(number: int = 7, *, schema_version: int = 2) -> dict:
     issue = gi.issue_from_api(issue_payload(number), repo=REPO)
     return {
+        "schema_version": schema_version,
         "issue_number": number,
         "issue_url": issue.url,
         "selected_entry_hash": issue.entry_hash,
@@ -687,6 +688,35 @@ def test_check_issue_drift_returns_none_when_live_issue_matches(fake_gh, tmp_pat
 
 def test_check_issue_drift_detects_edited_issue(fake_gh, tmp_path):
     fake_gh.on(*API, stdout=json.dumps(issue_payload(7, body="### What\n\nEdited\n")))
+    assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) == "issue_drift"
+
+
+def test_check_issue_drift_accepts_legacy_v2_trailing_whitespace_normalization(
+    fake_gh, tmp_path
+):
+    fake_gh.on(
+        *API,
+        stdout=json.dumps(issue_payload(7, body="### What  \n\nWidget  \n")),
+    )
+    assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) is None
+
+
+def test_check_issue_drift_keeps_v3_snapshot_comparison_exact(fake_gh, tmp_path):
+    fake_gh.on(
+        *API,
+        stdout=json.dumps(issue_payload(7, body="### What  \n\nWidget  \n")),
+    )
+    assert (
+        check_issue_drift(tmp_path, _drift_registration(schema_version=3), repo=REPO)
+        == "issue_drift"
+    )
+
+
+def test_check_issue_drift_v2_fallback_still_detects_real_edits(fake_gh, tmp_path):
+    fake_gh.on(
+        *API,
+        stdout=json.dumps(issue_payload(7, body="### What  \n\nEdited  \n")),
+    )
     assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) == "issue_drift"
 
 

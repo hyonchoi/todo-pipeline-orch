@@ -22,6 +22,7 @@ from hermes_pipeline.run_registration import (
     register_pinned_run,
     registration_state,
 )
+from hermes_pipeline.todos_create import load_create_request, render_create_body
 from tests.gh_fakes import API_ARGV, issue_payload, make_issue
 
 REPO = "acme/repo"
@@ -150,6 +151,39 @@ def test_embedded_registration_materializes_private_verified_artifact(tmp_path):
     payload = json.loads((artifact.parent / "registration.json").read_text())
     assert payload["schema_version"] == 3
     assert payload["plan_hash"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
+
+
+def test_created_issue_registration_preserves_plan_markdown_hard_break_spaces(tmp_path):
+    repo, _ = _repo(tmp_path)
+    request_path = repo / "request.json"
+    payload = {
+        "schema_version": 1,
+        "transaction_id": "12345678-1234-4234-9234-123456789abc",
+        "title": "Ship the feature",
+        "fields": {
+            "Summary": "Ship it", "What": "Build it", "Why": "Users need it",
+            "Pros": "Faster", "Cons": "Risk", "Context": "None",
+            "Assumptions": "None", "Spec": "docs/spec.md", "Reference": "README.md",
+            "Branch": "feat/todo-42", "Priority": "P1", "Effort": "M",
+            "Phase": "4 (Development)", "Test Coverage": "required",
+            "Security Review": "required", "UI Review": "not-required",
+        },
+        "plan_markdown": "# Implementation Plan\n\nFirst step.  \nSecond step.",
+        "tasks": [{
+            "id": "task-1", "title": "Ship", "instructions": "Do it",
+            "acceptance_criteria": ["Works"], "verification": ["pytest"],
+            "commit_message": "feat: ship",
+        }],
+    }
+    request_path.write_text(json.dumps(payload), encoding="utf-8")
+    request_path.chmod(0o600)
+    create_request = load_create_request(request_path)
+    issue = _issue(body=render_create_body(create_request, issue_number=42))
+
+    _register(repo, issue=issue, plan_path=None)
+
+    artifact = repo / ".hermes/runs/01TICK/plan.md"
+    assert "First step.  \nSecond step." in artifact.read_text()
 
 
 def test_embedded_registration_rejects_issue_object_source_not_bound_to_snapshot(tmp_path):

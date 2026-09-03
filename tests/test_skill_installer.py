@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -689,3 +690,165 @@ def test_partial_rollback_stage_cleanup_rejects_replacement_drift(
     ) == 1
     assert journal.exists()
     assert (stage / "replacement.txt").exists()
+
+
+@pytest.mark.parametrize("operation", ["install", "reinstall", "uninstall"])
+def test_postcommit_cleanup_resumes_after_each_removed_entry(
+    tmp_path, monkeypatch, operation
+):
+    from hermes_pipeline import skill_installer
+
+    source = _source(tmp_path)
+    home = tmp_path / "home"
+    dest, _lock, journal, receipt = _paths(home)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(skill_installer, "_skill_source", lambda _name: source)
+    if operation != "install":
+        dest.mkdir(parents=True)
+        (dest / "nested").mkdir()
+        (dest / "nested" / "old.txt").write_text("old\n")
+        if operation == "uninstall":
+            identity = skill_installer._identity(dest)
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(
+                json.dumps({"destination_digest": identity["digest"]}) + "\n"
+            )
+
+    seen = 0
+
+    def kill(point: str) -> None:
+        nonlocal seen
+        if point == "cleanup:entry-removed":
+            seen += 1
+            if seen == 1:
+                raise skill_installer.InjectedCrash(point)
+        if operation == "install" and point == "cleanup:pending":
+            raise skill_installer.InjectedCrash(point)
+
+    monkeypatch.setattr(skill_installer, "_checkpoint", kill)
+    with pytest.raises(skill_installer.InjectedCrash):
+        if operation == "uninstall":
+            skill_installer.uninstall(
+                "todo-manager", target="codex", scope="user", yes=True
+            )
+        else:
+            skill_installer.install(
+                "todo-manager",
+                target="codex",
+                scope="user",
+                reinstall=operation == "reinstall",
+            )
+    assert journal.exists()
+    monkeypatch.setattr(skill_installer, "_checkpoint", lambda _point: None)
+    assert skill_installer.recover(
+        "todo-manager", target="codex", scope="user", finish=True
+    ) == 0
+    assert not journal.exists()
+    if operation == "uninstall":
+        assert not dest.exists()
+    else:
+        assert (dest / "SKILL.md").read_text() == "# bundled\n"
+
+
+@pytest.mark.parametrize("operation", ["install", "reinstall", "uninstall"])
+def test_postcommit_cleanup_rejects_replacement_after_interruption(
+    tmp_path, monkeypatch, operation
+):
+    from hermes_pipeline import skill_installer
+
+    source = _source(tmp_path)
+    home = tmp_path / "home"
+    dest, _lock, journal, receipt = _paths(home)
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(skill_installer, "_skill_source", lambda _name: source)
+    if operation != "install":
+        dest.mkdir(parents=True)
+        (dest / "nested").mkdir()
+        (dest / "nested" / "old.txt").write_text("old\n")
+        if operation == "uninstall":
+            identity = skill_installer._identity(dest)
+            receipt.parent.mkdir(parents=True, exist_ok=True)
+            receipt.write_text(
+                json.dumps({"destination_digest": identity["digest"]}) + "\n"
+            )
+
+    monkeypatch.setattr(
+        skill_installer,
+        "_checkpoint",
+        lambda point: (_ for _ in ()).throw(skill_installer.InjectedCrash(point))
+        if point
+        == ("cleanup:pending" if operation == "install" else "cleanup:entry-removed")
+        else None,
+    )
+    with pytest.raises(skill_installer.InjectedCrash):
+        if operation == "uninstall":
+            skill_installer.uninstall(
+                "todo-manager", target="codex", scope="user", yes=True
+            )
+        else:
+            skill_installer.install(
+                "todo-manager",
+                target="codex",
+                scope="user",
+                reinstall=operation == "reinstall",
+            )
+
+    state = json.loads(journal.read_text())
+    cleanup_path = Path(state["stage" if operation == "install" else "backup"])
+    cleanup_path.mkdir(parents=True, exist_ok=True)
+    (cleanup_path / "replacement.txt").write_text("attacker\n")
+    monkeypatch.setattr(skill_installer, "_checkpoint", lambda _point: None)
+    assert skill_installer.recover(
+        "todo-manager", target="codex", scope="user", finish=True
+    ) == 1
+    assert journal.exists()
+    assert (cleanup_path / "replacement.txt").exists()
+
+
+@pytest.mark.parametrize("operation", ["reinstall", "uninstall"])
+def test_postcommit_cleanup_rejects_same_manifest_root_replacement(
+    tmp_path, monkeypatch, operation
+):
+    from hermes_pipeline import skill_installer
+
+    source = _source(tmp_path)
+    home = tmp_path / "home"
+    dest, _lock, journal, receipt = _paths(home)
+    dest.mkdir(parents=True)
+    (dest / "nested").mkdir()
+    (dest / "nested" / "old.txt").write_text("old\n")
+    monkeypatch.setattr(Path, "home", lambda: home)
+    monkeypatch.setattr(skill_installer, "_skill_source", lambda _name: source)
+    if operation == "uninstall":
+        identity = skill_installer._identity(dest)
+        receipt.parent.mkdir(parents=True, exist_ok=True)
+        receipt.write_text(json.dumps({"destination_digest": identity["digest"]}) + "\n")
+
+    monkeypatch.setattr(
+        skill_installer,
+        "_checkpoint",
+        lambda point: (_ for _ in ()).throw(skill_installer.InjectedCrash(point))
+        if point == "cleanup:entry-removed"
+        else None,
+    )
+    with pytest.raises(skill_installer.InjectedCrash):
+        if operation == "uninstall":
+            skill_installer.uninstall(
+                "todo-manager", target="codex", scope="user", yes=True
+            )
+        else:
+            skill_installer.install(
+                "todo-manager", target="codex", scope="user", reinstall=True
+            )
+
+    state = json.loads(journal.read_text())
+    cleanup_path = Path(state["backup"])
+    original = cleanup_path.with_name(cleanup_path.name + ".displaced")
+    cleanup_path.rename(original)
+    shutil.copytree(original, cleanup_path)
+    monkeypatch.setattr(skill_installer, "_checkpoint", lambda _point: None)
+    assert skill_installer.recover(
+        "todo-manager", target="codex", scope="user", finish=True
+    ) == 1
+    assert journal.exists()
+    assert cleanup_path.exists()

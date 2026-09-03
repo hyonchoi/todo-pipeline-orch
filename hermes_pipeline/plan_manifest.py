@@ -33,6 +33,7 @@ _PSEUDO_MANIFEST_START_RE = re.compile(
     r"^[ \t]*```json tpo-plan[ \t]*$", re.MULTILINE
 )
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*\Z")
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _MANIFEST_KEYS = frozenset({"schema_version", "todo_id", "tasks"})
 _TASK_KEYS = frozenset(
     {
@@ -252,7 +253,12 @@ def embedded_plan_source(body: str, *, expected_todo_id: str) -> PlanSource | No
 
 
 def _bounded_string(value: object, *, maximum: int, code: str) -> str:
-    if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+    if (
+        not isinstance(value, str)
+        or not value.strip()
+        or len(value) > maximum
+        or _CONTROL_RE.search(value)
+    ):
         raise PlanManifestValidationError(code)
     return value.strip()
 

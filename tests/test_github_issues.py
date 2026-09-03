@@ -278,17 +278,17 @@ def test_canonical_issue_snapshot_is_exact_and_normalizes_body():
         "number: 12\n"
         "title: Title\n"
         "\n"
-        "### What\n\nline one\nline two\n"
+        "### What\n\nline one  \nline two\n"
     )
     assert split_canonical_snapshot(snapshot) == (
         REPO,
         12,
         "Title",
-        "### What\n\nline one\nline two",
+        "### What\n\nline one  \nline two",
     )
     assert snapshot_hash(snapshot) == hashlib.sha256(snapshot.encode("utf-8")).hexdigest()
     assert snapshot_hash(snapshot) == snapshot_hash(
-        canonical_issue_snapshot(REPO, 12, "Title", "### What\n\nline one\nline two")
+        canonical_issue_snapshot(REPO, 12, "Title", "### What\n\nline one  \nline two")
     )
 
 

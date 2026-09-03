@@ -250,6 +250,7 @@ def _step_stage(journal_path: Path, journal: dict[str, Any]) -> None:
     new_identity = _copy_source(source, stage)
     _checkpoint("stage:copied")
     journal["new_identity"] = new_identity
+    journal["cleanup_manifests"]["stage"] = _tree_manifest(stage)
     journal["step"] = {"name": "stage", "status": "done"}
     _write_journal(journal_path, journal)
     _checkpoint("stage:done")
@@ -353,22 +354,89 @@ def _step_remove_receipt(journal_path: Path, journal: dict[str, Any]) -> None:
     _checkpoint("receipt-remove:done")
 
 
+def _cleanup_tree(
+    journal_path: Path,
+    journal: dict[str, Any],
+    *,
+    key: str,
+    identity_key: str,
+) -> None:
+    target = Path(journal[key])
+    states = journal["cleanup_states"]
+    state = states[key]
+    expected_manifest = journal["cleanup_manifests"][key]
+    actual_identity = _identity(target)
+    if state == "done":
+        if actual_identity is not None:
+            raise RuntimeError(f"{key} replacement appeared after cleanup")
+        return
+    expected_identity = journal.get(identity_key)
+    if actual_identity is not None:
+        identity_fields = (
+            ("kind", "device", "inode", "mode")
+            if state == "removing"
+            else tuple(actual_identity)
+        )
+        if expected_identity is None or any(
+            actual_identity.get(field) != expected_identity.get(field)
+            for field in identity_fields
+        ):
+            raise RuntimeError(f"{key} identity drift before cleanup")
+    if state == "pending":
+        if actual_identity is None:
+            states[key] = "done"
+            _write_journal(journal_path, journal)
+            return
+        if _tree_manifest(target) != expected_manifest:
+            raise RuntimeError(f"{key} manifest drift before cleanup")
+        states[key] = "removing"
+        _write_journal(journal_path, journal)
+
+    while target.exists():
+        _validate_manifest_subset(target, expected_manifest)
+        actual_manifest = _tree_manifest(target)
+        relative = max(
+            actual_manifest,
+            key=lambda item: (len(Path(item).parts), item),
+        )
+        entry = target if relative == "." else target / relative
+        journal["step"] = {
+            "name": "cleanup-entry",
+            "status": "pending",
+            "target": key,
+            "relative": relative,
+        }
+        _write_journal(journal_path, journal)
+        _checkpoint("cleanup:entry-pending")
+        _validate_manifest_subset(target, expected_manifest)
+        if entry.is_dir():
+            entry.rmdir()
+        else:
+            entry.unlink()
+        _fsync_dir(entry.parent)
+        _checkpoint("cleanup:entry-removed")
+        journal["step"] = {
+            "name": "cleanup-entry",
+            "status": "done",
+            "target": key,
+            "relative": relative,
+        }
+        _write_journal(journal_path, journal)
+        _checkpoint("cleanup:entry-done")
+    states[key] = "done"
+    _write_journal(journal_path, journal)
+
+
 def _cleanup(journal_path: Path, journal: dict[str, Any]) -> None:
-    backup = Path(journal["backup"])
     journal["step"] = {"name": "cleanup", "status": "pending"}
     _write_journal(journal_path, journal)
     _checkpoint("cleanup:pending")
-    if backup.exists():
-        if not _same_file_identity(_identity(backup), journal.get("old_identity")):
-            raise RuntimeError("backup identity drift before cleanup")
-        shutil.rmtree(backup)
-        _fsync_dir(backup.parent)
-    stage = Path(journal["stage"])
-    if stage.exists():
-        if not _same_file_identity(_identity(stage), journal.get("new_identity")):
-            raise RuntimeError("stage identity drift before cleanup")
-        shutil.rmtree(stage)
-        _fsync_dir(stage.parent)
+    _cleanup_tree(
+        journal_path, journal, key="backup", identity_key="old_identity"
+    )
+    _cleanup_tree(
+        journal_path, journal, key="stage", identity_key="new_identity"
+    )
     _checkpoint("cleanup:removed")
     journal["step"] = {"name": "cleanup", "status": "done"}
     _write_journal(journal_path, journal)
@@ -453,6 +521,7 @@ def _load_journal(path: Path, expected: dict[str, Path]) -> dict[str, Any]:
         "source", "source_identity", "stage", "backup", "receipt", "old_identity", "new_identity",
         "receipt_previous", "receipt_previous_identity", "receipt_written_text",
         "receipt_rollback_path", "receipt_rollback_identity", "rollback_stage_manifest",
+        "cleanup_manifests", "cleanup_states",
         "committed", "step",
     }
     if set(data) - (required | {"receipt_identity"}) or not required <= set(data):
@@ -514,6 +583,13 @@ def install(
                 "receipt_rollback_path": None,
                 "receipt_rollback_identity": None,
                 "rollback_stage_manifest": None,
+                "cleanup_manifests": {
+                    "backup": _tree_manifest(paths["dest"])
+                    if old_identity is not None
+                    else {},
+                    "stage": {},
+                },
+                "cleanup_states": {"backup": "pending", "stage": "pending"},
                 "committed": False,
                 "step": {"name": "prepare", "status": "done"},
             }
@@ -576,6 +652,11 @@ def uninstall(
                 "receipt_rollback_path": None,
                 "receipt_rollback_identity": None,
                 "rollback_stage_manifest": None,
+                "cleanup_manifests": {
+                    "backup": _tree_manifest(paths["dest"]),
+                    "stage": {},
+                },
+                "cleanup_states": {"backup": "pending", "stage": "pending"},
                 "committed": False,
                 "step": {"name": "prepare", "status": "done"},
             }

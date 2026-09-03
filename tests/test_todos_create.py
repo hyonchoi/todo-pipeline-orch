@@ -88,6 +88,19 @@ def test_request_rejects_invalid_contract(tmp_path, mutation, code):
         load_create_request(path)
 
 
+@pytest.mark.parametrize("field", ["id", "title", "instructions", "acceptance_criteria", "verification", "commit_message"])
+def test_request_rejects_controls_in_every_task_string(tmp_path, field):
+    payload = request()
+    task = payload["tasks"][0]
+    if isinstance(task[field], list):
+        task[field][0] += "\x7f"
+    else:
+        task[field] += "\x7f"
+
+    with pytest.raises(TodoCreateError, match="invalid_task"):
+        load_create_request(_write(tmp_path / "request.json", payload))
+
+
 def test_duplicate_json_key_is_rejected(tmp_path):
     path = tmp_path / "request.json"
     path.write_text('{"schema_version":1,"schema_version":1}', encoding="utf-8")
