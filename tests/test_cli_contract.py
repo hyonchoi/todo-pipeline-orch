@@ -2516,11 +2516,11 @@ class TestPriorTickId:
         assert any(r.levelname == "ERROR" and "tick id" in r.getMessage() for r in caplog.records)
 
 
-class TestSkillsRemoved:
-    def test_skills_install_is_rejected(self):
+class TestSkillsCommands:
+    def test_skills_requires_an_operation(self):
         with pytest.raises(SystemExit) as excinfo:
-            build_parser().parse_args(["skills", "install"])
+            build_parser().parse_args(["skills"])
         assert excinfo.value.code == 2
 
-    def test_skills_absent_from_usage(self):
-        assert "skills" not in build_parser().format_usage()
+    def test_skills_present_in_usage(self):
+        assert "skills" in build_parser().format_usage()

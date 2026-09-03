@@ -811,6 +811,37 @@ def build_parser() -> argparse.ArgumentParser:
     )
     test_parser.set_defaults(func=_cmd_test)
 
+    skills_parser = subparsers.add_parser(
+        "skills", help="Install, uninstall, or recover bundled agent skills"
+    )
+    skills_subparsers = skills_parser.add_subparsers(
+        dest="skills_command", required=True
+    )
+
+    skills_install = skills_subparsers.add_parser("install")
+    skills_install.add_argument("skill", choices=["todo-manager"])
+    skills_install.add_argument("--target", choices=["codex", "claude"], required=True)
+    skills_install.add_argument("--scope", choices=["user", "project"], default="user")
+    skills_install.add_argument("--reinstall", action="store_true")
+    skills_install.set_defaults(func=_cmd_skills_install)
+
+    skills_uninstall = skills_subparsers.add_parser("uninstall")
+    skills_uninstall.add_argument("skill", choices=["todo-manager"])
+    skills_uninstall.add_argument("--target", choices=["codex", "claude"], required=True)
+    skills_uninstall.add_argument("--scope", choices=["user", "project"], default="user")
+    skills_uninstall.add_argument("--yes", action="store_true")
+    skills_uninstall.add_argument("--force", action="store_true")
+    skills_uninstall.set_defaults(func=_cmd_skills_uninstall)
+
+    skills_recover = skills_subparsers.add_parser("recover")
+    skills_recover.add_argument("skill", choices=["todo-manager"])
+    skills_recover.add_argument("--target", choices=["codex", "claude"], required=True)
+    skills_recover.add_argument("--scope", choices=["user", "project"], default="user")
+    recovery_mode = skills_recover.add_mutually_exclusive_group(required=True)
+    recovery_mode.add_argument("--finish", action="store_true")
+    recovery_mode.add_argument("--rollback", action="store_true")
+    skills_recover.set_defaults(func=_cmd_skills_recover)
+
     # config: read/write global tpo configuration
     config_parser = subparsers.add_parser(
         "config",
@@ -3291,6 +3322,39 @@ def _cmd_test(args, config: Config) -> int:
         return 2
 
 
+def _cmd_skills_install(args, config: Config | None) -> int:
+    from .skill_installer import install
+
+    return install(
+        args.skill,
+        target=args.target,
+        scope=args.scope,
+        reinstall=args.reinstall,
+    )
+
+
+def _cmd_skills_uninstall(args, config: Config | None) -> int:
+    from .skill_installer import uninstall
+
+    return uninstall(
+        args.skill,
+        target=args.target,
+        scope=args.scope,
+        yes=args.yes,
+        force=args.force,
+    )
+
+
+def _cmd_skills_recover(args, config: Config | None) -> int:
+    from .skill_installer import recover
+
+    return recover(
+        args.skill,
+        target=args.target,
+        scope=args.scope,
+        finish=args.finish,
+        rollback=args.rollback,
+    )
 def main(argv: list[str] | None = None) -> int:
     """
     Main entry point for the CLI.
@@ -3309,7 +3373,7 @@ def main(argv: list[str] | None = None) -> int:
     # `tpo config` runs before pipeline runtime config exists (state dir,
     # projects dir) — skip Config.from_env() so it works even when that env
     # isn't configured yet.
-    if getattr(args, "command", None) == "config":
+    if getattr(args, "command", None) in {"config", "skills"}:
         if hasattr(args, "func"):
             return args.func(args, None)
         parser.parse_args([*remaining, "--help"])
