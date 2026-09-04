@@ -12,16 +12,20 @@ circuit breaker observation.
 For `native-sdd`, the chain is compiled from the tracked `tpo-plan` manifest:
 
 ```text
-plan worker -> controller gate -> plan worker -> controller gate
+plan worker -> plan worker -> plan worker
             -> independent review -> review acceptance gate
             -> finish -> TODO closeout -> human merge gate
 ```
 
-Controller gates are unassigned and are completed only by TPO after validating
-the closing worker's `metadata.tpo_result` and independent Git facts. Stable
-keys use the tick and step identity, including `plan:<task-id>`,
-`validate:<task-id>`, `review:<round>`, `review-fix:<round>`,
-`fix-validation:<round>`, and `re-review:<round>`. A legacy Plan without a
+Plan tasks carry no per-task gate: the run is autonomous between tasks, and
+TPO validates each closing worker's `metadata.tpo_result` and independent Git
+facts on the next tick before the chain may advance to review. The remaining
+controller gates (`review-acceptance`, `fix-validation:<round>`) and the
+terminal human merge gate are unassigned and completed only by TPO. Stable keys
+use the tick and step identity, including `plan:<task-id>`, `review:<round>`,
+`review-fix:<round>`, `fix-validation:<round>`, and `re-review:<round>`. A run
+registered before the per-task gate was dropped still names its
+`validate:<task-id>` keys; TPO keeps completing those so it can be resumed. A legacy Plan without a
 manifest retains the static single-development/review/finish/human chain for
 compatibility. Retry still validates the registered repository, worktree,
 branch, pinned base TODO, and Plan hashes, but bypasses manifest-only dynamic

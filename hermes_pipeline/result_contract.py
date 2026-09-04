@@ -584,11 +584,10 @@ def load_validated_registration(
     ):
         raise ResultContractError("registration_invalid", "issue fields")
     if manifest is not None:
-        required_steps = {
-            key
-            for task in manifest.tasks
-            for key in (f"plan:{task.id}", f"validate:{task.id}")
-        }
+        # Subset, not equality: a run registered before the per-task controller
+        # gate was dropped still lists its ``validate:<id>`` keys and must keep
+        # validating so it can be resumed.
+        required_steps = {f"plan:{task.id}" for task in manifest.tasks}
         if not required_steps <= set(steps):
             raise ResultContractError("registration_invalid")
     plan_reference_value = (
@@ -637,6 +636,23 @@ def _git(cwd: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
+def _git_predicate(cwd: Path, *args: str) -> bool:
+    """Run a git query whose exit code 1 is an answer, not a failure.
+
+    ``_git`` treats every non-zero exit as ``git_verification_failed``, which
+    would collapse "false" (1) into "git is broken" (>= 2).
+    """
+    try:
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, timeout=60
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        raise ResultContractError("git_verification_failed") from exc
+    if result.returncode not in (0, 1):
+        raise ResultContractError("git_verification_failed", args[0])
+    return result.returncode == 0
+
+
 def _git_bytes(cwd: Path, *args: str) -> bytes:
     try:
         result = subprocess.run(
@@ -667,7 +683,14 @@ def verify_worker_git_result(
 def verify_worker_git_topology(
     worktree: Path, git: GitResult, *, expected_parent_sha: str
 ) -> None:
-    """Verify immutable commit topology without requiring it to be current HEAD."""
+    """Verify immutable commit topology and reachability from the branch head.
+
+    Parentage, commit count and changed files all keep holding for a commit that
+    ``git reset --hard`` has discarded: the object survives in the repository.
+    Reachability from HEAD is the only fact that proves the reported work is on
+    the branch this run delivers, so it is checked for every task, whether or
+    not the stricter current-HEAD check in ``verify_worker_git_result`` applies.
+    """
     if git.expected_parent_sha != expected_parent_sha:
         raise ResultContractError("parent_mismatch")
     if git.resulting_head_sha != git.task_commit_sha:
@@ -689,3 +712,7 @@ def verify_worker_git_topology(
     )
     if changed != tuple(sorted(git.changed_files)):
         raise ResultContractError("changed_files_mismatch")
+    if not _git_predicate(
+        worktree, "merge-base", "--is-ancestor", git.resulting_head_sha, "HEAD"
+    ):
+        raise ResultContractError("unreachable_commit")

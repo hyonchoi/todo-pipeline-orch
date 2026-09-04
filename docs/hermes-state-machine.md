@@ -7,10 +7,10 @@ registration and crash-recovery evidence, never a second mutable workflow.
 |---|---|---|
 | Hermes cron or manual `tpo tick` | no active project run | compile eligible TODOs |
 | TODO selected | issue snapshot and embedded Plan pinned, or legacy path tracked at base SHA | write schema-v3 `.hermes/runs/<tick-id>/registration.json` and verified embedded `plan.md` artifact; create/reuse exact linked worktree |
-| manifest compiled | <=50 ordered tasks | register `worker -> controller gate` pairs with stable keys |
+| manifest compiled | <=50 ordered tasks | register one `worker` card per task, chained, with stable keys |
 | legacy Plan compiled | valid Markdown, no manifest | register one development worker and warn |
-| worker closes | valid sanitized result metadata and Git facts | complete its controller gate |
-| worker evidence invalid | immutable mismatch or unsafe Git state | controller gate becomes `needs_input` |
+| worker closes | valid sanitized result metadata and Git facts | chain may advance; the chain tip is also verified against HEAD and a clean worktree |
+| worker evidence invalid | immutable mismatch or unsafe Git state | tick reports no progress and logs the bounded diagnostic; no card is blocked |
 | initial review finds issues | unchanged head and clean worktree | create one `review-fix -> fix-validation -> re-review` round |
 | fifth re-review still finds issues | every round card terminal | review gate remains human `needs_input`; create no cards |
 | review is clean | review evidence validates | allow finish and closeout |

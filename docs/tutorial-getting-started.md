@@ -151,8 +151,7 @@ full label vocabulary and body contract.
 
 `native-sdd` is plan-gated, so the tick in Step 8 needs the issue to name a
 Plan. The `json tpo-plan` manifest is what turns that Plan into one worker card
-and controller gate per task; without it the run compiles to a single
-development card instead. Copy
+per task; without it the run compiles to a single development card instead. Copy
 [the Plan template](templates/tpo-plan.md) into the project, fill in the tasks,
 and commit it:
 
@@ -209,9 +208,10 @@ See [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) for how phase tasks 
 
 ## Step 10: Inspect PR handoff
 
-Under the default `native-sdd` profile the compiled run finishes each Plan task
-behind a controller gate, reconciles independent review and the verified PR
-handoff from Kanban results, and then stops at a terminal human merge gate. The
+Under the default `native-sdd` profile the compiled run validates each Plan
+task's result before the chain advances, reconciles independent review and the
+verified PR handoff from Kanban results, and then stops at a terminal human
+merge gate -- the only card that waits for a human. The
 deprecated `gstack` profile instead finishes at Phase 8, which runs `/ship` in
 Claude Code or `$ship` in Codex. Either way the branch is pushed and a PR is
 opened or updated without being merged. Inspect the PR in GitHub or from the

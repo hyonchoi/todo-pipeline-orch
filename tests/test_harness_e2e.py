@@ -352,7 +352,7 @@ def test_keep_dir_touches_nothing_remote_and_prunes_only_the_config(live, script
 # -- native-sdd: one registration, several ticks ------------------------------------
 #
 # The compiled-plan profile is not driven to completion by a single ``tpo tick``:
-# the first tick registers the run and its ``plan:``/``validate:`` cards, and each
+# the first tick registers the run and its ``plan:`` worker cards, and each
 # later tick reconciles finished cards into the next stage (review, finish,
 # human-gate). The harness therefore has to keep ticking the same run until the
 # board is quiescent and the human gate stands, and to fail closed when a tick
@@ -360,7 +360,7 @@ def test_keep_dir_touches_nothing_remote_and_prunes_only_the_config(live, script
 
 _NATIVE_SDD = "native-sdd"
 _PLAN_PATH = f"docs/harness/{_RUN_TOKEN}-plan.md"
-_STEP_KEYS = ("plan:task-1", "validate:task-1")
+_STEP_KEYS = ("plan:task-1",)
 _REGISTRATION_BARRIER = "__registration_barrier__"
 
 
@@ -472,8 +472,8 @@ class _NativeSddSandbox(_LiveSandbox):
         run_outcomes = registration.worktree / ".hermes" / "outcomes"
         run_outcomes.mkdir(parents=True, exist_ok=True)
         (run_outcomes / "expected-phases.json").write_text(json.dumps(list(_STEP_KEYS)))
-        # A freshly registered worker card starts in todo; its gate starts blocked.
-        self.board.update({_REGISTRATION_BARRIER: "done", "plan:task-1": "todo", "validate:task-1": "blocked"})
+        # A freshly registered worker card starts in todo; no gate stands behind it.
+        self.board.update({_REGISTRATION_BARRIER: "done", "plan:task-1": "todo"})
         # The plan worker: one atomic task commit on the run branch, not pushed yet.
         (registration.worktree / "mock_transform.py").write_text(
             "def normalize_names(names):\n    return [n.strip().lower() for n in names if n.strip()]\n"
@@ -505,7 +505,7 @@ def _happy_native_sdd_script(*, verified: bool = True) -> dict[int, Callable[[_N
     """
 
     def review(sandbox):
-        sandbox.board.update({"validate:task-1": "done", "review:0": "ready", "review-acceptance": "blocked"})
+        sandbox.board.update({"review:0": "ready", "review-acceptance": "blocked"})
 
     def finish(sandbox):
         sandbox.board.update({"review-acceptance": "done", "finish": "ready"})
@@ -564,7 +564,6 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
     assert boards[-1] == {
         _REGISTRATION_BARRIER: "done",  # fixture-only stand-in for the run's own card
         "plan:task-1": "done",
-        "validate:task-1": "done",
         "review:0": "done",
         "review-acceptance": "done",
         "finish": "done",

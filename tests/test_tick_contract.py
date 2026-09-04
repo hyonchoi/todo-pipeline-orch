@@ -1543,8 +1543,48 @@ class TestTickFixRound1:
         )
 
         assert results.call_args.kwargs["repo"] == REPO  # C7: identity threaded, not re-resolved
-        selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
+        selection.cb.observe.assert_called_once_with(
+            picked=None, counts_as_no_progress=True, detail="result reconciliation blocked"
+        )
         assert fake_gh.calls.count(list(ORIGIN_ARGV)) == 1
+
+    def test_blocked_reconciler_alert_names_the_stalled_step_and_code(
+        self, tmp_path, mocker, fake_gh
+    ):
+        """A manifest run has no human gate, so the alert is the push signal.
+
+        Without the step key and code the operator only learns that nothing
+        moved, and the same tick repeats forever.
+        """
+        project_dir = _create_project(tmp_path, "demo")
+        run_dir = _write_prior_registration(project_dir)
+        (run_dir / "result-validation-blocked").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "tick_id": "01PRIOR",
+                    "step_key": "plan:task-2",
+                    "code": "worktree_dirty",
+                    "reason": "worktree_dirty",
+                }
+            )
+            + "\n"
+        )
+        seed_project_issues(
+            fake_gh, [todo_payload(10, title="test", labels=("tpo:todo", "ready-for-agent", "tpo:in-progress"))]
+        )
+        mocker.patch("hermes_pipeline.kanban_tasks.reconcile_plan_task_results", return_value=False)
+        mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+
+        selection = _run_project_tick(
+            project_dir=project_dir, config=Config(prompt_client="codex"), tick_id="01NAMED", mocker=mocker,
+        )
+
+        selection.cb.observe.assert_called_once_with(
+            picked=None,
+            counts_as_no_progress=True,
+            detail="result reconciliation blocked: plan:task-2 worktree_dirty",
+        )
 
     @pytest.mark.parametrize(("status_map", "observed"), [({}, True), ({"task-1": "running"}, False)])
     def test_in_flight_prior_tick_without_cards_is_a_stall(
@@ -1825,7 +1865,9 @@ class TestResumeIssueCloseout:
         selection = self._tick(project_dir, mocker, "01LABEL1")
         mocks["complete"].assert_not_called()
         mocks["mark"].assert_called_once_with("human-id", "TPO delivery blocked: gh_rejected")
-        selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
+        selection.cb.observe.assert_called_once_with(
+            picked=None, counts_as_no_progress=True, detail="delivery reconciliation blocked"
+        )
 
         remote["edit_rc"] = 0
         self._tick(project_dir, mocker, "01LABEL2")

@@ -2245,7 +2245,7 @@ def poll_pinned_run(
     sleep; setting it ends the poll with ``{}``.
 
     Unlike ``poll_registered_phases`` this never completes cards: gates
-    (``validate:*``, ``review-acceptance``, ``human-gate``) belong to the
+    (``review-acceptance``, ``human-gate``) belong to the
     ``tpo tick`` reconcilers, and dynamic cards (``review:0``, ``finish``)
     appear on later ticks under the same tick id. Transition events are
     emitted for every key that *changes* relative to the initial fetch, which
@@ -2395,12 +2395,11 @@ def classify_pinned_run(status_map: Mapping[str, str], run_dir: Path | None) -> 
 def pinned_tick_budget(step_keys: Iterable[str]) -> int:
     """How many ``tpo tick`` invocations one plan-pinned run may consume.
 
-    ``len(step_keys) // 2 + 5 + 2 * MAX_REVIEW_ROUNDS``:
+    ``len(step_keys) + 5 + 2 * MAX_REVIEW_ROUNDS``:
 
-    * ``len(step_keys) // 2`` -- the registered cards are one ``plan:<task>``
-      plus one ``validate:<task>`` per plan task, so half the step keys is the
-      task count, and one tick reconciles a task's validate gate and starts the
-      next task.
+    * ``len(step_keys)`` -- the registered cards are one ``plan:<task>`` per
+      plan task and nothing else, so the step-key count is the task count, and
+      one tick reconciles a task's result while the board runs the next.
     * ``5`` -- the fixed reconciler hops that own no step key: opening the first
       review round, ``review-acceptance``, ``finish``, ``human-gate``, and one
       slack tick for a retryable registration.
@@ -2412,7 +2411,7 @@ def pinned_tick_budget(step_keys: Iterable[str]) -> int:
     """
     from .review_reconciliation import MAX_REVIEW_ROUNDS
 
-    return len(tuple(step_keys)) // 2 + 5 + 2 * MAX_REVIEW_ROUNDS
+    return len(tuple(step_keys)) + 5 + 2 * MAX_REVIEW_ROUNDS
 
 
 def _classify_error_class(exc: Exception) -> str:

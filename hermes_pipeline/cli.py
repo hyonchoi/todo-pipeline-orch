@@ -253,6 +253,22 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
         print(f"Current tick {tick_id}: no registration (no TODO selected)")
         return True
     fix = f"Fix (tick {tick_id}):"
+    from .kanban_tasks import (
+        RESULT_VALIDATION_BLOCKED_MARKER,
+        validation_blocked_summary,
+    )
+
+    stalled = validation_blocked_summary(state_dir, tick_id)
+    if stalled:
+        # A stalled result validation is not corrupt authority, so it does not
+        # change the verdict -- but with no human gate on the board this is the
+        # only place an operator can see why the run stopped advancing.
+        print(f"RESULT VALIDATION BLOCKED: {stalled}")
+        print(
+            f"{fix} read "
+            f"{state_dir / 'runs' / tick_id / RESULT_VALIDATION_BLOCKED_MARKER} "
+            "and fix the reported step before the next tick."
+        )
     try:
         registration = json.loads(registration_path.read_text(encoding="utf-8"))
         from .github_issues import SUPPORTED_REGISTRATION_SCHEMA_VERSIONS
@@ -1886,13 +1902,24 @@ def _tick_project(
                     cb.observe(picked=None, counts_as_no_progress=True)
                     return
                 if not reconciled:
+                    from .kanban_tasks import validation_blocked_summary
+
+                    # A manifest run has no human gate to stall at: the alert is
+                    # the push signal, so it must name the stuck step and code.
+                    stalled = validation_blocked_summary(project_state, prior_tick_id)
+                    detail = f"{label} reconciliation blocked"
+                    if stalled:
+                        detail = f"{detail}: {stalled}"
                     log.info(
-                        "project %s: prior tick %s %s reconciliation is blocked, skipping",
+                        "project %s: prior tick %s %s reconciliation is blocked, skipping (%s)",
                         project_slug,
                         prior_tick_id,
                         label,
+                        stalled or "no recorded diagnostic",
                     )
-                    cb.observe(picked=None, counts_as_no_progress=True)
+                    cb.observe(
+                        picked=None, counts_as_no_progress=True, detail=detail
+                    )
                     return
 
         if not pr_handoff_resolved and not all_phases_complete(

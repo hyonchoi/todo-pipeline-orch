@@ -1009,7 +1009,7 @@ class _LiveRunStubs:
 
     SANDBOX = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
     #: Registered step keys of a plan-pinned run (one plan/validate pair per task).
-    PINNED_KEYS = ("plan:task-1", "validate:task-1")
+    PINNED_KEYS = ("plan:task-1", "plan:task-2")
     #: Deliberately NOT ``issue.branch``: the pipeline records the branch it
     #: actually created, and the PR head invariant is checked against that one.
     PINNED_BRANCH = "feat/pipeline-created-branch"
@@ -1386,7 +1386,7 @@ class TestRunHarness:
         assert result.pr_numbers == (11,)
 
     def test_native_sdd_unexpected_selection_shuts_down_the_recovered_tick(self, live):
-        live.pin([{"plan:task-1": "done", "validate:task-1": "blocked"}, _delivered_board()])
+        live.pin([{"plan:task-1": "done", "plan:task-2": "blocked"}, _delivered_board()])
         live.current_tick_id = None  # tick 2 persisted no id: a different selection
 
         result = live.run(profile_name="native-sdd")
@@ -1405,7 +1405,7 @@ class TestRunHarness:
         the run must hand shutdown ``assume_workers_may_exist`` so no branch or
         PR is deleted underneath them.
         """
-        live.pin([{"plan:task-1": "done", "validate:task-1": "blocked"}, _delivered_board()])
+        live.pin([{"plan:task-1": "done", "plan:task-2": "blocked"}, _delivered_board()])
         scripted_tick = live.tick
         ticks = {"n": 0}
 
@@ -1437,7 +1437,7 @@ class TestRunHarness:
         Nothing spawned under the new id, so shutdown keeps its observed-card
         completeness set and remote cleanup still runs.
         """
-        live.pin([{"plan:task-1": "done", "validate:task-1": "blocked"}, _delivered_board()])
+        live.pin([{"plan:task-1": "done", "plan:task-2": "blocked"}, _delivered_board()])
         scripted_tick = live.tick
         ticks = {"n": 0}
 
@@ -1463,7 +1463,7 @@ class TestRunHarness:
         assert live.kwargs["shutdown_run"]["assume_workers_may_exist"] is False
         assert live.kwargs["shutdown_run"]["expected_phase_keys"] == (
             "plan:task-1",
-            "validate:task-1",
+            "plan:task-2",
         )
 
     def test_native_sdd_stall_shuts_down_the_cards_it_observed(self, live):
@@ -2537,78 +2537,78 @@ class TestPollPinnedRun:
         return result, status
 
     def test_settles_when_every_card_done(self, tmp_path, mocker):
-        final = {"plan": "done", "validate:plan": "done"}
-        result, _ = self._run(tmp_path, mocker, [final, final], ["plan", "validate:plan"])
+        final = {"plan:task-1": "done", "plan:task-2": "done"}
+        result, _ = self._run(tmp_path, mocker, [final, final], ["plan:task-1", "plan:task-2"])
         assert result == final
 
     def test_settles_when_gate_blocked(self, tmp_path, mocker):
-        final = {"plan": "done", "human-gate": "blocked"}
-        result, _ = self._run(tmp_path, mocker, [final, final], ["plan", "human-gate"])
+        final = {"plan:task-1": "done", "human-gate": "blocked"}
+        result, _ = self._run(tmp_path, mocker, [final, final], ["plan:task-1", "human-gate"])
         assert result == final
 
     def test_settles_with_failed_card(self, tmp_path, mocker):
-        final = {"plan": "failed", "validate:plan": "done"}
+        final = {"plan:task-1": "failed", "plan:task-2": "done"}
         # The initial fetch seeds the baseline, so the failure has to happen
         # *after* it for phase_failed to be emitted.
-        snapshots = [{"plan": "running", "validate:plan": "running"}, final]
-        result, _ = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
+        snapshots = [{"plan:task-1": "running", "plan:task-2": "running"}, final]
+        result, _ = self._run(tmp_path, mocker, snapshots, ["plan:task-1", "plan:task-2"])
         assert result == final
         failed = [e for e in self._events(tmp_path) if e["event_type"] == "phase_failed"]
-        assert [e["phase_key"] for e in failed] == ["plan"]
+        assert [e["phase_key"] for e in failed] == ["plan:task-1"]
 
     @pytest.mark.parametrize("pending", ["ready", "running", "todo"])
     def test_keeps_polling_while_any_card_pending(self, tmp_path, mocker, pending):
         snapshots = [
-            {"plan": "done", "validate:plan": pending},
-            {"plan": "done", "validate:plan": pending},
-            {"plan": "done", "validate:plan": pending},
-            {"plan": "done", "validate:plan": "done"},
+            {"plan:task-1": "done", "plan:task-2": pending},
+            {"plan:task-1": "done", "plan:task-2": pending},
+            {"plan:task-1": "done", "plan:task-2": pending},
+            {"plan:task-1": "done", "plan:task-2": "done"},
         ]
-        result, status = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
-        assert result == {"plan": "done", "validate:plan": "done"}
+        result, status = self._run(tmp_path, mocker, snapshots, ["plan:task-1", "plan:task-2"])
+        assert result == {"plan:task-1": "done", "plan:task-2": "done"}
         assert status.call_count == 4
 
     def test_does_not_settle_while_step_key_missing(self, tmp_path, mocker):
         snapshots = [
-            {"plan": "done"},
-            {"plan": "done"},
-            {"plan": "done"},
-            {"plan": "done", "validate:plan": "done"},
+            {"plan:task-1": "done"},
+            {"plan:task-1": "done"},
+            {"plan:task-1": "done"},
+            {"plan:task-1": "done", "plan:task-2": "done"},
         ]
-        result, status = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
-        assert result == {"plan": "done", "validate:plan": "done"}
+        result, status = self._run(tmp_path, mocker, snapshots, ["plan:task-1", "plan:task-2"])
+        assert result == {"plan:task-1": "done", "plan:task-2": "done"}
         assert status.call_count == 4
 
     def test_does_not_settle_on_empty_map(self, tmp_path, mocker):
-        snapshots = [{}, {}, {}, {"plan": "done"}]
-        result, status = self._run(tmp_path, mocker, snapshots, ["plan"])
-        assert result == {"plan": "done"}
+        snapshots = [{}, {}, {}, {"plan:task-1": "done"}]
+        result, status = self._run(tmp_path, mocker, snapshots, ["plan:task-1"])
+        assert result == {"plan:task-1": "done"}
         assert status.call_count == 4
 
     def test_emits_transitions_for_dynamic_key(self, tmp_path, mocker):
         snapshots = [
-            {"plan": "ready"},
-            {"plan": "running"},
-            {"plan": "done", "review:0": "running"},
-            {"plan": "done", "review:0": "done"},
+            {"plan:task-1": "ready"},
+            {"plan:task-1": "running"},
+            {"plan:task-1": "done", "review:0": "running"},
+            {"plan:task-1": "done", "review:0": "done"},
         ]
-        result, _ = self._run(tmp_path, mocker, snapshots, ["plan"])
-        assert result == {"plan": "done", "review:0": "done"}
+        result, _ = self._run(tmp_path, mocker, snapshots, ["plan:task-1"])
+        assert result == {"plan:task-1": "done", "review:0": "done"}
         events = [(e["event_type"], e["phase_key"]) for e in self._events(tmp_path)]
         assert events == [
-            ("phase_started", "plan"),
-            ("phase_completed", "plan"),
+            ("phase_started", "plan:task-1"),
+            ("phase_completed", "plan:task-1"),
             ("phase_started", "review:0"),
             ("phase_completed", "review:0"),
         ]
 
     def test_never_calls_auto_complete_gate_tasks(self, tmp_path, mocker):
         snapshots = [
-            {"plan": "running", "validate:plan": "blocked"},
-            {"plan": "running", "validate:plan": "blocked"},
+            {"plan:task-1": "running", "plan:task-2": "blocked"},
+            {"plan:task-1": "running", "plan:task-2": "blocked"},
             # The tick reconciler, not the poller, moves the gate on after plan is done.
-            {"plan": "done", "validate:plan": "ready"},
-            {"plan": "done", "validate:plan": "done"},
+            {"plan:task-1": "done", "plan:task-2": "ready"},
+            {"plan:task-1": "done", "plan:task-2": "done"},
         ]
         self._forbid_auto_complete(mocker)
         mocker.patch("time.sleep")
@@ -2616,8 +2616,8 @@ class TestPollPinnedRun:
         monitor, detector = self._monitor(tmp_path)
         from hermes_pipeline import harness
 
-        result = self._poll(monitor, detector, ["plan", "validate:plan"], cancel_event=waiter)
-        assert result == {"plan": "done", "validate:plan": "done"}
+        result = self._poll(monitor, detector, ["plan:task-1", "plan:task-2"], cancel_event=waiter)
+        assert result == {"plan:task-1": "done", "plan:task-2": "done"}
         harness._auto_complete_gate_tasks.assert_not_called()
 
     def test_cancel_before_first_poll_returns_empty_map(self, tmp_path, mocker):
@@ -2627,13 +2627,13 @@ class TestPollPinnedRun:
 
         def _initial_status(*_args, **_kwargs):
             cancel_event.set()
-            return {"plan": "running"}
+            return {"plan:task-1": "running"}
 
         mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=_initial_status)
         sleep = mocker.patch("hermes_pipeline.harness.time.sleep")
         monitor, detector = self._monitor(tmp_path)
 
-        result = self._poll(monitor, detector, ["plan"], cancel_event=cancel_event)
+        result = self._poll(monitor, detector, ["plan:task-1"], cancel_event=cancel_event)
 
         assert result == {}
         sleep.assert_not_called()
@@ -2643,12 +2643,12 @@ class TestPollPinnedRun:
         cancelled poll can never be mistaken for a settled one."""
         self._forbid_auto_complete(mocker)
         sleep = mocker.patch("hermes_pipeline.harness.time.sleep")
-        populated = {"plan": "running", "validate:plan": "done"}
+        populated = {"plan:task-1": "running", "plan:task-2": "done"}
         # Script ends on a non-settling but populated poll; the fake then cancels.
-        status, waiter = self._fake_status(mocker, [{"plan": "ready"}, populated])
+        status, waiter = self._fake_status(mocker, [{"plan:task-1": "ready"}, populated])
         monitor, detector = self._monitor(tmp_path)
 
-        result = self._poll(monitor, detector, ["plan", "validate:plan"], cancel_event=waiter)
+        result = self._poll(monitor, detector, ["plan:task-1", "plan:task-2"], cancel_event=waiter)
 
         assert waiter.is_set()
         assert status.call_count >= 2  # initial fetch plus at least one populated poll
@@ -2674,12 +2674,12 @@ class TestPollPinnedRun:
         self._forbid_auto_complete(mocker)
         # The poller waits on cancel_event rather than time.sleep, so the waiter
         # records the backoff schedule.
-        snapshots = [{"plan": "ready"}] + [{"plan": "running"}] * 4 + [{"plan": "done"}]
+        snapshots = [{"plan:task-1": "ready"}] + [{"plan:task-1": "running"}] * 4 + [{"plan:task-1": "done"}]
         _, waiter = self._fake_status(mocker, snapshots)
         monitor, detector = self._monitor(tmp_path)
 
         self._poll(
-            monitor, detector, ["plan"],
+            monitor, detector, ["plan:task-1"],
             poll_interval=1.0, max_poll_interval=10.0, cancel_event=waiter,
         )
 
@@ -2696,21 +2696,21 @@ class TestPollPinnedRun:
         monitor, detector = self._monitor(tmp_path)
         observed: list[str | None] = []
         snapshots = [
-            {"plan": "ready"},
-            {"plan": "running"},
-            {"plan": "running"},
-            {"plan": "done"},
+            {"plan:task-1": "ready"},
+            {"plan:task-1": "running"},
+            {"plan:task-1": "running"},
+            {"plan:task-1": "done"},
         ]
         _, waiter = self._fake_status(
             mocker, snapshots, before_call=lambda: observed.append(monitor.current_phase_key)
         )
 
-        result = self._poll(monitor, detector, ["plan"], cancel_event=waiter)
+        result = self._poll(monitor, detector, ["plan:task-1"], cancel_event=waiter)
 
-        assert result == {"plan": "done"}
+        assert result == {"plan:task-1": "done"}
         # Sampled just before each fetch: nothing in flight for the initial fetch
-        # and the first poll, then "plan" while it runs.
-        assert observed == [None, None, "plan", "plan"]
+        # and the first poll, then "plan:task-1" while it runs.
+        assert observed == [None, None, "plan:task-1", "plan:task-1"]
         assert monitor.current_phase_key is None
 
     def test_clears_current_phase_key_when_in_flight_card_settles_silently(self, tmp_path, mocker):
@@ -2720,12 +2720,12 @@ class TestPollPinnedRun:
         report would blame a phase that already settled."""
         self._forbid_auto_complete(mocker)
         monitor, detector = self._monitor(tmp_path)
-        snapshots = [{"plan": "ready"}, {"plan": "running"}, {"plan": "archived"}]
+        snapshots = [{"plan:task-1": "ready"}, {"plan:task-1": "running"}, {"plan:task-1": "archived"}]
         _, waiter = self._fake_status(mocker, snapshots)
 
-        result = self._poll(monitor, detector, ["plan"], cancel_event=waiter)
+        result = self._poll(monitor, detector, ["plan:task-1"], cancel_event=waiter)
 
-        assert result == {"plan": "archived"}
+        assert result == {"plan:task-1": "archived"}
         # No transition event exists for the silent settle...
         assert [e["event_type"] for e in self._events(tmp_path)] == ["phase_started"]
         # ...but nothing is still in flight at settle.
@@ -2735,22 +2735,22 @@ class TestPollPinnedRun:
         """Regression: per-tick calls share one monitor/detector. Cards already
         terminal at the initial fetch must not be re-emitted or re-recorded."""
         self._forbid_auto_complete(mocker)
-        first = {"plan": "failed", "build": "failed"}
-        second = {"plan": "failed", "build": "failed", "review:0": "done"}
+        first = {"plan:task-1": "failed", "build": "failed"}
+        second = {"plan:task-1": "failed", "build": "failed", "review:0": "done"}
         _, waiter = self._fake_status(
-            mocker, [{"plan": "running", "build": "running"}, first, first, second]
+            mocker, [{"plan:task-1": "running", "build": "running"}, first, first, second]
         )
         monitor, detector = self._monitor(tmp_path, threshold=3)
 
-        assert self._poll(monitor, detector, ["plan", "build"], cancel_event=waiter) == first
+        assert self._poll(monitor, detector, ["plan:task-1", "build"], cancel_event=waiter) == first
         events_after_first = self._events(tmp_path)
         assert [(e["event_type"], e["phase_key"]) for e in events_after_first] == [
-            ("phase_failed", "plan"),
+            ("phase_failed", "plan:task-1"),
             ("phase_failed", "build"),
         ]
         assert not detector.should_halt()
 
-        assert self._poll(monitor, detector, ["plan", "build", "review:0"], cancel_event=waiter) == second
+        assert self._poll(monitor, detector, ["plan:task-1", "build", "review:0"], cancel_event=waiter) == second
 
         new_events = self._events(tmp_path)[len(events_after_first):]
         assert [(e["event_type"], e["phase_key"]) for e in new_events] == [("phase_completed", "review:0")]
@@ -2759,27 +2759,27 @@ class TestPollPinnedRun:
         assert not detector.should_halt()
 
     def test_transition_between_initial_fetch_and_first_snapshot_is_emitted(self, tmp_path, mocker):
-        snapshots = [{"plan": "running"}, {"plan": "done"}]
-        result, _ = self._run(tmp_path, mocker, snapshots, ["plan"])
-        assert result == {"plan": "done"}
+        snapshots = [{"plan:task-1": "running"}, {"plan:task-1": "done"}]
+        result, _ = self._run(tmp_path, mocker, snapshots, ["plan:task-1"])
+        assert result == {"plan:task-1": "done"}
         assert [(e["event_type"], e["phase_key"]) for e in self._events(tmp_path)] == [
-            ("phase_completed", "plan"),
+            ("phase_completed", "plan:task-1"),
         ]
 
     def test_warns_once_per_poll_on_unknown_status(self, tmp_path, mocker, caplog):
         import logging
 
         snapshots = [
-            {"plan": "unknown", "validate:plan": "unknown"},
-            {"plan": "unknown", "validate:plan": "unknown"},
-            {"plan": "done", "validate:plan": "done"},
+            {"plan:task-1": "unknown", "plan:task-2": "unknown"},
+            {"plan:task-1": "unknown", "plan:task-2": "unknown"},
+            {"plan:task-1": "done", "plan:task-2": "done"},
         ]
         with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
-            result, _ = self._run(tmp_path, mocker, snapshots, ["plan", "validate:plan"])
-        assert result == {"plan": "done", "validate:plan": "done"}
+            result, _ = self._run(tmp_path, mocker, snapshots, ["plan:task-1", "plan:task-2"])
+        assert result == {"plan:task-1": "done", "plan:task-2": "done"}
         warnings = [r for r in caplog.records if "unknown" in r.getMessage()]
         assert len(warnings) == 1
-        assert "plan" in warnings[0].getMessage()
+        assert "plan:task-1" in warnings[0].getMessage()
 
     def test_empty_step_keys_rejected(self, tmp_path, mocker):
         mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={})
@@ -6596,7 +6596,7 @@ _PINNED_ISSUE = 42
 _PINNED_TICK = "01PINNED"
 _PINNED_PLAN = "docs/harness/tok00000-plan.md"
 _PINNED_BRANCH = "feat/pinned-run"
-_PINNED_STEPS = ("plan:task-1", "validate:task-1")
+_PINNED_STEPS = ("plan:task-1", "plan:task-2")
 
 
 def _delivered_path_boards() -> tuple[dict[str, str], ...]:
@@ -6611,17 +6611,17 @@ def _delivered_path_boards() -> tuple[dict[str, str], ...]:
     from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
 
     return (
-        {"plan:task-1": "done", "validate:task-1": BLOCKED},
-        {"plan:task-1": "done", "validate:task-1": "done", "review:0": "done"},
+        {"plan:task-1": "done", "plan:task-2": "done"},
+        {"plan:task-1": "done", "plan:task-2": "done", "review:0": "done"},
         {
             "plan:task-1": "done",
-            "validate:task-1": "done",
+            "plan:task-2": "done",
             "review:0": "done",
             "review-acceptance": "done",
         },
         {
             "plan:task-1": "done",
-            "validate:task-1": "done",
+            "plan:task-2": "done",
             "review:0": "done",
             "review-acceptance": "done",
             FINISH_KEY: "done",
@@ -6926,8 +6926,8 @@ class TestRecoverPinnedRegistration:
         "sentinel",
         [
             ["plan:task-1"],
-            ["plan:task-1", "validate:task-1", "extra"],
-            ["plan:task-1", "validate:task-1", "plan:task-1"],
+            ["plan:task-1", "plan:task-2", "extra"],
+            ["plan:task-1", "plan:task-2", "plan:task-1"],
         ],
         ids=["subset", "superset", "duplicate"],
     )
@@ -7115,7 +7115,7 @@ class TestClassifyPinnedRun:
         run_dir = self._run_dir(tmp_path, verified=False)
 
         assert (
-            classify_pinned_run({"plan:task-1": "done", "validate:task-1": "blocked"}, run_dir)
+            classify_pinned_run({"plan:task-1": "done", "plan:task-2": "blocked"}, run_dir)
             == "in_progress"
         )
 
@@ -7125,7 +7125,7 @@ class TestClassifyPinnedRun:
         run_dir = self._run_dir(tmp_path, verified=False)
 
         assert (
-            classify_pinned_run({"plan:task-1": "failed", "validate:task-1": "done"}, run_dir)
+            classify_pinned_run({"plan:task-1": "failed", "plan:task-2": "done"}, run_dir)
             == "failed"
         )
 
@@ -7137,7 +7137,7 @@ class TestClassifyPinnedRun:
         run_dir = self._run_dir(tmp_path, verified=False)
 
         assert (
-            classify_pinned_run({"plan:task-1": "archived", "validate:task-1": "done"}, run_dir)
+            classify_pinned_run({"plan:task-1": "archived", "plan:task-2": "done"}, run_dir)
             == "failed"
         )
 
@@ -7248,10 +7248,22 @@ class TestPinnedTickBudget:
         with patch("hermes_pipeline.review_reconciliation.MAX_REVIEW_ROUNDS", self._rounds() + 1):
             assert mod.pinned_tick_budget(("a", "b")) == base + 2
 
+    def test_budget_grows_one_tick_per_plan_task(self):
+        """Plan tasks no longer come in worker/gate pairs.
+
+        One registered card is one task, so a run with N tasks must buy N ticks
+        or a multi-task run dies with ``tick_budget_exhausted``.
+        """
+        from hermes_pipeline.harness import pinned_tick_budget
+
+        keys = tuple(f"plan:task-{index}" for index in range(1, 5))
+
+        assert pinned_tick_budget(keys) - pinned_tick_budget(keys[:1]) == 3
+
     def test_accepts_any_iterable(self):
         from hermes_pipeline.harness import pinned_tick_budget
 
-        assert pinned_tick_budget(iter(["a", "b", "c"])) == 3 // 2 + 5 + 2 * self._rounds()
+        assert pinned_tick_budget(iter(["a", "b", "c"])) == 3 + 5 + 2 * self._rounds()
 
 
 class TestDriveTicks:
@@ -7513,7 +7525,7 @@ class TestDriveTicks:
         )
         mocker.patch(
             "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
-            return_value={"plan:task-1": "done", "validate:task-1": "running"},
+            return_value={"plan:task-1": "done", "plan:task-2": "running"},
         )
 
         drive = drive_ticks(**kwargs)
@@ -7522,7 +7534,7 @@ class TestDriveTicks:
         assert drive.success is False
         assert drive.ticks_run == 1
         events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
-        assert ("phase_timed_out", "validate:task-1") in [
+        assert ("phase_timed_out", "plan:task-2") in [
             (e["event_type"], e.get("phase_key")) for e in events
         ]
 
@@ -7605,7 +7617,7 @@ class TestDriveTicks:
         assert drive.observed_keys == frozenset(
             {
                 "plan:task-1",
-                "validate:task-1",
+                "plan:task-2",
                 "review:0",
                 "review-acceptance",
                 FINISH_KEY,
@@ -7626,8 +7638,8 @@ class TestDriveTicks:
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
         maps = [
-            {"plan:task-1": "done", "validate:task-1": "blocked"},
-            {"plan:task-1": "done", "validate:task-1": "failed"},
+            {"plan:task-1": "done", "plan:task-2": "blocked"},
+            {"plan:task-1": "done", "plan:task-2": "failed"},
         ]
         registration, _run, _poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=maps
@@ -7648,7 +7660,7 @@ class TestDriveTicks:
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
-        stuck = {"plan:task-1": "done", "validate:task-1": "blocked"}
+        stuck = {"plan:task-1": "done", "plan:task-2": "blocked"}
         registration, _run, _poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
         )
@@ -7670,7 +7682,7 @@ class TestDriveTicks:
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
-        first = {"plan:task-1": "done", "validate:task-1": BLOCKED}
+        first = {"plan:task-1": "done", "plan:task-2": BLOCKED}
         second = _delivered_board(keys=_PINNED_STEPS, extra=())
         registration, _run, _poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(first), dict(second)]
@@ -7689,7 +7701,7 @@ class TestDriveTicks:
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
-        stuck = {"plan:task-1": "done", "validate:task-1": "blocked"}
+        stuck = {"plan:task-1": "done", "plan:task-2": "blocked"}
         self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
         )
@@ -7737,7 +7749,7 @@ class TestDriveTicks:
         state = kwargs["project_state"]
         done = {
             "plan:task-1": "done",
-            "validate:task-1": "done",
+            "plan:task-2": "done",
             FINISH_KEY: "done",
             HUMAN_GATE_KEY: BLOCKED,
         }
@@ -7780,10 +7792,10 @@ class TestDriveTicks:
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
         maps = [
-            {"plan:task-1": "done", "validate:task-1": "todo"},
-            {"plan:task-1": "done", "validate:task-1": "ready"},
-            {"plan:task-1": "done", "validate:task-1": "blocked"},
-            {"plan:task-1": "done", "validate:task-1": "blocked"},
+            {"plan:task-1": "done", "plan:task-2": "todo"},
+            {"plan:task-1": "done", "plan:task-2": "ready"},
+            {"plan:task-1": "done", "plan:task-2": "blocked"},
+            {"plan:task-1": "done", "plan:task-2": "blocked"},
         ]
         registration, _run, poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 4, maps=maps
@@ -7813,10 +7825,10 @@ class TestDriveTicks:
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
         maps = [
-            {"plan:task-1": "done", "validate:task-1": "done", "review:0": "done"},
+            {"plan:task-1": "done", "plan:task-2": "done", "review:0": "done"},
             {
                 "plan:task-1": "done",
-                "validate:task-1": "done",
+                "plan:task-2": "done",
                 FINISH_KEY: "done",
                 HUMAN_GATE_KEY: BLOCKED,
             },
@@ -7831,7 +7843,7 @@ class TestDriveTicks:
         assert drive.success is True
         assert "review:0" in drive.observed_keys
         assert drive.observed_keys == frozenset(
-            {"plan:task-1", "validate:task-1", "review:0", FINISH_KEY, HUMAN_GATE_KEY}
+            {"plan:task-1", "plan:task-2", "review:0", FINISH_KEY, HUMAN_GATE_KEY}
         )
 
     # -- S4: the whole-run deadline is shared by every tick and poll ---------
@@ -7846,10 +7858,10 @@ class TestDriveTicks:
         state = kwargs["project_state"]
         clock = self._clock(mocker)
         maps = [
-            {"plan:task-1": "done", "validate:task-1": "blocked"},
+            {"plan:task-1": "done", "plan:task-2": "blocked"},
             {
                 "plan:task-1": "done",
-                "validate:task-1": "done",
+                "plan:task-2": "done",
                 FINISH_KEY: "done",
                 HUMAN_GATE_KEY: BLOCKED,
             },
@@ -7892,7 +7904,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK],
-            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
             clock=clock,
             poll_cost=200.0,
         )
@@ -7941,7 +7953,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK, "02OTHER"],
-            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
         )
 
         drive = drive_ticks(**kwargs)
@@ -7973,7 +7985,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK, "02NONE"],
-            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
         )
         self._phases_sentinel(state, "02NONE", "picked_none")
 
@@ -7985,7 +7997,7 @@ class TestDriveTicks:
         assert drive.tick_error.code == "tick_stalled"
         assert drive.tick_error.tick_id == _PINNED_TICK
         assert drive.workers_unaccounted is False
-        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+        assert drive.observed_keys == frozenset({"plan:task-1", "plan:task-2"})
         assert drive.ticks_run == 2
 
     @pytest.mark.parametrize(
@@ -8024,7 +8036,7 @@ class TestDriveTicks:
         )
         mocker.patch(
             "hermes_pipeline.harness.poll_pinned_run",
-            return_value={"plan:task-1": "done", "validate:task-1": "blocked"},
+            return_value={"plan:task-1": "done", "plan:task-2": "blocked"},
         )
 
         drive = drive_ticks(**kwargs)
@@ -8058,7 +8070,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK],
-            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
         )
         if registered:
             mocker.patch(
@@ -8084,7 +8096,7 @@ class TestDriveTicks:
         state = kwargs["project_state"]
         # Every map differs so the stall check never fires before the budget does.
         maps = [
-            {"plan:task-1": "done", "validate:task-1": "done", f"review:{i}": "done"}
+            {"plan:task-1": "done", "plan:task-2": "done", f"review:{i}": "done"}
             for i in range(budget)
         ]
         registration, _run, poll = self._pinned_patches(
@@ -8112,7 +8124,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK] * 2,
-            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
         )
         real = mod._run_with_timeout
         calls = {"n": 0}
@@ -8134,7 +8146,7 @@ class TestDriveTicks:
         assert drive.success is False
         assert drive.registration is registration
         assert drive.ticks_run == 2
-        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+        assert drive.observed_keys == frozenset({"plan:task-1", "plan:task-2"})
 
     def test_native_sdd_tick_error_on_first_tick_has_no_registration(
         self, tmp_path: Path, mocker
@@ -8181,7 +8193,7 @@ class TestDriveTicks:
         )
         mocker.patch(
             "hermes_pipeline.harness.poll_pinned_run",
-            return_value={"plan:task-1": "done", "validate:task-1": "blocked"},
+            return_value={"plan:task-1": "done", "plan:task-2": "blocked"},
         )
 
         drive = drive_ticks(**kwargs)
@@ -8189,7 +8201,7 @@ class TestDriveTicks:
         assert drive.failure_code == "tick_timeout"
         assert drive.registration is registration
         assert drive.ticks_run == 2
-        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+        assert drive.observed_keys == frozenset({"plan:task-1", "plan:task-2"})
         # The tick id is pinned and already recovered, so shutdown can quiesce it.
         assert drive.workers_unaccounted is False
         assert drive.tick_error is not None and drive.tick_error.tick_id == _PINNED_TICK
@@ -8208,7 +8220,7 @@ class TestDriveTicks:
             maps=[
                 {
                     "plan:task-1": "done",
-                    "validate:task-1": "done",
+                    "plan:task-2": "done",
                     FINISH_KEY: "done",
                     HUMAN_GATE_KEY: BLOCKED,
                 }
@@ -8341,7 +8353,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK] * 2,
-            maps=[{"plan:task-1": "done", "validate:task-1": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
         )
         cancelled = PollCancellationError("poll worker did not stop")
         real = mod._run_with_timeout
@@ -8361,7 +8373,7 @@ class TestDriveTicks:
         assert drive.pending_error is cancelled
         assert drive.registration is registration
         assert drive.ticks_run == 2
-        assert drive.observed_keys == frozenset({"plan:task-1", "validate:task-1"})
+        assert drive.observed_keys == frozenset({"plan:task-1", "plan:task-2"})
 
     def test_native_sdd_base_exception_propagates(self, tmp_path: Path, mocker):
         from hermes_pipeline.harness import drive_ticks
@@ -8389,7 +8401,7 @@ class TestDriveTicks:
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
         detector = kwargs["detector"]
-        failed = {"plan:task-1": "failed", "validate:task-1": "blocked"}
+        failed = {"plan:task-1": "failed", "plan:task-2": "blocked"}
 
         def _halt(_call_number, _kwargs):
             # What poll_pinned_run's shared emitter does before it halts.
@@ -8419,7 +8431,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK],
-            maps=[{"plan:task-1": "failed", "validate:task-1": "blocked"}],
+            maps=[{"plan:task-1": "failed", "plan:task-2": "blocked"}],
         )
 
         drive = drive_ticks(**kwargs)

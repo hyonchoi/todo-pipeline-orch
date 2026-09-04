@@ -108,8 +108,8 @@ Migrate one project explicitly:
    embedded Plan must carry a `json tpo-plan` block; without one it is blocked
    as `plan_invalid:manifest_required`, which is what `tpo doctor`'s `Hint:`
    line points at. A `Plan:` path stays eligible without a manifest, but it
-   compiles to a single development card instead of one worker card and
-   controller gate per task.
+   compiles to a single development card instead of one worker card per
+   Plan task.
 4. **Validate before the next tick.**
 
    ```bash
@@ -126,10 +126,16 @@ are reconciled from Kanban results instead.
 1. TPO records schema-v3 `.hermes/runs/<tick-id>/registration.json`, including
    the tagged Plan source, pinned base SHA, TODO and Plan hashes, branch,
    linked worktree, roles, and step keys. Schema-v2 active runs remain readable;
-   do not downgrade while a schema-v3 run is active.
-2. Each Plan task becomes a worker followed by a controller gate. The worker
-   reports bounded `metadata.tpo_result`; TPO opens the gate only after metadata
-   and Git topology validate.
+   do not downgrade while a schema-v3 run is active. The same applies to the
+   per-task controller gate: a run registered after that gate was dropped lists
+   only `plan:<task-id>` step keys, which an older TPO rejects as
+   `registration_invalid` on every tick, so it wedges with the in-progress
+   label and a live worktree. Do not downgrade past that release while a
+   manifest run is active; drain the run first.
+2. Each Plan task becomes one worker card chained onto the previous task's
+   worker. The worker reports bounded `metadata.tpo_result`; TPO validates that
+   metadata and the Git topology on the next tick, and the run stops advancing
+   until it does. No card waits for a human between Plan tasks.
 3. A fresh review session reports `clean` or structured P0-P3 findings. Findings
    create stable `review-fix`, fix-validation, and re-review cards. After five
    unsuccessful rounds the review gate stays `needs_input`; automation stops.
@@ -141,3 +147,23 @@ Exactly one run is active per project. Retries reconcile the same keys. Drifted
 authority, branch, worktree, PR, or remote head is preserved and blocked for
 human input: TPO never resets, cleans, deletes, force-pushes, merges, or repairs
 it automatically.
+
+## Run evidence
+
+Everything a run records lives in `.hermes/runs/<tick-id>/`. These files are
+evidence, never a second workflow database:
+
+| File | Written when |
+|---|---|
+| `registration.json` | the run is registered: immutable pinned authority |
+| `plan.md` | the Plan is embedded: the hash-verified Plan artifact |
+| `result-validation-blocked` | a Plan result fails validation, or the card chain is not wired; names the stalled `step_key` and `code`, blocks nothing, and is removed once every result validates |
+| `pending-review-create.json` | a review card create has an ambiguous outcome |
+| `accepted-review-head` | a clean review is accepted, pinning the reviewed head |
+| `finish-verified` | the PR handoff is verified: the proof of delivery |
+| `issue-close-started` / `issue-commented` / `issue-closed` | issue closeout progresses |
+
+Because a manifest run has no per-task human gate, `result-validation-blocked`
+is the first thing to read when the board shows every worker `done` but the run
+stops advancing. `tpo doctor` prints its step key and code for the active tick,
+and the circuit-breaker alert names them once the no-progress threshold trips.

@@ -38,6 +38,22 @@ _REGISTRATION_BARRIER_PHASE_KEY = "__registration_barrier__"
 _REGISTRATION_BARRIER_INFRASTRUCTURE = "registration_barrier"
 PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS = 60
 
+# The first dynamic card the review reconciler builds on the implementation
+# chain. Defined here so the result reconciler can recognise it without
+# importing review_reconciliation, which imports this module.
+INITIAL_REVIEW_KEY = "review:0"
+
+# Run-scoped evidence that a Plan result failed validation. Plain cron ticks
+# have no budget to exhaust and the board shows every worker done, so the stall
+# would otherwise be visible only in the log. The marker blocks nothing.
+RESULT_VALIDATION_BLOCKED_MARKER = "result-validation-blocked"
+
+# Marker codes for stalls that are not a rejected result. They never collide
+# with a ResultContractError code, so an operator can tell a wiring problem
+# (a card or step key that is not there) from work TPO refused.
+CHAIN_WIRING_INCOMPLETE_CODE = "chain_wiring_incomplete"
+GATE_COMPLETION_FAILED_CODE = "gate_completion_failed"
+
 log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
@@ -849,30 +865,6 @@ def prepare_todo_phases(
                         kind="worker",
                     )
                 )
-                validation_key = f"validate:{plan_task.id}"
-                validation_body = (
-                    _build_json_header(
-                        tick_id=tick_id,
-                        phase_key=validation_key,
-                        todo_id=todo_id,
-                        project_slug=board_slug,
-                    )
-                    + "\nController validation gate for Plan task "
-                    + plan_task.id
-                    + ". TPO completes this gate only after validating the worker "
-                    "result metadata and Git evidence.\nAcceptance criteria:\n"
-                    + "\n".join(f"- {item}" for item in plan_task.acceptance_criteria)
-                )
-                prepared.append(
-                    PreparedPhaseTask(
-                        phase_key=validation_key,
-                        name=f"Validate Plan task {plan_task.id}",
-                        body=validation_body,
-                        turns=0,
-                        gate=True,
-                        kind="controller_gate",
-                    )
-                )
             continue
         if compile_plan_tasks and manifest is None:
             log.warning(
@@ -941,8 +933,7 @@ def planned_phase_keys(phases_path: str | Path | None, plan_source) -> tuple[str
         }:
             continue
         if getattr(phase, "compile_plan_tasks", False) and manifest is not None:
-            for task in manifest.tasks:
-                keys.extend((f"plan:{task.id}", f"validate:{task.id}"))
+            keys.extend(f"plan:{task.id}" for task in manifest.tasks)
         else:
             keys.append(phase.phase_key)
     return tuple(keys)
@@ -1465,6 +1456,66 @@ def _mark_gate_needs_input(task_id: str, reason: str) -> bool:
     return result.returncode == 0
 
 
+def _validation_blocked_marker(state_dir: Path, tick_id: str) -> Path:
+    return state_dir / "runs" / tick_id / RESULT_VALIDATION_BLOCKED_MARKER
+
+
+def validation_blocked_summary(state_dir: Path, tick_id: str) -> str:
+    """One bounded line naming the stalled step and code, or "" if not stalled.
+
+    Read by the tick so its circuit-breaker alert says what is stuck; a manifest
+    run has no human gate to stand at, so this is the only push signal.
+    """
+    try:
+        payload = json.loads(
+            _validation_blocked_marker(state_dir, tick_id).read_text(encoding="utf-8")
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    step_key = payload.get("step_key")
+    code = payload.get("code")
+    if not isinstance(step_key, str) or not isinstance(code, str):
+        return ""
+    return f"{step_key[:256]} {code[:200]}".strip()
+
+
+def _record_validation_blocked(
+    state_dir: Path, *, tick_id: str, step_key: str, code: str, reason: str
+) -> None:
+    """Persist why the chain stopped advancing, beside the run's other evidence.
+
+    Idempotent: repeated no-progress ticks rewrite the same bounded payload.
+    """
+    try:
+        _atomic_write_text(
+            _validation_blocked_marker(state_dir, tick_id),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "tick_id": tick_id,
+                    "step_key": step_key,
+                    "code": code,
+                    "reason": reason,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+    except OSError:
+        # Diagnostic evidence only: never turn a failed write into a new failure.
+        log.warning("tick %s: could not record the blocked-validation marker", tick_id)
+
+
+def _clear_validation_blocked(state_dir: Path, tick_id: str) -> None:
+    """Drop a stale marker once every Plan result validates again."""
+    try:
+        _validation_blocked_marker(state_dir, tick_id).unlink(missing_ok=True)
+    except OSError:
+        log.warning("tick %s: could not clear the blocked-validation marker", tick_id)
+
+
 def reconcile_plan_task_results(
     *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str,
     repo: str | None = None,
@@ -1512,18 +1563,70 @@ def reconcile_plan_task_results(
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
+    manifest_tasks = registration.manifest.tasks
+    # Which check applies to a task is read off the board, never off local
+    # state: a lost or moved state_dir must not turn a resumed run into a
+    # verification failure. ``verify_worker_git_result`` adds "this commit is
+    # the current HEAD and the worktree is clean" to the immutable topology
+    # facts, so it can only hold for the chain tip. The initial review is the
+    # first card built on top of the last Plan commit; once it exists, review
+    # fixes may have advanced HEAD and the tip check no longer applies either.
+    #
+    # Accepted trade-off: worker N+1 starts the moment worker N closes, so a
+    # dirty worktree between two Plan tasks is not observable by construction --
+    # a per-task current-HEAD check would race the next worker instead of
+    # catching anything. Cleanliness is re-proved downstream, by
+    # ``verify_read_only_review`` when the review runs and by the delivery
+    # reconciler's finish verification. The floor that does hold for every task
+    # is inside ``verify_worker_git_topology``: the reported commit must be an
+    # ancestor of the run branch's HEAD, so a discarded or off-branch commit is
+    # rejected however the board looks.
+    review_started = INITIAL_REVIEW_KEY in tasks
     expected_parent = registration.base_sha
-    for plan_task in registration.manifest.tasks:
+    def stalled(*, step_key: str, code: str, reason: str) -> bool:
+        """Record a structural stall the same way a rejected result is recorded."""
+        log.error("tick %s step %s: %s: %s", tick_id, step_key, code, reason)
+        _record_validation_blocked(
+            state_dir, tick_id=tick_id, step_key=step_key, code=code, reason=reason
+        )
+        return False
+
+    for index, plan_task in enumerate(manifest_tasks):
         worker_key = f"plan:{plan_task.id}"
-        gate_key = f"validate:{plan_task.id}"
-        if worker_key not in registration.step_keys or gate_key not in registration.step_keys:
-            return False
+        if worker_key not in registration.step_keys:
+            return stalled(
+                step_key=worker_key,
+                code=CHAIN_WIRING_INCOMPLETE_CODE,
+                reason="step key is not registered for this run",
+            )
         worker = tasks.get(worker_key)
-        gate = tasks.get(gate_key)
-        if worker is None or gate is None:
-            return False
+        if worker is None:
+            return stalled(
+                step_key=worker_key,
+                code=CHAIN_WIRING_INCOMPLETE_CODE,
+                reason="no card for this step key on the board",
+            )
         if worker.status != "done":
             return True
+        # Compatibility: a run registered before the per-task controller gate
+        # was dropped still carries ``validate:<id>`` step keys and a sticky
+        # blocked gate card. ``poll_pinned_run`` waits for every registered step
+        # key, so those gates must still be completed or the run never settles.
+        legacy_gate_key = f"validate:{plan_task.id}"
+        legacy_gate = None
+        if legacy_gate_key in registration.step_keys:
+            legacy_gate = tasks.get(legacy_gate_key)
+            if legacy_gate is None:
+                return stalled(
+                    step_key=legacy_gate_key,
+                    code=CHAIN_WIRING_INCOMPLETE_CODE,
+                    reason="registered legacy gate card is not on the board",
+                )
+        is_chain_tip = (
+            index == len(manifest_tasks) - 1
+            and not review_started
+            and not (legacy_gate is not None and legacy_gate.status == "done")
+        )
         payload = _show_task_payload(worker.task_id)
         try:
             result = parse_worker_result(
@@ -1533,30 +1636,49 @@ def reconcile_plan_task_results(
                 step_key=worker_key,
                 acceptance_criteria=plan_task.acceptance_criteria,
             )
-            if gate.status == "done":
-                verify_worker_git_topology(
-                    registration.worktree,
-                    result.git,
-                    expected_parent_sha=expected_parent,
-                )
-            else:
+            if is_chain_tip:
                 verify_worker_git_result(
                     registration.worktree,
                     result.git,
                     expected_parent_sha=expected_parent,
                 )
+            else:
+                verify_worker_git_topology(
+                    registration.worktree,
+                    result.git,
+                    expected_parent_sha=expected_parent,
+                )
         except ResultContractError as exc:
-            diagnostic = sanitize_result_text(
-                f"TPO result validation failed: {exc.code}", maximum=1000
+            # No card is blocked here: a Plan task must never open a human-input
+            # boundary mid-run. Returning False makes the tick report no
+            # progress; the marker and the log are where an operator finds why.
+            reason = sanitize_result_text(str(exc), maximum=1000)
+            log.error(
+                "tick %s step %s: TPO result validation failed: %s",
+                tick_id,
+                worker_key,
+                reason,
             )
-            _mark_gate_needs_input(gate.task_id, diagnostic)
-            log.warning("tick %s step %s: %s", tick_id, worker_key, diagnostic)
+            _record_validation_blocked(
+                state_dir,
+                tick_id=tick_id,
+                step_key=worker_key,
+                code=sanitize_result_text(exc.code, maximum=200),
+                reason=reason,
+            )
             return False
         expected_parent = result.git.resulting_head_sha
-        if gate.status != "done" and not complete_todo_kanban_task(
-            tenant, gate.task_id
+        if (
+            legacy_gate is not None
+            and legacy_gate.status != "done"
+            and not complete_todo_kanban_task(tenant, legacy_gate.task_id)
         ):
-            return False
+            return stalled(
+                step_key=legacy_gate_key,
+                code=GATE_COMPLETION_FAILED_CODE,
+                reason="Hermes did not complete the registered legacy gate",
+            )
+    _clear_validation_blocked(state_dir, tick_id)
     return True
 
 

@@ -14,7 +14,7 @@ Tick Loop (Hermes cron or manual)
 [Kanban Registration] -- Build a complete chain behind a registration barrier
     |
     v
-[Compile pinned Plan source] --> worker --> controller gate --> next worker
+[Compile pinned Plan source] --> worker --> next worker --> next worker
     |
     v
 [Independent review] --> review-fix --> validation --> re-review (bounded)
@@ -139,7 +139,9 @@ base commit. Failure records `failed_to_spawn` with `plan_validation_failed`
 and creates no kanban tasks.
 
 The `native-sdd` profile uses that gate. A manifest Plan compiles to ordered
-worker cards separated by unassigned controller gates. A manifest-free embedded
+worker cards chained directly onto one another: TPO validates each closing
+worker's result metadata and Git facts before the run advances, but no card
+stops the run for human input between Plan tasks. A manifest-free embedded
 Plan is not selectable under a plan-gated profile: eligibility blocks the issue
 as `plan_invalid:manifest_required`. A manifest-free `Plan:` path stays
 selectable and compiles to a single development card. Independent review uses

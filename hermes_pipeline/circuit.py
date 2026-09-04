@@ -45,7 +45,15 @@ class CircuitBreaker:
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
         self.state_path.write_text(json.dumps(st, sort_keys=True))
 
-    def observe(self, *, picked: str | None, counts_as_no_progress: bool) -> None:
+    def observe(
+        self, *, picked: str | None, counts_as_no_progress: bool, detail: str = ""
+    ) -> None:
+        """Record one tick's progress verdict.
+
+        ``detail`` is a short, already-bounded description of what is stuck; it
+        is appended to the alert so the message names the cause rather than only
+        the symptom. Callers that have nothing specific pass nothing.
+        """
         st = self._load()
         log.debug("circuit breaker observe: picked=%s counts_as_no_progress=%s state=%s",
                   picked, counts_as_no_progress, st)
@@ -67,9 +75,13 @@ class CircuitBreaker:
             if dedup_ok:
                 log.debug("circuit breaker: sending slack alert after %d consecutive no-progress ticks",
                           st["consecutive_no_progress"])
+                suffix = f" ({detail})" if detail else ""
                 _send_slack(
                     channel=self.slack_channel,
-                    msg=f"pipeline-tick: {st['consecutive_no_progress']} consecutive no-progress ticks",
+                    msg=(
+                        f"pipeline-tick: {st['consecutive_no_progress']} "
+                        f"consecutive no-progress ticks{suffix}"
+                    ),
                 )
                 st["last_alert_at"] = _now().strftime("%Y-%m-%dT%H:%M:%SZ")
         self._save(st)

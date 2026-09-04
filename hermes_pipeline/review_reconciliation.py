@@ -175,8 +175,7 @@ def _implementation_head(*, tasks: dict, registration, tick_id: str) -> str:
     expected = registration.base_sha
     for task in registration.manifest.tasks:
         worker = tasks.get(f"plan:{task.id}")
-        gate = tasks.get(f"validate:{task.id}")
-        if worker is None or gate is None or worker.status != "done" or gate.status != "done":
+        if worker is None or worker.status != "done":
             raise ResultContractError("review_prerequisite_incomplete")
         result = parse_worker_result(
             _show_task_payload(worker.task_id), tick_id=tick_id,
@@ -192,12 +191,17 @@ def _implementation_head(*, tasks: dict, registration, tick_id: str) -> str:
 
 def _ensure_initial_review(*, project_dir: Path, tasks: dict, registration, tenant: str,
                            tick_id: str) -> None:
-    validation = [
-        tasks.get(f"validate:{task.id}") for task in registration.manifest.tasks
+    # The implementation chain is pure workers: the last one is the review's
+    # parent, and its completion is the only trigger the review waits for. The
+    # result reconciler has already validated the chain -- ``reconcile_reviews``
+    # runs only after it reported progress -- and ``_implementation_head``
+    # re-proves the topology below.
+    workers = [
+        tasks.get(f"plan:{task.id}") for task in registration.manifest.tasks
     ]
-    if not validation or any(task is None or task.status != "done" for task in validation):
+    if not workers or any(task is None or task.status != "done" for task in workers):
         return
-    parent = validation[-1].task_id
+    parent = workers[-1].task_id
     head_sha = _implementation_head(tasks=tasks, registration=registration, tick_id=tick_id)
     review = tasks.get("review:0")
     if review is None:

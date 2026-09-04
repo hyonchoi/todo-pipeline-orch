@@ -34,6 +34,25 @@ def test_third_trips_alert(tmp_path):
     assert len(sent) == 1
     assert "3 consecutive no-progress ticks" in sent[0]["msg"]
 
+def test_alert_names_what_is_stuck_when_a_detail_is_supplied(tmp_path):
+    """The alert is the only push signal; "no progress" alone is undiagnosable.
+
+    A plan-manifest run has no human gate to stop at, so a stalled result
+    validation repeats silently until someone reads the run directory.
+    """
+    sent = []
+    with patch("hermes_pipeline.circuit._send_slack", lambda **kw: sent.append(kw)):
+        br = _br(tmp_path)
+        for _ in range(3):
+            br.observe(
+                picked=None,
+                counts_as_no_progress=True,
+                detail="plan:task-2 worktree_dirty",
+            )
+    assert "3 consecutive no-progress ticks" in sent[0]["msg"]
+    assert "plan:task-2 worktree_dirty" in sent[0]["msg"]
+
+
 def test_alert_deduped_within_window(tmp_path):
     sent = []
     with patch("hermes_pipeline.circuit._send_slack", lambda **kw: sent.append(kw)):
