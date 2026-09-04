@@ -14,7 +14,7 @@ Tick Loop (Hermes cron or manual)
 [Kanban Registration] -- Build a complete chain behind a registration barrier
     |
     v
-[Compile pinned Plan source] --> worker --> controller gate --> next worker
+[Compile pinned Plan source] --> worker --> next worker --> next worker
     |
     v
 [Independent review] --> review-fix --> validation --> re-review (bounded)
@@ -63,7 +63,7 @@ invokes Claude or Codex directly: Hermes dispatches every assigned worker card.
 Review is reconciled from structured Kanban result metadata and Git facts.
 
 ### Lane E: Finish Branch
-Phase 8 runs `/ship` in Claude Code or `$ship` in Codex, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the default gstack phase profile.
+Phase 8 runs `/ship` in Claude Code or `$ship` in Codex, opens or updates a PR, pushes all intended branch changes, and completes normally without merging. The legacy `ship.py` helper remains for old ship-gate sidecars but is no longer part of the (now deprecated) `gstack` phase profile.
 
 Phase 8 records the work branch in `.hermes/pipeline_branch.txt`. After the
 terminal kanban task completes, the next `tpo tick` checks that branch's PR and
@@ -123,10 +123,13 @@ cli._tick_project(config, contract)
             `-- complete barrier, making the first executable runnable
 ```
 
-`register_todo_phases` remains a compatibility wrapper that performs the prepare
-and create calls back-to-back for harnesses and direct callers. Production uses
-the split API so tick persistence stays immediately before the first external
-mutation.
+There is no combined prepare-and-create wrapper: every caller uses the split
+API so tick persistence stays immediately before the first external mutation.
+
+`tpo init` writes `profile = "native-sdd"` unless `--profile` says otherwise,
+and `native-sdd` is plan-gated; `gstack` is deprecated but still bundled, and a
+contract with no `profile` key keeps resolving to `gstack`, the legacy implicit
+default ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)).
 
 Profiles may set top-level `requires_plan: true`. After normal TODO selection
 and before phase rendering or tick persistence, `_tick_project` resolves the
@@ -136,8 +139,12 @@ base commit. Failure records `failed_to_spawn` with `plan_validation_failed`
 and creates no kanban tasks.
 
 The `native-sdd` profile uses that gate. A manifest Plan compiles to ordered
-worker cards separated by unassigned controller gates. A manifest-free legacy
-Plan remains one development card and emits a warning. Independent review uses
+worker cards chained directly onto one another: TPO validates each closing
+worker's result metadata and Git facts before the run advances, but no card
+stops the run for human input between Plan tasks. A manifest-free embedded
+Plan is not selectable under a plan-gated profile: eligibility blocks the issue
+as `plan_invalid:manifest_required`. A manifest-free `Plan:` path stays
+selectable and compiles to a single development card. Independent review uses
 a distinct session; findings compile into at most five `review-fix` /
 fix-validation / re-review rounds. A clean result enables verified PR creation,
 deterministic TODO closeout, and an unassigned terminal human-review gate.
@@ -195,9 +202,11 @@ All pipeline state lives under `<project>/.hermes/`:
 1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent`
    chains. A non-spawnable registration barrier prevents partial chains from
    running; it is completed only after the complete chain is durable. Profiles
-   may define manual gates with sticky `needs_input` blocks, but the default
-   `gstack` profile ends at Phase 8 PR handoff. `native-sdd` keeps the same
-   merge-aware Phase 8 handoff key and follows it with a terminal human gate.
+   may define manual gates with sticky `needs_input` blocks; the deprecated
+   `gstack` profile ends at Phase 8 PR handoff. `native-sdd`, the default
+   profile ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)),
+   keeps the same merge-aware Phase 8 handoff key and follows it with a terminal
+   human gate.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Review reconciliation is metadata-driven** — TPO validates the independent
    review card's bounded result and Git facts; it does not run a local
@@ -220,9 +229,13 @@ and `TODOS-archive.md` are retired (see
   repository paths remain `legacy_path` inputs; dual sources are invalid
   ([ADR-0001](adr/0001-plan-is-the-execution-authority.md)). Manifest-free
   Markdown remains a legacy compatibility contract that compiles
-  to one development card, but only non-plan profiles accept it: a plan-gated
-  profile (`requires_plan`) blocks such an issue as
-  `plan_invalid:manifest_required`. Validate a Plan with
+  to one development card. A `Plan:` repository path accepts it under any
+  profile; an embedded Plan does not, and a plan-gated profile
+  (`requires_plan`) blocks such an issue as `plan_invalid:manifest_required`.
+  `native-sdd`, the default profile for new contracts
+  ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)), is
+  plan-gated, so a manifest is what makes a Plan's tasks visible as cards.
+  Validate a Plan with
   `tpo plan validate <project> --todo <n> --require-manifest`.
 - **Label vocabulary and eligibility** — `tpo:todo` + `ready-for-agent` make an
   issue selectable; `tpo:on-hold`, `tpo:in-progress`, and pending-triage labels
@@ -251,8 +264,10 @@ and `TODOS-archive.md` are retired (see
   `in_progress_stale` is the expected blocked reason for a delivered issue.
   Completion markers count only when TPO wrote them (the current `gh` login, or
   a `tick=` naming a local `runs/<tick>` directory).
-- **Offline harness** — `tpo test` serves every `gh` call from a bundled fake
-  (`TPO_GH_BIN`, `TPO_FAKE_GH_STATE`); the minimum real `gh` is 2.44.
+- **Live harness** — `tpo test --repo OWNER/NAME` runs one production tick
+  against a disposable GitHub sandbox repository with the real `gh` (minimum
+  2.44; `TPO_GH_BIN` overrides are rejected). See
+  [howto-live-integration-test-harness.md](howto-live-integration-test-harness.md).
 
 ## See Also
 - [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) — How kanban drives phase state

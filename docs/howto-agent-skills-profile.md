@@ -1,6 +1,6 @@
 # How to Use the agent-skills Profile
 
-Pipeline profiles let a project select an independent set of phases — the prompts, tool capabilities, and turn/timeout budgets driving each stage of the pipeline — instead of being locked to the bundled `gstack` phase list. This guide covers the bundled `agent-skills` profile and how to configure a project to use it.
+Pipeline profiles let a project select an independent set of phases — the prompts, tool capabilities, and turn/timeout budgets driving each stage of the pipeline — instead of being locked to one bundled phase list. This guide covers the bundled `agent-skills` profile and how to configure a project to use it.
 
 ## Prerequisites
 
@@ -29,7 +29,7 @@ second is the structured source of truth for client support, discovery, and
 invocation metadata. `tpo doctor` loads both files unconditionally. Three
 profiles are bundled:
 
-- **`gstack`** (default) — the gstack/superpowers workflow. Skills:
+- **`gstack`** (deprecated; see [ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md) and [Migrating from gstack](howto-native-sdd-profile.md#migrating-from-gstack)) — the gstack/superpowers workflow. Skills:
   `ai-coding-agents`, `autoplan`, `writing-plans`,
   `subagent-driven-development`, `review`, `cso`, `qa`, `document-release`,
   `document-generate`, `ship`.
@@ -41,7 +41,7 @@ profiles are bundled:
   `agent-skills:code-review-and-quality`, `agent-skills:code-reviewer`,
   `agent-skills:security-and-hardening`, `agent-skills:security-auditor`,
   `agent-skills:ship`.
-- **`native-sdd`** — Plan-gated native subagent TDD, independent review, PR
+- **`native-sdd`** (default) — Plan-gated native subagent TDD, independent review, PR
   creation, and a human gate, without gstack, superpowers, or client workflow
   skills. Skills: `ai-coding-agents`.
 
@@ -62,8 +62,11 @@ Wrote pipeline execution contract: /path/to/<project>/.hermes/pipeline.toml
 
 The contract records the profile and computes capabilities from `agent-skills/phases.yaml`:
 ```toml
-schema_version = 2
+# Pipeline execution contract — read at tick start.
+# See docs/tutorial-getting-started.md and `tpo doctor --help`.
+schema_version = 3
 assignee = "default"
+review_assignee = "default"
 capabilities = ["Bash", "Edit", "Read", "Write"]
 profile = "agent-skills"
 ```
@@ -87,8 +90,8 @@ prompt client: <claude-or-codex> (global for all projects under projects_dir)
 UNSUPPORTED: profile 'agent-skills' has Unverified prerequisites for prompt client '<claude-or-codex>'
 ```
 
-`doctor` resolves phases from the profile named in the contract, not always
-`gstack`. If the `profile` field names a profile that doesn't exist, `doctor`
+`doctor` resolves phases from the profile named in the contract, never from a
+fixed default. If the `profile` field names a profile that doesn't exist, `doctor`
 fails closed with a `MISSING` error and exit code 2. If either profile data file
 is missing or malformed, doctor reports
 `INVALID: failed to load profile data for '<name>'` and exits 2.
@@ -117,9 +120,18 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
 ## Adding a new profile
 
 1. Create `hermes_pipeline/data/phase-profiles/<name>/phases.yaml` following
-   the same schema as the bundled profiles (optional top-level
-   `requires_plan`, plus `phase_key`, `name`, `prompt`,
-   `tools`, `turns`, `timeout` per phase; gate phases use `gate: true`).
+   the same schema as the bundled profiles. Two optional top-level keys, both
+   booleans that default to `false`:
+   - `requires_plan` — the profile is plan-gated: a selected TODO must carry a
+     valid `Plan:` path, and (as `native-sdd` shows) the compiler may additionally
+     require a `json tpo-plan` manifest.
+   - `deprecated` — the profile still runs unchanged, but `tpo init --profile
+     <name>` prints a `note:` line and `tpo doctor` / `tpo tick` emit one
+     informational deprecation notice for a contract that selects it. It never
+     changes an exit code. `gstack` sets it.
+
+   Each phase then needs `phase_key`, `name`, `prompt`, `tools`, `turns`, and
+   `timeout`; gate phases use `gate: true`.
 2. Create the mandatory sibling
    `hermes_pipeline/data/phase-profiles/<name>/prerequisites.yaml`. It has this
    schema:
@@ -143,7 +155,7 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
 
 **"ERROR: unknown profile '<name>'" on init**
 - The `--profile` flag names a profile that doesn't exist under `hermes_pipeline/data/phase-profiles/`.
-- **Fix:** Use `gstack` or `agent-skills`, or add a new profile directory first.
+- **Fix:** Use one of the bundled profiles (`native-sdd`, `agent-skills`, `gstack`), or add a new profile directory first.
 
 **"MISSING: ..." on doctor**
 - The contract's `profile` field names a profile that no longer exists (e.g. it was renamed or removed).

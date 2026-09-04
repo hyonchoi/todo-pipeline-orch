@@ -891,9 +891,92 @@ def test_doctor_reports_plan_readiness_from_github_issues(tmp_path, mocker, caps
     assert "Repository: acme/repo" in output
     assert "Label vocabulary: ok" in output
     assert "Plan readiness: eligible=1 blocked=2 (not_ready=1 plan_invalid=1)" in output
+    assert "Hint:" not in output
     assert "Runs: active=0 delivered=0 abandoned=0" in output
     assert "TODOS.md" not in output
     assert "OK:" in output
+
+
+_LEGACY_PLAN = "# Plan\n\n1. Do the thing\n"
+
+
+def _seed_doctor_legacy_plans(tmp_path, fake_gh, count=2):
+    """Seed issues whose Plan is a manifest-free repository path.
+
+    A ``legacy_path`` Plan needs no manifest, so these stay selectable; they
+    exist to prove the migration hint does NOT fire for them.
+    """
+    from tests.gh_fakes import issue_payload
+
+    project = tmp_path / "demo"
+    (project / "docs").mkdir()
+    (project / "docs" / "legacy.md").write_text(_LEGACY_PLAN)
+    _seed_doctor_github(fake_gh, [
+        issue_payload(
+            n,
+            body=f"### Plan\n\ndocs/legacy.md\n\n### Branch\n\nfeat/{n}\n",
+        )
+        for n in range(1, count + 1)
+    ])
+
+
+def _seed_doctor_manifest_free_embedded_plans(fake_gh, count=2):
+    """Seed issues carrying an embedded Plan with no ``tpo-plan`` manifest.
+
+    Only the embedded authority requires a manifest, so this is the shape that
+    blocks with ``plan_invalid:manifest_required``.
+    """
+    from tests.gh_fakes import issue_payload
+
+    # The block must be the body's final element, so Branch comes first.
+    embedded = (
+        "<details>\n<summary>Implementation Plan</summary>\n---\n"
+        "# Plan\n\nDo the thing, with no manifest block.\n"
+        "---\n</details>\n"
+    )
+    _seed_doctor_github(fake_gh, [
+        issue_payload(n, body=f"### Branch\n\nfeat/{n}\n\n{embedded}")
+        for n in range(1, count + 1)
+    ])
+
+
+_MANIFEST_HINT = (
+    "Hint: an embedded Plan needs a manifest (```json tpo-plan``` block); "
+    "see docs/templates/tpo-plan.md and the \"Migrating from gstack\" section of "
+    "docs/howto-native-sdd-profile.md"
+)
+
+
+def test_doctor_hints_manifest_migration_once_for_manifest_free_plans(
+    tmp_path, mocker, capsys, fake_gh
+):
+    args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+    _seed_doctor_manifest_free_embedded_plans(fake_gh, count=2)
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    lines = output.splitlines()
+    readiness_index = lines.index("Plan readiness: eligible=0 blocked=2 (plan_invalid=2)")
+    assert lines[readiness_index + 1] == _MANIFEST_HINT
+    assert output.count("Hint:") == 1
+
+
+def test_doctor_omits_manifest_hint_under_gstack_profile(tmp_path, mocker, capsys, fake_gh):
+    args = _create_valid_doctor_project(tmp_path, profile="gstack")
+    _seed_doctor_legacy_plans(tmp_path, fake_gh, count=1)
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+    output = capsys.readouterr().out
+    assert "Plan readiness: eligible=1 blocked=0" in output
+    assert "Hint:" not in output
 
 
 def test_doctor_github_checks_are_offline_tolerant(tmp_path, mocker, capsys, fake_gh):
@@ -1469,11 +1552,15 @@ class TestCmdInit:
         _cmd_init(FakeArgs(project="demo", force=False), config)
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         contract.write_text('schema_version = 2\nassignee = "custom"\n')
+        capsys.readouterr()  # drop the fresh-write output
 
         result = _cmd_init(FakeArgs(project="demo", force=False), config)
 
         assert result == 0
-        assert "already exists" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "already exists" in out
+        # The deprecation note belongs to a fresh write, not the no-op path.
+        assert "deprecated" not in out
         assert 'assignee = "custom"' in contract.read_text()
 
     def test_init_force_overwrites(self, tmp_path):
@@ -1530,10 +1617,13 @@ class TestInitAssignee:
 
 
 class TestInitProfile:
-    def test_init_profile_parser_defaults_to_gstack(self):
+    def test_init_profile_parser_defaults_to_native_sdd(self):
+        from hermes_pipeline.contract import DEFAULT_PROFILE
+
         parser = build_parser()
         args = parser.parse_args(["init", "demo"])
-        assert args.profile == "gstack"
+        assert args.profile == DEFAULT_PROFILE
+        assert args.profile == "native-sdd"
 
     def test_init_profile_parser_accepts_flag(self):
         parser = build_parser()
@@ -1554,7 +1644,13 @@ class TestInitProfile:
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         assert 'profile = "agent-skills"' in contract.read_text()
 
-    def test_init_without_profile_flag_defaults_to_gstack(self, tmp_path):
+    def test_init_without_profile_flag_defaults_to_native_sdd(self, tmp_path, capsys):
+        """No --profile: init writes DEFAULT_PROFILE and its capabilities."""
+        import tomllib
+
+        from hermes_pipeline.contract import DEFAULT_PROFILE, required_capabilities
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         _create_project(projects_dir, "demo")
@@ -1564,7 +1660,79 @@ class TestInitProfile:
 
         assert result == 0
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
+        data = tomllib.loads(contract.read_text())
+        assert data["profile"] == DEFAULT_PROFILE == "native-sdd"
+        assert data["capabilities"] == sorted(
+            required_capabilities(load_phases(resolve_profile_phases_path(DEFAULT_PROFILE)))
+        )
+        out = capsys.readouterr().out
+        assert "Wrote pipeline execution contract" in out
+        assert "deprecated" not in out
+
+    def test_init_explicit_gstack_prints_deprecation_note(self, tmp_path, capsys):
+        """Opting into the deprecated legacy profile still warns."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="gstack"), config
+        )
+
+        assert result == 0
+        contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
         assert 'profile = "gstack"' in contract.read_text()
+        out = capsys.readouterr().out
+        assert "Wrote pipeline execution contract" in out
+        assert (
+            "note: profile 'gstack' is deprecated; new projects default to "
+            "'native-sdd' (see docs/howto-native-sdd-profile.md)\n"
+        ) in out
+
+    def test_init_native_sdd_prints_no_deprecation_note(self, tmp_path, capsys):
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=None, profile="native-sdd"), config
+        )
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "Wrote pipeline execution contract" in out
+        assert "deprecated" not in out
+
+    def test_init_assignee_patch_keeps_the_legacy_implicit_profile(self, tmp_path):
+        """Patching --assignee into a profile-less contract must not migrate it.
+
+        An absent ``profile`` key means the legacy implicit profile, so the
+        re-render keeps it rather than adopting the new authoring default.
+        """
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        state = project_dir / ".hermes"
+        state.mkdir(parents=True, exist_ok=True)
+        (state / "pipeline.toml").write_text(
+            "schema_version = 3\n"
+            'assignee = "default"\n'
+            'review_assignee = "default"\n'
+            'capabilities = ["Bash", "Edit", "Read", "Write"]\n'
+        )
+        config = Config(projects_dir=projects_dir)
+
+        result = _cmd_init(
+            FakeArgs(project="demo", force=False, assignee="pipeline"), config
+        )
+
+        assert result == 0
+        text = (state / "pipeline.toml").read_text()
+        assert 'assignee = "pipeline"' in text
+        assert 'profile = "gstack"' in text
+        assert "native-sdd" not in text
 
     def test_init_unknown_profile_returns_error(self, tmp_path, capsys):
         projects_dir = tmp_path / "projects"
@@ -1687,6 +1855,12 @@ class TestCmdDoctor:
         assert "Plan readiness: eligible=0 blocked=0\n" in output
         assert "todos-manager" not in output
         assert "Skill parity" not in output
+        assert (
+            "DEPRECATED: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd\n"
+        ) in output
+        assert output.count("DEPRECATED:") == 1
 
     def test_doctor_drift_returns_1(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"
@@ -1876,7 +2050,29 @@ class TestDoctorProfileAware:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 0
-        assert "profile=gstack" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "profile=gstack" in out
+        assert (
+            "DEPRECATED: profile 'gstack' is deprecated; migrate with: "
+            "tpo init demo --force --profile native-sdd\n"
+        ) in out
+        assert "does not declare a profile" not in out
+
+    def test_doctor_native_sdd_emits_no_deprecation(
+        self, monkeypatch, tmp_path, capsys, fake_gh
+    ):
+        _seed_doctor_github(fake_gh)
+        args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+        monkeypatch.setattr(
+            "hermes_pipeline.cli._cli_sp.run",
+            _allow_hermes_registry_skill_check,
+        )
+
+        assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == 0
+
+        out = capsys.readouterr().out
+        assert "profile=native-sdd" in out
+        assert "DEPRECATED:" not in out
 
 
 class TestDoctorMissingProfile:

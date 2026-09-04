@@ -78,6 +78,13 @@ def _doctor_hermes_version() -> tuple[bool, str]:
     return True, rendered
 
 
+_MANIFEST_REQUIRED_HINT = (
+    "Hint: an embedded Plan needs a manifest (```json tpo-plan``` block); "
+    "see docs/templates/tpo-plan.md and the \"Migrating from gstack\" section of "
+    "docs/howto-native-sdd-profile.md"
+)
+
+
 def _doctor_github_checks(
     project_dir: Path, state_dir: Path, *, project: str, requires_plan: bool
 ) -> bool:
@@ -155,6 +162,8 @@ def _doctor_github_checks(
             if summary:
                 line += " (" + " ".join(f"{key}={summary[key]}" for key in sorted(summary)) + ")"
             print(line)
+            if "plan_invalid:manifest_required" in readiness.blocked_reasons.values():
+                print(_MANIFEST_REQUIRED_HINT)
         except GitHubIssuesError as exc:
             print(f"WARNING: Plan readiness unavailable ({exc.code})")
             ok = False
@@ -244,6 +253,22 @@ def _doctor_active_registration(project_dir: Path, state_dir: Path) -> bool:
         print(f"Current tick {tick_id}: no registration (no TODO selected)")
         return True
     fix = f"Fix (tick {tick_id}):"
+    from .kanban_tasks import (
+        RESULT_VALIDATION_BLOCKED_MARKER,
+        validation_blocked_summary,
+    )
+
+    stalled = validation_blocked_summary(state_dir, tick_id)
+    if stalled:
+        # A stalled result validation is not corrupt authority, so it does not
+        # change the verdict -- but with no human gate on the board this is the
+        # only place an operator can see why the run stopped advancing.
+        print(f"RESULT VALIDATION BLOCKED: {stalled}")
+        print(
+            f"{fix} read "
+            f"{state_dir / 'runs' / tick_id / RESULT_VALIDATION_BLOCKED_MARKER} "
+            "and fix the reported step before the next tick."
+        )
     try:
         registration = json.loads(registration_path.read_text(encoding="utf-8"))
         from .github_issues import SUPPORTED_REGISTRATION_SCHEMA_VERSIONS
@@ -595,6 +620,8 @@ def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the argparse parser with subcommands."""
+    from .contract import DEFAULT_PROFILE
+
     parser = argparse.ArgumentParser(
         prog="tpo",
         description="Hermes pipeline orchestrator: tick projects, manage pipeline setup, and handle legacy approval gates.",
@@ -722,9 +749,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init_parser.add_argument(
         "--profile",
-        default="gstack",
-        help="Pipeline skill-set profile (e.g., gstack, agent-skills). Default: gstack. "
-        "Each profile defines a different set of phases and required capabilities.",
+        default=DEFAULT_PROFILE,
+        help=(
+            "Pipeline skill-set profile (e.g., native-sdd, gstack, agent-skills). "
+            f"Default: {DEFAULT_PROFILE}. Each profile defines a different set of "
+            "phases and required capabilities."
+        ),
     )
     init_parser.set_defaults(func=_cmd_init)
 
@@ -769,20 +799,32 @@ def build_parser() -> argparse.ArgumentParser:
     )
     install_profile_parser.set_defaults(func=_cmd_install_profile)
 
-    # test: Mock integration test harness
+    # test: Live integration test harness
     test_parser = subparsers.add_parser(
         "test",
-        help="Run mock integration test harness against mock project data",
+        help="Run the live integration test harness against a sandbox GitHub repository",
+        description="Live integration test harness against a sandbox GitHub repository.",
     )
     test_parser.add_argument(
         "--fixture",
-        required=True,
-        help="Fixture name to use (e.g., happy-path)",
+        default="happy-path",
+        help="Fixture name to use (default: happy-path)",
+    )
+    test_parser.add_argument(
+        "--repo",
+        default=None,
+        metavar="OWNER/NAME",
+        help="Sandbox GitHub repository (default: TPO_HARNESS_REPO)",
+    )
+    test_parser.add_argument(
+        "--init-sandbox",
+        action="store_true",
+        help="Seed the sandbox default branch once and exit (no harness run)",
     )
     test_parser.add_argument(
         "--profile",
-        default="gstack",
-        help="Bundled phase profile to test (default: gstack)",
+        default=DEFAULT_PROFILE,
+        help=f"Bundled phase profile to test (default: {DEFAULT_PROFILE})",
     )
     test_parser.add_argument(
         "--loop",
@@ -793,14 +835,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     test_parser.add_argument(
-        "--phase",
-        default=None,
-        help="Run only a single phase by key (e.g., phase_2_autoplan)",
-    )
-    test_parser.add_argument(
         "--keep",
         action="store_true",
-        help="Keep temp directory after run for inspection",
+        help="Keep the workspace and the sandbox issue/PR/branch after the run for inspection",
     )
     test_parser.add_argument(
         "--timeout",
@@ -1513,6 +1550,30 @@ def _record_tracker_error(
         )
 
 
+def _profile_deprecation_notices(contract, phase_profile, project_slug: str) -> list[str]:
+    """Return deprecation notices for the contract's profile selection.
+
+    Emits at most one notice: when ``pipeline.toml`` omits ``profile`` (the
+    implicit legacy default is deprecated), or else when the resolved profile
+    is itself marked ``deprecated`` in its phases.yaml. Informational only:
+    callers must not change exit codes based on these.
+    """
+    from .contract import DEFAULT_PROFILE
+
+    migrate = f"tpo init {project_slug} --force --profile {DEFAULT_PROFILE}"
+    notices = []
+    if not contract.profile_declared:
+        notices.append(
+            "pipeline.toml does not declare a profile; the implicit default "
+            f"'{contract.profile}' is deprecated. Migrate with: {migrate}"
+        )
+    elif phase_profile.deprecated:
+        notices.append(
+            f"profile '{contract.profile}' is deprecated; migrate with: {migrate}"
+        )
+    return notices
+
+
 def _tick_project(
     *,
     project_dir: Path,
@@ -1548,6 +1609,7 @@ def _tick_project(
     """
     from .contract import (
         CONTRACT_SCHEMA_VERSION,
+        LEGACY_IMPLICIT_PROFILE,
         CapabilityMismatchError,
         ContractMissingError,
         ContractSchemaError,
@@ -1570,19 +1632,33 @@ def _tick_project(
         phase_profile = load_phase_profile(phases_path)
         phases = list(phase_profile.phases)
         prerequisites = load_profile_prerequisites(contract.profile)
+        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
+            log.warning("project %s: %s", project_slug, notice)
     except ContractMissingError:
+        # A contract-less project keeps resolving to the legacy implicit
+        # profile — same as a contract that omits `profile` — regardless of
+        # what `tpo init` now writes for new projects. Passed explicitly so a
+        # change to PipelineContract.profile's default can't migrate an
+        # existing project's phases underneath it.
         # Auto-compute capabilities from phases.yaml so a fresh project
         # doesn't break when a future phase requires a tool not in the
         # hardcoded DEFAULT_CAPABILITIES tuple.
-        phases_path = resolve_profile_phases_path("gstack")
+        phases_path = resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE)
         phase_profile = load_phase_profile(phases_path)
         phases = list(phase_profile.phases)
-        prerequisites = load_profile_prerequisites("gstack")
+        prerequisites = load_profile_prerequisites(LEGACY_IMPLICIT_PROFILE)
         contract = PipelineContract(
             schema_version=CONTRACT_SCHEMA_VERSION,
             assignee="pipeline",
             capabilities=tuple(sorted(required_capabilities(phases))),
+            profile=LEGACY_IMPLICIT_PROFILE,
+            # No contract declares nothing, so the profile is as implicit as it
+            # gets: this is the population ADR-0004 most needs to reach with the
+            # migration hint, and the default (declared) would silence it.
+            profile_declared=False,
         )
+        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
+            log.warning("project %s: %s", project_slug, notice)
         try:
             result = _cli_sp.run(
                 ["hermes", "profile", "show", contract.assignee],
@@ -1826,13 +1902,24 @@ def _tick_project(
                     cb.observe(picked=None, counts_as_no_progress=True)
                     return
                 if not reconciled:
+                    from .kanban_tasks import validation_blocked_summary
+
+                    # A manifest run has no human gate to stall at: the alert is
+                    # the push signal, so it must name the stuck step and code.
+                    stalled = validation_blocked_summary(project_state, prior_tick_id)
+                    detail = f"{label} reconciliation blocked"
+                    if stalled:
+                        detail = f"{detail}: {stalled}"
                     log.info(
-                        "project %s: prior tick %s %s reconciliation is blocked, skipping",
+                        "project %s: prior tick %s %s reconciliation is blocked, skipping (%s)",
                         project_slug,
                         prior_tick_id,
                         label,
+                        stalled or "no recorded diagnostic",
                     )
-                    cb.observe(picked=None, counts_as_no_progress=True)
+                    cb.observe(
+                        picked=None, counts_as_no_progress=True, detail=detail
+                    )
                     return
 
         if not pr_handoff_resolved and not all_phases_complete(
@@ -2068,6 +2155,13 @@ def _tick_project(
     plan_source = selected.plan_source
     issue = selected.entry
     plan_reference = None
+    if plan_source is not None and plan_source.kind == "legacy_path" and plan_source.plan_path:
+        # A repository-path Plan is its own authority: the reference value is
+        # the source's own validated path (see plan_manifest.validate_plan_reference).
+        # The embedded kind is bound below, from the pinned registration instead.
+        from .plan_manifest import PlanReference
+
+        plan_reference = PlanReference(plan_source.plan_path, plan_source)
 
     # Step 4: Render every prompt before persisting the tick ID or mutating Hermes.
     from .kanban_tasks import (
@@ -2686,15 +2780,16 @@ def _cmd_init(args, config: Config) -> int:
         return 2
 
     from .contract import (
+        DEFAULT_PROFILE,
         PROFILE_NAME_RE,
         ContractSchemaError,
         contract_path,
         write_default_contract,
     )
-    from .phases import resolve_profile_phases_path
+    from .phases import load_phase_profile, resolve_profile_phases_path
     from .project_config import _get_project_state_dir
 
-    profile = getattr(args, "profile", "gstack") or "gstack"
+    profile = getattr(args, "profile", DEFAULT_PROFILE) or DEFAULT_PROFILE
     if not PROFILE_NAME_RE.match(profile):
         msg = (
             f"invalid profile {profile!r}: must be a lowercase alphanumeric/hyphen "
@@ -2704,7 +2799,7 @@ def _cmd_init(args, config: Config) -> int:
         print(f"ERROR: {msg}")
         return 2
     try:
-        resolve_profile_phases_path(profile)
+        phase_profile = load_phase_profile(resolve_profile_phases_path(profile))
     except ContractSchemaError as e:
         log.error("invalid profile: %s", e)
         print(f"ERROR: {e}")
@@ -2730,17 +2825,20 @@ def _cmd_init(args, config: Config) -> int:
             data = tomllib.loads(path.read_text())
             from .contract import (
                 DEFAULT_CAPABILITIES,
+                LEGACY_IMPLICIT_PROFILE,
                 PipelineContract,
                 _render_contract_toml,
             )
 
+            # Re-rendering an existing contract: an absent `profile` key means
+            # the legacy implicit profile, never the new authoring default.
             contract = PipelineContract(
                 schema_version=data["schema_version"],
                 assignee=assignee,
                 capabilities=tuple(
                     data.get("capabilities", list(DEFAULT_CAPABILITIES))
                 ),
-                profile=data.get("profile", "gstack"),
+                profile=data.get("profile", LEGACY_IMPLICIT_PROFILE),
             )
             path.write_text(_render_contract_toml(contract))
         except (tomllib.TOMLDecodeError, KeyError) as e:
@@ -2752,6 +2850,11 @@ def _cmd_init(args, config: Config) -> int:
     else:
         print(
             f"Pipeline execution contract already exists: {path} (use --force to regenerate)"
+        )
+    if written and phase_profile.deprecated:
+        print(
+            f"note: profile '{profile}' is deprecated; new projects default to "
+            f"'{DEFAULT_PROFILE}' (see docs/howto-native-sdd-profile.md)"
         )
     return 0
 
@@ -2838,7 +2941,9 @@ def _cmd_doctor(args, config: Config) -> int:
     Exit codes: 0 clean; 1 drift (capability mismatch, registration or issue
     drift) or any ``WARNING:``/``INVALID:`` line from the GitHub checks (auth,
     repository identity, label vocabulary, plan readiness, runs); 2 missing or
-    INVALID contract, unknown project, or missing profile.
+    INVALID contract, unknown project, or missing profile. ``DEPRECATED:``
+    lines (undeclared or deprecated profile) are informational and never
+    change the exit code.
     """
     project_dir = _resolve_project_dir(config, args.project)
     if project_dir is None:
@@ -2885,6 +2990,9 @@ def _cmd_doctor(args, config: Config) -> int:
             f"INVALID: failed to load profile data for '{contract.profile}': {e}"
         )
         return 2
+
+    for notice in _profile_deprecation_notices(contract, phase_profile, args.project):
+        print(f"DEPRECATED: {notice}")
 
     missing = missing_capabilities(contract, phases)
     if missing:
@@ -3323,33 +3431,81 @@ def _atomic_write_config(path: Path, text: str) -> None:
 
 
 def _cmd_test(args, config: Config) -> int:
-    """Handle 'test' subcommand — mock integration test harness."""
-    from .harness import HarnessProfileError, run_harness
+    """Handle 'test' subcommand — live integration test harness against a sandbox repo."""
+    from . import harness
+    from .github_issues import GitHubIssuesError
+    from .harness import (
+        HarnessCleanupError,
+        HarnessPreflightError,
+        HarnessProfileError,
+        HarnessRemoteCleanupError,
+    )
+
+    if getattr(args, "init_sandbox", False):
+        try:
+            sandbox = harness.resolve_sandbox_repo(args.repo)
+            root = harness._harness_tmp_root()
+            root.mkdir(parents=True, exist_ok=True)
+            workspace = Path(tempfile.mkdtemp(prefix="harness-init-", dir=root))
+            try:
+                outcome = harness.init_sandbox(sandbox, workspace)
+            finally:
+                shutil.rmtree(workspace, ignore_errors=True)
+            print(f"sandbox {sandbox.repo}: {outcome}")
+            return 0
+        except HarnessPreflightError as e:
+            log.error("sandbox init preflight failed: code=%s detail=%s", e.code, e.detail)
+            return 2
+        except HarnessRemoteCleanupError as e:
+            log.error("sandbox init failed: code=%s detail=%s", e.code, e.detail)
+            return 2
+        except GitHubIssuesError as e:
+            log.error("sandbox init failed: gh error: %s", e)
+            return 2
+        except Exception as e:
+            log.error(
+                "sandbox init failed: error_type=%s message=%s", type(e).__name__, e
+            )
+            return 2
 
     try:
-        result = run_harness(
+        result = harness.run_harness(
             fixture_name=args.fixture,
+            repo=args.repo,
             loop=args.loop,
-            phase_only=args.phase,
             keep_dir=args.keep,
             timeout=args.timeout,
             convergence_threshold=args.convergence_threshold,
             config=config,
             profile_name=args.profile,
         )
-        if result.exit_code != 0:
-            return result.exit_code
-        return 0
     except HarnessProfileError as e:
         log.error(
-            "test harness profile setup failed: code=%s profile=%s",
+            "test harness profile setup failed: code=%s profile=%s detail=%s",
             e.code,
             e.profile_name,
+            e.detail,
         )
         return 2
-    except Exception as e:
-        log.error("test harness failed: error_type=%s", type(e).__name__)
+    except HarnessPreflightError as e:
+        log.error("test harness preflight failed: code=%s detail=%s", e.code, e.detail)
         return 2
+    except HarnessRemoteCleanupError as e:
+        log.error("test harness cleanup incomplete: code=%s detail=%s", e.code, e.detail)
+        return 2
+    except HarnessCleanupError as e:
+        log.error("test harness cleanup failed: %s", e)
+        for note in getattr(e, "__notes__", ()):
+            log.error("test harness cleanup: %s", note)
+        return 2
+    except Exception as e:
+        log.error("test harness failed: error_type=%s message=%s", type(e).__name__, e)
+        return 2
+
+    print(result.summary)
+    for leftover in result.cleanup_leftovers:
+        print(f"leftover: {leftover}")
+    return result.exit_code
 
 
 def _cmd_skills_install(args, config: Config | None) -> int:

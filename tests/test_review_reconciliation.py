@@ -9,14 +9,16 @@ from hermes_pipeline.review_reconciliation import (
 )
 
 
-def _registration(tmp_path):
+def _registration(tmp_path, task_ids=("task-1",)):
     return SimpleNamespace(
         todo_id="TODO-42",
         worktree=tmp_path,
         assignee="implementer",
         review_assignee="reviewer",
         prompt_client="codex",
-        manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1"),)),
+        manifest=SimpleNamespace(
+            tasks=tuple(SimpleNamespace(id=task_id) for task_id in task_ids)
+        ),
     )
 
 
@@ -36,15 +38,73 @@ def test_initial_review_is_fresh_role_and_persistent_gate(tmp_path, mocker):
 
     _ensure_initial_review(
         project_dir=tmp_path,
-        tasks={"validate:task-1": _task("validation")},
-        registration=_registration(tmp_path), tenant="demo", tick_id="01TICK",
+        tasks={"plan:task-1": _task("worker-1"), "plan:task-2": _task("worker-2")},
+        registration=_registration(tmp_path, ("task-1", "task-2")),
+        tenant="demo", tick_id="01TICK",
     )
 
     assert create.call_args_list[0].kwargs["key"] == "review:0"
     assert create.call_args_list[0].kwargs["assignee"] == "reviewer"
+    # The last Plan worker is the review's parent: no controller gate remains
+    # between the implementation chain and the review.
+    assert create.call_args_list[0].kwargs["parent"] == "worker-2"
     assert "fresh, independent, read-only" in create.call_args_list[0].kwargs["prompt"]
     assert create.call_args_list[1].kwargs["key"] == REVIEW_ACCEPTANCE_KEY
     assert create.call_args_list[1].kwargs["gate"] is True
+
+
+def test_initial_review_defers_until_every_plan_worker_is_done(tmp_path, mocker):
+    create = mocker.patch("hermes_pipeline.review_reconciliation._create_task")
+    head = mocker.patch(
+        "hermes_pipeline.review_reconciliation._implementation_head",
+        return_value="a" * 40,
+    )
+
+    _ensure_initial_review(
+        project_dir=tmp_path,
+        tasks={
+            "plan:task-1": _task("worker-1"),
+            "plan:task-2": _task("worker-2", "running"),
+        },
+        registration=_registration(tmp_path, ("task-1", "task-2")),
+        tenant="demo", tick_id="01TICK",
+    )
+
+    create.assert_not_called()
+    head.assert_not_called()
+
+
+def test_implementation_head_revalidates_the_chain_without_gate_cards(tmp_path, mocker):
+    from hermes_pipeline.review_reconciliation import _implementation_head
+
+    registration = SimpleNamespace(
+        todo_id="TODO-42",
+        worktree=tmp_path,
+        base_sha="a" * 40,
+        manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1", acceptance_criteria=()),)),
+    )
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation._show_task_payload",
+        return_value={"payload": True},
+    )
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation.parse_worker_result",
+        return_value=SimpleNamespace(
+            git=SimpleNamespace(resulting_head_sha="b" * 40)
+        ),
+    )
+    topology = mocker.patch(
+        "hermes_pipeline.review_reconciliation.verify_worker_git_topology"
+    )
+
+    head = _implementation_head(
+        tasks={"plan:task-1": _task("worker-1")},
+        registration=registration,
+        tick_id="01TICK",
+    )
+
+    assert head == "b" * 40
+    assert topology.call_args.kwargs["expected_parent_sha"] == "a" * 40
 
 
 def test_partial_round_registration_retry_reuses_barrier_and_defers_rereview(
@@ -99,7 +159,7 @@ def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
         "hermes_pipeline.review_reconciliation.load_validated_registration",
         return_value=registration,
     )
-    validation_tasks = {"validate:task-1": _task("validation")}
+    validation_tasks = {"plan:task-1": _task("worker-1")}
     get_tasks = mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
         return_value=validation_tasks,
@@ -159,7 +219,7 @@ def test_malformed_success_mid_round_recovers_partial_chain_without_escalation(
         return_value=registration,
     )
     base_tasks = {
-        "validate:task-1": _task("validation"),
+        "plan:task-1": _task("worker-1"),
         "review:0": _task("review"),
         REVIEW_ACCEPTANCE_KEY: _task("acceptance", "blocked"),
     }
@@ -232,7 +292,7 @@ def test_clean_review_completes_acceptance_without_round_cards(tmp_path, mocker)
         return_value=registration,
     )
     tasks = {
-        "validate:task-1": _task("validation"),
+        "plan:task-1": _task("worker-1"),
         "review:0": _task("review"),
         REVIEW_ACCEPTANCE_KEY: _task("acceptance", "blocked"),
     }
@@ -273,7 +333,7 @@ def test_fifth_findings_blocks_gate_and_creates_no_sixth_round(tmp_path, mocker)
         return_value=registration,
     )
     tasks = {
-        "validate:task-1": _task("validation"),
+        "plan:task-1": _task("worker-1"),
         "review:0": _task("review"),
         REVIEW_ACCEPTANCE_KEY: _task("acceptance", "blocked"),
     }
@@ -334,3 +394,92 @@ def test_reconcile_reviews_forwards_repo_to_registration_loader(tmp_path, mocker
         project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", repo="acme/repo"
     )
     assert load.call_args.kwargs["repo"] == "acme/repo"
+
+
+def _worker_card_registration(tmp_path):
+    return SimpleNamespace(
+        todo_id="TODO-42",
+        worktree=tmp_path,
+        assignee="implementer",
+        review_assignee="reviewer",
+        prompt_client="codex",
+        manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1"),)),
+    )
+
+
+def test_review_card_publishes_the_full_result_metadata_template(tmp_path, mocker):
+    from hermes_pipeline.result_contract import render_result_template
+
+    create = mocker.patch(
+        "hermes_pipeline.review_reconciliation._create_task",
+        side_effect=["review-id", "acceptance-id"],
+    )
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation._implementation_head",
+        return_value="a" * 40,
+    )
+
+    _ensure_initial_review(
+        project_dir=tmp_path,
+        tasks={"plan:task-1": _task("worker-1")},
+        registration=_worker_card_registration(tmp_path),
+        tenant="demo", tick_id="01TICK",
+    )
+
+    prompt = create.call_args_list[0].kwargs["prompt"]
+    assert render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        section="review", pinned_head_sha="a" * 40, allow_no_changes=True,
+    ) in prompt
+
+
+def test_rereview_card_publishes_its_own_step_key_template(tmp_path, mocker):
+    from hermes_pipeline.result_contract import render_result_template
+    from hermes_pipeline.review_reconciliation import _ensure_rereview
+
+    create = mocker.patch(
+        "hermes_pipeline.review_reconciliation._create_task", return_value="rereview-id"
+    )
+
+    _ensure_rereview(
+        project_dir=tmp_path, round_number=2, validation_id="validation-id",
+        head_sha="d" * 40, registration=_worker_card_registration(tmp_path),
+        tenant="demo", tick_id="01TICK", tasks={},
+    )
+
+    assert render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="re-review:2",
+        section="review", pinned_head_sha="d" * 40, allow_no_changes=True,
+    ) in create.call_args.kwargs["prompt"]
+
+
+def test_review_fix_card_publishes_the_committing_worker_template(tmp_path, mocker):
+    from hermes_pipeline.result_contract import render_result_template
+
+    create = mocker.patch(
+        "hermes_pipeline.review_reconciliation._create_task",
+        side_effect=["barrier-id", "fix-id", "validation-id"],
+    )
+    mocker.patch("hermes_pipeline.review_reconciliation.complete_todo_kanban_task")
+
+    _ensure_round(
+        project_dir=tmp_path, round_number=1, parent="review-id",
+        registration=_worker_card_registration(tmp_path),
+        tenant="demo", tick_id="01TICK", tasks={},
+        findings=({"priority": "P1", "location": "a.py:1",
+                   "failure_scenario": "x", "recommendation": "y"},),
+    )
+
+    fix_call = next(
+        call for call in create.call_args_list
+        if call.kwargs["key"] == "review-fix:1"
+    )
+    assert render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review-fix:1",
+    ) in fix_call.kwargs["prompt"]
+    # Controller gates are TPO-completed and must stay free of worker schema.
+    gate_call = next(
+        call for call in create.call_args_list
+        if call.kwargs["key"] == "fix-validation:1"
+    )
+    assert "```json" not in gate_call.kwargs["prompt"]

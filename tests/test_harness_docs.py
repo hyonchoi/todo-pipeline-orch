@@ -4,14 +4,24 @@ from pathlib import Path
 def test_harness_docs_describe_profile_selection_and_fail_closed_rules():
     root = Path(__file__).resolve().parents[1]
     cli_reference = (root / "docs" / "reference-cli.md").read_text()
-    harness_guide = (root / "docs" / "howto-mock-integration-test-harness.md").read_text()
+    harness_guide = (root / "docs" / "howto-live-integration-test-harness.md").read_text()
 
     assert "`--profile`" in cli_reference
+    assert "`--repo`" in cli_reference
+    assert "`--init-sandbox`" in cli_reference
     assert "Unverified" in cli_reference
-    assert "Gate phases are rejected" in cli_reference
-    assert "tpo test --fixture happy-path --profile" in harness_guide
-    assert "terminal gate" in harness_guide
-    assert "profile attribution" in harness_guide.lower()
+    assert "unsafe_terminal" in cli_reference
+    assert "`--phase`" not in cli_reference
+    assert "tpo test --repo OWNER/NAME --profile" in harness_guide
+    assert "tpo test --repo OWNER/NAME --init-sandbox" in harness_guide
+    assert "sandbox_not_quiescent" in harness_guide
+    assert "force-with-lease" in harness_guide
+    assert "gh_override_forbidden" in harness_guide
+    assert "TPO_FAKE_GH_STATE" not in harness_guide
+    assert "repo_missing" in harness_guide and "repo_missing" in cli_reference
+    for name in ("README.md", "docs/ARCHITECTURE.md"):
+        assert "mock integration" not in (root / name).read_text().lower(), name
+    assert (root / "docs" / "howto-mock-integration-test-harness.md").exists() is False
 
 
 def test_native_sdd_docs_describe_compiled_plan_to_kanban_lifecycle():

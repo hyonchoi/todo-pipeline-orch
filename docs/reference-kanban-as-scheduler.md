@@ -12,16 +12,20 @@ circuit breaker observation.
 For `native-sdd`, the chain is compiled from the tracked `tpo-plan` manifest:
 
 ```text
-plan worker -> controller gate -> plan worker -> controller gate
+plan worker -> plan worker -> plan worker
             -> independent review -> review acceptance gate
             -> finish -> TODO closeout -> human merge gate
 ```
 
-Controller gates are unassigned and are completed only by TPO after validating
-the closing worker's `metadata.tpo_result` and independent Git facts. Stable
-keys use the tick and step identity, including `plan:<task-id>`,
-`validate:<task-id>`, `review:<round>`, `review-fix:<round>`,
-`fix-validation:<round>`, and `re-review:<round>`. A legacy Plan without a
+Plan tasks carry no per-task gate: the run is autonomous between tasks, and
+TPO validates each closing worker's `metadata.tpo_result` and independent Git
+facts on the next tick before the chain may advance to review. The remaining
+controller gates (`review-acceptance`, `fix-validation:<round>`) and the
+terminal human merge gate are unassigned and completed only by TPO. Stable keys
+use the tick and step identity, including `plan:<task-id>`, `review:<round>`,
+`review-fix:<round>`, `fix-validation:<round>`, and `re-review:<round>`. A run
+registered before the per-task gate was dropped still names its
+`validate:<task-id>` keys; TPO keeps completing those so it can be resumed. A legacy Plan without a
 manifest retains the static single-development/review/finish/human chain for
 compatibility. Retry still validates the registered repository, worktree,
 branch, pinned base TODO, and Plan hashes, but bypasses manifest-only dynamic
@@ -29,7 +33,7 @@ reconcilers.
 
 Hermes >= 0.19.0 is required for the Kanban and closing-result contracts.
 
-For the default `gstack` profile, completion of the terminal Phase 8 task means
+For the deprecated `gstack` profile, completion of the terminal Phase 8 task means
 the branch was handed to a PR, not merged. `tpo tick` reads
 `.hermes/pipeline_branch.txt` and skips new selection while that PR is open,
 closed without merge, or temporarily unverifiable. Once GitHub reports the PR as
@@ -362,7 +366,7 @@ prepare_todo_phases(
 | `todo_id` | `str` | — | TODO ID (e.g., "TODO-10"). Embedded in task body JSON header. |
 | `tick_id` | `str` | — | ULID tick ID embedded in each task body header. |
 | `board_slug` | `str` | — | Project slug embedded in each task body header. |
-| `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is packaged `gstack`; production resolves `contract.profile` and passes its path explicitly. |
+| `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is the packaged legacy implicit profile (`contract.LEGACY_IMPLICIT_PROFILE`, i.e. `gstack`), never the `tpo init` default; production resolves `contract.profile` and passes its path explicitly. |
 | `prompt_client` | `PromptClient` | `"claude"` | Renders the fixed product label, verified skill invocation vocabulary, and external-client delegation guidance. |
 
 **Returns:** All `PreparedPhaseTask` values in profile order.
@@ -439,31 +443,13 @@ known parents are not archived until that task is resolved. If cleanup cannot be
 confirmed from an archived-inclusive snapshot, the durable pending marker
 remains and later ticks skip the project until cleanup finishes.
 
-### `register_todo_phases`
+### Preparation and creation are always split
 
-Backward-compatible convenience wrapper for callers that do not need to
-persist state between preparation and task creation. It calls
-`prepare_todo_phases`, then `create_prepared_todo_phases`.
+There is no combined prepare-and-create wrapper. Production `_tick_project`
+calls the two functions separately so its exact sequence is:
 
-```python
-register_todo_phases(
-    *,
-    todo_id: str,
-    tick_id: str,
-    board_slug: str,
-    project_dir: str | Path,
-    phases_path: str | Path | None = None,
-    assignee: str = "default",
-    prompt_client: PromptClient = "claude",
-) -> list[str]
-```
-
-The wrapper accepts the union of the preparation and creation parameters and
-returns the created task IDs. A render failure occurs before the creation call,
-including when a later phase is malformed. Production `_tick_project` uses the
-two functions separately so its exact sequence is:
-
-1. prepare every rendered body;
+1. prepare every rendered body (a render failure, including a malformed later
+   phase, happens here, before any task exists);
 2. persist `current_tick_id.txt` and the `tick_started` outcome;
 3. create the prepared Hermes tasks.
 

@@ -97,18 +97,11 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
         plan_path="plan.md",
         project_dir=repo,
     )
-    expected_keys = [
-        key
-        for number in range(1, TASK_COUNT + 1)
-        for key in (f"plan:task-{number}", f"validate:task-{number}")
-    ]
-    assert len(prepared) == 2 * TASK_COUNT
+    expected_keys = [f"plan:task-{number}" for number in range(1, TASK_COUNT + 1)]
+    assert len(prepared) == TASK_COUNT
     assert [task.phase_key for task in prepared] == expected_keys
-    assert [task.kind for task in prepared] == [
-        kind
-        for _ in range(TASK_COUNT)
-        for kind in ("worker", "controller_gate")
-    ]
+    assert [task.kind for task in prepared] == ["worker"] * TASK_COUNT
+    assert not any(task.gate for task in prepared)
 
     task_ids: dict[str, str] = {}
     create_commands: list[list[str]] = []
@@ -140,8 +133,8 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
     )
     mocker.stop(run_mock)
     assert first_ids == second_ids
-    assert len(first_ids) == 2 * TASK_COUNT
-    first_commands = create_commands[: 2 * TASK_COUNT + 1]
+    assert len(first_ids) == TASK_COUNT
+    first_commands = create_commands[: TASK_COUNT + 1]
     for index, command in enumerate(first_commands[1:]):
         parent = command[command.index("--parent") + 1]
         assert parent == task_ids[
@@ -170,15 +163,11 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
     )
     cards: dict[str, KanbanTaskInfo] = {}
     results: dict[str, dict[str, object]] = {}
-    completed_gates: set[str] = set()
+    completed: list[str] = []
     for number in range(1, TASK_COUNT + 1):
         worker_key = f"plan:task-{number}"
-        gate_key = f"validate:task-{number}"
         cards[worker_key] = KanbanTaskInfo(
             f"worker-{number}", worker_key, "queued", TODO_ID
-        )
-        cards[gate_key] = KanbanTaskInfo(
-            f"gate-{number}", gate_key, "blocked", TODO_ID
         )
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
@@ -190,7 +179,7 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
     )
 
     def complete(_tenant, task_id):
-        completed_gates.add(task_id)
+        completed.append(task_id)
         return True
 
     mocker.patch(
@@ -205,9 +194,7 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
         _git(registration.worktree, "commit", "-qm", f"change {number}")
         head = _git(registration.worktree, "rev-parse", "HEAD")
         worker_key = f"plan:task-{number}"
-        gate_key = f"validate:task-{number}"
         worker_id = f"worker-{number}"
-        gate_id = f"gate-{number}"
         cards[worker_key] = KanbanTaskInfo(worker_id, worker_key, "done", TODO_ID)
         results[worker_id] = {
             "runs": [
@@ -224,11 +211,20 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
             tenant="stress",
             tick_id=TICK_ID,
         )
-        cards[gate_key] = KanbanTaskInfo(gate_id, gate_key, "done", TODO_ID)
         parent = head
 
-    assert completed_gates == {f"gate-{number}" for number in range(1, 51)}
+    # No card is completed and none is blocked: the chain is pure workers, so
+    # the run never stops for human input between Plan tasks.
+    assert completed == []
     assert reconcile_plan_task_results(
         project_dir=repo, state_dir=state, tenant="stress", tick_id=TICK_ID
     )
-    assert completed_gates == {f"gate-{number}" for number in range(1, 51)}
+    assert completed == []
+
+    # The chain tip is still verified against the live worktree.
+    stray = registration.worktree / "stray.txt"
+    stray.write_text("uncommitted")
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="stress", tick_id=TICK_ID
+    )
+    stray.unlink()

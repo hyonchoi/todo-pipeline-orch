@@ -57,11 +57,17 @@ tpo doctor myproject
 
 Output (success; prerequisite diagnostics appear before the final line):
 ```text
+DEPRECATED: profile 'gstack' is deprecated; migrate with: tpo init myproject --force --profile native-sdd
 prompt client: <claude-or-codex> (global for all projects under projects_dir)
 Prerequisites for profile 'gstack':
 ...
-OK: schema_version=2 assignee=pipeline profile=gstack capabilities=['Bash', 'Edit', 'Read', 'Write']
+OK: schema_version=3 assignee=pipeline profile=gstack capabilities=['Bash', 'Edit', 'Read', 'Write']
 ```
+
+The `DEPRECATED:` line appears only for a contract that selects `gstack` (or one
+that declares no `profile` at all, which resolves to `gstack`). It is
+informational and never changes the exit code — see
+[Migrating from gstack](howto-native-sdd-profile.md#migrating-from-gstack).
 
 If the selected profile has any `Unverified` prerequisite, `doctor` prints an
 `UNSUPPORTED` result and exits 2 even when the contract itself is valid.

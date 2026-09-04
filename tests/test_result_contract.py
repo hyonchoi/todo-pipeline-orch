@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -19,6 +21,7 @@ from hermes_pipeline.github_issues import (
     snapshot_hash,
 )
 from hermes_pipeline.result_contract import (
+    _FINDING_PRIORITIES,
     ResultContractError,
     load_validated_registration,
     parse_worker_result,
@@ -32,6 +35,13 @@ PLAN = '''# Plan
 
 ```json tpo-plan
 {"schema_version":1,"todo_id":"TODO-42","tasks":[{"id":"task-1","title":"Do it","instructions":"Implement it.","acceptance_criteria":["Observable criterion"],"verification":["uv run pytest"],"commit_message":"feat: do it"}]}
+```
+'''
+
+PLAN_TWO_TASKS = '''# Plan
+
+```json tpo-plan
+{"schema_version":1,"todo_id":"TODO-42","tasks":[{"id":"task-1","title":"Do it","instructions":"Implement it.","acceptance_criteria":["Observable criterion"],"verification":["uv run pytest"],"commit_message":"feat: do it"},{"id":"task-2","title":"Do it again","instructions":"Implement it again.","acceptance_criteria":["Observable criterion"],"verification":["uv run pytest"],"commit_message":"feat: do it again"}]}
 ```
 '''
 
@@ -460,7 +470,8 @@ def test_registration_rejects_unknown_keys_and_mutable_plan_drift(tmp_path):
 
 def _registered_repo(
     tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str | None = "plan.md",
-    embedded: bool = False,
+    embedded: bool = False, plan: str = PLAN,
+    step_keys: tuple[str, ...] = ("plan:task-1",),
 ):
     from hermes_pipeline.plan_manifest import render_embedded_plan
     from hermes_pipeline.run_registration import register_pinned_run
@@ -471,14 +482,14 @@ def _registered_repo(
     _git(repo, "config", "user.email", "test@example.com")
     _git(repo, "config", "user.name", "Test")
     _git(repo, "remote", "add", "origin", f"git@github.com:{REPO}.git")
-    (repo / "plan.md").write_text(PLAN)
+    (repo / "plan.md").write_text(plan)
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
     parent = _git(repo, "rev-parse", "HEAD")
     state = repo / ".hermes"
     if embedded:
         issue_body = ISSUE_BODY.replace("### Plan\n\nplan.md\n\n", "")
-        issue_body += render_embedded_plan(PLAN, expected_todo_id="TODO-42")
+        issue_body += render_embedded_plan(plan, expected_todo_id="TODO-42")
         plan_path = None
     registration = register_pinned_run(
         project_dir=repo,
@@ -490,7 +501,7 @@ def _registered_repo(
         prompt_client="claude",
         assignee="pipeline",
         review_assignee=None,
-        step_keys=("plan:task-1", "validate:task-1"),
+        step_keys=step_keys,
     )
     return repo, registration.worktree, state, parent
 
@@ -514,7 +525,30 @@ def test_registration_authority_is_the_issue_snapshot(tmp_path):
     assert authority.plan_path == "plan.md"
     assert authority.worktree == (repo / ".worktrees" / "todo-42-do-it").resolve()
     assert authority.manifest.tasks[0].id == "task-1"
+    assert authority.plan_hash == json.loads(
+        (state / "runs" / "01TICK" / "registration.json").read_text()
+    )["plan_hash"]
     assert not (repo / "TODOS.md").exists()
+
+
+def test_registration_accepts_step_keys_beyond_the_plan_tasks(tmp_path):
+    """``required_steps <= steps`` is deliberate, in both directions.
+
+    A profile that registers non-compiled phases alongside the plan workers, and
+    a run registered before the per-task controller gate was dropped, both carry
+    keys the manifest does not name. Neither may be rejected -- an equality
+    check here would refuse to load an in-flight run's own authority.
+    """
+    extra = ("plan:task-1", "review", "finish", "human", "validate:task-1")
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, step_keys=extra)
+
+    authority = load_validated_registration(repo, state, "01TICK")
+
+    assert authority.step_keys == extra
+
+    _rewrite_registration(state, lambda payload: payload.__setitem__("step_keys", ["review"]))
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "01TICK")
 
 
 def test_embedded_registration_exposes_verified_artifact_reference(tmp_path):
@@ -538,7 +572,7 @@ def test_embedded_registration_exposes_verified_artifact_reference(tmp_path):
         selected_issue=make_issue(42, repo=REPO, title="Do it", body=body),
         plan_path=None, profile="native-sdd", prompt_client="claude",
         assignee="pipeline", review_assignee=None,
-        step_keys=("plan:task-1", "validate:task-1"),
+        step_keys=("plan:task-1",),
     )
 
     authority = load_validated_registration(repo, state, "01TICK")
@@ -573,7 +607,6 @@ def test_embedded_plan_reconciliation_scenario(tmp_path, mocker):
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         return_value={
             "plan:task-1": SimpleNamespace(task_id="worker", status="todo"),
-            "validate:task-1": SimpleNamespace(task_id="gate", status="blocked"),
         },
     )
 
@@ -602,6 +635,36 @@ def test_doctor_accepts_valid_embedded_artifact(tmp_path, mocker, capsys):
 
     assert _doctor_active_registration(repo, state)
     assert "Issue authority: pinned" in capsys.readouterr().out
+
+
+def test_doctor_surfaces_a_blocked_result_validation(tmp_path, mocker, capsys):
+    """``tpo doctor`` is where an operator looks; the stall must be visible there.
+
+    It is a stalled run, not corrupt authority, so the verdict is unchanged.
+    """
+    from hermes_pipeline.cli import _doctor_active_registration
+    from hermes_pipeline.kanban_tasks import RESULT_VALIDATION_BLOCKED_MARKER
+
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, embedded=True)
+    (state / "current_tick_id.txt").write_text("01TICK\n")
+    (state / "runs" / "01TICK" / RESULT_VALIDATION_BLOCKED_MARKER).write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "tick_id": "01TICK",
+                "step_key": "plan:task-1",
+                "code": "worktree_dirty",
+                "reason": "worktree_dirty",
+            }
+        )
+        + "\n"
+    )
+    mocker.patch("hermes_pipeline.github_issues.check_issue_drift", return_value=None)
+
+    assert _doctor_active_registration(repo, state)
+    out = capsys.readouterr().out
+    assert "RESULT VALIDATION BLOCKED: plan:task-1 worktree_dirty" in out
+    assert RESULT_VALIDATION_BLOCKED_MARKER in out
 
 
 def test_doctor_rejects_embedded_artifact_digest_drift(tmp_path, mocker, capsys):
@@ -744,31 +807,164 @@ def test_registration_repo_must_match_live_identity(tmp_path):
         load_validated_registration(repo, state, "01TICK")
 
 
-def test_reconcile_completed_worker_validates_then_completes_gate(tmp_path, mocker):
-    from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
-
-    repo, worktree, state, parent = _registered_repo(tmp_path)
-    (worktree / "change.txt").write_text("change")
+def _commit(worktree, name: str) -> str:
+    (worktree / name).write_text(name)
     _git(worktree, "add", ".")
-    _git(worktree, "commit", "-qm", "change")
-    head = _git(worktree, "rev-parse", "HEAD")
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
-        return_value={
-            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
-            "validate:task-1": KanbanTaskInfo("gate", "validate:task-1", "blocked", "TODO-42"),
-        },
-    )
-    result = _result()
+    _git(worktree, "commit", "-qm", name)
+    return _git(worktree, "rev-parse", "HEAD")
+
+
+def _worker_payload(*, step_key: str, parent: str, head: str, changed: list[str]):
+    result = _result(step_key=step_key)
     result["git"] = {
         "expected_parent_sha": parent,
         "resulting_head_sha": head,
         "task_commit_sha": head,
-        "changed_files": ["change.txt"],
+        "changed_files": changed,
     }
+    return {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]}
+
+
+def test_reconcile_completed_worker_validates_without_a_controller_gate(
+    tmp_path, mocker
+):
+    """A validated worker needs no gate card: nothing is completed or blocked."""
+    from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
+
+    repo, worktree, state, parent = _registered_repo(tmp_path)
+    head = _commit(worktree, "change.txt")
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        return_value={
+            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+        },
+    )
     mocker.patch(
         "hermes_pipeline.kanban_tasks._show_task_payload",
-        return_value={"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]},
+        return_value=_worker_payload(
+            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+        ),
+    )
+    complete = mocker.patch(
+        "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=True
+    )
+    blocked = mocker.patch("hermes_pipeline.kanban_tasks._mark_gate_needs_input")
+
+    for _ in range(2):  # Reconciliation is idempotent across ticks.
+        assert reconcile_plan_task_results(
+            project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+        )
+    complete.assert_not_called()
+    blocked.assert_not_called()
+
+
+def test_reconcile_verifies_earlier_tasks_by_topology_and_the_tip_against_head(
+    tmp_path, mocker
+):
+    """Only the chain tip is checked against current HEAD and a clean worktree.
+
+    A task a later task already built on cannot be HEAD any more, so re-running
+    the full check against it would fail after every resume.
+    """
+    from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
+
+    repo, worktree, state, base = _registered_repo(
+        tmp_path, plan=PLAN_TWO_TASKS, step_keys=("plan:task-1", "plan:task-2")
+    )
+    first = _commit(worktree, "one.txt")
+    second = _commit(worktree, "two.txt")
+    payloads = {
+        "worker-1": _worker_payload(
+            step_key="plan:task-1", parent=base, head=first, changed=["one.txt"]
+        ),
+        "worker-2": _worker_payload(
+            step_key="plan:task-2", parent=first, head=second, changed=["two.txt"]
+        ),
+    }
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        return_value={
+            "plan:task-1": KanbanTaskInfo("worker-1", "plan:task-1", "done", "TODO-42"),
+            "plan:task-2": KanbanTaskInfo("worker-2", "plan:task-2", "done", "TODO-42"),
+        },
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._show_task_payload",
+        side_effect=lambda task_id: payloads[task_id],
+    )
+
+    assert reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+
+    (worktree / "stray.txt").write_text("uncommitted")
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+
+
+def test_reconcile_falls_back_to_topology_once_review_builds_on_the_chain(
+    tmp_path, mocker
+):
+    """Review-fix commits advance HEAD; the chain must stay reconcilable."""
+    from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
+
+    repo, worktree, state, base = _registered_repo(tmp_path)
+    head = _commit(worktree, "change.txt")
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._show_task_payload",
+        return_value=_worker_payload(
+            step_key="plan:task-1", parent=base, head=head, changed=["change.txt"]
+        ),
+    )
+    board = {
+        "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+    }
+    tasks = mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        side_effect=lambda *_args: board,
+    )
+    _commit(worktree, "review-fix.txt")
+
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+
+    board["review:0"] = KanbanTaskInfo("review", "review:0", "done", "TODO-42")
+    assert reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    assert tasks.called
+
+
+def test_reconcile_completes_legacy_validate_gates_still_named_by_registration(
+    tmp_path, mocker
+):
+    """A run registered before the gate was dropped must still settle its gates.
+
+    ``poll_pinned_run`` waits for every registered step key, so a resumed run
+    whose ``step_keys`` still name ``validate:<id>`` would hang forever.
+    """
+    from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
+
+    repo, worktree, state, parent = _registered_repo(
+        tmp_path, step_keys=("plan:task-1", "validate:task-1")
+    )
+    head = _commit(worktree, "change.txt")
+    gate = KanbanTaskInfo("gate", "validate:task-1", "blocked", "TODO-42")
+    board = {
+        "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+        "validate:task-1": gate,
+    }
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        side_effect=lambda *_args: board,
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._show_task_payload",
+        return_value=_worker_payload(
+            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+        ),
     )
     complete = mocker.patch(
         "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=True
@@ -779,26 +975,287 @@ def test_reconcile_completed_worker_validates_then_completes_gate(tmp_path, mock
     )
     complete.assert_called_once_with("demo", "gate")
 
+    board["validate:task-1"] = KanbanTaskInfo(
+        "gate", "validate:task-1", "done", "TODO-42"
+    )
+    complete.reset_mock()
+    assert reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    complete.assert_not_called()
 
-def test_reconcile_invalid_result_marks_gate_needs_input(tmp_path, mocker):
+
+def test_topology_rejects_a_commit_no_longer_reachable_from_head(tmp_path):
+    """Parentage, count and changed files all still hold for a discarded commit.
+
+    ``git reset --hard`` leaves the object in the repository, so every immutable
+    topology fact keeps passing; only reachability proves the work is on the
+    branch the run is delivering.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "base.txt").write_text("base")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    parent = _git(repo, "rev-parse", "HEAD")
+    head = _commit(repo, "change.txt")
+    _git(repo, "reset", "--hard", "-q", parent)
+    git = parse_worker_result(
+        _worker_payload(
+            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+        ),
+        tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    ).git
+
+    with pytest.raises(ResultContractError, match="unreachable_commit"):
+        verify_worker_git_topology(repo, git, expected_parent_sha=parent)
+
+
+def test_reconcile_rejects_a_discarded_commit_even_when_a_decoy_review_card_exists(
+    tmp_path, mocker, caplog
+):
+    """A board card can be forged by a worker that knows its own tick id.
+
+    ``review:0`` only decides which *extra* checks apply; the ancestry anchor is
+    unconditional, so a decoy cannot strip verification off a task.
+    """
     from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
 
-    repo, worktree, state, _parent = _registered_repo(tmp_path)
+    repo, worktree, state, parent = _registered_repo(tmp_path)
+    head = _commit(worktree, "change.txt")
+    _git(worktree, "reset", "--hard", "-q", parent)
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         return_value={
             "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
-            "validate:task-1": KanbanTaskInfo("gate", "validate:task-1", "blocked", "TODO-42"),
+            "review:0": KanbanTaskInfo("decoy", "review:0", "done", "TODO-42"),
+        },
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._show_task_payload",
+        return_value=_worker_payload(
+            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+        ),
+    )
+
+    with caplog.at_level(logging.ERROR, logger="hermes_pipeline.kanban_tasks"):
+        assert not reconcile_plan_task_results(
+            project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+        )
+
+    assert "unreachable_commit" in caplog.text
+
+
+def test_reconcile_records_a_durable_blocked_marker_and_clears_it_on_success(
+    tmp_path, mocker
+):
+    """Plain cron ``tpo tick`` has no budget: the stall must leave evidence."""
+    from hermes_pipeline.kanban_tasks import (
+        RESULT_VALIDATION_BLOCKED_MARKER,
+        KanbanTaskInfo,
+        reconcile_plan_task_results,
+    )
+
+    repo, worktree, state, parent = _registered_repo(tmp_path)
+    head = _commit(worktree, "change.txt")
+    board = {"plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42")}
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        side_effect=lambda *_args: board,
+    )
+    payload = mocker.patch(
+        "hermes_pipeline.kanban_tasks._show_task_payload", return_value={"runs": []}
+    )
+    marker = state / "runs" / "01TICK" / RESULT_VALIDATION_BLOCKED_MARKER
+
+    for _ in range(2):  # Repeated no-progress ticks converge on one marker.
+        assert not reconcile_plan_task_results(
+            project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+        )
+    recorded = json.loads(marker.read_text())
+    assert recorded["step_key"] == "plan:task-1"
+    assert recorded["code"] == "missing_successful_run"
+    assert recorded["tick_id"] == "01TICK"
+    assert isinstance(recorded["reason"], str) and recorded["reason"]
+
+    payload.return_value = _worker_payload(
+        step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+    )
+    assert reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    assert not marker.exists()
+
+
+def test_git_predicate_reports_a_real_git_failure_rather_than_false(tmp_path):
+    """Exit 1 is "no"; anything above it is a broken git, not an answer.
+
+    Collapsing the two would let an unusable repository read as a clean
+    non-ancestor verdict, which is the wrong direction to fail in.
+    """
+    from hermes_pipeline.result_contract import _git_predicate
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "base.txt").write_text("base")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    head = _git(repo, "rev-parse", "HEAD")
+
+    assert _git_predicate(repo, "merge-base", "--is-ancestor", head, "HEAD") is True
+
+    with pytest.raises(ResultContractError, match="git_verification_failed"):
+        _git_predicate(repo, "merge-base", "--is-ancestor", "0" * 40, "HEAD")
+
+
+def test_reconcile_records_a_structural_marker_when_the_chain_is_not_wired(
+    tmp_path, mocker
+):
+    """A missing card stalls the run exactly like a rejected result.
+
+    The code has to say which, or an operator cannot tell a wiring problem from
+    work TPO refused.
+    """
+    from hermes_pipeline.kanban_tasks import (
+        CHAIN_WIRING_INCOMPLETE_CODE,
+        KanbanTaskInfo,
+        reconcile_plan_task_results,
+    )
+
+    repo, _worktree, state, _parent = _registered_repo(
+        tmp_path, step_keys=("plan:task-1", "validate:task-1")
+    )
+    marker = state / "runs" / "01TICK" / "result-validation-blocked"
+    board: dict[str, object] = {}
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        side_effect=lambda *_args: board,
+    )
+
+    # No worker card on the board at all.
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    recorded = json.loads(marker.read_text())
+    assert recorded["code"] == CHAIN_WIRING_INCOMPLETE_CODE
+    assert recorded["step_key"] == "plan:task-1"
+
+    # Worker done, but the legacy gate this registration still names is missing.
+    board["plan:task-1"] = KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42")
+    marker.unlink()
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    recorded = json.loads(marker.read_text())
+    assert recorded["code"] == CHAIN_WIRING_INCOMPLETE_CODE
+    assert recorded["step_key"] == "validate:task-1"
+
+
+def test_reconcile_records_a_marker_when_a_registered_step_key_is_absent(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        CHAIN_WIRING_INCOMPLETE_CODE,
+        reconcile_plan_task_results,
+    )
+
+    repo, worktree, state, parent = _registered_repo(tmp_path)
+    mocker.patch(
+        "hermes_pipeline.result_contract.load_validated_registration",
+        return_value=SimpleNamespace(
+            manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1"),)),
+            step_keys=("phase_4_development",),
+            base_sha=parent,
+            todo_id="TODO-42",
+            worktree=worktree,
+        ),
+    )
+    tasks = mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_tasks")
+
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    recorded = json.loads(
+        (state / "runs" / "01TICK" / "result-validation-blocked").read_text()
+    )
+    assert recorded["code"] == CHAIN_WIRING_INCOMPLETE_CODE
+    assert recorded["step_key"] == "plan:task-1"
+    assert tasks.called
+
+
+def test_reconcile_records_a_marker_when_a_legacy_gate_cannot_be_completed(
+    tmp_path, mocker
+):
+    from hermes_pipeline.kanban_tasks import (
+        GATE_COMPLETION_FAILED_CODE,
+        KanbanTaskInfo,
+        reconcile_plan_task_results,
+    )
+
+    repo, worktree, state, parent = _registered_repo(
+        tmp_path, step_keys=("plan:task-1", "validate:task-1")
+    )
+    head = _commit(worktree, "change.txt")
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        return_value={
+            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+            "validate:task-1": KanbanTaskInfo(
+                "gate", "validate:task-1", "blocked", "TODO-42"
+            ),
+        },
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._show_task_payload",
+        return_value=_worker_payload(
+            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+        ),
+    )
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False
+    )
+
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    recorded = json.loads(
+        (state / "runs" / "01TICK" / "result-validation-blocked").read_text()
+    )
+    assert recorded["code"] == GATE_COMPLETION_FAILED_CODE
+    assert recorded["step_key"] == "validate:task-1"
+
+
+def test_reconcile_invalid_result_reports_no_progress_without_a_blocking_card(
+    tmp_path, mocker, caplog
+):
+    from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
+
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
+        return_value={
+            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
         },
     )
     mocker.patch("hermes_pipeline.kanban_tasks._show_task_payload", return_value={"runs": []})
     blocked = mocker.patch("hermes_pipeline.kanban_tasks._mark_gate_needs_input")
     complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
 
-    assert not reconcile_plan_task_results(
-        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
-    )
-    blocked.assert_called_once()
+    with caplog.at_level(logging.ERROR, logger="hermes_pipeline.kanban_tasks"):
+        assert not reconcile_plan_task_results(
+            project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+        )
+
+    assert "TPO result validation failed" in caplog.text
+    assert "plan:task-1" in caplog.text
+    blocked.assert_not_called()
     complete.assert_not_called()
 
 
@@ -867,3 +1324,455 @@ def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, moc
     registration_path.write_text(json.dumps(drifted))
     with pytest.raises(ResultContractError, match="registration_invalid"):
         load_validated_registration(repo, state, "LEGACY-TICK")
+
+
+# --- Published result-metadata template -------------------------------------
+#
+# The template is the only thing a worker is told about the contract, so these
+# tests round-trip every rendered template through the real parser and assert
+# the published keys are derived from the contract constants themselves.
+
+_JSON_BLOCK_RE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+_PLACEHOLDER_RE = re.compile(r"^<.*>$")
+
+_TEMPLATE_FILL = {
+    ("external_session_id",): "session-1",
+    ("review", "findings", 0, "priority"): "P1",
+    ("git", "expected_parent_sha"): "a" * 40,
+    ("git", "resulting_head_sha"): "b" * 40,
+    ("git", "task_commit_sha"): "b" * 40,
+    ("git", "changed_files", 0): "src/example.py",
+    ("tdd", "red", "command"): "uv run pytest tests/test_example.py",
+    ("tdd", "green", "command"): "uv run pytest tests/test_example.py",
+    ("tdd", "refactor", "command"): "uv run pytest tests/test_example.py",
+    ("review", "findings", 0, "location"): "src/example.py:12",
+    ("review", "findings", 0, "failure_scenario"): "A resumed tick closes the card twice.",
+    ("review", "findings", 0, "recommendation"): "Guard the close with the run marker.",
+    ("delivery", "pr_url"): "https://github.com/acme/repo/pull/7",
+    ("delivery", "checks", 0, "command"): "uv run pytest",
+}
+
+
+def _template_blocks(text: str) -> list[dict]:
+    blocks = [json.loads(block) for block in _JSON_BLOCK_RE.findall(text)]
+    assert blocks, f"template published no JSON block: {text}"
+    return blocks
+
+
+def _fill_template(value, path=()):
+    """Substitute worker-supplied values for every ``<...>`` placeholder."""
+    if isinstance(value, dict):
+        return {key: _fill_template(item, (*path, key)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fill_template(item, (*path, index)) for index, item in enumerate(value)]
+    if isinstance(value, str) and _PLACEHOLDER_RE.match(value):
+        assert path in _TEMPLATE_FILL, f"unfillable placeholder at {path}: {value}"
+        return _TEMPLATE_FILL[path]
+    return value
+
+
+def _template_envelope(result: dict) -> dict:
+    return {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]}
+
+
+def test_plan_template_round_trips_through_the_parser():
+    from hermes_pipeline.result_contract import render_result_template
+
+    text = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+    template, = _template_blocks(text)
+
+    parsed = parse_worker_result(
+        _template_envelope(_fill_template(template)),
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+
+    assert parsed.git.changed_files == ("src/example.py",)
+    assert parsed.red.exit_code != 0
+    assert (parsed.green.exit_code, parsed.refactor.exit_code) == (0, 0)
+    # The criteria are pipeline-known facts, so the template pre-fills them.
+    assert "<" not in json.dumps(template["acceptance"])
+    assert "do not report a result object" in text
+
+
+def test_review_template_round_trips_clean_and_findings_verdicts():
+    from hermes_pipeline.result_contract import (
+        render_result_template,
+        verify_read_only_review,
+    )
+
+    head = "c" * 40
+    text = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="review:0",
+        section="review",
+        pinned_head_sha=head,
+        allow_no_changes=True,
+    )
+    template, findings_variant = _template_blocks(text)
+
+    clean = parse_worker_result(
+        _template_envelope(_fill_template(template)),
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+    assert clean.review is not None and clean.review.verdict == "clean"
+    verify_read_only_review(
+        Path("."), clean, head_sha=head, require_current=False
+    )
+
+    spliced = dict(template)
+    spliced["review"] = findings_variant
+    reported = parse_worker_result(
+        _template_envelope(_fill_template(spliced)),
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+    assert reported.review is not None
+    assert reported.review.verdict == "findings"
+    assert reported.review.findings[0]["priority"] in _FINDING_PRIORITIES
+
+
+def test_delivery_template_round_trips_through_the_parser():
+    from hermes_pipeline.result_contract import render_result_template
+
+    head = "b" * 40
+    text = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="finish",
+        section="delivery",
+        pinned_head_sha=head,
+        branch="todo-42",
+        allow_no_changes=True,
+    )
+    template, = _template_blocks(text)
+
+    parsed = parse_worker_result(
+        _template_envelope(_fill_template(template)),
+        tick_id="01TICK", todo_id="TODO-42", step_key="finish",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+
+    assert parsed.delivery is not None
+    # Delivery reconciliation demands the branch and the reviewed head verbatim.
+    assert parsed.delivery.branch == "todo-42"
+    assert parsed.delivery.head_sha == parsed.git.resulting_head_sha == head
+    assert parsed.git.changed_files == ()
+
+
+def test_template_publishes_every_key_the_contract_constants_require():
+    from hermes_pipeline import result_contract as contract
+
+    plan, = _template_blocks(
+        contract.render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        )
+    )
+    assert set(plan) == contract._TOP_KEYS
+    assert set(plan["git"]) == contract._GIT_KEYS
+    assert set(plan["tdd"]) == contract._TDD_KEYS
+    for phase in contract._TDD_KEYS:
+        assert set(plan["tdd"][phase]) == contract._COMMAND_KEYS
+    assert set(plan["acceptance"][0]) == contract._ACCEPTANCE_ENTRY_KEYS
+
+    review, findings_variant = _template_blocks(
+        contract.render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+            section="review", pinned_head_sha="c" * 40, allow_no_changes=True,
+        )
+    )
+    assert set(review) == contract._TOP_KEYS | {"review"}
+    assert set(review["review"]) == contract._REVIEW_KEYS
+    assert set(findings_variant) == contract._REVIEW_KEYS
+    assert set(findings_variant["findings"][0]) == contract._FINDING_KEYS
+
+    delivery, = _template_blocks(
+        contract.render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish",
+            section="delivery", pinned_head_sha="b" * 40, branch="todo-42",
+            allow_no_changes=True,
+        )
+    )
+    assert set(delivery) == contract._TOP_KEYS | {"delivery"}
+    assert set(delivery["delivery"]) == contract._DELIVERY_KEYS
+    assert set(delivery["delivery"]["checks"][0]) == contract._COMMAND_KEYS
+
+
+def test_template_rejects_an_unknown_optional_section():
+    from hermes_pipeline.result_contract import render_result_template
+
+    with pytest.raises(ResultContractError, match="unknown_result_section"):
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="nope",
+        )
+
+
+def test_review_body_never_reads_as_constraining_the_review_verdict():
+    """The stall this template exists to prevent must not be re-encoded in prose."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    head = "c" * 40
+    text = render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+        pinned_head_sha=head, allow_no_changes=True,
+    )
+    template, findings_variant = _template_blocks(text)
+
+    # A reviewer that reads an unqualified verdict sentence as covering the
+    # review sub-object stalls the run exactly as the live incident did.
+    misread = _fill_template(template)
+    misread["review"] = dict(findings_variant, verdict="success")
+    with pytest.raises(ResultContractError, match="invalid_review"):
+        parse_worker_result(
+            _template_envelope(_fill_template(misread)),
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+            acceptance_criteria=(), allow_no_changes=True,
+        )
+
+    for sentence in text.split(". "):
+        if '"verdict" accepts only' in sentence:
+            assert "top-level" in sentence, sentence
+
+
+def test_parser_rejects_unfilled_template_placeholders():
+    from hermes_pipeline.result_contract import render_result_template
+
+    template, = _template_blocks(
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        )
+    )
+    for path, code in (
+        (("external_session_id",), "invalid_session"),
+        (("tdd", "red", "command"), "invalid_tdd"),
+        (("git", "changed_files"), "invalid_git"),
+    ):
+        result = _fill_template(template)
+        target = result
+        for key in path[:-1]:
+            target = target[key]
+        # Restore the published placeholder for exactly one field.
+        published = template
+        for key in path:
+            published = published[key]
+        target[path[-1]] = published
+        with pytest.raises(ResultContractError, match=code):
+            parse_worker_result(
+                _template_envelope(result),
+                tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+                acceptance_criteria=("Observable criterion",),
+            )
+
+
+def test_bounded_string_allows_a_real_value_containing_angle_brackets():
+    from hermes_pipeline.result_contract import _bounded_string
+
+    assert _bounded_string(
+        "uv run pytest -k 'a<b'", maximum=100, code="invalid_tdd"
+    ) == "uv run pytest -k 'a<b'"
+
+
+def test_read_only_cards_need_no_invented_tdd_evidence():
+    """A pinned review or finish card is closable by filling the session id alone."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    for kwargs, step_key in (
+        ({"section": "review", "pinned_head_sha": "c" * 40}, "review:0"),
+        (
+            {"section": "delivery", "pinned_head_sha": "b" * 40, "branch": "todo-42"},
+            "finish",
+        ),
+    ):
+        text = render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key=step_key,
+            allow_no_changes=True, **kwargs,
+        )
+        template = _template_blocks(text)[0]
+        assert "<" not in json.dumps(template["tdd"])
+        assert "red.exit_code" not in text
+        filled = _fill_template(template)
+        remaining = [
+            value for value in json.dumps(filled).split('"')
+            if value.startswith("<") and value.endswith(">")
+        ]
+        assert remaining == []
+        parsed = parse_worker_result(
+            _template_envelope(filled),
+            tick_id="01TICK", todo_id="TODO-42", step_key=step_key,
+            acceptance_criteria=(), allow_no_changes=True,
+        )
+        assert parsed.external_session_id == _TEMPLATE_FILL[("external_session_id",)]
+
+
+def test_delivery_template_requires_the_pipeline_known_branch_and_head():
+    from hermes_pipeline.result_contract import render_result_template
+
+    with pytest.raises(ResultContractError, match="incomplete_result_section"):
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
+            allow_no_changes=True,
+        )
+
+
+def test_review_body_states_the_findings_substitution_before_other_instructions():
+    """A dispatcher obeying "exactly, never paraphrase" must not publish clean."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    text = render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+        pinned_head_sha="c" * 40, allow_no_changes=True,
+    )
+    main_fence_end = text.index("```", text.index("```json") + len("```json"))
+    substitution = text.index('replace the whole "review" value')
+
+    assert main_fence_end < substitution
+    for later in (
+        "must not change the worktree",
+        "runs no TDD cycle",
+        'top-level "verdict"',
+    ):
+        assert substitution < text.index(later), later
+    # Both fences must name which review verdict they carry.
+    assert 'publish that second object as "review"' in text
+    assert "defect-free" in text
+
+
+def test_summary_is_not_a_template_field_and_accepts_bracketed_text():
+    result = _result()
+    parsed = parse_worker_result(
+        {"runs": [{"status": "succeeded", "summary": "<none>",
+                   "metadata": {"tpo_result": result}}]},
+        tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+    assert parsed.external_session_id == "session-1"
+
+
+def test_placeholder_rejection_never_swallows_a_real_bracketed_finding():
+    from hermes_pipeline.result_contract import render_result_template
+
+    text = render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+        pinned_head_sha="c" * 40, allow_no_changes=True,
+    )
+    template, findings_variant = _template_blocks(text)
+    reported = dict(template)
+    reported["review"] = findings_variant
+    filled = _fill_template(reported)
+    filled["review"]["findings"][0]["failure_scenario"] = (
+        "<script> tags render unescaped, e.g. <img onerror=x>"
+    )
+
+    parsed = parse_worker_result(
+        _template_envelope(filled),
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+
+    assert parsed.review is not None
+    assert parsed.review.findings[0]["failure_scenario"].startswith("<script>")
+
+
+def test_every_rendered_placeholder_is_caught_by_the_placeholder_rule():
+    from hermes_pipeline.result_contract import _PLACEHOLDER_RE, render_result_template
+
+    texts = (
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+            pinned_head_sha="c" * 40, allow_no_changes=True,
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
+            pinned_head_sha="b" * 40, branch="todo-42", allow_no_changes=True,
+        ),
+    )
+    seen = 0
+    for text in texts:
+        for block in _template_blocks(text):
+            for value in re.findall(r'"(<[^"]*>)"', json.dumps(block)):
+                assert _PLACEHOLDER_RE.fullmatch(value), value
+                seen += 1
+    assert seen >= 10
+
+
+def test_read_only_tdd_exit_code_reads_as_nothing_ran():
+    from hermes_pipeline.result_contract import render_result_template
+
+    template, _variant = _template_blocks(
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+            pinned_head_sha="c" * 40, allow_no_changes=True,
+        )
+    )
+
+    assert template["tdd"]["red"]["exit_code"] == 127
+
+
+def _all_templates():
+    from hermes_pipeline.result_contract import render_result_template
+
+    return (
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+            pinned_head_sha="c" * 40, allow_no_changes=True,
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
+            pinned_head_sha="b" * 40, branch="todo-42", allow_no_changes=True,
+        ),
+    )
+
+
+def test_template_asks_only_for_what_the_external_client_can_do():
+    """The template is passed verbatim to a client with no Kanban tools."""
+    kanban_only = ("close the card", "closing the card", "kanban_close",
+                   "kanban_block", "kanban_comment")
+    for text in _all_templates():
+        lowered = text.lower()
+        for phrase in kanban_only:
+            assert phrase not in lowered, phrase
+        # It must still say who closes the card with the reported object.
+        assert "dispatcher" in lowered
+
+
+def test_findings_priority_is_chosen_by_the_reviewer_not_pre_filled():
+    from hermes_pipeline.result_contract import _FINDING_PRIORITIES
+
+    _template, findings_variant = _template_blocks(_all_templates()[1])
+    priority = findings_variant["findings"][0]["priority"]
+
+    assert priority.startswith("<") and priority.endswith(">")
+    for allowed in _FINDING_PRIORITIES:
+        assert allowed in priority
+
+
+def test_delivery_body_demands_every_gate_it_ran():
+    text = _all_templates()[2]
+
+    assert "every required gate" in text
+
+
+def test_review_substitution_is_scoped_to_defects_still_present():
+    text = _all_templates()[1]
+
+    assert "still present" in text
+    assert "any defect at all" not in text

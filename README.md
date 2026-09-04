@@ -105,15 +105,22 @@ local skill registry; remote worker prerequisites remain operator-provisioned.
 See [agent client release qualification](docs/release-qualification-agent-clients.md)
 for the evidence required to advertise a `Conditional` pair.
 
-Use `tpo init <project> --profile native-sdd` for the compiled workflow:
+`native-sdd` is the default profile for every contract `tpo init` writes
+([ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md)); `gstack`
+is deprecated but still bundled and supported. It runs the compiled workflow:
 Hermes cron invokes TPO, TPO selects an eligible TODO and pins its embedded Plan
-from the issue snapshot, then Hermes Kanban dispatches workers. A `tpo-plan`
-manifest produces one visible worker card and controller gate per ordered task;
-a legacy Markdown Plan remains compatible as one development card with a
-doctor warning. Independent review, bounded review-fix rounds, PR closeout, and
-the human merge gate remain visible on the board. It does not require gstack,
-superpowers, or client-side workflow skills. See the
-[native SDD profile guide](docs/howto-native-sdd-profile.md).
+from the issue snapshot in a linked worktree, then Hermes Kanban dispatches
+workers. A `tpo-plan` manifest produces one visible worker card and controller
+gate per ordered task. Independent review, bounded review-fix rounds, PR
+closeout, and the human merge gate remain visible on the board. It does not
+require gstack, superpowers, or client-side workflow skills.
+
+Because the profile is plan-gated, an embedded Plan must carry a `json tpo-plan`
+manifest; one without it is blocked as `plan_invalid:manifest_required`. A
+legacy `Plan:` repository path still works without a manifest and compiles to a
+single development card. See the
+[native SDD profile guide](docs/howto-native-sdd-profile.md) and
+[Migrating from gstack](docs/howto-native-sdd-profile.md#migrating-from-gstack).
 
 ## Core workflows
 
@@ -183,7 +190,7 @@ tpo tick my-project
 | `plan validate` | Validate a TODO's Plan attachment and optional `tpo-plan` manifest. |
 | `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
 | `config` | Read and write global `tpo` configuration. |
-| `test` | Run the mock integration test harness. |
+| `test` | Run the live integration test harness against a GitHub sandbox repository. |
 
 See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detailed behavior.
 
@@ -228,7 +235,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 |---|---|---|
 | [Configure the pipeline contract](docs/howto-pipeline-contract.md) | How-to | Editing assignee, fixing capability drift, schema migration |
 | [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Design rationale for versioned contracts and capability gates |
-| [Use the agent-skills profile](docs/howto-agent-skills-profile.md) | How-to | Selecting `gstack` or `agent-skills` pipeline phases |
+| [Use the agent-skills profile](docs/howto-agent-skills-profile.md) | How-to | Selecting `native-sdd`, `agent-skills`, or `gstack` pipeline phases |
 | [Qualify agent clients for release](docs/release-qualification-agent-clients.md) | Reference | Capturing evidence for conditional profile/client support |
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` routes LLM calls |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
@@ -238,7 +245,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | Doc | Type | When to read |
 |---|---|---|
 | [Run the eval suite](docs/howto-eval-suite.md) | How-to | Before changing the prompt, model, or `decision/agent.py` |
-| [Mock integration test harness](docs/howto-mock-integration-test-harness.md) | How-to | Running `tpo test` against mock project data |
+| [Live integration test harness](docs/howto-live-integration-test-harness.md) | How-to | Running `tpo test` against a live GitHub sandbox repository |
 | [Harness production-code coverage checklist](docs/checklist-harness-production-coverage.md) | Reference | Acceptance criteria for production-code path reuse |
 
 ### Architecture and reference

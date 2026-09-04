@@ -21,6 +21,7 @@ from .result_contract import (
     ResultContractError,
     load_validated_registration,
     parse_worker_result,
+    render_result_template,
     sanitize_result_text,
 )
 from .review_reconciliation import (
@@ -298,9 +299,16 @@ def reconcile_todo_completion(
             prompt=(
                 "Run every required repository gate on the clean reviewed head, then "
                 "push the registered branch and create or update its pull request. "
-                "Do not merge. Close with metadata.tpo_result.delivery containing the "
-                f"PR URL, branch {registration.branch}, exact head SHA, and checks. "
-                f"The expected parent is {head}."
+                f"Do not merge. The expected parent is {head}.\n\n"
+                + render_result_template(
+                    tick_id=tick_id,
+                    todo_id=registration.todo_id,
+                    step_key=FINISH_KEY,
+                    section="delivery",
+                    pinned_head_sha=head,
+                    branch=registration.branch,
+                    allow_no_changes=True,
+                )
             ),
             worktree=registration.worktree, assignee=registration.assignee,
             parent=acceptance.task_id, prompt_client=registration.prompt_client,

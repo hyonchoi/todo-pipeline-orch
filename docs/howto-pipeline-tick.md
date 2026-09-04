@@ -128,7 +128,7 @@ for all possible outcomes, including the new review outcomes: `review_clean`, `r
 
 ### 4. Inspect PR handoff
 
-The default `gstack` profile ends at Phase 8. Phase 8 runs `/ship` in Claude
+The deprecated `gstack` profile ends at Phase 8. Phase 8 runs `/ship` in Claude
 Code or `$ship` in Codex, pushes the branch, opens or updates a PR, and does not
 merge it. The pipeline records the branch in
 `<project>/.hermes/pipeline_branch.txt`; later ticks check that PR and skip new

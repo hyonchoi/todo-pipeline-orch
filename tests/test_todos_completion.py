@@ -1161,3 +1161,43 @@ def test_flag_issue_drift_without_cards_survives_existing_decisions(tmp_path, mo
         ) is False
     assert (state / "decisions" / "01TICK-issue-drift.json").read_text() == "{}"
     assert any(r.levelname == "DEBUG" and "already" in r.getMessage() for r in caplog.records)
+
+
+def test_finish_card_publishes_the_delivery_result_template(tmp_path, mocker):
+    from hermes_pipeline.result_contract import render_result_template
+
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text("{}")
+    (state / "runs" / "01TICK" / "accepted-review-head").write_text("a" * 40)
+    registration = SimpleNamespace(
+        todo_id="TODO-1", worktree=tmp_path, branch="feat/native",
+        assignee="worker", prompt_client="codex",
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=registration,
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
+        return_value={
+            "review-acceptance": SimpleNamespace(task_id="review-gate", status="done")
+        },
+    )
+    mocker.patch("hermes_pipeline.todos_completion._git", return_value="a" * 40)
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("acme/repo", "main"),
+    )
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
+
+    assert reconcile_todo_completion(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+        repo="acme/repo",
+    )
+
+    assert render_result_template(
+        tick_id="01TICK", todo_id="TODO-1", step_key="finish",
+        section="delivery", pinned_head_sha="a" * 40, branch="feat/native",
+        allow_no_changes=True,
+    ) in create.call_args.kwargs["prompt"]

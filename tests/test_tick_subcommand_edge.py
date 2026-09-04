@@ -343,7 +343,7 @@ class TestTickPicked:
     def test_kanban_registration_failure_writes_outcome(self, tmp_path, mocker):
         """Kanban registration failure writes failed_to_spawn outcome.
 
-        When register_todo_phases raises RuntimeError, _tick_project catches it,
+        When create_prepared_todo_phases raises RuntimeError, _tick_project catches it,
         writes a ``failed_to_spawn`` outcome sidecar via append_outcome, then
         re-raises. The re-raise is caught at the _cmd_tick level (error
         isolation), but the outcome persists for the circuit breaker.

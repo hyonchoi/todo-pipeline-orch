@@ -566,8 +566,8 @@ class TestTickSubcommand:
             counts_as_no_progress=True,
         )
 
-    def test_tick_no_prior_proceeds(self, tmp_path, mocker):
-        """No prior tick -> proceed normally."""
+    def test_tick_no_prior_proceeds(self, tmp_path, mocker, caplog):
+        """No prior tick -> proceed normally; undeclared profile warns once."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
         mock_selection.return_value = _make_decision()
 
@@ -579,8 +579,109 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
-        result = _cmd_tick(FakeArgs(), config)
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            result = _cmd_tick(FakeArgs(), config)
         assert result == 0
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        # Exactly one notice: the undeclared case already carries the migration.
+        assert deprecations == [
+            "project demo: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+    def test_tick_explicit_gstack_profile_warns_deprecated(self, tmp_path, mocker, caplog):
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "gstack"\n'
+        )
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        assert deprecations == [
+            "project demo: profile 'gstack' is deprecated; migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+    def test_tick_native_sdd_profile_emits_no_deprecation(self, tmp_path, mocker, caplog):
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "native-sdd"\n'
+        )
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        assert not any("deprecated" in r.getMessage() for r in caplog.records)
+
+    def test_tick_without_a_contract_prepares_legacy_implicit_phases(
+        self, tmp_path, mocker
+    ):
+        """No pipeline.toml -> the tick still prepares the legacy implicit
+        profile's phases, independent of what new projects now default to."""
+        import hermes_pipeline.contract as contract_mod
+        from hermes_pipeline.contract import DEFAULT_PROFILE, LEGACY_IMPLICIT_PROFILE
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+        # The spy relies on _tick_project importing PipelineContract inside the
+        # function: hoisting that import to module scope would leave built empty.
+        real_contract = contract_mod.PipelineContract
+        built: list = []
+        mocker.patch.object(
+            contract_mod,
+            "PipelineContract",
+            side_effect=lambda **kw: built.append(real_contract(**kw)) or built[-1],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision(picked="TODO-10"),
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["t_1"],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo", contract=False)
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        legacy_keys = [
+            phase.phase_key
+            for phase in load_phases(resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE))
+        ]
+        default_keys = [
+            phase.phase_key
+            for phase in load_phases(resolve_profile_phases_path(DEFAULT_PROFILE))
+        ]
+        assert legacy_keys != default_keys  # the regression would be invisible otherwise
+        prepared = create.call_args.kwargs["prepared"]
+        assert [task.phase_key for task in prepared] == legacy_keys
+        # The synthesized contract must name the legacy profile too, so the run
+        # is never recorded as DEFAULT_PROFILE while running legacy phases.
+        assert built, "the spy saw no PipelineContract construction"
+        assert built[0].profile == LEGACY_IMPLICIT_PROFILE
 
     def test_tick_selection_uses_project_state_dir(self, tmp_path, mocker):
         """Selection decisions are persisted under the project, not global state."""
@@ -1001,3 +1102,92 @@ class TestTickProjectContractWarning:
             and "tpo init" in r.getMessage() and r.levelname == "WARNING"
             for r in caplog.records
         )
+        # A contract-less project resolves to the same deprecated implicit
+        # profile as a contract that omits `profile`, and it is the population
+        # that most needs the migration hint (ADR-0004), so it gets the same
+        # single notice.
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        assert deprecations == [
+            "project demo: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+
+class TestTickLegacyPathPlan:
+    """A repository-path Plan must spawn cards under a ``requires_plan`` profile."""
+
+    @staticmethod
+    def _git(cwd, *args):
+        import subprocess
+
+        return subprocess.run(
+            ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
+        )
+
+    def test_tick_legacy_path_plan_prepares_cards_under_native_sdd(
+        self, tmp_path, mocker, fake_gh, caplog
+    ):
+        """A manifest-free ``### Plan`` repository path is a valid plan source.
+
+        The tick must build its ``PlanReference`` from the compiled plan source
+        and prepare cards; it must not record ``failed_to_spawn``.
+        """
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "native-sdd"\n'
+        )
+        docs = project_dir / "docs"
+        docs.mkdir()
+        (docs / "legacy.md").write_text("# Legacy plan\n\nDo the bounded thing.\n")
+        self._git(project_dir, "init", "-q", "-b", "main")
+        self._git(project_dir, "config", "user.email", "test@example.com")
+        self._git(project_dir, "config", "user.name", "Test")
+        self._git(project_dir, "add", "docs")
+        self._git(project_dir, "commit", "-qm", "base")
+        self._git(
+            project_dir, "remote", "add", "origin", "https://github.com/acme/repo.git"
+        )
+
+        body = (
+            "### What\n\nWidget\n\n### Plan\n\ndocs/legacy.md\n\n### Branch\n\nfeat/todo\n"
+        )
+        seed_project_issues(fake_gh, [todo_payload(10, title="test", body=body)])
+        mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision(picked="TODO-10"),
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["t_1"],
+        )
+        # ``cli._cli_sp`` IS the ``subprocess`` module, so patching its ``run``
+        # would also blind ``run_registration``'s git calls. Only stub ``hermes``.
+        import subprocess
+
+        real_run = subprocess.run
+
+        def run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "hermes":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return real_run(cmd, *args, **kwargs)
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.ERROR, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        outcomes = project_dir / ".hermes" / "outcomes"
+        recorded = "".join(
+            path.read_text() for path in sorted(outcomes.glob("*")) if path.is_file()
+        )
+        assert "failed_to_spawn" not in recorded, caplog.text
+        assert create.called, caplog.text
+        prepared = create.call_args.kwargs["prepared"]
+        assert prepared, "the tick prepared no phase cards"

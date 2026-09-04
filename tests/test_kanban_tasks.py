@@ -9,6 +9,29 @@ from types import SimpleNamespace
 import pytest
 
 
+def _register_todo_phases(**kwargs):
+    """Prepare then create back-to-back, as ``cli._tick_project`` does.
+
+    Stands in for the deleted convenience wrapper so the creation-path assertions
+    below keep exercising the production functions.
+    """
+    from hermes_pipeline.kanban_tasks import (
+        create_prepared_todo_phases,
+        prepare_todo_phases,
+    )
+
+    assignee = kwargs.pop("assignee", "default")
+    cancel_event = kwargs.pop("cancel_event", None)
+    prepared = prepare_todo_phases(**kwargs)
+    return create_prepared_todo_phases(
+        prepared=prepared,
+        tick_id=kwargs["tick_id"],
+        board_slug=kwargs["board_slug"],
+        project_dir=kwargs["project_dir"],
+        assignee=assignee,
+        cancel_event=cancel_event,
+    )
+
 def test_prepare_embedded_plan_requires_verified_digest_bound_reference(tmp_path):
     import hashlib
     import os
@@ -496,42 +519,6 @@ def test_late_render_failure_creates_zero_tasks(tmp_path, mocker):
     run.assert_not_called()
 
 
-def test_register_todo_phases_late_render_failure_is_atomic(tmp_path, mocker):
-    from hermes_pipeline.kanban_tasks import register_todo_phases
-    from hermes_pipeline.phases import PhasePromptRenderError
-
-    phases_path = tmp_path / "phases.yaml"
-    phases_path.write_text(
-        "phases:\n"
-        "  - phase_key: phase_1\n"
-        "    name: One\n"
-        "    prompt: valid\n"
-        "    tools: Read\n"
-        "    turns: 5\n"
-        "  - phase_key: phase_2\n"
-        "    name: Two\n"
-        "    prompt: '{unknown}'\n"
-        "    tools: Read\n"
-        "    turns: 5\n"
-    )
-    create_prepared = mocker.patch(
-        "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
-    )
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-
-    with pytest.raises(PhasePromptRenderError, match=r"phase_2.*unknown"):
-        register_todo_phases(
-            todo_id="TODO-41",
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-            phases_path=phases_path,
-        )
-
-    create_prepared.assert_not_called()
-    run.assert_not_called()
-
-
 def test_prepare_todo_phases_requires_plan_for_plan_gated_profile(tmp_path):
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
     from hermes_pipeline.plan_manifest import TodoPlanValidationError
@@ -565,8 +552,8 @@ def test_prepare_todo_phases_requires_plan_for_plan_gated_profile(tmp_path):
         )
 
 
-def test_register_todo_phases_resolves_plan_before_task_creation(tmp_path, mocker):
-    from hermes_pipeline.kanban_tasks import register_todo_phases
+def test_prepare_todo_phases_renders_plan_path_into_bodies(tmp_path):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
 
     phases_path = tmp_path / "phases.yaml"
     phases_path.write_text(
@@ -580,57 +567,20 @@ def test_register_todo_phases_resolves_plan_before_task_creation(tmp_path, mocke
     )
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "plan.md").write_text("# Plan\n")
-    create = mocker.patch(
-        "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
-        return_value=["t_00000001"],
-    )
 
-    assert register_todo_phases(
+    prepared = prepare_todo_phases(
         todo_id="TODO-41",
         tick_id="01CLIENT",
         board_slug="demo",
         project_dir=tmp_path,
         phases_path=phases_path,
         plan_path="docs/plan.md",
-    ) == ["t_00000001"]
+    )
 
-    prepared = create.call_args.kwargs["prepared"]
     assert "Implement from docs/plan.md" in prepared[0].body
 
 
-def test_register_todo_phases_rejects_missing_plan_before_task_creation(
-    tmp_path, mocker
-):
-    from hermes_pipeline.kanban_tasks import register_todo_phases
-    from hermes_pipeline.plan_manifest import TodoPlanValidationError
-
-    phases_path = tmp_path / "phases.yaml"
-    phases_path.write_text(
-        "requires_plan: true\n"
-        "phases:\n"
-        "  - phase_key: phase_1\n"
-        "    name: One\n"
-        "    prompt: valid\n"
-        "    tools: Read\n"
-        "    turns: 5\n"
-    )
-    create = mocker.patch(
-        "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
-    )
-
-    with pytest.raises(TodoPlanValidationError, match="missing"):
-        register_todo_phases(
-            todo_id="TODO-41",
-            tick_id="01CLIENT",
-            board_slug="demo",
-            project_dir=tmp_path,
-            phases_path=phases_path,
-        )
-
-    create.assert_not_called()
-
-
-def test_prepare_todo_phases_compiles_manifest_workers_and_controller_gates(
+def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
     tmp_path, caplog, mocker
 ):
     from hermes_pipeline.kanban_tasks import (
@@ -690,29 +640,24 @@ def test_prepare_todo_phases_compiles_manifest_workers_and_controller_gates(
 
     assert [task.phase_key for task in prepared] == [
         "plan:task-1",
-        "validate:task-1",
         "plan:task-2",
-        "validate:task-2",
         "review",
         "finish",
         "human",
     ]
-    assert [task.kind for task in prepared[:4]] == [
-        "worker",
-        "controller_gate",
-        "worker",
-        "controller_gate",
-    ]
+    assert [task.kind for task in prepared[:2]] == ["worker", "worker"]
+    assert [task.gate for task in prepared[:2]] == [False, False]
     assert prepared[-1].kind == "human_gate"
     assert "Exact first instruction." in prepared[0].body
     assert "First exact criterion." in prepared[0].body
     assert "uv run pytest tests/test_first.py" in prepared[0].body
     assert "feat: first" in prepared[0].body
-    assert "Exact second instruction." in prepared[2].body
-    assert "Second exact criterion." in prepared[2].body
+    assert "Exact second instruction." in prepared[1].body
+    assert "Second exact criterion." in prepared[1].body
     assert "legacy" not in caplog.text.lower()
 
     created: list[list[str]] = []
+    blocked: list[list[str]] = []
 
     def run(cmd, **_kwargs):
         if cmd[:3] == ["hermes", "kanban", "create"]:
@@ -722,6 +667,8 @@ def test_prepare_todo_phases_compiles_manifest_workers_and_controller_gates(
                 stdout=json.dumps({"id": f"t_{len(created):08x}"}),
                 stderr="",
             )
+        if cmd[:3] == ["hermes", "kanban", "block"]:
+            blocked.append(cmd)
         return mocker.Mock(returncode=0, stdout="", stderr="")
 
     mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run", side_effect=run)
@@ -735,25 +682,32 @@ def test_prepare_todo_phases_compiles_manifest_workers_and_controller_gates(
 
     cards = created[1:]
     keys = [card[card.index("--idempotency-key") + 1] for card in cards]
-    assert keys[:4] == [
+    assert keys == [
         "01TICK:plan:task-1",
-        "01TICK:validate:task-1",
         "01TICK:plan:task-2",
-        "01TICK:validate:task-2",
+        "01TICK:review",
+        "01TICK:finish",
+        "01TICK:human",
     ]
-    assert cards[0][cards[0].index("--parent") + 1] == "t_00000001"
-    assert cards[1][cards[1].index("--parent") + 1] == "t_00000002"
-    assert cards[2][cards[2].index("--parent") + 1] == "t_00000003"
-    assert cards[4][cards[4].index("--parent") + 1] == "t_00000005"
-    assert cards[5][cards[5].index("--parent") + 1] == "t_00000006"
+    # Every worker chains directly onto the previous worker: no controller gate
+    # stands between two Plan tasks, so nothing pauses the run for human input.
+    assert [card[card.index("--parent") + 1] for card in cards] == [
+        "t_00000001",
+        "t_00000002",
+        "t_00000003",
+        "t_00000004",
+        "t_00000005",
+    ]
     assert all(
         card[card.index("--workspace") + 1] == f"dir:{tmp_path}"
         for card in cards
     )
     assert cards[0][cards[0].index("--assignee") + 1] == "implementer"
-    assert cards[1][cards[1].index("--assignee") + 1] == "-"
+    assert cards[1][cards[1].index("--assignee") + 1] == "implementer"
     assert "--goal" in cards[0]
-    assert "--goal" not in cards[1]
+    assert "--goal" in cards[1]
+    # Only the final human gate is sticky-blocked; a Plan task never is.
+    assert [cmd[-1] for cmd in blocked] == ["t_00000006"]
 
 
 def test_prepare_todo_phases_keeps_legacy_single_development_card_with_warning(
@@ -1383,12 +1337,11 @@ def test_find_task_rejects_mixed_valid_and_invalid_snapshot(mocker):
     )
 
 
-class TestRegisterTodoPhases:
-    """Tests for register_todo_phases()."""
+class TestPrepareAndCreateTodoPhases:
+    """Tests for prepare_todo_phases() + create_prepared_todo_phases() run back-to-back."""
 
     def test_creates_tasks_with_parent_chain(self, tmp_path, mocker):
         """Phases are registered as kanban tasks with --parent deps."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
@@ -1412,7 +1365,7 @@ class TestRegisterTodoPhases:
             "    timeout: 3600\n"
         )
 
-        register_todo_phases(
+        _register_todo_phases(
             todo_id="TODO-10",
             tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
             board_slug="demo",
@@ -1436,7 +1389,6 @@ class TestRegisterTodoPhases:
 
     def test_task_body_has_json_header(self, tmp_path, mocker):
         """Task body starts with a JSON header line containing tick_id, phase_key, todo_id."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
@@ -1454,7 +1406,7 @@ class TestRegisterTodoPhases:
             "    timeout: 1800\n"
         )
 
-        register_todo_phases(
+        _register_todo_phases(
             todo_id="TODO-10",
             tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
             board_slug="demo",
@@ -1481,7 +1433,6 @@ class TestRegisterTodoPhases:
 
     def test_idempotency_key_format(self, tmp_path, mocker):
         """Idempotency key is <tick_id>:<phase_key>."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
@@ -1499,7 +1450,7 @@ class TestRegisterTodoPhases:
             "    timeout: 1800\n"
         )
 
-        register_todo_phases(
+        _register_todo_phases(
             todo_id="TODO-10",
             tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
             board_slug="demo",
@@ -1519,8 +1470,7 @@ class TestRegisterTodoPhases:
         assert key_value == "01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan"
 
     def test_returns_task_ids(self, tmp_path, mocker):
-        """register_todo_phases returns a list of created task IDs."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
+        """create_prepared_todo_phases returns a list of created task IDs."""
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.side_effect = [
@@ -1553,7 +1503,7 @@ class TestRegisterTodoPhases:
             "    timeout: 3600\n"
         )
 
-        task_ids = register_todo_phases(
+        task_ids = _register_todo_phases(
             todo_id="TODO-10",
             tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
             board_slug="demo",
@@ -1567,7 +1517,6 @@ class TestRegisterTodoPhases:
         self, tmp_path, mocker
     ):
         """Gate phases are nonspawnable and receive an explicit sticky block."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
 
         phases = [
             FakeGatePhase("phase_8_finish_branch", name="P8", turns=15),
@@ -1577,7 +1526,7 @@ class TestRegisterTodoPhases:
         mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
         mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_0000000a"}', stderr="")
 
-        register_todo_phases(
+        _register_todo_phases(
             todo_id="TODO-5",
             tick_id="01TICK",
             board_slug="demo",
@@ -1617,7 +1566,6 @@ class TestRegisterTodoPhases:
 
     def test_gate_phase_is_not_assigned_to_pipeline_worker(self, tmp_path, mocker):
         """Gate phases are human checkpoints and must not be worker-dispatchable."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
 
         phases = [
             FakeGatePhase("phase_8_finish_branch", name="P8", turns=15),
@@ -1627,7 +1575,7 @@ class TestRegisterTodoPhases:
         mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
         mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_0000000a"}', stderr="")
 
-        register_todo_phases(
+        _register_todo_phases(
             todo_id="TODO-5",
             tick_id="01TICK",
             board_slug="demo",
@@ -2078,7 +2026,6 @@ class TestObserveOutcomes:
 
     def test_json_parse_error_in_kanban_create(self, tmp_path, mocker):
         """If kanban create returns non-JSON, RuntimeError is raised."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
 
         mock_run = mocker.patch("subprocess.run")
         mock_run.return_value = mocker.MagicMock(
@@ -2097,7 +2044,7 @@ class TestObserveOutcomes:
         )
 
         with pytest.raises(RuntimeError, match="failed to parse"):
-            register_todo_phases(
+            _register_todo_phases(
                 todo_id="TODO-10",
                 tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
                 board_slug="demo",
@@ -2107,10 +2054,9 @@ class TestObserveOutcomes:
 
     def test_load_phases_file_not_found(self, tmp_path, mocker):
         """If phases.yaml doesn't exist, the error propagates."""
-        from hermes_pipeline.kanban_tasks import register_todo_phases
 
         with pytest.raises(FileNotFoundError):
-            register_todo_phases(
+            _register_todo_phases(
                 todo_id="TODO-10",
                 tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
                 board_slug="demo",
@@ -3067,10 +3013,70 @@ def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles
     native = {task.phase_key: task for task in render("native-sdd")}
     assert marker in native["plan:task-1"].body
     assert decisions_marker in native["plan:task-1"].body
-    assert marker not in native["validate:task-1"].body
-    assert "Security Review:" not in native["validate:task-1"].body
-    assert native["validate:task-1"].gate and native["validate:task-1"].kind == "controller_gate"
+    assert not any(key.startswith("validate:") for key in native)
+    assert all(task.kind == "worker" and not task.gate for task in native.values())
     assert not any(key.startswith(("phase_5", "phase_8", "phase_9")) for key in native)
+
+
+def test_planned_phase_keys_are_exactly_the_cards_compilation_creates(tmp_path):
+    """Registration keys and created cards come from two separate generators.
+
+    ``poll_pinned_run`` waits for every registered step key, and
+    ``load_validated_registration`` accepts extra keys by design (a resumed
+    pre-gate-removal run still lists its ``validate:<id>`` keys), so a key with
+    no card cannot be caught at registration: it stalls the run until the tick
+    budget runs out. Nothing else pins the two generators together.
+    """
+    from hermes_pipeline.kanban_tasks import planned_phase_keys, prepare_todo_phases
+    from hermes_pipeline.phases import resolve_profile_phases_path
+    from hermes_pipeline.plan_manifest import legacy_plan_source
+
+    repo = _git_tracked_project(tmp_path, ["docs/plan.md"])
+    (repo / "docs" / "plan.md").write_text(
+        "```json tpo-plan\n"
+        '{"schema_version":1,"todo_id":"TODO-41","tasks":['
+        '{"id":"task-1","title":"First","instructions":"Do first.",'
+        '"acceptance_criteria":["ok"],"verification":["uv run pytest"],'
+        '"commit_message":"feat: first"},'
+        '{"id":"task-2","title":"Second","instructions":"Do second.",'
+        '"acceptance_criteria":["ok"],"verification":["uv run pytest"],'
+        '"commit_message":"feat: second"}]}\n```\n'
+    )
+    source = legacy_plan_source(repo, "docs/plan.md", expected_todo_id="TODO-41")
+    # A profile whose non-compiled phases are registered too, so the invariant is
+    # exercised on a key set that is not only plan workers.
+    extra = tmp_path / "phases.yaml"
+    extra.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: development\n"
+        "    name: Development\n"
+        "    prompt: implement\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+        "    compile_plan_tasks: true\n"
+        "  - phase_key: review\n"
+        "    name: Review\n"
+        "    prompt: review\n"
+        "    tools: Read\n"
+        "    turns: 5\n"
+        "  - phase_key: human\n"
+        "    name: Human\n"
+        "    kind: human_gate\n"
+        "    gate: true\n"
+    )
+
+    for phases_path in (resolve_profile_phases_path("native-sdd"), extra):
+        keys = planned_phase_keys(phases_path, source)
+        prepared = prepare_todo_phases(
+            todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+            phases_path=phases_path, plan_path="docs/plan.md", project_dir=repo,
+        )
+        assert keys == tuple(task.phase_key for task in prepared)
+        assert not any(key.startswith("validate:") for key in keys)
+        assert keys[:2] == ("plan:task-1", "plan:task-2")
+
+    assert planned_phase_keys(extra, source)[2:] == ("review", "human")
 
 
 def test_reconcile_plan_task_results_forwards_repo_to_registration_loader(tmp_path, mocker):
@@ -3101,3 +3107,91 @@ def test_contained_paths_drop_on_git_timeout(tmp_path, mocker, caplog):
     with caplog.at_level("WARNING", logger="hermes_pipeline.kanban_tasks"):
         assert _contained_paths(repo, "TODO-1", ["docs/spec.md"]) == []
     assert any("TimeoutExpired" in r.getMessage() for r in caplog.records)
+
+
+def test_plan_worker_card_publishes_the_result_metadata_template(tmp_path):
+    """The worker cannot satisfy the strict contract it is never shown."""
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.result_contract import render_result_template
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: development\n"
+        "    name: Development\n"
+        "    prompt: implement legacy plan\n"
+        "    tools: Read,Write,Edit,Bash\n"
+        "    turns: 20\n"
+        "    compile_plan_tasks: true\n"
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "plan.md").write_text(
+        "```json tpo-plan\n"
+        '{"schema_version":1,"todo_id":"TODO-41","tasks":['
+        '{"id":"task-1","title":"First","instructions":"Exact first instruction.",'
+        '"acceptance_criteria":["First exact criterion."],'
+        '"verification":["uv run pytest tests/test_first.py"],'
+        '"commit_message":"feat: first"}]}'
+        "\n```\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01TICK",
+        board_slug="demo",
+        phases_path=phases_path,
+        prompt_client="codex",
+        plan_path="docs/plan.md",
+        project_dir=tmp_path,
+    )
+
+    expected = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-41",
+        step_key="plan:task-1",
+        acceptance_criteria=("First exact criterion.",),
+    )
+    assert expected in prepared[0].body
+    # The dispatcher closes the card, so it must be pointed at the same object,
+    # and told to supply the one field only it holds.
+    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
+    assert "metadata.tpo_result" in dispatcher
+    assert "external_session_id" in dispatcher
+    # "exactly, never paraphrase" must not override a stated substitution, or a
+    # defect-bearing review gets published as clean.
+    assert "substitution the template" in dispatcher
+
+
+def test_profile_phase_prompt_cannot_claim_a_template_it_never_publishes(tmp_path):
+    """A profile prompt is overridable YAML: it must not flip the dispatcher."""
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.result_contract import RESULT_TEMPLATE_HEADING
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_4_development\n"
+        "    name: Development\n"
+        f"    prompt: 'Implement it. {RESULT_TEMPLATE_HEADING} see the board.'\n"
+        "    tools: Read,Bash\n"
+        "    turns: 5\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+        phases_path=phases_path, prompt_client="codex", project_dir=tmp_path,
+    )
+
+    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
+    assert "include the same result metadata" in dispatcher
+    assert "set `metadata.tpo_result` to exactly" not in dispatcher
+
+
+def test_legacy_phase_delegation_block_keeps_its_generic_metadata_line(tmp_path):
+    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
+
+    block = _external_client_delegation_block("codex", timeout=1800, tools="")
+
+    assert "```json" not in block
+    assert "result metadata" in block
