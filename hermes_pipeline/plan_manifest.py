@@ -33,7 +33,29 @@ _PSEUDO_MANIFEST_START_RE = re.compile(
     r"^[ \t]*```json tpo-plan[ \t]*$", re.MULTILINE
 )
 _TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*\Z")
-_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+# A superset of ``result_contract._CONTROL_RE`` (identical today): C0/DEL
+# controls plus the Unicode bidi overrides and isolates. A Plan is authority
+# content that TPO renders into worker-facing card text, and ``result_contract``
+# no longer scans ``acceptance[].criterion``, so this validator is the only
+# filter left for Trojan-Source-style task strings. Refusing them here is the
+# least-bad option, not a clean one:
+#   - it is not purely an authoring-time gate. ``parse_plan_manifest`` re-runs
+#     on every step through ``load_validated_registration``, which wraps the
+#     failure as ``registration_invalid``. A run registered before this class
+#     was widened, whose Plan carries one of these characters, now fails every
+#     subsequent step -- and the Plan is hash-pinned against
+#     ``registration["plan_hash"]``, so editing the character out changes the
+#     digest and fails the same check. Such a run must be cancelled and
+#     re-registered; retrying cannot repair it.
+#   - the rejection surfaces as ``invalid_task``, shared with empty, over-long
+#     and non-string values, and names neither the task nor the field, so for an
+#     invisible character it is not self-explanatory.
+# Both still beat catching it in ``result_contract`` at result-validation time,
+# where a rejection wedges an immutable closed run with no repair path at all,
+# and where the run is already lost before anyone sees it. Note U+200E/U+200F --
+# the likelier accidental paste -- are deliberately outside the class and
+# continue to validate.
+_CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\u202a-\u202e\u2066-\u2069]")
 _MANIFEST_KEYS = frozenset({"schema_version", "todo_id", "tasks"})
 _TASK_KEYS = frozenset(
     {

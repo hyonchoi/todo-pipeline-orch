@@ -23,7 +23,6 @@ from .github_issues import (
 from .plan_manifest import PlanManifest, PlanReference, PlanSource, parse_plan_manifest
 
 MAX_METADATA_BYTES = 64 * 1024
-MAX_SUMMARY_LENGTH = 8 * 1024
 MAX_COMMAND_LENGTH = 500
 MAX_FINDINGS = 50
 MAX_LOCATION_LENGTH = 256
@@ -165,6 +164,17 @@ def sanitize_result_text(value: object, *, maximum: int) -> str:
 
 
 def _reject_unsafe_strings(value: object) -> None:
+    # The key branch below no longer decides anything: every dict this function
+    # is now handed is ``_exact_keys``-checked (``tpo_result`` at every level,
+    # and the registration mapping before its own scan), and an unknown
+    # top-level ``tpo_result`` key raises ``malformed_result``, so an unsafe key
+    # always rejects anyway -- dropping the branch would change only which code
+    # is raised, never accept-vs-reject. Removing the enclosing-envelope scan
+    # removed the only caller that ever saw arbitrary keys. Kept rather than
+    # deleted: a future caller passing looser data should not silently lose key
+    # coverage, and the code it does decide is pinned by the
+    # ``unsafe-top-level-key`` case of
+    # ``test_parse_rejects_secrets_and_controls_at_any_metadata_depth``.
     if isinstance(value, str):
         if _CONTROL_RE.search(value) or _SECRET_RE.search(value):
             raise ResultContractError("unsafe_metadata")
@@ -189,14 +199,12 @@ def _exact_keys(value: dict[str, object], keys: set[str], *, code: str) -> None:
         raise ResultContractError(code, "unexpected or missing fields")
 
 
-def _bounded_string(
-    value: object, *, maximum: int, code: str, allow_placeholder: bool = False
-) -> str:
+def _bounded_string(value: object, *, maximum: int, code: str) -> str:
     if not isinstance(value, str) or not value or len(value) > maximum:
         raise ResultContractError("size_limit" if isinstance(value, str) and len(value) > maximum else code)
     if _CONTROL_RE.search(value) or _SECRET_RE.search(value):
         raise ResultContractError("unsafe_metadata")
-    if not allow_placeholder and _PLACEHOLDER_RE.fullmatch(value):
+    if _PLACEHOLDER_RE.fullmatch(value):
         raise ResultContractError(code, "unfilled template placeholder")
     return value
 
@@ -247,14 +255,13 @@ def parse_worker_result(
     """Parse ``metadata.tpo_result`` from the final successful Hermes run."""
     envelope = _mapping(payload, code="malformed_payload")
     run = _successful_runs(envelope)[-1]
-    summary = run.get("summary")
-    if summary is not None:
-        # Free-form diagnostics, not a template field, and discarded after
-        # bounding: "<none>" is a legitimate summary.
-        _bounded_string(
-            summary, maximum=MAX_SUMMARY_LENGTH, code="invalid_summary",
-            allow_placeholder=True,
-        )
+    # ``run["summary"]`` is deliberately not read, bounded, or scanned. Hermes
+    # requires a closing summary and stores it verbatim, but it is free-form
+    # dispatcher diagnostics that nothing in TPO consumes or echoes, so any
+    # check on it can only reject: a closed run's data is immutable and a
+    # rejection opens no card, so ANSI colour, a "token: expired" log line, or
+    # an over-long tail would wedge the step forever. Diagnostics that TPO does
+    # surface are sanitized at the point of use with ``sanitize_result_text``.
     metadata = _mapping(run.get("metadata"), code="missing_result")
     try:
         metadata_encoded = json.dumps(
@@ -264,17 +271,20 @@ def parse_worker_result(
         raise ResultContractError("malformed_result") from exc
     if len(metadata_encoded) > MAX_METADATA_BYTES:
         raise ResultContractError("size_limit", "metadata")
-    _reject_unsafe_strings(metadata)
-    # Do not restore an exactness (or subset) check on this mapping. The worker
-    # supplies the whole envelope, and live runs routinely carry extra
-    # worker-authored keys beside ``tpo_result`` (``notes``, ``findings``,
-    # ``commit_message``, ...), so any key check here stalls every step. Those
-    # siblings are untrusted and are simply never read by this function; the
-    # trust comes from ``tpo_result``, which is exact-key-checked at every level
-    # below, while the size bound and unsafe-string scan above still cover the
-    # whole mapping. ``worker_session_id`` is the one key Hermes stamps, but
-    # only on its own tool path and without verification on the plain CLI path,
-    # so it is forgeable and is never an authenticity signal.
+    # Do not restore an exactness (or subset) check on this mapping, nor an
+    # unsafe-string scan over it. The worker supplies the whole envelope, and
+    # live runs routinely carry extra worker-authored keys beside ``tpo_result``
+    # (``notes``, ``findings``, ``commit_message``, ...), so any key check here
+    # stalls every step -- and so did scanning them: a sibling this function
+    # never reads, and that nothing anywhere echoes into a log, notification,
+    # report, comment, issue or card, once rejected the whole result forever.
+    # Those siblings are untrusted and are simply never read; the trust comes
+    # from ``tpo_result``, which is exact-key-checked and scanned at every level
+    # below, while the size bound above -- a resource guard, not a content one
+    # -- still covers the whole mapping. ``worker_session_id`` is the one key
+    # Hermes stamps, but only on its own tool path and without verification on
+    # the plain CLI path, so it is forgeable and is never an authenticity
+    # signal.
     raw = _mapping(metadata.get("tpo_result"), code="missing_result")
     try:
         encoded = json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode()
@@ -282,7 +292,27 @@ def parse_worker_result(
         raise ResultContractError("malformed_result") from exc
     if len(encoded) > MAX_METADATA_BYTES:
         raise ResultContractError("size_limit", "metadata")
-    _reject_unsafe_strings(raw)
+    # ``acceptance`` is exempt for the same reason ``issue_snapshot`` is in
+    # ``load_validated_registration``: it is hash-pinned authority content, not
+    # agent metadata. Every criterion must equal ``acceptance_criteria``
+    # exactly, and those come from the Plan manifest that TPO itself renders
+    # into the worker-facing card -- so the text is TPO's own, scanning it
+    # protects nothing, and scanning it made any TODO whose criteria mention a
+    # token, password, authorization header or secret impossible to complete.
+    # The equality check below is what actually constrains its content, and the
+    # Plan manifest bounds each criterion to ``MAX_CRITERION_LENGTH`` and
+    # rejects the same control characters ``_CONTROL_RE`` does -- its rule is
+    # pinned identical to this module's, because this exemption makes it the
+    # only filter left for Trojan-Source-style criteria -- so only Plan-authored
+    # text can survive. Everything else here stays scanned: those values are
+    # consumed and compared.
+    #
+    # This exemption is only correct while the enclosing-envelope scan above
+    # stays deleted: that scan recursed transitively into
+    # ``metadata["tpo_result"]["acceptance"]``, so restoring it would silently
+    # undo the exemption and bring the wedge back. The two loosenings are one
+    # change, not two.
+    _reject_unsafe_strings({key: value for key, value in raw.items() if key != "acceptance"})
     if not _TOP_KEYS <= set(raw) or set(raw) - _TOP_KEYS - _OPTIONAL_TOP_KEYS:
         raise ResultContractError("malformed_result", "unexpected or missing fields")
     if raw["schema_version"] != SCHEMA_VERSION or raw["verdict"] != "success":

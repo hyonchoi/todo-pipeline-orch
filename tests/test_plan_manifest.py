@@ -207,7 +207,28 @@ def test_rejects_bounded_string_overflow():
     "field",
     ["id", "title", "instructions", "acceptance_criteria", "verification", "commit_message"],
 )
-@pytest.mark.parametrize("control", ["\x00", "\x1f", "\x7f"])
+@pytest.mark.parametrize(
+    "control",
+    [
+        "\x00",
+        "\x1f",
+        "\x7f",
+        # Bidi overrides and isolates: Trojan-Source-style text that renders as
+        # something other than what it says. ``result_contract`` has always
+        # rejected these, and since it stopped scanning ``acceptance`` this
+        # validator must reject a SUPERSET of what it rejects -- not the same
+        # set. Loosening this class to match a future loosening there would
+        # reopen the hole; see
+        # ``test_manifest_control_rule_contains_the_result_contract_rule``.
+        # Rejecting them here is the least-bad option rather than a clean one:
+        # ``parse_plan_manifest`` also re-runs mid-run through
+        # ``load_validated_registration``, so this is not purely an
+        # authoring-time gate -- see the comment on ``plan_manifest._CONTROL_RE``
+        # for the consequences and the cancel-and-re-register migration.
+        "\u202e",
+        "\u2066",
+    ],
+)
 def test_manifest_rejects_controls_in_every_task_string(field, control):
     task = dict(_manifest()["tasks"][0])
     if isinstance(task[field], list):
@@ -217,6 +238,39 @@ def test_manifest_rejects_controls_in_every_task_string(field, control):
 
     with pytest.raises(PlanManifestValidationError, match="invalid_task"):
         parse_plan_manifest(_document(_manifest(tasks=[task])), expected_todo_id="TODO-42")
+
+
+def test_manifest_control_rule_contains_the_result_contract_rule():
+    """This validator must refuse a superset, and the coupling is load-bearing.
+
+    ``result_contract`` exempts ``acceptance[].criterion`` from its unsafe-string
+    scan because the Plan is authority content, so this validator is now the only
+    thing standing between a Trojan-Source-style criterion and the card text
+    ``render_result_template`` publishes. Any character ``result_contract``
+    refuses and this validator tolerates reopens that hole.
+
+    The invariant is one-directional on purpose. Asserting the two patterns are
+    equal would fail on an equivalent rewrite of either class, block a
+    legitimate tightening of this validator alone, and -- the direction that
+    matters -- invite "repair" by loosening this rule in lockstep if
+    ``result_contract`` is ever loosened, silently reopening the hole with a
+    green suite. The two classes happen to be identical today; only containment
+    is required.
+    """
+    from hermes_pipeline import plan_manifest, result_contract
+
+    # Every codepoint, not a set of blocks: a block sweep has a hole in exactly
+    # the direction this test guards -- adding, say, U+061C or U+FEFF to
+    # ``result_contract`` alone would sit outside C0/Latin-1 and General
+    # Punctuation and pass unnoticed. The full plane costs ~0.1s.
+    leaked = [
+        f"U+{code:04X}"
+        for code in range(0x110000)
+        if result_contract._CONTROL_RE.search(chr(code))
+        and not plan_manifest._CONTROL_RE.search(chr(code))
+    ]
+
+    assert leaked == []
 
 
 @pytest.mark.parametrize(

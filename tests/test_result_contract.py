@@ -173,17 +173,18 @@ def test_parse_rejects_oversized_metadata():
         )
 
 
-@pytest.mark.parametrize(
-    "sibling",
-    [
-        {"provider_body": "password=super-secret"},
-        {"unsafe\x00key": "value"},
-        {"padding": "x" * 65536},
-    ],
-)
-def test_parse_validates_entire_enclosing_run_metadata(sibling):
-    metadata = {"tpo_result": _result(), **sibling}
-    with pytest.raises(ResultContractError, match="unsafe_metadata|size_limit"):
+def test_parse_bounds_the_size_of_the_enclosing_run_metadata():
+    """Replaces the former ``test_parse_validates_entire_enclosing_run_metadata``.
+
+    That test also asserted that a secret-shaped or control-bearing *sibling*
+    rejected the result. That half was the wedge: siblings are never read, the
+    closed run is immutable, and a rejection opens no card, so one stray
+    ``notes`` line permanently stalled the step. Content tolerance now lives in
+    ``test_parse_accepts_platform_injected_metadata_siblings``; only the size
+    bound survives here, because it guards memory rather than content.
+    """
+    metadata = {"tpo_result": _result(), "padding": "x" * 65536}
+    with pytest.raises(ResultContractError, match="size_limit"):
         parse_worker_result(
             {"runs": [{"status": "succeeded", "metadata": metadata}]},
             tick_id="01TICK",
@@ -199,12 +200,16 @@ def test_parse_accepts_platform_injected_metadata_siblings():
     Every completed run observed live carries the Hermes-stamped
     ``worker_session_id``, and nearly all carry worker-authored siblings such as
     ``notes``. Only ``tpo_result`` is read, so siblings must neither reject an
-    otherwise valid result nor leak into it.
+    otherwise valid result nor leak into it -- and that holds whatever they
+    contain, including secret-shaped prose and control characters, because
+    unread text cannot be echoed anywhere it could do harm.
     """
     metadata = {
         "tpo_result": _result(),
         "worker_session_id": "20260904_154528_b0f01d",
-        "notes": "free-form worker commentary",
+        "notes": "free-form worker commentary: added token: refresh",
+        "provider_body": "password=super-secret",
+        "unsafe\x00key": "value",
         # Named like a ``tpo_result`` field on purpose: a sibling must never
         # reach the parse, least of all one that could override a checked field.
         "external_session_id": "forged",
@@ -240,15 +245,87 @@ def test_summary_and_diagnostics_are_sanitized():
 
 
 @pytest.mark.parametrize(
-    "path",
+    ("path", "value"),
     [
-        ("git", "changed_files", 0),
-        ("acceptance", 0, "criterion"),
-        ("delivery", "checks", 0, "command"),
+        # ``git.changed_files`` entries are the only ``tpo_result`` strings the
+        # scan alone guards: nothing validates their content, so with the scan
+        # removed each of these payloads parses clean. Secret and control are
+        # separated on purpose -- a value tripping both at once cannot tell
+        # ``_SECRET_RE`` and ``_CONTROL_RE`` apart, so dropping either half of
+        # the scan's condition would survive.
+        pytest.param(
+            ("git", "changed_files", 0), "password=super-secret", id="secret-in-list",
+        ),
+        pytest.param(("git", "changed_files", 0), "bad\x00name", id="c0-control-in-list"),
+        pytest.param(
+            ("git", "changed_files", 0), "bad\u202ename", id="bidi-override-in-list",
+        ),
+        # ``review.findings`` is the list-of-dicts shape: it pins that the scan
+        # recurses through a list *into* a dict. It replaces the former
+        # ``acceptance[0].criterion`` param, which had the same shape and is now
+        # exempt. ``priority`` rather than ``location``: a bad ``location`` is
+        # rejected by ``_bounded_string`` with the same code either way, whereas
+        # a bad ``priority`` falls through to ``invalid_review`` the moment the
+        # scan stops reaching it.
+        pytest.param(
+            ("review", "findings", 0, "priority"),
+            "password=super-secret",
+            id="secret-in-list-of-dicts",
+        ),
+        pytest.param(
+            ("review", "findings", 0, "priority"),
+            "P1\x00",
+            id="control-in-list-of-dicts",
+        ),
+        # The scan reaches dict KEYS, and it runs before the ``_TOP_KEYS``
+        # check, so this is observable at the public boundary -- but only
+        # through WHICH code is raised, not accept-vs-reject: an unsafe key is
+        # rejected either way, as ``malformed_result`` once the key branch of
+        # ``_reject_unsafe_strings`` stops seeing it. The code is what the
+        # reconciler records in its sticky marker, so it is worth pinning. The
+        # value here is deliberately benign; only the key is unsafe.
+        pytest.param(("bad\x00key",), "value", id="unsafe-top-level-key"),
+        # The exemption is keyed on the top level of ``tpo_result`` only. A
+        # stray ``acceptance`` key nested inside a checked block must still be
+        # scanned: applying the exemption recursively by key name would skip
+        # this and leave ``_exact_keys`` to reject with ``invalid_git`` instead.
+        pytest.param(
+            ("git", "acceptance"),
+            "password=super-secret",
+            id="stray-nested-acceptance-key",
+        ),
+        # Contract regression guards, not scan coverage: ``_bounded_string``
+        # raises ``unsafe_metadata`` for these two even with the scan removed.
+        pytest.param(
+            ("tdd", "red", "command"),
+            "password=super-secret\x00",
+            id="tdd-command-double-covered",
+        ),
+        pytest.param(
+            ("delivery", "checks", 0, "command"),
+            "password=super-secret\x00",
+            id="delivery-check-double-covered",
+        ),
     ],
 )
-def test_parse_rejects_secrets_and_controls_at_any_metadata_depth(path):
+def test_parse_rejects_secrets_and_controls_at_any_metadata_depth(path, value):
+    """Every ``tpo_result`` value TPO consumes or compares stays scanned.
+
+    ``acceptance[].criterion`` is deliberately absent: see
+    ``test_acceptance_criteria_are_plan_text_and_are_never_scanned``.
+    """
     result = _result()
+    result["review"] = {
+        "verdict": "findings",
+        "findings": [
+            {
+                "priority": "P1",
+                "location": "src/example.py:1",
+                "failure_scenario": "It breaks.",
+                "recommendation": "Fix it.",
+            }
+        ],
+    }
     result["delivery"] = {
         "pr_url": "https://github.com/example/repo/pull/1",
         "branch": "todo-42",
@@ -258,8 +335,81 @@ def test_parse_rejects_secrets_and_controls_at_any_metadata_depth(path):
     target = result
     for key in path[:-1]:
         target = target[key]
-    target[path[-1]] = "password=super-secret\x00"
+    target[path[-1]] = value
     with pytest.raises(ResultContractError, match="unsafe_metadata"):
+        parse_worker_result(
+            {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]},
+            tick_id="01TICK",
+            todo_id="TODO-42",
+            step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        )
+
+
+# Four of these trip only ``_SECRET_RE`` and the fifth trips no guard at all, so
+# they are documentation of the reported field failures, not five independent
+# cases. The coverage in this test comes from the negative half below.
+@pytest.mark.parametrize(
+    "criterion",
+    [
+        "Expired token: request returns 401",
+        "Login rejects a bad password: no session is created",
+        "Sends authorization: Bearer a-token on every call",
+        "The secret: rotation job runs nightly",
+        "normalize_names([]) returns []",
+    ],
+)
+def test_acceptance_criteria_are_plan_text_and_are_never_scanned(criterion):
+    """Scanning this text can only reject TPO's own words.
+
+    ``acceptance_criteria`` reaches the parser from the hash-pinned Plan
+    manifest (``kanban_tasks`` passes ``plan_task.acceptance_criteria``) and TPO
+    renders the same strings into the worker-facing card itself. Scanning them
+    made any TODO whose criteria mention a token, password, authorization header
+    or secret impossible to complete: the required text is dictated by the Plan,
+    so no worker output could pass.
+
+    The negative half is what pins the exemption's *scope*: acceptance being
+    tolerated proves nothing on its own, because "scan nothing at all" would
+    also pass. The first mutation below is the discriminator -- with the scan
+    gone that payload parses clean.
+    """
+    result = _result(acceptance=[{"criterion": criterion, "status": "passed"}])
+    parsed = parse_worker_result(
+        {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]},
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=(criterion,),
+    )
+    assert parsed.external_session_id == "session-1"
+
+    for mutation in (
+        lambda item: item["git"].update(changed_files=["password=super-secret"]),
+        # Belt and braces: this one also rejects via ``_bounded_string`` with
+        # the scan removed, so it pins the contract rather than the exemption.
+        lambda item: item["tdd"]["red"].update(command="pytest password=hunter2"),
+    ):
+        unsafe = _result(acceptance=[{"criterion": criterion, "status": "passed"}])
+        mutation(unsafe)
+        with pytest.raises(ResultContractError, match="unsafe_metadata"):
+            parse_worker_result(
+                {"runs": [{"status": "succeeded", "metadata": {"tpo_result": unsafe}}]},
+                tick_id="01TICK",
+                todo_id="TODO-42",
+                step_key="plan:task-1",
+                acceptance_criteria=(criterion,),
+            )
+
+
+def test_acceptance_criteria_must_still_echo_the_plan_exactly():
+    """Exempting the scan must not weaken the equality gate that justifies it."""
+    result = _result(
+        acceptance=[
+            {"criterion": "Expired token: request returns 401", "status": "passed"}
+        ]
+    )
+    with pytest.raises(ResultContractError, match="invalid_acceptance"):
         parse_worker_result(
             {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]},
             tick_id="01TICK",
@@ -1751,11 +1901,29 @@ def test_review_body_states_the_findings_substitution_before_other_instructions(
     assert "defect-free" in text
 
 
-def test_summary_is_not_a_template_field_and_accepts_bracketed_text():
-    result = _result()
+@pytest.mark.parametrize(
+    "summary",
+    [
+        pytest.param("<none>", id="bracketed-not-a-template-field"),
+        pytest.param("\x1b[32mall tests passed\x1b[0m", id="ansi-colour"),
+        pytest.param("token: expired", id="secret-shaped-prose"),
+        # Hermes' own redactor rewrites "Token: refreshed" to this, which still
+        # matched the secret pattern: redaction upstream made rejection likelier.
+        pytest.param("Token: *** successfully", id="upstream-redacted"),
+        pytest.param("x" * 100_000, id="longer-than-any-bound"),
+        pytest.param({"unexpected": "shape"}, id="not-a-string"),
+    ],
+)
+def test_summary_is_discarded_diagnostics_and_never_rejects_the_result(summary):
+    """Hermes requires a closing summary; TPO reads it nowhere.
+
+    It is not a template field and its value was already discarded after
+    bounding, so scanning or bounding it could only convert healthy dispatcher
+    output into a permanent wedge on an immutable closed run.
+    """
     parsed = parse_worker_result(
-        {"runs": [{"status": "succeeded", "summary": "<none>",
-                   "metadata": {"tpo_result": result}}]},
+        {"runs": [{"status": "succeeded", "summary": summary,
+                   "metadata": {"tpo_result": _result()}}]},
         tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
         acceptance_criteria=("Observable criterion",),
     )
