@@ -265,7 +265,16 @@ def parse_worker_result(
     if len(metadata_encoded) > MAX_METADATA_BYTES:
         raise ResultContractError("size_limit", "metadata")
     _reject_unsafe_strings(metadata)
-    _exact_keys(metadata, {"tpo_result"}, code="malformed_result")
+    # Do not restore an exactness (or subset) check on this mapping. The worker
+    # supplies the whole envelope, and live runs routinely carry extra
+    # worker-authored keys beside ``tpo_result`` (``notes``, ``findings``,
+    # ``commit_message``, ...), so any key check here stalls every step. Those
+    # siblings are untrusted and are simply never read by this function; the
+    # trust comes from ``tpo_result``, which is exact-key-checked at every level
+    # below, while the size bound and unsafe-string scan above still cover the
+    # whole mapping. ``worker_session_id`` is the one key Hermes stamps, but
+    # only on its own tool path and without verification on the plain CLI path,
+    # so it is forgeable and is never an authenticity signal.
     raw = _mapping(metadata.get("tpo_result"), code="missing_result")
     try:
         encoded = json.dumps(raw, ensure_ascii=False, separators=(",", ":")).encode()

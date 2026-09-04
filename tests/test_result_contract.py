@@ -99,6 +99,14 @@ def test_parse_valid_final_successful_run():
         (lambda p: p["tdd"]["green"].update(exit_code=1), "invalid_tdd"),
         (lambda p: p["acceptance"][0].update(status="pending"), "invalid_acceptance"),
         (lambda p: p["tdd"]["red"].update(command="x" * 501), "size_limit"),
+        # ``tpo_result`` stays exact-key-checked at every level: that strictness
+        # is the whole reason the enclosing envelope need not be key-checked.
+        (lambda p: p.update(unexpected="x"), "malformed_result"),
+        (lambda p: p.pop("git"), "malformed_result"),
+        (lambda p: p["git"].update(unexpected="x"), "invalid_git"),
+        (lambda p: p["tdd"].update(unexpected="x"), "invalid_tdd"),
+        (lambda p: p["tdd"]["red"].update(unexpected="x"), "invalid_tdd"),
+        (lambda p: p["acceptance"][0].update(unexpected="x"), "invalid_acceptance"),
     ],
 )
 def test_parse_rejects_invalid_contract(mutation, code):
@@ -114,16 +122,46 @@ def test_parse_rejects_invalid_contract(mutation, code):
         )
 
 
-def test_parse_rejects_malformed_missing_and_oversized_metadata():
-    for payload in ({}, {"runs": [{}]}, {"runs": [{"status": "succeeded", "metadata": {}}]}):
-        with pytest.raises(ResultContractError):
-            parse_worker_result(
-                payload,
-                tick_id="01TICK",
-                todo_id="TODO-42",
-                step_key="plan:task-1",
-                acceptance_criteria=("Observable criterion",),
-            )
+@pytest.mark.parametrize(
+    ("payload", "code"),
+    [
+        pytest.param({}, "malformed_payload", id="no-runs"),
+        pytest.param({"runs": [{}]}, "missing_successful_run", id="no-successful-run"),
+        pytest.param(
+            {"runs": [{"status": "succeeded", "metadata": {}}]},
+            "missing_result",
+            id="empty-metadata",
+        ),
+        # Siblings alone are not a result: presence of ``tpo_result`` is required.
+        pytest.param(
+            {"runs": [{"status": "succeeded", "metadata": {"worker_session_id": "x"}}]},
+            "missing_result",
+            id="siblings-without-result",
+        ),
+        pytest.param(
+            {"runs": [{"status": "succeeded", "metadata": {"tpo_result": _result(), 1: "x"}}]},
+            "missing_result",
+            id="non-string-metadata-key",
+        ),
+    ],
+)
+def test_parse_reports_the_code_for_missing_and_malformed_metadata(payload, code):
+    """The rejection code is durable operator output, not just a raise.
+
+    ``kanban_tasks`` records it in the validation-blocked marker and
+    ``todos_completion`` hands it to ``_needs_input``, so it must be pinned.
+    """
+    with pytest.raises(ResultContractError, match=code):
+        parse_worker_result(
+            payload,
+            tick_id="01TICK",
+            todo_id="TODO-42",
+            step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        )
+
+
+def test_parse_rejects_oversized_metadata():
     oversized = _result(extra="x" * 65536)
     with pytest.raises(ResultContractError, match="size_limit"):
         parse_worker_result(
@@ -145,7 +183,7 @@ def test_parse_rejects_malformed_missing_and_oversized_metadata():
 )
 def test_parse_validates_entire_enclosing_run_metadata(sibling):
     metadata = {"tpo_result": _result(), **sibling}
-    with pytest.raises(ResultContractError, match="unsafe_metadata|size_limit|malformed_result"):
+    with pytest.raises(ResultContractError, match="unsafe_metadata|size_limit"):
         parse_worker_result(
             {"runs": [{"status": "succeeded", "metadata": metadata}]},
             tick_id="01TICK",
@@ -153,6 +191,43 @@ def test_parse_validates_entire_enclosing_run_metadata(sibling):
             step_key="plan:task-1",
             acceptance_criteria=("Observable criterion",),
         )
+
+
+def test_parse_accepts_platform_injected_metadata_siblings():
+    """The envelope is worker-supplied and live runs carry extra keys.
+
+    Every completed run observed live carries the Hermes-stamped
+    ``worker_session_id``, and nearly all carry worker-authored siblings such as
+    ``notes``. Only ``tpo_result`` is read, so siblings must neither reject an
+    otherwise valid result nor leak into it.
+    """
+    metadata = {
+        "tpo_result": _result(),
+        "worker_session_id": "20260904_154528_b0f01d",
+        "notes": "free-form worker commentary",
+        # Named like a ``tpo_result`` field on purpose: a sibling must never
+        # reach the parse, least of all one that could override a checked field.
+        "external_session_id": "forged",
+        # Structurally valid on purpose: an invalid forgery would be caught by
+        # the nested key check before either assertion below is reached, so the
+        # assertions -- not validator ordering -- are what prove no leak.
+        "git": {
+            "expected_parent_sha": "c" * 40,
+            "resulting_head_sha": "d" * 40,
+            "task_commit_sha": "d" * 40,
+            "changed_files": ["forged.py"],
+        },
+    }
+    parsed = parse_worker_result(
+        {"runs": [{"status": "succeeded", "metadata": metadata}]},
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+    assert parsed.external_session_id == "session-1"
+    # Tolerated means unread: no sibling may reach the parsed result.
+    assert parsed.git.changed_files == ("src/example.py",)
 
 
 def test_summary_and_diagnostics_are_sanitized():
@@ -250,6 +325,21 @@ def test_review_evidence_preserves_bounded_structured_findings():
             },
             id="bad-priority",
         ),
+        pytest.param(
+            {
+                "verdict": "findings",
+                "findings": [
+                    {
+                        "priority": "P1",
+                        "location": "file.py:1",
+                        "failure_scenario": "failure",
+                        "recommendation": "fix",
+                        "unexpected": "x",
+                    }
+                ],
+            },
+            id="finding-unknown-key",
+        ),
     ],
 )
 def test_review_evidence_rejects_ambiguous_or_unbounded_shapes(review):
@@ -313,6 +403,7 @@ def test_delivery_evidence_accepts_only_successful_checks_and_exact_pr_identity(
         lambda value: value.update(
             checks=[{"command": "uv run pytest", "exit_code": 1}]
         ),
+        lambda value: value.update(unexpected="x"),
     ):
         invalid = dict(delivery)
         mutation(invalid)
@@ -822,7 +913,19 @@ def _worker_payload(*, step_key: str, parent: str, head: str, changed: list[str]
         "task_commit_sha": head,
         "changed_files": changed,
     }
-    return {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]}
+    # Hermes stamps ``worker_session_id`` on its own tool path only; live runs
+    # also carry worker-authored siblings. The reconciler ignores them all.
+    return {
+        "runs": [
+            {
+                "status": "succeeded",
+                "metadata": {
+                    "tpo_result": result,
+                    "worker_session_id": "20260904_154528_b0f01d",
+                },
+            }
+        ]
+    }
 
 
 def test_reconcile_completed_worker_validates_without_a_controller_gate(
