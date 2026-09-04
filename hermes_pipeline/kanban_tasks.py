@@ -29,6 +29,7 @@ from .phases import (
     load_phase_profile,
     load_phases,
 )
+from .result_contract import RESULT_TEMPLATE_HEADING, render_result_template
 from .state import _atomic_write_text
 
 # Sentinel written after successful registration to record expected phases.
@@ -153,8 +154,14 @@ def _external_client_delegation_block(
     prompt_client: PromptClient,
     timeout: int,
     tools: str,
+    expects_result_metadata: bool = False,
 ) -> str:
-    """Return the dispatcher contract prepended to executable phase tasks."""
+    """Return the dispatcher contract prepended to executable phase tasks.
+
+    ``expects_result_metadata`` is set when the card below publishes the
+    ``metadata.tpo_result`` template, so the dispatcher that actually closes the
+    card is told to copy that object instead of writing a prose summary.
+    """
     if prompt_client == "codex":
         command = "codex exec --sandbox workspace-write"
     elif prompt_client == "claude":
@@ -196,7 +203,17 @@ def _external_client_delegation_block(
         '`kanban_block(kind="needs_input", reason=<exact reason>)`. '
         "Do not inspect, implement, or commit partial work; you must not inspect "
         "partial changes, and must not implement or commit the phase yourself.\n"
-        "When completing the task, include the same result metadata.\n\n"
+        + (
+            "When completing the task, set `metadata.tpo_result` to exactly the "
+            f"object in the \"{RESULT_TEMPLATE_HEADING}\" template below, filled "
+            "with the values the external client reported; never summarize or "
+            "paraphrase it, and apply any substitution the template itself "
+            "states for a section. Set `external_session_id` from the external client "
+            "run you launched, which is the same session id you would report "
+            "through `kanban_comment` on failure.\n\n"
+            if expects_result_metadata
+            else "When completing the task, include the same result metadata.\n\n"
+        )
     )
 
 
@@ -824,8 +841,13 @@ def prepare_todo_phases(
                     + "\n\nVerification:\n"
                     + "\n".join(f"- {item}" for item in plan_task.verification)
                     + f"\n\nRequired commit message: {plan_task.commit_message}\n"
-                    "Complete only this task using red-green-refactor TDD. "
-                    "Report the required structured result metadata when closing."
+                    "Complete only this task using red-green-refactor TDD.\n\n"
+                    + render_result_template(
+                        tick_id=tick_id,
+                        todo_id=todo_id,
+                        step_key=worker_key,
+                        acceptance_criteria=plan_task.acceptance_criteria,
+                    )
                 )
                 rendered_worker = _render_phase_prompt(
                     "",
@@ -856,6 +878,8 @@ def prepare_todo_phases(
                                 prompt_client,
                                 timeout=phase.timeout,
                                 tools=phase.tools,
+                                # Manifest workers always publish the template.
+                                expects_result_metadata=True,
                             )
                             + _external_agent_prompt_block(rendered_worker)
                         ),
@@ -897,6 +921,9 @@ def prepare_todo_phases(
                 prompt_client,
                 timeout=phase.timeout,
                 tools=phase.tools,
+                # Profile phases publish no result template: their results are
+                # never parsed, and the prompt comes from overridable YAML.
+                expects_result_metadata=False,
             )
         )
         prepared.append(

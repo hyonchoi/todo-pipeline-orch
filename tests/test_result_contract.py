@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from hermes_pipeline.github_issues import (
     snapshot_hash,
 )
 from hermes_pipeline.result_contract import (
+    _FINDING_PRIORITIES,
     ResultContractError,
     load_validated_registration,
     parse_worker_result,
@@ -1322,3 +1324,455 @@ def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, moc
     registration_path.write_text(json.dumps(drifted))
     with pytest.raises(ResultContractError, match="registration_invalid"):
         load_validated_registration(repo, state, "LEGACY-TICK")
+
+
+# --- Published result-metadata template -------------------------------------
+#
+# The template is the only thing a worker is told about the contract, so these
+# tests round-trip every rendered template through the real parser and assert
+# the published keys are derived from the contract constants themselves.
+
+_JSON_BLOCK_RE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
+_PLACEHOLDER_RE = re.compile(r"^<.*>$")
+
+_TEMPLATE_FILL = {
+    ("external_session_id",): "session-1",
+    ("review", "findings", 0, "priority"): "P1",
+    ("git", "expected_parent_sha"): "a" * 40,
+    ("git", "resulting_head_sha"): "b" * 40,
+    ("git", "task_commit_sha"): "b" * 40,
+    ("git", "changed_files", 0): "src/example.py",
+    ("tdd", "red", "command"): "uv run pytest tests/test_example.py",
+    ("tdd", "green", "command"): "uv run pytest tests/test_example.py",
+    ("tdd", "refactor", "command"): "uv run pytest tests/test_example.py",
+    ("review", "findings", 0, "location"): "src/example.py:12",
+    ("review", "findings", 0, "failure_scenario"): "A resumed tick closes the card twice.",
+    ("review", "findings", 0, "recommendation"): "Guard the close with the run marker.",
+    ("delivery", "pr_url"): "https://github.com/acme/repo/pull/7",
+    ("delivery", "checks", 0, "command"): "uv run pytest",
+}
+
+
+def _template_blocks(text: str) -> list[dict]:
+    blocks = [json.loads(block) for block in _JSON_BLOCK_RE.findall(text)]
+    assert blocks, f"template published no JSON block: {text}"
+    return blocks
+
+
+def _fill_template(value, path=()):
+    """Substitute worker-supplied values for every ``<...>`` placeholder."""
+    if isinstance(value, dict):
+        return {key: _fill_template(item, (*path, key)) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_fill_template(item, (*path, index)) for index, item in enumerate(value)]
+    if isinstance(value, str) and _PLACEHOLDER_RE.match(value):
+        assert path in _TEMPLATE_FILL, f"unfillable placeholder at {path}: {value}"
+        return _TEMPLATE_FILL[path]
+    return value
+
+
+def _template_envelope(result: dict) -> dict:
+    return {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]}
+
+
+def test_plan_template_round_trips_through_the_parser():
+    from hermes_pipeline.result_contract import render_result_template
+
+    text = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+    template, = _template_blocks(text)
+
+    parsed = parse_worker_result(
+        _template_envelope(_fill_template(template)),
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+
+    assert parsed.git.changed_files == ("src/example.py",)
+    assert parsed.red.exit_code != 0
+    assert (parsed.green.exit_code, parsed.refactor.exit_code) == (0, 0)
+    # The criteria are pipeline-known facts, so the template pre-fills them.
+    assert "<" not in json.dumps(template["acceptance"])
+    assert "do not report a result object" in text
+
+
+def test_review_template_round_trips_clean_and_findings_verdicts():
+    from hermes_pipeline.result_contract import (
+        render_result_template,
+        verify_read_only_review,
+    )
+
+    head = "c" * 40
+    text = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="review:0",
+        section="review",
+        pinned_head_sha=head,
+        allow_no_changes=True,
+    )
+    template, findings_variant = _template_blocks(text)
+
+    clean = parse_worker_result(
+        _template_envelope(_fill_template(template)),
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+    assert clean.review is not None and clean.review.verdict == "clean"
+    verify_read_only_review(
+        Path("."), clean, head_sha=head, require_current=False
+    )
+
+    spliced = dict(template)
+    spliced["review"] = findings_variant
+    reported = parse_worker_result(
+        _template_envelope(_fill_template(spliced)),
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+    assert reported.review is not None
+    assert reported.review.verdict == "findings"
+    assert reported.review.findings[0]["priority"] in _FINDING_PRIORITIES
+
+
+def test_delivery_template_round_trips_through_the_parser():
+    from hermes_pipeline.result_contract import render_result_template
+
+    head = "b" * 40
+    text = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="finish",
+        section="delivery",
+        pinned_head_sha=head,
+        branch="todo-42",
+        allow_no_changes=True,
+    )
+    template, = _template_blocks(text)
+
+    parsed = parse_worker_result(
+        _template_envelope(_fill_template(template)),
+        tick_id="01TICK", todo_id="TODO-42", step_key="finish",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+
+    assert parsed.delivery is not None
+    # Delivery reconciliation demands the branch and the reviewed head verbatim.
+    assert parsed.delivery.branch == "todo-42"
+    assert parsed.delivery.head_sha == parsed.git.resulting_head_sha == head
+    assert parsed.git.changed_files == ()
+
+
+def test_template_publishes_every_key_the_contract_constants_require():
+    from hermes_pipeline import result_contract as contract
+
+    plan, = _template_blocks(
+        contract.render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        )
+    )
+    assert set(plan) == contract._TOP_KEYS
+    assert set(plan["git"]) == contract._GIT_KEYS
+    assert set(plan["tdd"]) == contract._TDD_KEYS
+    for phase in contract._TDD_KEYS:
+        assert set(plan["tdd"][phase]) == contract._COMMAND_KEYS
+    assert set(plan["acceptance"][0]) == contract._ACCEPTANCE_ENTRY_KEYS
+
+    review, findings_variant = _template_blocks(
+        contract.render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+            section="review", pinned_head_sha="c" * 40, allow_no_changes=True,
+        )
+    )
+    assert set(review) == contract._TOP_KEYS | {"review"}
+    assert set(review["review"]) == contract._REVIEW_KEYS
+    assert set(findings_variant) == contract._REVIEW_KEYS
+    assert set(findings_variant["findings"][0]) == contract._FINDING_KEYS
+
+    delivery, = _template_blocks(
+        contract.render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish",
+            section="delivery", pinned_head_sha="b" * 40, branch="todo-42",
+            allow_no_changes=True,
+        )
+    )
+    assert set(delivery) == contract._TOP_KEYS | {"delivery"}
+    assert set(delivery["delivery"]) == contract._DELIVERY_KEYS
+    assert set(delivery["delivery"]["checks"][0]) == contract._COMMAND_KEYS
+
+
+def test_template_rejects_an_unknown_optional_section():
+    from hermes_pipeline.result_contract import render_result_template
+
+    with pytest.raises(ResultContractError, match="unknown_result_section"):
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="nope",
+        )
+
+
+def test_review_body_never_reads_as_constraining_the_review_verdict():
+    """The stall this template exists to prevent must not be re-encoded in prose."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    head = "c" * 40
+    text = render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+        pinned_head_sha=head, allow_no_changes=True,
+    )
+    template, findings_variant = _template_blocks(text)
+
+    # A reviewer that reads an unqualified verdict sentence as covering the
+    # review sub-object stalls the run exactly as the live incident did.
+    misread = _fill_template(template)
+    misread["review"] = dict(findings_variant, verdict="success")
+    with pytest.raises(ResultContractError, match="invalid_review"):
+        parse_worker_result(
+            _template_envelope(_fill_template(misread)),
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+            acceptance_criteria=(), allow_no_changes=True,
+        )
+
+    for sentence in text.split(". "):
+        if '"verdict" accepts only' in sentence:
+            assert "top-level" in sentence, sentence
+
+
+def test_parser_rejects_unfilled_template_placeholders():
+    from hermes_pipeline.result_contract import render_result_template
+
+    template, = _template_blocks(
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        )
+    )
+    for path, code in (
+        (("external_session_id",), "invalid_session"),
+        (("tdd", "red", "command"), "invalid_tdd"),
+        (("git", "changed_files"), "invalid_git"),
+    ):
+        result = _fill_template(template)
+        target = result
+        for key in path[:-1]:
+            target = target[key]
+        # Restore the published placeholder for exactly one field.
+        published = template
+        for key in path:
+            published = published[key]
+        target[path[-1]] = published
+        with pytest.raises(ResultContractError, match=code):
+            parse_worker_result(
+                _template_envelope(result),
+                tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+                acceptance_criteria=("Observable criterion",),
+            )
+
+
+def test_bounded_string_allows_a_real_value_containing_angle_brackets():
+    from hermes_pipeline.result_contract import _bounded_string
+
+    assert _bounded_string(
+        "uv run pytest -k 'a<b'", maximum=100, code="invalid_tdd"
+    ) == "uv run pytest -k 'a<b'"
+
+
+def test_read_only_cards_need_no_invented_tdd_evidence():
+    """A pinned review or finish card is closable by filling the session id alone."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    for kwargs, step_key in (
+        ({"section": "review", "pinned_head_sha": "c" * 40}, "review:0"),
+        (
+            {"section": "delivery", "pinned_head_sha": "b" * 40, "branch": "todo-42"},
+            "finish",
+        ),
+    ):
+        text = render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key=step_key,
+            allow_no_changes=True, **kwargs,
+        )
+        template = _template_blocks(text)[0]
+        assert "<" not in json.dumps(template["tdd"])
+        assert "red.exit_code" not in text
+        filled = _fill_template(template)
+        remaining = [
+            value for value in json.dumps(filled).split('"')
+            if value.startswith("<") and value.endswith(">")
+        ]
+        assert remaining == []
+        parsed = parse_worker_result(
+            _template_envelope(filled),
+            tick_id="01TICK", todo_id="TODO-42", step_key=step_key,
+            acceptance_criteria=(), allow_no_changes=True,
+        )
+        assert parsed.external_session_id == _TEMPLATE_FILL[("external_session_id",)]
+
+
+def test_delivery_template_requires_the_pipeline_known_branch_and_head():
+    from hermes_pipeline.result_contract import render_result_template
+
+    with pytest.raises(ResultContractError, match="incomplete_result_section"):
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
+            allow_no_changes=True,
+        )
+
+
+def test_review_body_states_the_findings_substitution_before_other_instructions():
+    """A dispatcher obeying "exactly, never paraphrase" must not publish clean."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    text = render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+        pinned_head_sha="c" * 40, allow_no_changes=True,
+    )
+    main_fence_end = text.index("```", text.index("```json") + len("```json"))
+    substitution = text.index('replace the whole "review" value')
+
+    assert main_fence_end < substitution
+    for later in (
+        "must not change the worktree",
+        "runs no TDD cycle",
+        'top-level "verdict"',
+    ):
+        assert substitution < text.index(later), later
+    # Both fences must name which review verdict they carry.
+    assert 'publish that second object as "review"' in text
+    assert "defect-free" in text
+
+
+def test_summary_is_not_a_template_field_and_accepts_bracketed_text():
+    result = _result()
+    parsed = parse_worker_result(
+        {"runs": [{"status": "succeeded", "summary": "<none>",
+                   "metadata": {"tpo_result": result}}]},
+        tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+    assert parsed.external_session_id == "session-1"
+
+
+def test_placeholder_rejection_never_swallows_a_real_bracketed_finding():
+    from hermes_pipeline.result_contract import render_result_template
+
+    text = render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+        pinned_head_sha="c" * 40, allow_no_changes=True,
+    )
+    template, findings_variant = _template_blocks(text)
+    reported = dict(template)
+    reported["review"] = findings_variant
+    filled = _fill_template(reported)
+    filled["review"]["findings"][0]["failure_scenario"] = (
+        "<script> tags render unescaped, e.g. <img onerror=x>"
+    )
+
+    parsed = parse_worker_result(
+        _template_envelope(filled),
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+
+    assert parsed.review is not None
+    assert parsed.review.findings[0]["failure_scenario"].startswith("<script>")
+
+
+def test_every_rendered_placeholder_is_caught_by_the_placeholder_rule():
+    from hermes_pipeline.result_contract import _PLACEHOLDER_RE, render_result_template
+
+    texts = (
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+            pinned_head_sha="c" * 40, allow_no_changes=True,
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
+            pinned_head_sha="b" * 40, branch="todo-42", allow_no_changes=True,
+        ),
+    )
+    seen = 0
+    for text in texts:
+        for block in _template_blocks(text):
+            for value in re.findall(r'"(<[^"]*>)"', json.dumps(block)):
+                assert _PLACEHOLDER_RE.fullmatch(value), value
+                seen += 1
+    assert seen >= 10
+
+
+def test_read_only_tdd_exit_code_reads_as_nothing_ran():
+    from hermes_pipeline.result_contract import render_result_template
+
+    template, _variant = _template_blocks(
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+            pinned_head_sha="c" * 40, allow_no_changes=True,
+        )
+    )
+
+    assert template["tdd"]["red"]["exit_code"] == 127
+
+
+def _all_templates():
+    from hermes_pipeline.result_contract import render_result_template
+
+    return (
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+            acceptance_criteria=("Observable criterion",),
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
+            pinned_head_sha="c" * 40, allow_no_changes=True,
+        ),
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
+            pinned_head_sha="b" * 40, branch="todo-42", allow_no_changes=True,
+        ),
+    )
+
+
+def test_template_asks_only_for_what_the_external_client_can_do():
+    """The template is passed verbatim to a client with no Kanban tools."""
+    kanban_only = ("close the card", "closing the card", "kanban_close",
+                   "kanban_block", "kanban_comment")
+    for text in _all_templates():
+        lowered = text.lower()
+        for phrase in kanban_only:
+            assert phrase not in lowered, phrase
+        # It must still say who closes the card with the reported object.
+        assert "dispatcher" in lowered
+
+
+def test_findings_priority_is_chosen_by_the_reviewer_not_pre_filled():
+    from hermes_pipeline.result_contract import _FINDING_PRIORITIES
+
+    _template, findings_variant = _template_blocks(_all_templates()[1])
+    priority = findings_variant["findings"][0]["priority"]
+
+    assert priority.startswith("<") and priority.endswith(">")
+    for allowed in _FINDING_PRIORITIES:
+        assert allowed in priority
+
+
+def test_delivery_body_demands_every_gate_it_ran():
+    text = _all_templates()[2]
+
+    assert "every required gate" in text
+
+
+def test_review_substitution_is_scoped_to_defects_still_present():
+    text = _all_templates()[1]
+
+    assert "still present" in text
+    assert "any defect at all" not in text

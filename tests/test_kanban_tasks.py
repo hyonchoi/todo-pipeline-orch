@@ -3107,3 +3107,91 @@ def test_contained_paths_drop_on_git_timeout(tmp_path, mocker, caplog):
     with caplog.at_level("WARNING", logger="hermes_pipeline.kanban_tasks"):
         assert _contained_paths(repo, "TODO-1", ["docs/spec.md"]) == []
     assert any("TimeoutExpired" in r.getMessage() for r in caplog.records)
+
+
+def test_plan_worker_card_publishes_the_result_metadata_template(tmp_path):
+    """The worker cannot satisfy the strict contract it is never shown."""
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.result_contract import render_result_template
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "requires_plan: true\n"
+        "phases:\n"
+        "  - phase_key: development\n"
+        "    name: Development\n"
+        "    prompt: implement legacy plan\n"
+        "    tools: Read,Write,Edit,Bash\n"
+        "    turns: 20\n"
+        "    compile_plan_tasks: true\n"
+    )
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "plan.md").write_text(
+        "```json tpo-plan\n"
+        '{"schema_version":1,"todo_id":"TODO-41","tasks":['
+        '{"id":"task-1","title":"First","instructions":"Exact first instruction.",'
+        '"acceptance_criteria":["First exact criterion."],'
+        '"verification":["uv run pytest tests/test_first.py"],'
+        '"commit_message":"feat: first"}]}'
+        "\n```\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01TICK",
+        board_slug="demo",
+        phases_path=phases_path,
+        prompt_client="codex",
+        plan_path="docs/plan.md",
+        project_dir=tmp_path,
+    )
+
+    expected = render_result_template(
+        tick_id="01TICK",
+        todo_id="TODO-41",
+        step_key="plan:task-1",
+        acceptance_criteria=("First exact criterion.",),
+    )
+    assert expected in prepared[0].body
+    # The dispatcher closes the card, so it must be pointed at the same object,
+    # and told to supply the one field only it holds.
+    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
+    assert "metadata.tpo_result" in dispatcher
+    assert "external_session_id" in dispatcher
+    # "exactly, never paraphrase" must not override a stated substitution, or a
+    # defect-bearing review gets published as clean.
+    assert "substitution the template" in dispatcher
+
+
+def test_profile_phase_prompt_cannot_claim_a_template_it_never_publishes(tmp_path):
+    """A profile prompt is overridable YAML: it must not flip the dispatcher."""
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.result_contract import RESULT_TEMPLATE_HEADING
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_4_development\n"
+        "    name: Development\n"
+        f"    prompt: 'Implement it. {RESULT_TEMPLATE_HEADING} see the board.'\n"
+        "    tools: Read,Bash\n"
+        "    turns: 5\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+        phases_path=phases_path, prompt_client="codex", project_dir=tmp_path,
+    )
+
+    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
+    assert "include the same result metadata" in dispatcher
+    assert "set `metadata.tpo_result` to exactly" not in dispatcher
+
+
+def test_legacy_phase_delegation_block_keeps_its_generic_metadata_line(tmp_path):
+    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
+
+    block = _external_client_delegation_block("codex", timeout=1800, tools="")
+
+    assert "```json" not in block
+    assert "result metadata" in block

@@ -24,6 +24,7 @@ from .result_contract import (
     WorkerResult,
     load_validated_registration,
     parse_worker_result,
+    render_result_template,
     sanitize_result_text,
     verify_read_only_review,
     verify_worker_git_result,
@@ -100,7 +101,11 @@ def _create_task(
 ) -> str:
     project_dir = project_dir or worktree
     task_prompt = prompt if gate else (
-        _external_client_delegation_block(prompt_client, timeout=1800, tools="")
+        _external_client_delegation_block(
+            # Every non-gate card this module and delivery create publishes the
+            # result template.
+            prompt_client, timeout=1800, tools="", expects_result_metadata=True,
+        )
         + _external_agent_prompt_block(prompt)
     )
     cmd = [
@@ -161,12 +166,18 @@ def _review_result(task_id: str, *, tick_id: str, todo_id: str, key: str,
     return result
 
 
-def _review_prompt(head_sha: str) -> str:
+def _review_prompt(head_sha: str, *, tick_id: str, todo_id: str, step_key: str) -> str:
     return (
         "Perform a fresh, independent, read-only review in a new external session. "
-        f"Review the complete branch at {head_sha}; do not modify the worktree. "
-        "Return metadata.tpo_result.review with verdict clean or findings and bounded "
-        "P0-P3 findings. The reported Git head must remain unchanged."
+        f"Review the complete branch at {head_sha}; do not modify the worktree.\n\n"
+        + render_result_template(
+            tick_id=tick_id,
+            todo_id=todo_id,
+            step_key=step_key,
+            section="review",
+            pinned_head_sha=head_sha,
+            allow_no_changes=True,
+        )
     )
 
 
@@ -208,7 +219,11 @@ def _ensure_initial_review(*, project_dir: Path, tasks: dict, registration, tena
         review_id = _create_task(
             project_dir=project_dir,
             tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-            key="review:0", title="Independent review", prompt=_review_prompt(head_sha),
+            key="review:0", title="Independent review",
+            prompt=_review_prompt(
+                head_sha, tick_id=tick_id, todo_id=registration.todo_id,
+                step_key="review:0",
+            ),
             worktree=registration.worktree,
             assignee=registration.review_assignee or registration.assignee, parent=parent,
             prompt_client=registration.prompt_client,
@@ -246,7 +261,12 @@ def _ensure_round(*, project_dir: Path, round_number: int, parent: str, registra
         project_dir=project_dir,
         tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id, key=fix_key,
         title=f"Fix review findings round {round_number}",
-        prompt=f"Fix exactly these reviewed findings using TDD, then commit:\n{residual}",
+        prompt=(
+            f"Fix exactly these reviewed findings using TDD, then commit:\n{residual}\n\n"
+            + render_result_template(
+                tick_id=tick_id, todo_id=registration.todo_id, step_key=fix_key,
+            )
+        ),
         worktree=registration.worktree, assignee=registration.assignee, parent=barrier_id,
         prompt_client=registration.prompt_client,
     )
@@ -272,7 +292,10 @@ def _ensure_rereview(*, project_dir: Path, round_number: int, validation_id: str
         project_dir=project_dir,
         tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
         key=key, title=f"Independent re-review round {round_number}",
-        prompt=_review_prompt(head_sha), worktree=registration.worktree,
+        prompt=_review_prompt(
+            head_sha, tick_id=tick_id, todo_id=registration.todo_id, step_key=key,
+        ),
+        worktree=registration.worktree,
         assignee=registration.review_assignee or registration.assignee,
         parent=validation_id, prompt_client=registration.prompt_client,
     )
