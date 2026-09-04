@@ -49,11 +49,11 @@ def _git(worktree: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _pr_view(worktree: Path, pr_url: str) -> dict[str, str]:
+def _pr_view(worktree: Path, pr_url: str) -> dict[str, object]:
     try:
         result = subprocess.run(
             ["gh", "pr", "view", pr_url, "--json",
-             "state,url,headRefName,headRefOid,baseRefName,headRepository,baseRepository"],
+             "state,url,headRefName,headRefOid,baseRefName,headRepository,isCrossRepository"],
             cwd=worktree, capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
@@ -129,14 +129,30 @@ def _name_with_owner(value: object) -> str | None:
 
 
 def _verify_pr_identity(worktree: Path, view: dict, *, branch: str, repo: str) -> None:
+    """Pin the PR to our branch, origin's base branch, and the project repository.
+
+    ``gh pr view`` exposes no ``baseRepository`` field, so the base repository is
+    established transitively: ``isCrossRepository`` is false exactly when head and
+    base repositories are the same, so head == origin plus not-cross-repository
+    means base == origin, and origin is then matched against ``repo``. A missing
+    or non-boolean ``isCrossRepository`` fails closed.
+
+    Repository names compare case-insensitively throughout: ``repository`` carries
+    whatever case the operator typed into the origin remote URL, while
+    ``headRepository.nameWithOwner`` carries GitHub's canonical case.
+    """
     repository, base_branch = _github_identity(worktree)
-    base_repository = _name_with_owner(view.get("baseRepository"))
+    head_repository = _name_with_owner(view.get("headRepository"))
     if (
         view.get("headRefName") != branch
         or view.get("baseRefName") != base_branch
-        or _name_with_owner(view.get("headRepository")) != repository
-        or base_repository is None
-        or base_repository.lower() != repo.lower()
+        or head_repository is None
+        or head_repository.lower() != repository.lower()
+        or view.get("isCrossRepository") is not False
+        # Defence in depth: unreachable in production, since _delivery_authority
+        # pins origin == repo and reconcile_todo_completion re-checks the pin
+        # before calling here. Kept as a fail-closed backstop.
+        or repository.lower() != repo.lower()
     ):
         raise ResultContractError("pr_identity_mismatch")
 

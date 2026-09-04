@@ -284,13 +284,125 @@ def test_gh_nonzero_unusable_response_needs_input(tmp_path, mocker):
         _check_state(tmp_path, "https://github.com/acme/repo/pull/1")
 
 
+# gh 2.89.0 `gh pr view --json` field vocabulary, transcribed verbatim from
+# `gh pr view --help`. Requesting anything outside this set makes gh exit 1 with
+# `Unknown JSON field`, which _pr_view can only report as `pr_missing`.
+#
+# P0-LOAD-BEARING. Every integration test in this repository mocks `gh`, so this
+# frozenset and its sibling argv test are the only checks standing between the
+# codebase and a silent reintroduction of the `baseRepository` defect, where
+# delivery verification could never succeed against a real PR. Update it only
+# from `gh pr view --help` output, never to make a failing test pass.
+GH_PR_VIEW_JSON_FIELDS = frozenset(
+    """
+    additions assignees author autoMergeRequest baseRefName baseRefOid body
+    changedFiles closed closedAt closingIssuesReferences comments commits
+    createdAt deletions files fullDatabaseId headRefName headRefOid
+    headRepository headRepositoryOwner id isCrossRepository isDraft labels
+    latestReviews maintainerCanModify mergeCommit mergeStateStatus mergeable
+    mergedAt mergedBy milestone number potentialMergeCommit projectCards
+    projectItems reactionGroups reviewDecision reviewRequests reviews state
+    statusCheckRollup title updatedAt url
+    """.split()
+)
+
+
+def _requested_pr_view_fields(run) -> set[str]:
+    argv = run.call_args.args[0]
+    return set(argv[argv.index("--json") + 1].split(","))
+
+
+def test_pr_view_requests_only_fields_gh_supports(tmp_path, mocker):
+    run = mocker.patch(
+        "hermes_pipeline.todos_completion.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="{}"),
+    )
+    _pr_view(tmp_path, "https://github.com/acme/repo/pull/1")
+    fields = _requested_pr_view_fields(run)
+    assert fields - GH_PR_VIEW_JSON_FIELDS == set()
+
+
+def test_pr_view_requests_every_field_delivery_verification_consumes(tmp_path, mocker):
+    run = mocker.patch(
+        "hermes_pipeline.todos_completion.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout="{}"),
+    )
+    _pr_view(tmp_path, "https://github.com/acme/repo/pull/1")
+    assert {
+        "state", "url", "headRefName", "headRefOid", "baseRefName",
+        "headRepository", "isCrossRepository",
+    } <= _requested_pr_view_fields(run)
+
+
+def _gh_shaped_view(**overrides) -> dict:
+    """A view with the shape `gh pr view --json ...` actually emits."""
+    view = {
+        "state": "OPEN",
+        "url": "https://github.com/acme/repo/pull/1",
+        "headRefName": "feat/native",
+        "headRefOid": "a" * 40,
+        "baseRefName": "main",
+        "headRepository": {"id": "R_x", "name": "repo", "nameWithOwner": "acme/repo"},
+        "isCrossRepository": False,
+    }
+    view.update(overrides)
+    return view
+
+
+def test_pr_identity_accepts_real_gh_view_without_base_repository(tmp_path, mocker):
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("acme/repo", "main"),
+    )
+    _verify_pr_identity(
+        tmp_path, _gh_shaped_view(), branch="feat/native", repo="acme/repo"
+    )
+
+
+def test_pr_identity_matches_project_repo_case_insensitively(tmp_path, mocker):
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("acme/repo", "main"),
+    )
+    _verify_pr_identity(
+        tmp_path, _gh_shaped_view(), branch="feat/native", repo="ACME/Repo"
+    )
+
+
+ABSENT = object()
+"""Parametrization marker: drop the key entirely rather than override it."""
+
+
+def _mutate(view: dict, override: dict) -> dict:
+    """Apply an override, where ``ABSENT`` deletes the key instead of setting it."""
+    mutated = view | {k: v for k, v in override.items() if v is not ABSENT}
+    for key, value in override.items():
+        if value is ABSENT:
+            mutated.pop(key, None)
+    return mutated
+
+
 @pytest.mark.parametrize(
     "view",
     [
+        pytest.param({"headRefName": "feat/other"}, id="wrong-head-branch"),
+        pytest.param({"headRefName": ABSENT}, id="no-head-branch"),
         pytest.param({"baseRefName": "release"}, id="wrong-base-branch"),
-        pytest.param({"baseRepository": {"nameWithOwner": "fork/repo"}}, id="fork-base"),
-        pytest.param({"baseRepository": None}, id="no-base-repository"),
-        pytest.param({"headRepository": {"nameWithOwner": "fork/repo"}}, id="fork-head"),
+        pytest.param({"baseRefName": ABSENT}, id="no-base-branch"),
+        pytest.param(
+            {"headRepository": {"nameWithOwner": "fork/repo"}}, id="fork-head"
+        ),
+        pytest.param({"headRepository": None}, id="no-head-repository"),
+        pytest.param({"headRepository": ABSENT}, id="absent-head-repository"),
+        pytest.param({"isCrossRepository": True}, id="cross-repository-fork-pr"),
+        pytest.param({"isCrossRepository": "false"}, id="cross-repository-not-bool"),
+        pytest.param({"isCrossRepository": 0}, id="cross-repository-falsy-int"),
+        pytest.param({"isCrossRepository": None}, id="cross-repository-null"),
+        # `good | override` can never delete a key, so absence needs ABSENT. Without
+        # these two params, `view.get("isCrossRepository", False) is not False`
+        # survives with the suite green -- and that default reopens the P0 for any
+        # degraded or older-gh payload that omits the field.
+        pytest.param({"isCrossRepository": ABSENT}, id="cross-repository-absent"),
     ],
 )
 def test_pr_identity_requires_registered_origin_base_and_repo(tmp_path, mocker, view):
@@ -298,24 +410,56 @@ def test_pr_identity_requires_registered_origin_base_and_repo(tmp_path, mocker, 
         "hermes_pipeline.todos_completion._github_identity",
         return_value=("acme/repo", "main"),
     )
-    good = {
-        "headRefName": "feat/native", "baseRefName": "main",
-        "headRepository": {"nameWithOwner": "acme/repo"},
-        "baseRepository": {"nameWithOwner": "ACME/repo"},
-    }
+    good = _gh_shaped_view()
     _verify_pr_identity(tmp_path, good, branch="feat/native", repo="acme/repo")
     with pytest.raises(ResultContractError, match="pr_identity_mismatch"):
-        _verify_pr_identity(tmp_path, {**good, **view}, branch="feat/native", repo="acme/repo")
+        _verify_pr_identity(
+            tmp_path, _mutate(good, view), branch="feat/native", repo="acme/repo"
+        )
 
 
-def test_pr_view_requests_base_repository(tmp_path, mocker):
-    run = mocker.patch(
-        "hermes_pipeline.todos_completion.subprocess.run",
-        return_value=SimpleNamespace(returncode=0, stdout="{}"),
+@pytest.mark.parametrize(
+    ("origin", "head_repo"),
+    [
+        pytest.param("Acme/Repo", "acme/repo", id="origin-url-typed-in-mixed-case"),
+        pytest.param("acme/repo", "Acme/Repo", id="gh-canonical-case-differs"),
+        pytest.param("acme/REPO", "ACME/repo", id="both-sides-differ"),
+    ],
+)
+def test_pr_identity_compares_head_repository_case_insensitively(
+    tmp_path, mocker, origin, head_repo
+):
+    """`repository` carries whatever case the operator typed into the origin remote
+    URL; `headRepository.nameWithOwner` carries GitHub's canonical case. Comparing
+    them case-sensitively rejects a legitimate same-repo PR forever -- the same
+    never-succeeds failure class as the `baseRepository` defect, and latent only
+    while nothing got past `_pr_view` to reach this line.
+    """
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=(origin, "main"),
     )
-    _pr_view(tmp_path, "https://github.com/acme/repo/pull/1")
-    fields = run.call_args.args[0][run.call_args.args[0].index("--json") + 1].split(",")
-    assert {"baseRepository", "headRepository", "headRefOid", "state", "url"} <= set(fields)
+    view = _gh_shaped_view(headRepository={"nameWithOwner": head_repo})
+    _verify_pr_identity(tmp_path, view, branch="feat/native", repo="acme/repo")
+
+
+def test_pr_identity_rejects_origin_that_is_not_the_project_repo(tmp_path, mocker):
+    """Defence in depth, redundant with `_delivery_authority` in production.
+
+    `_delivery_authority` already requires `origin_repository == repo` when it
+    writes the pin, and `reconcile_todo_completion` re-checks `_github_identity`
+    against that pin before calling here, so an origin that disagrees with `repo`
+    cannot actually reach this clause. Reaching it requires mocking
+    `_github_identity` into a state the caller makes impossible; the clause is
+    kept as a fail-closed backstop, not because this branch is reachable.
+    """
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("other/repo", "main"),
+    )
+    view = _gh_shaped_view(headRepository={"nameWithOwner": "other/repo"})
+    with pytest.raises(ResultContractError, match="pr_identity_mismatch"):
+        _verify_pr_identity(tmp_path, view, branch="feat/native", repo="acme/repo")
 
 
 API = ("gh", "api", "-H", "Accept: application/vnd.github+json")

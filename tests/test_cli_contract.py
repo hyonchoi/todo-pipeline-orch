@@ -2465,6 +2465,11 @@ class TestTodosComplete:
 
     @pytest.fixture(autouse=True)
     def _merged_pr(self, mocker):
+        from hermes_pipeline import todos_completion
+
+        # Captured before patching so one test can put the real helper back and
+        # exercise the argv gh actually accepts (see the shape test below).
+        self.real_pr_view = todos_completion._pr_view
         self.pr_view = mocker.patch(
             "hermes_pipeline.todos_completion._pr_view",
             return_value={"state": "MERGED", "url": "https://github.com/acme/repo/pull/7"},
@@ -2585,6 +2590,45 @@ class TestTodosComplete:
         forced = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7", "--force"])
         assert _cmd_todos_complete(forced, config) == 0
         assert remote["state"] == "closed"
+
+    def test_real_pr_view_drives_completion_from_the_shape_gh_emits(
+        self, tmp_path, fake_gh, mocker, capsys
+    ):
+        """`tpo todos complete` calls `_pr_view` directly, so the `baseRepository`
+        defect made this command fail against every real PR too. Every other test in
+        this class mocks `_pr_view`, which proves nothing about the argv gh accepts
+        or the payload it returns; this one runs the real helper over a recorded
+        `gh pr view --json ...` response.
+        """
+        import json as _json
+
+        from hermes_pipeline.cli import _cmd_todos_complete
+        from tests.gh_fakes import FakeGh
+        from tests.test_todos_completion import GH_PR_VIEW_JSON_FIELDS
+
+        config, remote = self._project(tmp_path, fake_gh)
+        mocker.patch("hermes_pipeline.todos_completion._pr_view", self.real_pr_view)
+        gh = FakeGh().on("gh", "pr", "view", stdout=_json.dumps({
+            "baseRefName": "main",
+            "headRefName": "todo-5-widget",
+            "headRefOid": "a" * 40,
+            "headRepository": {
+                "id": "R_kgDOAbc123", "name": "repo", "nameWithOwner": "acme/repo",
+            },
+            "isCrossRepository": False,
+            "state": "MERGED",
+            "url": "https://github.com/acme/repo/pull/7",
+        }))
+        mocker.patch("hermes_pipeline.todos_completion.subprocess.run", gh)
+        args = build_parser().parse_args(["todos", "complete", "demo", "--todo", "5", "--pr", "7"])
+
+        assert _cmd_todos_complete(args, config) == 0
+        assert capsys.readouterr().out.strip() == "completed"
+        assert remote["state"] == "closed"
+        argv = gh.calls[0]
+        assert argv[:4] == ["gh", "pr", "view", "https://github.com/acme/repo/pull/7"]
+        requested = set(argv[argv.index("--json") + 1].split(","))
+        assert requested - GH_PR_VIEW_JSON_FIELDS == set()
 
     def test_pr_lookup_failure_exits_1(self, tmp_path, fake_gh, capsys):
         from hermes_pipeline.cli import _cmd_todos_complete
