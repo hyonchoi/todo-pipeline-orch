@@ -22,6 +22,7 @@ from hermes_pipeline.github_issues import (
 )
 from hermes_pipeline.result_contract import (
     _FINDING_PRIORITIES,
+    _PLACEHOLDER_RE,
     ResultContractError,
     load_validated_registration,
     parse_worker_result,
@@ -1586,7 +1587,9 @@ def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, moc
 # the published keys are derived from the contract constants themselves.
 
 _JSON_BLOCK_RE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
-_PLACEHOLDER_RE = re.compile(r"^<.*>$")
+# Placeholders are detected with the contract's own pattern, so a template
+# string these tests treat as a placeholder is exactly one the validator
+# would reject as unfilled.
 
 _TEMPLATE_FILL = {
     ("external_session_id",): "session-1",
@@ -1618,7 +1621,7 @@ def _fill_template(value, path=()):
         return {key: _fill_template(item, (*path, key)) for key, item in value.items()}
     if isinstance(value, list):
         return [_fill_template(item, (*path, index)) for index, item in enumerate(value)]
-    if isinstance(value, str) and _PLACEHOLDER_RE.match(value):
+    if isinstance(value, str) and _PLACEHOLDER_RE.fullmatch(value):
         assert path in _TEMPLATE_FILL, f"unfillable placeholder at {path}: {value}"
         return _TEMPLATE_FILL[path]
     return value
@@ -1716,6 +1719,10 @@ def test_delivery_template_round_trips_through_the_parser():
     )
 
     assert parsed.delivery is not None
+    # The published pr_url placeholder describes the value, and still validates
+    # once the worker replaces the whole token with the URL it opened.
+    assert _PLACEHOLDER_RE.fullmatch(template["delivery"]["pr_url"])
+    assert parsed.delivery.pr_url == "https://github.com/acme/repo/pull/7"
     # Delivery reconciliation demands the branch and the reviewed head verbatim.
     assert parsed.delivery.branch == "todo-42"
     assert parsed.delivery.head_sha == parsed.git.resulting_head_sha == head
@@ -1759,6 +1766,116 @@ def test_template_publishes_every_key_the_contract_constants_require():
     assert set(delivery) == contract._TOP_KEYS | {"delivery"}
     assert set(delivery["delivery"]) == contract._DELIVERY_KEYS
     assert set(delivery["delivery"]["checks"][0]) == contract._COMMAND_KEYS
+
+
+def _template_placeholders(value, path=()):
+    """Yield ``(path, described)`` for every ``<...>`` the renderer emits."""
+    if isinstance(value, dict):
+        for key, item in value.items():
+            yield from _template_placeholders(item, (*path, key))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            yield from _template_placeholders(item, (*path, index))
+    elif isinstance(value, str) and _PLACEHOLDER_RE.fullmatch(value):
+        yield path, value[1:-1]
+
+
+_CAPS_RUN_RE = re.compile(r"[A-Z]{2,}")
+
+
+def _metavariable_slots(described: str) -> list[str]:
+    """Return the ALL-CAPS slots in a placeholder's text.
+
+    A slot is an ALL-CAPS run standing for one *part* of the value, glued into
+    a larger token: OWNER, REPO and NUMBER in
+    ``https://github.com/OWNER/REPO/pull/NUMBER``. A standalone capitalised
+    word -- SHA, HEAD, URL -- is domain vocabulary in an English sentence, not
+    a slot: nothing can be substituted for it in place. Inside a path-like
+    token a single capital (``.../pull/N``) is a slot too, which a bare ``P1``
+    in prose is not.
+    """
+    slots: list[str] = []
+    for word in described.split():
+        if _CAPS_RUN_RE.fullmatch(word.strip(".,;:")):
+            continue
+        pattern = r"[A-Z]+" if "/" in word else r"[A-Z]{2,}"
+        slots.extend(re.findall(pattern, word))
+    return slots
+
+
+# Every placeholder the renderer can publish, by path. Named exhaustively so
+# that pre-filling or dropping one is caught rather than absorbed by a sibling
+# that happens to share a field name.
+_EXPECTED_PLACEHOLDER_PATHS = {
+    ("external_session_id",),
+    ("git", "expected_parent_sha"),
+    ("git", "resulting_head_sha"),
+    ("git", "task_commit_sha"),
+    ("git", "changed_files", 0),
+    ("tdd", "red", "command"),
+    ("tdd", "green", "command"),
+    ("tdd", "refactor", "command"),
+    # The findings variant is published as a bare "review" object.
+    ("findings", 0, "priority"),
+    ("findings", 0, "location"),
+    ("findings", 0, "failure_scenario"),
+    ("findings", 0, "recommendation"),
+    ("delivery", "pr_url"),
+    ("delivery", "checks", 0, "command"),
+}
+
+
+def test_template_placeholders_describe_the_value_instead_of_wrapping_it():
+    """Every ``<...>`` must mean "replace this whole token", never "fill in the parts".
+
+    A placeholder whose bracketed content is the value's own syntax with the
+    parts renamed -- ``<https://github.com/OWNER/REPO/pull/NUMBER>`` -- teaches
+    the opposite: a worker substitutes its real owner, repo and number in place,
+    keeps the brackets, and publishes a natural-looking value the contract then
+    rejects as an unfilled placeholder, blocking a delivery that happened.
+
+    Two independent rules, both evaluated for every placeholder so neither can
+    shadow the other: no metavariable slot, and more than one word of prose.
+    """
+    from hermes_pipeline import result_contract as contract
+
+    blocks = [
+        *_template_blocks(
+            contract.render_result_template(
+                tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
+                acceptance_criteria=("Observable criterion",),
+            )
+        ),
+        *_template_blocks(
+            contract.render_result_template(
+                tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+                section="review", pinned_head_sha="c" * 40, allow_no_changes=True,
+            )
+        ),
+        *_template_blocks(
+            contract.render_result_template(
+                tick_id="01TICK", todo_id="TODO-42", step_key="finish",
+                section="delivery", pinned_head_sha="b" * 40, branch="todo-42",
+                allow_no_changes=True,
+            )
+        ),
+    ]
+    placeholders = [pair for block in blocks for pair in _template_placeholders(block)]
+    assert {path for path, _ in placeholders} == _EXPECTED_PLACEHOLDER_PATHS
+
+    offences = []
+    for path, described in placeholders:
+        slots = _metavariable_slots(described)
+        if slots:
+            offences.append(
+                f"{path} publishes the shape of the answer, with "
+                f"{'/'.join(slots)} to fill in place: <{described}>"
+            )
+        # Cheap secondary smoke test: a description is prose about the value;
+        # a single bare token is the value itself.
+        if len(described.split()) < 2:
+            offences.append(f"{path} publishes a bare token: <{described}>")
+    assert not offences, "\n".join(offences)
 
 
 def test_template_rejects_an_unknown_optional_section():

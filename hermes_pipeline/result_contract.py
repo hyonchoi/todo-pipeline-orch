@@ -537,7 +537,11 @@ def _template_delivery(*, pinned_head_sha: str, branch: str) -> dict[str, object
     """Render the delivery section; both identities are registration facts."""
     return _require_keys(
         {
-            "pr_url": "<https://github.com/OWNER/REPO/pull/NUMBER>",
+            # A description, like every other placeholder. Brackets wrapping
+            # the URL's own shape ("<https://github.com/OWNER/REPO/pull/N>")
+            # invite a worker to fill the parts in place and keep the
+            # brackets, which the contract rejects as an unfilled placeholder.
+            "pr_url": "<URL of the pull request you opened>",
             "branch": branch,
             "head_sha": pinned_head_sha,
             "checks": [_template_command("required repository gate you ran", 0)],
