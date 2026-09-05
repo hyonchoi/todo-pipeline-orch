@@ -153,8 +153,41 @@ def _classify_check_states(states: set[str]) -> str:
     return "passed"
 
 
+# The projection asked of `repos/{repo}/commits/{sha}/check-suites`. Bounded
+# output (the raw page is tens of kilobytes of commit and repository objects) and
+# an explicit `total` so a page that does not hold every suite is detectable.
+_CHECK_SUITES_JQ = (
+    "{total: .total_count, suites: [.check_suites[] | "
+    "{runs: .latest_check_runs_count, conclusion: .conclusion, "
+    "status: .status, app: .app.slug}]}"
+)
+
+# The App whose zero-run suite stays fail-closed; see `_rollup_is_honestly_empty`.
+_ACTIONS_APP_SLUG = "github-actions"
+
+
+def _corroborating_api(worktree: Path, endpoint: str, jq: str) -> str:
+    """One read-only `gh api` call made to prove a negative, failing closed.
+
+    Any failure to establish the fact -- a non-zero exit, a timeout, an OSError,
+    undecodable output -- raises ``checks_unavailable`` rather than returning
+    something a caller could read as absence: an error while proving a negative
+    is not proof of the negative.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "api", endpoint, "--jq", jq], cwd=worktree,
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        raise ResultContractError("checks_unavailable") from exc
+    if result.returncode != 0:
+        raise ResultContractError("checks_unavailable")
+    return result.stdout or ""
+
+
 def _rollup_is_honestly_empty(worktree: Path, *, repo: str, head_sha: str) -> bool:
-    """True only when *head_sha* really has no check suites and no statuses.
+    """True only when *head_sha* really has no gate to pass.
 
     gh raises `no checks reported on the '<branch>' branch` when the head commit's
     ``statusCheckRollup`` is EMPTY (`checks.go`:
@@ -174,39 +207,102 @@ def _rollup_is_honestly_empty(worktree: Path, *, repo: str, head_sha: str) -> bo
     ``pull_request`` workflows do not re-run after a merge, so a head commit that
     never got a check run never will. The false green would be permanent.
 
-    Live repro this exists for: ``yehiashouman/WearExerciseManager#4``, MERGED at
+    Live repro: ``yehiashouman/WearExerciseManager#4``, MERGED at
     ``4c14b532d7da2a99a9e3b337fece90a5336fdc43``, whose repository does have
     ``.github/workflows/android.yml`` on ``pull_request``. gh reports no checks;
-    ``check-suites`` reports ``total_count: 1`` (with ``latest_check_runs_count:
-    0``) and ``status`` reports ``total_count: 0``.
+    ``check-suites`` reports ``total_count: 1`` holding one ``github-actions``
+    suite ``{"latest_check_runs_count": 0, "status": "completed", "conclusion":
+    "failure"}``, and ``status`` reports ``total_count: 0``.
 
-    So the absence is corroborated against the commit itself before it is allowed
-    to mean green, using the two REST endpoints that count the underlying objects
-    rather than the rollup. Both must be zero. Read-only, and any failure to
-    establish that -- a non-zero exit, an unparseable count, a timeout -- raises
-    ``checks_unavailable`` rather than falling through to an approval: an error
-    while proving a negative is not proof of the negative.
+    So the absence is corroborated against the commit itself, using the two REST
+    endpoints that expose the underlying objects rather than the rollup. What is
+    NOT usable is the check-suites ``total_count``: GitHub opens a check suite for
+    EVERY installed App subscribing to ``check_suite``, whether or not that App
+    ever produces a check run, so ``total_count >= 1`` is the normal state of any
+    repository with a common App installed and says nothing about whether a gate
+    exists. Verified read-only on 2026-09-05 -- every one of these head commits
+    carries zero-run suites, verbatim ``{"latest_check_runs_count": 0,
+    "conclusion": null, "status": "queued"}``:
+
+      dependabot/dependabot-core  github-service-catalog,
+                                  github-service-catalog-staging, sentry
+      sindresorhus/got            codecov, claude
+      prettier/prettier           codecov, netlify, circleci-checks, renovate,
+                                  vercel, autofix-ci, relativeci
+      astral-sh/uv                renovate
+      pallets/flask               read-the-docs-community
+
+    Requiring ``total_count == 0`` therefore failed CLOSED on all of them: every
+    tick raised ``checks_unavailable``, blocked the gate and demanded a human who
+    never arrives, for repositories that in fact had no gate to pass. The
+    discriminator that separates them from the startup failure is the suite
+    itself: a benign App suite is zero-run with a NULL conclusion; a startup
+    failure is zero-run with a NON-NULL conclusion. So the rollup is honestly
+    empty only when ALL of:
+
+    1. the ``status`` endpoint still reports ``total_count == 0``. Legacy commit
+       statuses are a real gate and this half is unchanged.
+    2. every check suite has ``latest_check_runs_count == 0``. A suite that
+       produced runs contradicts the empty rollup gh just reported -- those run
+       states were never classified, so they cannot be waved through.
+    3. every check suite has a NULL conclusion. Zero runs with a conclusion is
+       the startup-failure family: the App answered and produced nothing to read.
+    4. no suite's ``app.slug`` is ``github-actions``. LOAD-BEARING, and the one
+       condition that refuses a shape which is merely ambiguous: a zero-run
+       ``github-actions`` suite with a null conclusion is either workflows about
+       to start (a brief race right after a push) or workflows that will never
+       report, and the payload does not separate them. "No gate" is the risky
+       reading, and it is the same App the startup failure arrives under, so it
+       stays fail-closed. Third-party App suites are not ambiguous: they are Apps
+       that were notified and did nothing.
+
+    A suite whose ``app`` is null fails 4 for the same reason -- an unidentifiable
+    App cannot be ruled out. A page that does not hold every suite (``total``
+    exceeding the suites returned) is unread evidence, not absence.
+
+    Read-only throughout, and any failure to establish the negative -- a non-zero
+    exit, unparseable output, a timeout -- raises ``checks_unavailable`` rather
+    than falling through to an approval.
     """
-    for endpoint in (
-        f"repos/{repo}/commits/{head_sha}/check-suites",
-        f"repos/{repo}/commits/{head_sha}/status",
-    ):
-        try:
-            result = subprocess.run(
-                ["gh", "api", endpoint, "--jq", ".total_count"], cwd=worktree,
-                capture_output=True, text=True, timeout=60,
-            )
-        except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
-            raise ResultContractError("checks_unavailable") from exc
-        if result.returncode != 0:
+    raw = _corroborating_api(
+        worktree,
+        f"repos/{repo}/commits/{head_sha}/check-suites?per_page=100",
+        _CHECK_SUITES_JQ,
+    )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResultContractError("checks_unavailable") from exc
+    if not isinstance(payload, dict):
+        raise ResultContractError("checks_unavailable")
+    suites = payload.get("suites")
+    total = payload.get("total")
+    # `bool` is an `int`; an unreadable envelope is unreadable evidence.
+    if not isinstance(suites, list) or not isinstance(total, int) or isinstance(total, bool):
+        raise ResultContractError("checks_unavailable")
+    if total != len(suites):
+        return False
+    for suite in suites:
+        if not isinstance(suite, dict):
             raise ResultContractError("checks_unavailable")
-        try:
-            total = int((result.stdout or "").strip())
-        except ValueError as exc:
-            raise ResultContractError("checks_unavailable") from exc
-        if total != 0:
+        runs = suite.get("runs")
+        conclusion = suite.get("conclusion")
+        app = suite.get("app")
+        if not isinstance(runs, int) or isinstance(runs, bool):
+            raise ResultContractError("checks_unavailable")
+        if conclusion is not None and not isinstance(conclusion, str):
+            raise ResultContractError("checks_unavailable")
+        if runs != 0 or conclusion is not None:
             return False
-    return True
+        if not isinstance(app, str) or app == _ACTIONS_APP_SLUG:
+            return False
+    statuses = _corroborating_api(
+        worktree, f"repos/{repo}/commits/{head_sha}/status", ".total_count",
+    )
+    try:
+        return int(statuses.strip()) == 0
+    except ValueError as exc:
+        raise ResultContractError("checks_unavailable") from exc
 
 
 def _check_state(worktree: Path, pr_url: str, *, repo: str, head_sha: str) -> str:
@@ -239,13 +335,18 @@ def _check_state(worktree: Path, pr_url: str, *, repo: str, head_sha: str) -> st
       worth classifying, and one that somehow did could otherwise let a stray
       ``[{"state": "SUCCESS"}]`` approve a delivery gh had just errored on.
 
-    This DELIBERATELY DIFFERS from ``ship.ci_is_green``, which still answers green
-    for an empty rollup with no corroboration ("treated as green so approve does
-    not deadlock on repos without required checks"). That rule is unsound for the
-    same reason it was unsound here -- an empty rollup has at least six causes and
-    only one of them is "no gate to pass" -- and ``ship`` is the side that should
-    move. Until it does, the divergence is intentional: do not "restore" it by
-    deleting the corroboration below.
+    This once diverged from ``ship.ci_is_green``, which answered green for an
+    empty rollup with no corroboration at all. Ship has since moved, and the two
+    sides now agree: ``ci_is_green`` is handed a bare list, so it raises
+    ``ChecksInconclusive`` rather than guessing, and ``ship._bump_and_merge`` --
+    which does know the repository and the head sha -- corroborates by calling
+    ``_rollup_is_honestly_empty`` below and merges only on a proven absence.
+
+    So there is ONE rule for "when is an empty rollup honest", and it lives here.
+    Ship imports it; ship does not restate it. Changing it below changes the ship
+    gate too, which is the point: a second copy is exactly what let the post-merge
+    delivery gate and the merge gate drift apart until ship was merging on a shape
+    this module already refused.
     """
     try:
         result = subprocess.run(
@@ -591,6 +692,14 @@ def reconcile_todo_completion(
         gate_id = gate.task_id
         try:
             view = _pr_view(registration.worktree, delivery.pr_url)
+            # Same check as the sibling branch above, for the same reason: every
+            # judgement below -- merge state, head, `_check_state`, the issue
+            # close -- is measured on the PR `gh` actually answered with, so the
+            # echoed `url` must be the PR the delivery named. `_verify_pr_identity`
+            # does not cover it: it pins the branch, base and repository, all of
+            # which another pull request of the same repository shares.
+            if view.get("url") != delivery.pr_url:
+                raise ResultContractError("pr_identity_mismatch")
             _verify_pr_identity(
                 registration.worktree, view, branch=registration.branch, repo=repo,
             )

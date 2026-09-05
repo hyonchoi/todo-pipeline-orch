@@ -269,16 +269,122 @@ CHECKS_HEAD_SHA = "c" * 40
 NO_CHECKS_STDERR = "no checks reported on the 'feature-branch' branch\n"
 
 
+# The projection `_rollup_is_honestly_empty` asks gh for, pinned here and
+# asserted verbatim by `test_corroboration_argv_and_cwd_are_pinned`. The fixtures
+# below are the RAW REST payloads GitHub serves and `_project_check_suites`
+# applies this filter the way gh's gojq does, so no test can see a check-suites
+# shape the live endpoint cannot produce.
+CHECK_SUITES_JQ = (
+    "{total: .total_count, suites: [.check_suites[] | "
+    "{runs: .latest_check_runs_count, conclusion: .conclusion, "
+    "status: .status, app: .app.slug}]}"
+)
+CHECK_SUITES_ENDPOINT = (
+    f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/check-suites?per_page=100"
+)
+STATUS_ENDPOINT = f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/status"
+
+
+def _suite(app: str, *, runs: int = 0, conclusion=None, status: str = "queued") -> dict:
+    """One element of `check_suites`, carrying the field set GitHub really serves.
+
+    Verified read-only against live commits on 2026-09-05. Defaults reproduce the
+    shape GitHub creates for EVERY installed App subscribing to `check_suite`,
+    whether or not that App ever produces a check run -- verbatim
+    ``{"latest_check_runs_count": 0, "conclusion": null, "status": "queued"}``:
+
+      dependabot/dependabot-core  github-service-catalog, github-service-catalog-staging, sentry
+      sindresorhus/got            codecov, claude
+      prettier/prettier           codecov, netlify, circleci-checks, renovate, vercel,
+                                  autofix-ci, relativeci
+      astral-sh/uv                renovate
+      pallets/flask               read-the-docs-community
+
+    The extra fields are kept because the code must ignore them: a projection
+    that reads `.conclusion` off the wrong object, or a fixture trimmed down to
+    only the fields the rule happens to use, is how this file has been fooled
+    before.
+    """
+    return {
+        "id": 41837291057,
+        "node_id": "CS_kwDOAA5QjM8AAAAJvBOxsQ",
+        "head_branch": "feature-branch",
+        "head_sha": CHECKS_HEAD_SHA,
+        "status": status,
+        "conclusion": conclusion,
+        "url": f"https://api.github.com/repos/{CHECKS_REPO}/check-suites/41837291057",
+        "before": "b" * 40,
+        "after": CHECKS_HEAD_SHA,
+        "pull_requests": [],
+        "app": {
+            "id": 15368,
+            "slug": app,
+            "node_id": "MDM6QXBwMTUzNjg=",
+            "owner": {"login": app, "id": 9919, "type": "Organization"},
+            "name": app,
+            "events": ["check_suite", "pull_request", "push"],
+        },
+        "created_at": "2026-09-05T09:12:44Z",
+        "updated_at": "2026-09-05T09:12:44Z",
+        "rerequestable": True,
+        "runs_rerequestable": False,
+        "latest_check_runs_count": runs,
+        "check_runs_url": (
+            f"https://api.github.com/repos/{CHECKS_REPO}"
+            "/check-suites/41837291057/check-runs"
+        ),
+        "head_commit": {
+            "id": CHECKS_HEAD_SHA, "tree_id": "d" * 40, "message": "worker delivery",
+        },
+        "repository": {"id": 938636, "name": "repo", "full_name": CHECKS_REPO},
+    }
+
+
+# The startup failure, transcribed from the live repro this corroboration exists
+# for: `yehiashouman/WearExerciseManager` @ 4c14b532d7da2a99a9e3b337fece90a5336fdc43,
+# whose `check-suites` reports `total_count: 1` with a single `github-actions`
+# suite `{"latest_check_runs_count": 0, "status": "completed", "conclusion":
+# "failure"}` while `status` reports `total_count: 0`.
+STARTUP_FAILURE_SUITE = _suite("github-actions", conclusion="failure", status="completed")
+
+
+def _project_check_suites(payload: dict) -> str:
+    """Apply ``CHECK_SUITES_JQ`` to a raw payload as gh's gojq + encoder would.
+
+    gh writes each jq result with `json.Encoder.Encode`: compact separators, one
+    line, trailing newline.
+    """
+    return json.dumps(
+        {
+            "total": payload["total_count"],
+            "suites": [
+                {
+                    "runs": suite["latest_check_runs_count"],
+                    "conclusion": suite["conclusion"],
+                    "status": suite["status"],
+                    # jq's `.app.slug` yields null for a null `app`.
+                    "app": (suite["app"] or {}).get("slug"),
+                }
+                for suite in payload["check_suites"]
+            ],
+        },
+        separators=(",", ":"),
+    ) + "\n"
+
+
 def _gh(
     mocker, *, returncode: int, stdout: str = "", stderr: str = "",
-    suites: int = 0, statuses: int = 0, api_returncode: int = 0,
-    api_stdout: str | None = None,
+    suites: tuple = (), suites_total: int | None = None, statuses: int = 0,
+    api_returncode: int = 0, api_stdout: str | None = None,
 ):
     """Fake `gh`, dispatching on argv: `gh pr checks` vs the corroborating `gh api`.
 
-    ``suites``/``statuses`` are the ``total_count`` values the two REST endpoints
-    report for the head commit; ``api_stdout``/``api_returncode`` override them to
-    simulate an API that answers unusably.
+    ``suites`` are raw `check_suites` elements (see ``_suite``) for the head
+    commit, served through ``_project_check_suites``; ``suites_total`` overrides
+    the envelope's ``total_count`` to simulate a page that does not hold every
+    suite. ``statuses`` is the ``total_count`` of the legacy status endpoint.
+    ``api_stdout``/``api_returncode`` override both to simulate an API that
+    answers unusably.
     """
     calls: list[list[str]] = []
 
@@ -287,8 +393,13 @@ def _gh(
         if argv[:2] == ["gh", "api"]:
             if api_stdout is not None:
                 out = api_stdout
+            elif "/check-suites" in argv[2]:
+                out = _project_check_suites({
+                    "total_count": len(suites) if suites_total is None else suites_total,
+                    "check_suites": list(suites),
+                })
             else:
-                out = f"{suites if argv[2].endswith('/check-suites') else statuses}\n"
+                out = f"{statuses}\n"
             return SimpleNamespace(returncode=api_returncode, stdout=out, stderr="")
         return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
 
@@ -309,13 +420,10 @@ def test_repo_without_ci_is_green_rather_than_a_permanent_block(tmp_path, mocker
     closed, leaving ``registration_state`` ``active`` for good. Green only once
     the commit itself corroborates the absence.
     """
-    run = _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=0, statuses=0)
+    run = _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=(), statuses=0)
     assert _state(tmp_path) == "passed"
     api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
-    assert [c[2] for c in api] == [
-        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/check-suites",
-        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/status",
-    ]
+    assert [c[2] for c in api] == [CHECK_SUITES_ENDPOINT, STATUS_ENDPOINT]
 
 
 # P0-LOAD-BEARING, mirroring `test_pr_view_requests_only_fields_gh_supports`
@@ -345,12 +453,12 @@ def test_corroboration_argv_and_cwd_are_pinned(tmp_path, mocker):
     They must address the head commit of the verified PR, count objects rather
     than re-read the rollup gh already called empty, and stay read-only.
     """
-    run = _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=0, statuses=0)
+    run = _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=(), statuses=0)
     assert _state(tmp_path) == "passed"
     api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
     assert api == [
-        ["gh", "api", f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/check-suites", "--jq", ".total_count"],
-        ["gh", "api", f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/status", "--jq", ".total_count"],
+        ["gh", "api", CHECK_SUITES_ENDPOINT, "--jq", CHECK_SUITES_JQ],
+        ["gh", "api", STATUS_ENDPOINT, "--jq", ".total_count"],
     ]
     for call in run.call_args_list:
         assert call.kwargs["cwd"] == tmp_path
@@ -394,24 +502,121 @@ def test_no_checks_line_only_counts_with_empty_stdout(tmp_path, mocker):
         _state(tmp_path)
 
 
+def test_benign_app_suite_without_runs_is_green(tmp_path, mocker):
+    """A repo with Apps installed but no reporting workflow must still progress.
+
+    GitHub opens a check suite for every installed App subscribing to
+    `check_suite`, run or no run, so `total_count >= 1` says nothing about
+    whether any gate exists. Requiring `total_count == 0` therefore wedged every
+    such repository -- `checks_unavailable` on every tick, forever, waiting for a
+    human who is not coming. These are prettier/prettier's live suites.
+    """
+    run = _gh(
+        mocker, returncode=1, stderr=NO_CHECKS_STDERR, statuses=0,
+        suites=tuple(_suite(app) for app in (
+            "codecov", "netlify", "circleci-checks", "renovate", "vercel",
+            "autofix-ci", "relativeci",
+        )),
+    )
+    assert _state(tmp_path) == "passed"
+    api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
+    assert [c[2] for c in api] == [CHECK_SUITES_ENDPOINT, STATUS_ENDPOINT]
+
+
 def test_startup_failure_rollup_is_not_green(tmp_path, mocker):
     """Live repro: yehiashouman/WearExerciseManager#4 @ 4c14b532.
 
     That repository HAS `.github/workflows/android.yml` on `pull_request`. The run
     concluded `failure` with zero jobs, so the rollup is empty and gh says "no
-    checks reported" -- while `check-suites` reports `total_count: 1` (with
-    `latest_check_runs_count: 0`) and `status` reports `total_count: 0`. CI was
-    silently deleted; calling that green closes the issue on a red build. TPO's
-    own workers edit `.github/workflows/*`, so this is a shape they can create.
+    checks reported" -- while `check-suites` reports one `github-actions` suite
+    with `latest_check_runs_count: 0`, `status: completed`, `conclusion: failure`
+    and `status` reports `total_count: 0`. CI was silently deleted; calling that
+    green closes the issue on a red build. TPO's own workers edit
+    `.github/workflows/*`, so this is a shape they can create.
     """
-    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=1, statuses=0)
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, statuses=0,
+        suites=(STARTUP_FAILURE_SUITE,))
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_zero_run_suite_with_a_conclusion_is_not_green(tmp_path, mocker):
+    """The startup-failure family, isolated from the app-slug rule.
+
+    Zero runs plus a NON-NULL conclusion is the discriminator: the App was asked,
+    answered, and produced nothing to read. A benign App suite never carries a
+    conclusion. Held for third-party Apps too, so this stays a rule about the
+    shape rather than a special case for `github-actions`.
+    """
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, statuses=0,
+        suites=(_suite("codecov", conclusion="failure", status="completed"),))
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_github_actions_suite_without_runs_is_not_green(tmp_path, mocker):
+    """A zero-run `github-actions` suite is ambiguous, so it stays fail-closed.
+
+    It is either workflows about to start (the brief race just after a push) or
+    workflows that will never report, and nothing in the payload separates them.
+    It is also the same App the startup failure arrives under. Reading it as "no
+    gate" is the risky half of the ambiguity, so it is refused; third-party Apps
+    are not ambiguous, they were notified and did nothing.
+    """
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, statuses=0,
+        suites=(_suite("github-actions"),))
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_suite_from_an_unidentifiable_app_is_not_green(tmp_path, mocker):
+    """`.app.slug` null leaves condition 4 unverifiable, so it fails closed.
+
+    GitHub serves a null `app` for a suite whose App has been deleted or
+    suspended; a null slug cannot be shown NOT to be `github-actions`.
+    """
+    suite = _suite("codecov")
+    suite["app"] = None
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, statuses=0, suites=(suite,))
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_suite_that_produced_runs_is_not_green(tmp_path, mocker):
+    """A suite with check runs contradicts the empty rollup gh just reported.
+
+    Two readings, both fatal: gh's rollup is stale, or it is reading a different
+    commit. Either way there ARE runs on this head and their states were never
+    classified, so it cannot be waved through.
+    """
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, statuses=0,
+        suites=(_suite("codecov"), _suite("github-service-catalog", runs=3, status="in_progress")))
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_unseen_suites_are_not_green(tmp_path, mocker):
+    """A page that does not hold every suite cannot clear every suite.
+
+    The per-suite rule is only as good as the suites it saw, so a `total_count`
+    larger than the returned page is unread evidence, not absence.
+    """
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, statuses=0,
+        suites=(_suite("codecov"),), suites_total=2)
     with pytest.raises(ResultContractError, match="checks_unavailable"):
         _state(tmp_path)
 
 
 def test_commit_status_without_a_check_suite_is_not_green(tmp_path, mocker):
     """The other half of the corroboration: legacy commit statuses count too."""
-    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=0, statuses=2)
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=(), statuses=2)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_benign_suites_do_not_excuse_a_commit_status(tmp_path, mocker):
+    """Condition 1 survives condition 2-4 passing: statuses are a real gate."""
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=(_suite("codecov"),), statuses=2)
     with pytest.raises(ResultContractError, match="checks_unavailable"):
         _state(tmp_path)
 
@@ -422,10 +627,32 @@ def test_commit_status_without_a_check_suite_is_not_green(tmp_path, mocker):
         pytest.param({"api_returncode": 1}, id="api-error"),
         pytest.param({"api_stdout": "null\n"}, id="api-count-missing"),
         pytest.param({"api_stdout": ""}, id="api-empty-output"),
+        pytest.param({"api_stdout": "{oops\n"}, id="api-unparseable"),
+        pytest.param(
+            {"api_stdout": '{"total":1,"suites":[["codecov",0]]}\n'},
+            id="api-suite-is-not-an-object",
+        ),
+        pytest.param(
+            {"api_stdout": '{"total":1,"suites":[{"runs":"0","conclusion":null,"app":"codecov"}]}\n'},
+            id="api-run-count-is-not-a-number",
+        ),
+        pytest.param(
+            {"api_stdout": '{"total":1,"suites":[{"runs":0,"conclusion":{},"app":"codecov"}]}\n'},
+            id="api-conclusion-is-not-a-string",
+        ),
+        pytest.param(
+            {"api_stdout": '{"total":"1","suites":[]}\n'},
+            id="api-total-is-not-a-number",
+        ),
     ],
 )
 def test_corroboration_failure_is_not_an_approval(tmp_path, mocker, kwargs):
-    """An error while proving a negative is not proof of the negative."""
+    """An error while proving a negative is not proof of the negative.
+
+    Every unreadable envelope and unreadable suite record lands here rather than
+    being skipped: a record this code cannot type-check is a record whose runs
+    and conclusion it did not actually verify.
+    """
     _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, **kwargs)
     with pytest.raises(ResultContractError, match="checks_unavailable"):
         _state(tmp_path)
@@ -590,23 +817,20 @@ def test_empty_check_list_matches_the_no_ci_rule(tmp_path, mocker):
     Same claim as an empty rollup, so it takes the same corroboration -- an
     approval must not rest on gh continuing to error rather than exporting `[]`.
     """
-    run = _gh(mocker, returncode=0, stdout="[]", suites=0, statuses=0)
+    run = _gh(mocker, returncode=0, stdout="[]", suites=(), statuses=0)
     assert _state(tmp_path) == "passed"
     api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
-    assert [c[2] for c in api] == [
-        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/check-suites",
-        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/status",
-    ]
+    assert [c[2] for c in api] == [CHECK_SUITES_ENDPOINT, STATUS_ENDPOINT]
 
 
-def test_empty_check_list_is_not_green_when_the_commit_has_suites(tmp_path, mocker):
-    """The P0 reached through the other door: `[]` while the commit has 99 suites.
+def test_empty_check_list_is_not_green_when_the_commit_has_a_broken_workflow(tmp_path, mocker):
+    """The P0 reached through the other door: `[]` alongside a startup failure.
 
     If gh ever normalises its empty-output wart to `[]` with exit 0, a worker that
     breaks `.github/workflows/*` would otherwise close issues on red builds again,
     silently and permanently.
     """
-    _gh(mocker, returncode=0, stdout="[]", suites=99, statuses=0)
+    _gh(mocker, returncode=0, stdout="[]", suites=(STARTUP_FAILURE_SUITE,), statuses=0)
     with pytest.raises(ResultContractError, match="checks_unavailable"):
         _state(tmp_path)
 
@@ -812,6 +1036,9 @@ def test_pr_identity_rejects_origin_that_is_not_the_project_repo(tmp_path, mocke
 API = ("gh", "api", "-H", "Accept: application/vnd.github+json")
 REPO = "acme/repo"
 PR_URL = f"https://github.com/{REPO}/pull/7"
+# A DIFFERENT pull request in the same repository, so it clears the `pr_url`
+# regex and only the echoed `url` can tell it apart from the delivered PR.
+OTHER_PR_URL = f"https://github.com/{REPO}/pull/8"
 MARKER = "<!-- tpo-completed tick=01TICK pr=7 -->"
 
 
@@ -1247,6 +1474,17 @@ def _view(state="OPEN", head="a" * 40, url=PR_URL):
         pytest.param(_gate_tasks(), _view("CLOSED"), "pull_request_closed_or_drifted", id="gate-closed"),
         pytest.param(_gate_tasks(), _view("OPEN", "b" * 40), "pr_head_drift", id="gate-open-drifted"),
         pytest.param(_gate_tasks(), _view("MERGED", "b" * 40), "pr_head_drift", id="gate-merged-drifted"),
+        # `gh pr view` echoes the PR it actually read back as `url`. Both branches
+        # must confirm it is the PR the delivery named: everything downstream --
+        # the merge state, the head, `_check_state`, and the issue close -- is
+        # then measured on whatever PR gh answered with. The gate branch omitted
+        # this check while its sibling performed it, so a `gh` that resolved the
+        # url to a different pull request of the same repository could close the
+        # issue on a green build belonging to another PR.
+        pytest.param(_no_gate_tasks(), _view("MERGED", url=OTHER_PR_URL),
+                     "pr_identity_mismatch", id="no-gate-url-mismatch"),
+        pytest.param(_gate_tasks(), _view("MERGED", url=OTHER_PR_URL),
+                     "pr_identity_mismatch", id="gate-url-mismatch"),
     ],
 )
 def test_pr_state_guards_block_the_gate_and_never_touch_the_issue(tmp_path, mocker, tasks, view, code):

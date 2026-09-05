@@ -2,6 +2,7 @@
 import pytest
 
 from hermes_pipeline.ship import (
+    ChecksInconclusive,
     ShipError,
     ShipSidecar,
     bump_in_pr,
@@ -108,7 +109,14 @@ def test_git_tree_clean(mocker, tmp_path):
 
 
 def test_ci_is_green():
-    assert ci_is_green([]) is True  # no checks configured
+    # This line used to read `assert ci_is_green([]) is True  # no checks
+    # configured`, and that assertion pinned a bug. An empty status-check
+    # rollup has several causes and only one of them is "this repo configures
+    # no CI"; the dangerous one is a workflow startup failure. `ci_is_green`
+    # is handed a bare list with no repo or sha, so it cannot tell the causes
+    # apart and must refuse to answer instead of guessing "green".
+    with pytest.raises(ChecksInconclusive):
+        ci_is_green([])
     assert ci_is_green([{"status": "COMPLETED", "conclusion": "SUCCESS"}]) is True
     assert ci_is_green([{"state": "SUCCESS"}]) is True
     assert ci_is_green([{"status": "IN_PROGRESS", "conclusion": ""}]) is False
@@ -381,6 +389,31 @@ def test_bump_then_ci_pending_refuses_with_retry(mocker, tmp_path):
     assert persisted.pr_head_sha == "bumpedsha"
 
 
+def test_bump_and_merge_refuses_empty_rollup_instead_of_merging(mocker, tmp_path):
+    """An empty rollup is never on its own a licence to merge.
+
+    ``_bump_and_merge`` is the one production caller of ``ci_is_green``. It has
+    the repo and the head sha, so it corroborates the emptiness against the
+    commit rather than inheriting it; a rollup that stays uncorroborated still
+    ends in a refusal that says the CI status is undetermined. Here the commit's
+    check-suites report a suite that DID produce check runs, which contradicts
+    the empty rollup gh just reported: those run states were never classified,
+    so they cannot be waved through.
+
+    The assertion on the ``gh api`` calls is what keeps this test honest. Without
+    it a blanket refusal that never asks the commit anything would pass it just
+    as happily as the corroborating one, and the refusal would be right for the
+    wrong reason.
+    """
+    merge = _empty_rollup(mocker)
+    run = _corroboration(mocker, suites=(_projected_suite("codecov", runs=3),))
+    with pytest.raises(ApproveRefused, match="undetermined"):
+        _bump_and_merge(sidecar=_guard_sidecar(), project_dir=tmp_path,
+                        state_dir=tmp_path)
+    assert [c[:2] for c in run.argv_calls].count(["gh", "api"]) >= 1
+    merge.assert_not_called()
+
+
 def test_retry_skips_bump_and_merges_when_green(mocker, tmp_path):
     bump = mocker.patch("hermes_pipeline.ship.bump_in_pr")
     mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value={
@@ -591,6 +624,29 @@ def test_ci_is_green_mixed_checkrun_and_statuscontext():
     ]) is True
 
 
+def test_ci_is_green_empty_rollup_may_be_a_workflow_startup_failure():
+    """An empty rollup is evidence of emptiness, not of an absent gate.
+
+    Live worked example: ``yehiashouman/WearExerciseManager`` at
+    ``4c14b532d7da2a99a9e3b337fece90a5336fdc43`` reports no checks through
+    ``gh``, while ``check-suites`` shows one ``github-actions`` suite with
+    ``latest_check_runs_count: 0`` and ``conclusion: failure``. That is a
+    workflow *startup failure* -- a run is created, concludes ``failure`` and
+    produces zero jobs -- which is exactly the shape an agent that breaks
+    ``.github/workflows/*`` leaves behind. Reading it as green merges a branch
+    whose CI never ran a single job. Separating that cause from "no CI is
+    configured" needs the commit itself, which this predicate is never handed,
+    so raising is where its responsibility ends. The corroboration happens one
+    layer up, in ``_bump_and_merge``, against the rule stated in
+    ``todos_completion._rollup_is_honestly_empty``; the tests for it are at the
+    end of this file. Note that the rule is not "a zero-run suite is a failure"
+    -- a zero-run suite with a NULL conclusion from a third-party App is benign;
+    it is the conclusion and the App slug that separate this shape from that one.
+    """
+    with pytest.raises(ChecksInconclusive, match="corroborat"):
+        ci_is_green([])
+
+
 def test_ci_is_green_none_state_and_none_status():
     """Missing state/status fields are treated as failure."""
     assert ci_is_green([{}]) is False
@@ -697,3 +753,156 @@ def test_maybe_ship_ready_exception_swallowed(tmp_path, mocker, caplog):
                      slack_channel="#ship")
     # Should not raise; the exception is swallowed
     assert "maybe_ship_ready failed" in caplog.text
+
+
+# --- Corroborating an empty rollup at the one site that can ---
+#
+# `ci_is_green` is handed a bare list, so it can only raise `ChecksInconclusive`.
+# `_bump_and_merge` is the layer that knows the repository and the head sha, so
+# it is the layer that can go and ask the commit itself whether a gate exists.
+# The rule it applies is `todos_completion._rollup_is_honestly_empty` -- imported,
+# not restated, because ship and todos_completion drifting apart on exactly this
+# question is what produced the live false green.
+
+import json
+from types import SimpleNamespace
+
+from hermes_pipeline.github_issues import GitHubIssuesError
+
+WEM_REPO = "yehiashouman/WearExerciseManager"
+WEM_SHA = "4c14b532d7da2a99a9e3b337fece90a5336fdc43"
+
+
+def _projected_suite(app, *, runs=0, conclusion=None, status="queued"):
+    """One `check_suites` element in the shape gh's `--jq` projection emits.
+
+    The RAW REST payloads and the projection that produces this shape are pinned
+    in `tests/test_todos_completion.py`; these tests deliberately work in the
+    projected shape, which is what `_rollup_is_honestly_empty` parses.
+    """
+    return {"runs": runs, "conclusion": conclusion, "status": status, "app": app}
+
+
+def _corroboration(mocker, *, suites=(), statuses=0, returncode=0, repo=WEM_REPO):
+    """Stub the two read-only REST calls `_rollup_is_honestly_empty` makes."""
+    mocker.patch(
+        "hermes_pipeline.github_issues.repository_identity", return_value=repo
+    )
+    calls = []
+
+    def _run(argv, **kwargs):
+        calls.append(list(argv))
+        if "check-suites" in argv[2]:
+            out = json.dumps({"total": len(suites), "suites": list(suites)})
+        else:
+            out = f"{statuses}\n"
+        return SimpleNamespace(returncode=returncode, stdout=out, stderr="")
+
+    patched = mocker.patch(
+        "hermes_pipeline.todos_completion.subprocess.run", side_effect=_run
+    )
+    patched.argv_calls = calls
+    return patched
+
+
+def _empty_rollup(mocker, *, head="bumpedsha", view_head=None):
+    """Drive `_bump_and_merge` to the empty-rollup branch; return the merge mock."""
+    mocker.patch("hermes_pipeline.ship.bump_in_pr", return_value=("0.3.4", head))
+    mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value={
+        "state": "OPEN", "headRefOid": view_head or head, "statusCheckRollup": [],
+    })
+    return mocker.patch("hermes_pipeline.ship.gh_pr_merge_squash")
+
+
+def test_bump_and_merge_merges_when_the_absence_of_ci_is_corroborated(mocker, tmp_path):
+    """A genuinely CI-less repo must still be able to ship.
+
+    Fail-closed on an empty rollup was the right first move, but left alone it
+    costs the autonomy property outright: nothing could ever merge on a repo
+    that has no CI. The commit here carries one zero-run third-party App suite
+    with a NULL conclusion and no legacy statuses -- an App that was notified
+    and did nothing -- which is proof that there is no gate to pass.
+    """
+    merge = _empty_rollup(mocker)
+    run = _corroboration(mocker, suites=(_projected_suite("renovate"),), statuses=0)
+
+    _bump_and_merge(sidecar=_guard_sidecar(), project_dir=tmp_path, state_dir=tmp_path)
+
+    merge.assert_called_once()
+    assert merge.call_args.kwargs["match_head"] == "bumpedsha"
+    api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
+    assert [c[2] for c in api] == [
+        f"repos/{WEM_REPO}/commits/bumpedsha/check-suites?per_page=100",
+        f"repos/{WEM_REPO}/commits/bumpedsha/status",
+    ]
+
+
+def test_bump_and_merge_refuses_the_wear_exercise_manager_startup_failure(mocker, tmp_path):
+    """The live shape that must never merge.
+
+    `yehiashouman/WearExerciseManager` at
+    `4c14b532d7da2a99a9e3b337fece90a5336fdc43`: gh reports no checks, while
+    `check-suites` holds one `github-actions` suite with zero check runs and
+    `conclusion: failure`. A run was created, concluded `failure` and produced
+    zero jobs -- exactly what a worker that breaks `.github/workflows/*` leaves
+    behind. Merging it ships a branch whose CI never ran a single job.
+    """
+    merge = _empty_rollup(mocker, head=WEM_SHA)
+    run = _corroboration(mocker, suites=(
+        _projected_suite("github-actions", conclusion="failure", status="completed"),
+    ), statuses=0)
+
+    with pytest.raises(ApproveRefused, match="corroborat"):
+        _bump_and_merge(sidecar=_guard_sidecar(), project_dir=tmp_path,
+                        state_dir=tmp_path)
+
+    merge.assert_not_called()
+    assert [c[:2] for c in run.argv_calls].count(["gh", "api"]) >= 1
+
+
+def test_bump_and_merge_refuses_when_corroboration_cannot_be_established(mocker, tmp_path):
+    """An error while proving a negative is not proof of the negative.
+
+    A merge is irreversible and outward-facing, so a failed corroboration call
+    refuses exactly as loudly as a disproved one.
+    """
+    merge = _empty_rollup(mocker)
+    run = _corroboration(mocker, returncode=1)
+
+    with pytest.raises(ApproveRefused, match="checks_unavailable"):
+        _bump_and_merge(sidecar=_guard_sidecar(), project_dir=tmp_path,
+                        state_dir=tmp_path)
+
+    merge.assert_not_called()
+    assert [c[:2] for c in run.argv_calls].count(["gh", "api"]) >= 1
+
+
+def test_bump_and_merge_refuses_when_the_repository_cannot_be_identified(mocker, tmp_path):
+    """No repo means no commit to ask, which is an ambiguity, not an absence."""
+    merge = _empty_rollup(mocker)
+    mocker.patch(
+        "hermes_pipeline.github_issues.repository_identity",
+        side_effect=GitHubIssuesError("origin_identity_invalid", "git remote"),
+    )
+
+    with pytest.raises(ApproveRefused, match="origin_identity_invalid"):
+        _bump_and_merge(sidecar=_guard_sidecar(), project_dir=tmp_path,
+                        state_dir=tmp_path)
+
+    merge.assert_not_called()
+
+
+def test_bump_and_merge_refuses_when_the_rollup_describes_another_commit(mocker, tmp_path):
+    """Corroborating the wrong commit would prove nothing about this one.
+
+    If the PR head moved between the bump push and the view, the empty rollup
+    belongs to a commit that is not the one `--match-head-commit` would merge.
+    """
+    merge = _empty_rollup(mocker, head="bumpedsha", view_head="someone_elses_sha")
+    _corroboration(mocker, suites=(_projected_suite("renovate"),), statuses=0)
+
+    with pytest.raises(ApproveRefused, match="does not describe"):
+        _bump_and_merge(sidecar=_guard_sidecar(), project_dir=tmp_path,
+                        state_dir=tmp_path)
+
+    merge.assert_not_called()
