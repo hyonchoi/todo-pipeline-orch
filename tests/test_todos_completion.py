@@ -257,31 +257,378 @@ def test_finish_evidence_is_not_rechecked_against_live_head_once_verified(tmp_pa
     _verify_finish(tmp_path, result, accepted, require_current=False)
 
 
-def test_gh_failed_exit_still_classifies_documented_check_failure(tmp_path, mocker):
-    mocker.patch(
-        "hermes_pipeline.todos_completion.subprocess.run",
-        return_value=SimpleNamespace(
-            returncode=1, stdout='[{"state":"FAILURE"}]', stderr="checks failed"
-        ),
+CHECKS_PR_URL = "https://github.com/acme/repo/pull/1"
+CHECKS_REPO = "acme/repo"
+CHECKS_HEAD_SHA = "c" * 40
+
+# The exact stderr `gh pr checks --json state` writes for an empty status-check
+# rollup, transcribed from gh 2.89.0 `pkg/cmd/pr/checks/checks.go`:
+#   fmt.Errorf("no checks reported on the '%s' branch", pr.HeadRefName)
+# Confirmed against live PRs (cli/cli#9000, yehiashouman/WearExerciseManager#4):
+# exit 1, EMPTY stdout, this on stderr.
+NO_CHECKS_STDERR = "no checks reported on the 'feature-branch' branch\n"
+
+
+def _gh(
+    mocker, *, returncode: int, stdout: str = "", stderr: str = "",
+    suites: int = 0, statuses: int = 0, api_returncode: int = 0,
+    api_stdout: str | None = None,
+):
+    """Fake `gh`, dispatching on argv: `gh pr checks` vs the corroborating `gh api`.
+
+    ``suites``/``statuses`` are the ``total_count`` values the two REST endpoints
+    report for the head commit; ``api_stdout``/``api_returncode`` override them to
+    simulate an API that answers unusably.
+    """
+    calls: list[list[str]] = []
+
+    def _run(argv, **kwargs):
+        calls.append(list(argv))
+        if argv[:2] == ["gh", "api"]:
+            if api_stdout is not None:
+                out = api_stdout
+            else:
+                out = f"{suites if argv[2].endswith('/check-suites') else statuses}\n"
+            return SimpleNamespace(returncode=api_returncode, stdout=out, stderr="")
+        return SimpleNamespace(returncode=returncode, stdout=stdout, stderr=stderr)
+
+    patched = mocker.patch("hermes_pipeline.todos_completion.subprocess.run", side_effect=_run)
+    patched.argv_calls = calls
+    return patched
+
+
+def _state(worktree):
+    return _check_state(worktree, CHECKS_PR_URL, repo=CHECKS_REPO, head_sha=CHECKS_HEAD_SHA)
+
+
+def test_repo_without_ci_is_green_rather_than_a_permanent_block(tmp_path, mocker):
+    """gh's no-checks error must not wedge the human gate forever.
+
+    gh reports an empty rollup as exit 1 with empty stdout, so the old
+    ``json.loads(stdout)`` raised ``checks_unavailable`` and the issue was never
+    closed, leaving ``registration_state`` ``active`` for good. Green only once
+    the commit itself corroborates the absence.
+    """
+    run = _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=0, statuses=0)
+    assert _state(tmp_path) == "passed"
+    api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
+    assert [c[2] for c in api] == [
+        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/check-suites",
+        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/status",
+    ]
+
+
+# P0-LOAD-BEARING, mirroring `test_pr_view_requests_only_fields_gh_supports`
+# below. `--json state` is the PREMISE of `_check_state`'s whole model: gh's
+# exporter returns before its exit-code tail, so with `--json` gh exits 0 whatever
+# the checks say and a nonzero exit never carries a payload. Delete `--json state`
+# and gh exits 1 on any failing check with human-readable text on stdout, which
+# this module can only read as `checks_unavailable` -- the identical permanent
+# wedge this work exists to remove, one token away. Ask for `--json bucket`
+# instead and gh exits 1 with `Unknown JSON field`, the `baseRepository` defect
+# verbatim. `cwd` is what binds the call to the project's `gh` auth and remote.
+EXPECTED_CHECKS_ARGV = ["gh", "pr", "checks", CHECKS_PR_URL, "--json", "state"]
+
+
+def test_check_state_argv_and_cwd_are_pinned(tmp_path, mocker):
+    run = _gh(mocker, returncode=0, stdout='[{"state":"SUCCESS"}]')
+    assert _state(tmp_path) == "passed"
+    assert run.call_args.args[0] == EXPECTED_CHECKS_ARGV
+    assert run.call_args.kwargs["cwd"] == tmp_path
+    # A wedged `gh` must not hang the tick; UnicodeError is caught with it below.
+    assert run.call_args.kwargs["timeout"] == 60
+
+
+def test_corroboration_argv_and_cwd_are_pinned(tmp_path, mocker):
+    """The corroborating REST calls are pinned like the checks call.
+
+    They must address the head commit of the verified PR, count objects rather
+    than re-read the rollup gh already called empty, and stay read-only.
+    """
+    run = _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=0, statuses=0)
+    assert _state(tmp_path) == "passed"
+    api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
+    assert api == [
+        ["gh", "api", f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/check-suites", "--jq", ".total_count"],
+        ["gh", "api", f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/status", "--jq", ".total_count"],
+    ]
+    for call in run.call_args_list:
+        assert call.kwargs["cwd"] == tmp_path
+        assert call.kwargs["timeout"] == 60
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        pytest.param("failed to get checks: HTTP 500\n", id="server-error-mentions-checks"),
+        pytest.param("no checks could be reported: HTTP 502\n", id="contains-no-checks"),
+        pytest.param("error: nothing reported\n", id="contains-reported"),
+        pytest.param("checks unavailable\n", id="contains-checks"),
+        pytest.param("no checks reported\n", id="truncated-before-the-branch-clause"),
+        pytest.param("", id="no-stderr-at-all"),
+    ],
+)
+def test_only_ghs_exact_no_checks_line_can_mean_green(tmp_path, mocker, stderr):
+    """A wrong-but-adjacent sentinel turns real gh failures into approvals.
+
+    Broadening the match to `checks`, `no checks` or `reported` makes
+    `failed to get checks: HTTP 500` with empty stdout return `passed`. Only gh's
+    own `no checks reported on the '<branch>' branch` may mean an empty rollup,
+    and the corroborating API must not even be consulted for anything else.
+    """
+    run = _gh(mocker, returncode=1, stderr=stderr)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+    assert not [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
+
+
+def test_no_checks_line_only_counts_with_empty_stdout(tmp_path, mocker):
+    """The empty-stdout precondition is half the rule and is pinned separately.
+
+    gh cannot pair a payload with the no-checks error -- that error is returned
+    before the exporter runs -- so a nonzero exit carrying both is an unmodelled
+    gh, not a green build.
+    """
+    _gh(mocker, returncode=1, stdout='[{"state":"FAILURE"}]', stderr=NO_CHECKS_STDERR)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_startup_failure_rollup_is_not_green(tmp_path, mocker):
+    """Live repro: yehiashouman/WearExerciseManager#4 @ 4c14b532.
+
+    That repository HAS `.github/workflows/android.yml` on `pull_request`. The run
+    concluded `failure` with zero jobs, so the rollup is empty and gh says "no
+    checks reported" -- while `check-suites` reports `total_count: 1` (with
+    `latest_check_runs_count: 0`) and `status` reports `total_count: 0`. CI was
+    silently deleted; calling that green closes the issue on a red build. TPO's
+    own workers edit `.github/workflows/*`, so this is a shape they can create.
+    """
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=1, statuses=0)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_commit_status_without_a_check_suite_is_not_green(tmp_path, mocker):
+    """The other half of the corroboration: legacy commit statuses count too."""
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, suites=0, statuses=2)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        pytest.param({"api_returncode": 1}, id="api-error"),
+        pytest.param({"api_stdout": "null\n"}, id="api-count-missing"),
+        pytest.param({"api_stdout": ""}, id="api-empty-output"),
+    ],
+)
+def test_corroboration_failure_is_not_an_approval(tmp_path, mocker, kwargs):
+    """An error while proving a negative is not proof of the negative."""
+    _gh(mocker, returncode=1, stderr=NO_CHECKS_STDERR, **kwargs)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(OSError("missing executable"), id="os-error"),
+        pytest.param(subprocess.TimeoutExpired("gh", 60), id="timeout"),
+        pytest.param(UnicodeError("undecodable output"), id="unicode-error"),
+    ],
+)
+def test_corroboration_subprocess_failure_is_not_an_approval(tmp_path, mocker, outcome):
+    def _run(argv, **kwargs):
+        if argv[:2] == ["gh", "api"]:
+            raise outcome
+        return SimpleNamespace(returncode=1, stdout="", stderr=NO_CHECKS_STDERR)
+
+    mocker.patch("hermes_pipeline.todos_completion.subprocess.run", side_effect=_run)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_no_checks_signal_must_be_anchored_not_a_substring(tmp_path, mocker):
+    """`gh pr checks <arg>` echoes its argument, so a substring test is forgeable.
+
+    An approval predicate must not depend on `pr_url` being validated two modules
+    away, and the corroborating API must not even be consulted for this shape.
+    """
+    run = _gh(
+        mocker, returncode=1,
+        stderr="no pull requests found for branch \"no checks reported on the 'x' branch\"\n",
     )
-    assert _check_state(tmp_path, "https://github.com/acme/repo/pull/1") == "failed"
-
-
-def test_gh_exit_8_is_pending_and_successful_no_checks_is_green(tmp_path, mocker):
-    run = mocker.patch("hermes_pipeline.todos_completion.subprocess.run")
-    run.return_value = SimpleNamespace(returncode=8, stdout="", stderr="pending")
-    assert _check_state(tmp_path, "https://github.com/acme/repo/pull/1") == "pending"
-    run.return_value = SimpleNamespace(returncode=0, stdout="[]", stderr="")
-    assert _check_state(tmp_path, "https://github.com/acme/repo/pull/1") == "passed"
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+    assert not [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
 
 
 def test_gh_nonzero_unusable_response_needs_input(tmp_path, mocker):
-    mocker.patch(
-        "hermes_pipeline.todos_completion.subprocess.run",
-        return_value=SimpleNamespace(returncode=1, stdout="", stderr="auth failed"),
-    )
+    """A nonzero exit that is not the no-checks case is unreadable evidence."""
+    _gh(mocker, returncode=1, stderr="auth failed")
     with pytest.raises(ResultContractError, match="checks_unavailable"):
-        _check_state(tmp_path, "https://github.com/acme/repo/pull/1")
+        _state(tmp_path)
+
+
+def test_nonzero_exit_never_classifies_a_payload(tmp_path, mocker):
+    """Replaces a test that asserted exit 1 + JSON means "failed".
+
+    With ``--json`` gh returns ``opts.Exporter.Write`` before the exit-code tail,
+    so it never pairs a nonzero exit with a payload. Trusting stdout anyway would
+    let ``[{"state":"SUCCESS"}]`` alongside an error exit approve a delivery.
+    """
+    _gh(mocker, returncode=1, stdout='[{"state":"SUCCESS"}]', stderr="checks failed")
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_exit_8_is_unreachable_with_json_and_is_not_pending(tmp_path, mocker):
+    """Replaces a test that asserted exit 8 means "pending".
+
+    ``PendingError`` (exit 8) is raised after the ``--json`` exporter has already
+    returned, so ``gh pr checks --json`` cannot emit it. If it ever appears it is
+    an unmodelled gh change, not a pending run.
+    """
+    _gh(mocker, returncode=8, stderr="pending")
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+@pytest.mark.parametrize("state", ["SUCCESS", "SKIPPED", "NEUTRAL"])
+def test_gh_pass_and_skipping_buckets_are_green(tmp_path, mocker, state):
+    """gh buckets SKIPPED and NEUTRAL as non-blocking "skipping"; NEUTRAL used to hang."""
+    _gh(mocker, returncode=0, stdout=json.dumps([{"state": state}]))
+    assert _state(tmp_path) == "passed"
+
+
+def test_mixed_green_states_pass(tmp_path, mocker):
+    _gh(mocker, returncode=0, stdout=json.dumps(
+        [{"state": "SUCCESS"}, {"state": "SKIPPED"}, {"state": "NEUTRAL"}]
+    ))
+    assert _state(tmp_path) == "passed"
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED",
+     "STALE", "STARTUP_FAILURE"],
+)
+def test_terminal_non_success_states_fail_closed(tmp_path, mocker, state):
+    """STALE and STARTUP_FAILURE are terminal; gh's pending bucket would hang us."""
+    _gh(mocker, returncode=0, stdout=json.dumps([{"state": "SUCCESS"}, {"state": state}]))
+    assert _state(tmp_path) == "failed"
+
+
+@pytest.mark.parametrize(
+    "state",
+    ["EXPECTED", "REQUESTED", "WAITING", "QUEUED", "PENDING", "IN_PROGRESS",
+     pytest.param("", id="completed-with-null-conclusion")],
+)
+def test_genuinely_transient_states_are_pending(tmp_path, mocker, state):
+    """`""` is gh exporting a COMPLETED run whose conclusion has not landed yet.
+
+    `aggregate.go` takes `state` from the conclusion once `status == "COMPLETED"`,
+    so a null conclusion exports as the empty string and gh's default arm buckets
+    it pending. Raising instead would block a delivery on something that resolves
+    itself on the next tick.
+    """
+    _gh(mocker, returncode=0, stdout=json.dumps([{"state": "SUCCESS"}, {"state": state}]))
+    assert _state(tmp_path) == "pending"
+
+
+def test_failure_outranks_pending(tmp_path, mocker):
+    _gh(mocker, returncode=0, stdout=json.dumps(
+        [{"state": "IN_PROGRESS"}, {"state": "FAILURE"}]
+    ))
+    assert _state(tmp_path) == "failed"
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    [
+        pytest.param('["SUCCESS"]', id="list-of-non-dicts"),
+        # These two are where the strict per-item loop differs observably from
+        # filtering non-dicts out: lenient filtering leaves {"SUCCESS"} and
+        # answers `passed`, approving a delivery on a payload it half-read.
+        pytest.param('[{"state":"SUCCESS"},"SUCCESS"]', id="non-dict-beside-a-green-dict"),
+        pytest.param('[{"state":"SUCCESS"},42]', id="scalar-beside-a-green-dict"),
+        pytest.param("[{}]", id="dicts-without-state"),
+        pytest.param('[{"state":null}]', id="null-state"),
+        pytest.param('[{"state":"SUCCESS"},{"state":null}]', id="one-unreadable-among-green"),
+        pytest.param('[{"state":"WARP_SPEED"}]', id="state-gh-does-not-define"),
+        pytest.param('[{"state":"SUCCESS"},{"state":"WARP_SPEED"}]', id="unknown-among-green"),
+        pytest.param('{"state":"SUCCESS"}', id="not-a-list"),
+        # Falsy non-lists: without the list guard these reach `if not checks` and
+        # a bare `0` on stdout would approve the delivery.
+        pytest.param("0", id="scalar-zero"),
+        pytest.param("null", id="scalar-null"),
+        pytest.param("{}", id="empty-object"),
+        pytest.param('""', id="empty-string"),
+        # Truthy non-lists: without the guard these escape as a bare TypeError,
+        # crashing the gate instead of blocking it.
+        pytest.param("5", id="scalar-int"),
+        pytest.param("true", id="scalar-true"),
+        pytest.param("not json", id="not-json"),
+    ],
+)
+def test_unreadable_check_payload_is_never_green(tmp_path, mocker, stdout):
+    """A payload we cannot interpret must block, never approve a delivery.
+
+    ``["SUCCESS"]`` used to return "passed": the set comprehension dropped every
+    non-dict, and ``set() <= {"SUCCESS", "SKIPPED"}`` is True.
+    """
+    _gh(mocker, returncode=0, stdout=stdout)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_empty_check_list_matches_the_no_ci_rule(tmp_path, mocker):
+    """gh does not emit this shape, but "no checks at all" means the same thing.
+
+    Same claim as an empty rollup, so it takes the same corroboration -- an
+    approval must not rest on gh continuing to error rather than exporting `[]`.
+    """
+    run = _gh(mocker, returncode=0, stdout="[]", suites=0, statuses=0)
+    assert _state(tmp_path) == "passed"
+    api = [c for c in run.argv_calls if c[:2] == ["gh", "api"]]
+    assert [c[2] for c in api] == [
+        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/check-suites",
+        f"repos/{CHECKS_REPO}/commits/{CHECKS_HEAD_SHA}/status",
+    ]
+
+
+def test_empty_check_list_is_not_green_when_the_commit_has_suites(tmp_path, mocker):
+    """The P0 reached through the other door: `[]` while the commit has 99 suites.
+
+    If gh ever normalises its empty-output wart to `[]` with exit 0, a worker that
+    breaks `.github/workflows/*` would otherwise close issues on red builds again,
+    silently and permanently.
+    """
+    _gh(mocker, returncode=0, stdout="[]", suites=99, statuses=0)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+def test_empty_check_list_is_not_green_when_corroboration_fails(tmp_path, mocker):
+    _gh(mocker, returncode=0, stdout="[]", api_returncode=1)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        pytest.param(OSError("missing executable"), id="os-error"),
+        pytest.param(subprocess.TimeoutExpired("gh", 60), id="timeout"),
+        pytest.param(UnicodeError("undecodable output"), id="unicode-error"),
+    ],
+)
+def test_gh_invocation_failure_needs_input(tmp_path, mocker, outcome):
+    mocker.patch("hermes_pipeline.todos_completion.subprocess.run", side_effect=outcome)
+    with pytest.raises(ResultContractError, match="checks_unavailable"):
+        _state(tmp_path)
 
 
 # gh 2.89.0 `gh pr view --json` field vocabulary, transcribed verbatim from

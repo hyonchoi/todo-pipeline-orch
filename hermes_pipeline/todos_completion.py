@@ -82,7 +82,171 @@ def _remote_head(worktree: Path, branch: str) -> str:
     return result.stdout.split()[0]
 
 
-def _check_state(worktree: Path, pr_url: str) -> str:
+# Check-state vocabulary, transcribed from gh 2.89.0
+# `pkg/cmd/pr/checks/aggregate.go`, which buckets every state it knows:
+# SUCCESS -> pass; SKIPPED, NEUTRAL -> skipping; ERROR, FAILURE, TIMED_OUT,
+# ACTION_REQUIRED -> fail; CANCELLED -> cancel; everything else -> pending.
+#
+# We reuse gh's green and red buckets and diverge deliberately on three states,
+# because gh's buckets serve a watch loop a human is staring at while ours
+# decides, unattended and unbounded, whether to close a delivered issue:
+#
+#   CANCELLED       gh calls it non-blocking. We fail it. A cancelled required
+#                   check is not evidence that it passed, and this divergence
+#                   fails CLOSED (a human is asked), so it is the safe one.
+#   STALE           gh buckets both as pending only because its default arm
+#   STARTUP_FAILURE catches every unlisted state. Neither is transient: a stale
+#                   check will not re-run on its own and a startup failure has
+#                   already ended. `pending` here means "return True every tick,
+#                   forever, silently", so they fail closed too.
+#
+# States absent from all three sets (a state gh grows after this was written)
+# are unreadable evidence, not a silent pass and not a silent wait: see
+# `_classify_check_states`.
+_CHECKS_GREEN = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
+_CHECKS_RED = frozenset({
+    "ERROR", "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED",
+    "STALE", "STARTUP_FAILURE",
+})
+# `""` is in here, not an unknown: `aggregate.go` derives `state` from the
+# conclusion once `status == "COMPLETED"`, so a check run completed with a null
+# conclusion -- the brief window before the conclusion lands, and what a deleted
+# or expired run degrades to -- exports as the empty string. gh's own default arm
+# buckets it pending; raising instead would summon a human for something that
+# resolves itself on the next tick.
+_CHECKS_TRANSIENT = frozenset({
+    "EXPECTED", "REQUESTED", "WAITING", "QUEUED", "PENDING", "IN_PROGRESS", "",
+})
+
+# gh's message for an empty status-check rollup on the head commit
+# (`checks.go`: `no checks reported on the '%s' branch`). Matched as an anchored
+# prefix of the first stderr line, not as a substring: `gh pr checks <arg>` echoes
+# its argument back in `no pull requests found for branch "<arg>"`, so a bare
+# substring test lets a crafted `pr_url` mint this signal for itself. That is
+# unreachable today only because `result_contract` pins `pr_url` to a strict
+# GitHub URL two modules away, and an approval predicate should not lean on a
+# guarantee enforced somewhere else. The branch name is interpolated, so the
+# match stops at the opening quote.
+_NO_CHECKS_STDERR_PREFIX = "no checks reported on the '"
+
+
+def _classify_check_states(states: set[str]) -> str:
+    """Reduce one PR's check states to ``passed`` / ``failed`` / ``pending``.
+
+    Raises ``checks_unavailable`` for any state outside the vocabulary above: a
+    state gh grows after this was written is unreadable evidence, so it is neither
+    a silent pass nor an unbounded silent wait.
+
+    The empty-set arm is defence in depth, NOT the fix for the old
+    ``set() <= {"SUCCESS", "SKIPPED"}`` -> ``passed`` defect. What fixes that is
+    the strict per-item loop in ``_check_state``, which refuses an unreadable
+    entry outright instead of dropping it and shrinking the set. Given that loop,
+    ``states`` can only be empty when ``checks`` was empty, which returns earlier;
+    this arm exists so a future caller cannot reintroduce the defect by filtering.
+    """
+    if not states or not states <= (_CHECKS_GREEN | _CHECKS_RED | _CHECKS_TRANSIENT):
+        raise ResultContractError("checks_unavailable")
+    if states & _CHECKS_RED:
+        return "failed"
+    if states & _CHECKS_TRANSIENT:
+        return "pending"
+    return "passed"
+
+
+def _rollup_is_honestly_empty(worktree: Path, *, repo: str, head_sha: str) -> bool:
+    """True only when *head_sha* really has no check suites and no statuses.
+
+    gh raises `no checks reported on the '<branch>' branch` when the head commit's
+    ``statusCheckRollup`` is EMPTY (`checks.go`:
+    ``if len(statusCheckRollup.Nodes) == 0``). That is not the same claim as "this
+    repository has no CI", and at least six conditions produce it: no CI at all;
+    the rollup not yet populated after a push; Actions disabled on the repository;
+    a fork pull request whose workflows await maintainer approval; every workflow
+    path-filtered out of the diff; and a workflow *startup failure*, where a run
+    is created, concludes ``failure``, and produces zero jobs. Only the first
+    means "no gate to pass"; the rest mean "the gate did not report".
+
+    The startup failure is the one that must never be read as green here, because
+    TPO's own workers edit repository files including ``.github/workflows/*``: a
+    worker that breaks the workflow file deletes CI and produces exactly this
+    shape. (Note it never reaches the state vocabulary as ``STARTUP_FAILURE``; it
+    arrives as this error instead.) Nor is the post-merge framing a rescue --
+    ``pull_request`` workflows do not re-run after a merge, so a head commit that
+    never got a check run never will. The false green would be permanent.
+
+    Live repro this exists for: ``yehiashouman/WearExerciseManager#4``, MERGED at
+    ``4c14b532d7da2a99a9e3b337fece90a5336fdc43``, whose repository does have
+    ``.github/workflows/android.yml`` on ``pull_request``. gh reports no checks;
+    ``check-suites`` reports ``total_count: 1`` (with ``latest_check_runs_count:
+    0``) and ``status`` reports ``total_count: 0``.
+
+    So the absence is corroborated against the commit itself before it is allowed
+    to mean green, using the two REST endpoints that count the underlying objects
+    rather than the rollup. Both must be zero. Read-only, and any failure to
+    establish that -- a non-zero exit, an unparseable count, a timeout -- raises
+    ``checks_unavailable`` rather than falling through to an approval: an error
+    while proving a negative is not proof of the negative.
+    """
+    for endpoint in (
+        f"repos/{repo}/commits/{head_sha}/check-suites",
+        f"repos/{repo}/commits/{head_sha}/status",
+    ):
+        try:
+            result = subprocess.run(
+                ["gh", "api", endpoint, "--jq", ".total_count"], cwd=worktree,
+                capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+            raise ResultContractError("checks_unavailable") from exc
+        if result.returncode != 0:
+            raise ResultContractError("checks_unavailable")
+        try:
+            total = int((result.stdout or "").strip())
+        except ValueError as exc:
+            raise ResultContractError("checks_unavailable") from exc
+        if total != 0:
+            return False
+    return True
+
+
+def _check_state(worktree: Path, pr_url: str, *, repo: str, head_sha: str) -> str:
+    """Classify `gh pr checks --json state` for the post-merge delivery gate.
+
+    ``repo`` and ``head_sha`` identify the commit whose checks these are, and are
+    used only to corroborate an empty rollup. The caller has already verified both
+    against the live pull request (``_verify_pr_identity`` pins the PR to ``repo``;
+    ``view["headRefOid"] == delivery.head_sha`` is asserted, as ``pr_head_drift``,
+    on every path reaching here), so neither is re-derived loosely.
+
+    Three facts about gh 2.89.0 shape this, each confirmed against the live CLI:
+
+    * ``--json`` short-circuits the exit-code logic. ``checksRun`` returns
+      ``opts.Exporter.Write(...)`` *before* the tail that maps failures to
+      ``SilentError`` (exit 1) and pending runs to ``PendingError`` (exit 8), so
+      with ``--json`` gh exits 0 whatever the checks say. (A PR with FAILURE and
+      IN_PROGRESS runs exits 0 with ``--json`` and 1 without.) There is no exit-8
+      branch to write: the one removed from here could never fire.
+    * An EMPTY status-check rollup on the head commit fails earlier, inside
+      ``populateStatusChecks``: exit 1, EMPTY stdout, and
+      ``no checks reported on the '<branch>' branch`` on stderr. It never emits
+      ``[]`` with exit 0, so the old code's ``json.loads("")`` raised
+      ``checks_unavailable`` and wedged the gate permanently -- the issue never
+      closed, ``registration_state`` stayed ``active``, and the TODO stayed
+      ineligible forever. That signal is necessary but NOT sufficient for green;
+      see ``_rollup_is_honestly_empty``.
+    * Every other nonzero exit (auth, network, deleted PR, unknown JSON field)
+      also leaves stdout empty. A nonzero exit therefore never carries a payload
+      worth classifying, and one that somehow did could otherwise let a stray
+      ``[{"state": "SUCCESS"}]`` approve a delivery gh had just errored on.
+
+    This DELIBERATELY DIFFERS from ``ship.ci_is_green``, which still answers green
+    for an empty rollup with no corroboration ("treated as green so approve does
+    not deadlock on repos without required checks"). That rule is unsound for the
+    same reason it was unsound here -- an empty rollup has at least six causes and
+    only one of them is "no gate to pass" -- and ``ship`` is the side that should
+    move. Until it does, the divergence is intentional: do not "restore" it by
+    deleting the corroboration below.
+    """
     try:
         result = subprocess.run(
             ["gh", "pr", "checks", pr_url, "--json", "state"], cwd=worktree,
@@ -90,24 +254,45 @@ def _check_state(worktree: Path, pr_url: str) -> str:
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
         raise ResultContractError("checks_unavailable") from exc
-    if result.returncode == 8:
-        return "pending"
+    if result.returncode != 0:
+        if (result.stdout or "").strip() or not (
+            (result.stderr or "").lstrip().startswith(_NO_CHECKS_STDERR_PREFIX)
+        ):
+            raise ResultContractError("checks_unavailable")
+        if _rollup_is_honestly_empty(worktree, repo=repo, head_sha=head_sha):
+            return "passed"
+        raise ResultContractError("checks_unavailable")
     try:
         checks = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise ResultContractError("checks_unavailable") from exc
+    # The list check guards the emptiness shortcut below, so the two are written
+    # as one decision: without it `json.loads` returning `0`, `null` or `{}` is
+    # falsy and would be approved as "no checks at all", and `5` or `true` would
+    # reach the iteration and escape as a bare `TypeError` rather than a block.
     if not isinstance(checks, list):
         raise ResultContractError("checks_unavailable")
     if not checks:
-        if result.returncode == 0:
+        # "No checks at all" makes the same claim as an empty rollup, so it earns
+        # the same corroboration. gh 2.89.0 cannot reach here -- `populateStatusChecks`
+        # errors on an empty rollup before the exporter runs -- but erroring on
+        # empty output is a known `--json` wart and normalising it to `[]` with
+        # exit 0 is the natural upstream fix. Approving uncorroborated here would
+        # lean on a guarantee enforced in a Go binary this repository does not
+        # control, which is exactly what the anchored sentinel above refuses to do.
+        if _rollup_is_honestly_empty(worktree, repo=repo, head_sha=head_sha):
             return "passed"
         raise ResultContractError("checks_unavailable")
-    states = {item.get("state") for item in checks if isinstance(item, dict)}
-    if states <= {"SUCCESS", "SKIPPED"}:
-        return "passed"
-    if states & {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}:
-        return "failed"
-    return "pending"
+    # Strict, per item: one entry we cannot read makes the whole answer
+    # unreadable. Filtering such entries out instead is how the old code turned
+    # a payload of non-dicts into an empty -- and therefore "green" -- state set.
+    states: set[str] = set()
+    for item in checks:
+        state = item.get("state") if isinstance(item, dict) else None
+        if not isinstance(state, str):
+            raise ResultContractError("checks_unavailable")
+        states.add(state)
+    return _classify_check_states(states)
 
 
 def _github_identity(worktree: Path) -> tuple[str, str]:
@@ -419,11 +604,24 @@ def reconcile_todo_completion(
             return _block(gate_id, "pr_head_drift")
 
     try:
-        checks = _check_state(registration.worktree, delivery.pr_url)
+        checks = _check_state(
+            registration.worktree, delivery.pr_url,
+            repo=repo, head_sha=delivery.head_sha,
+        )
     except ResultContractError as exc:
         return _block(gate_id, exc.code)
     if checks == "failed":
-        return _block(gate_id, "required_checks_failed")
+        # Not "required_checks_failed": `gh pr checks` runs without `--required`,
+        # so this counts advisory checks too. Passing `--required` instead would
+        # be worse. gh 2.89.0 carries a SECOND format string for that mode,
+        # `no required checks reported on the '%s' branch`, so a repository with
+        # CI but no branch protection -- no check is marked required -- would get
+        # that message for every PR. It does not match the anchored
+        # `_NO_CHECKS_STDERR_PREFIX`, which is correct: `_check_state` would raise
+        # `checks_unavailable` immediately, never reaching corroboration, and the
+        # gate would block forever, reinstating the wedge this was just fixed for.
+        # We measure every check and name the code for what we measured.
+        return _block(gate_id, "pr_checks_failed")
     if checks == "pending" or view.get("state") != "MERGED":
         return True
 
