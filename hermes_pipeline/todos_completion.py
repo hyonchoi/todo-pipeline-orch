@@ -1,4 +1,4 @@
-"""Verified PR handoff, human merge gate, and idempotent GitHub issue closeout."""
+"""Verified PR handoff and idempotent GitHub issue closeout."""
 from __future__ import annotations
 
 import datetime as dt
@@ -12,9 +12,7 @@ from typing import Literal
 from . import github_issues
 from .github_issues import IN_PROGRESS_LABEL, parse_github_remote
 from .kanban_tasks import (
-    _mark_gate_needs_input,
     _show_task_payload,
-    complete_todo_kanban_task,
     get_todo_kanban_tasks,
 )
 from .result_contract import (
@@ -24,17 +22,12 @@ from .result_contract import (
     render_result_template,
     sanitize_result_text,
 )
-from .review_reconciliation import (
-    REVIEW_ACCEPTANCE_KEY,
-    RetryableReviewRegistration,
-    _create_task,
-)
+from .review_reconciliation import _create_task
 from .state import _atomic_write_text
 
 log = logging.getLogger(__name__)
 
 FINISH_KEY = "finish"
-HUMAN_GATE_KEY = "human-gate"
 
 
 def _git(worktree: Path, *args: str) -> str:
@@ -494,78 +487,42 @@ def _verify_finish(worktree: Path, result, accepted_head: str,
         raise ResultContractError("finish_review_head_mismatch")
 
 
-def _block(gate_id: str, code: str) -> bool:
-    _mark_gate_needs_input(
-        gate_id, sanitize_result_text(f"TPO delivery blocked: {code}", maximum=1000)
+def _blocked(tick_id: str, code: str) -> bool:
+    """Report a delivery stall. Returning False is the whole signal.
+
+    The tick turns a False reconciliation into a circuit-breaker no-progress
+    observation and an operator alert; there is no card to mark, because TPO
+    manufactures none.
+    """
+    log.error(
+        "tick %s: delivery blocked: %s", tick_id,
+        sanitize_result_text(code, maximum=1000),
     )
     return False
-
-
-def _needs_input(*, tasks: dict, registration, tenant: str, tick_id: str,
-                 parent: str, code: str) -> bool:
-    gate = tasks.get(HUMAN_GATE_KEY)
-    gate_id = gate.task_id if gate is not None else _create_task(
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key=HUMAN_GATE_KEY, title="Human delivery intervention",
-        prompt="TPO detected immutable delivery drift; a human must inspect it.",
-        worktree=registration.worktree, assignee=None, parent=parent,
-        prompt_client=registration.prompt_client, gate=True,
-    )
-    _mark_gate_needs_input(
-        gate_id, sanitize_result_text(f"TPO delivery blocked: {code}", maximum=1000)
-    )
-    return False
-
-
-def _human_merge_gate(*, tasks: dict, registration, tenant: str,
-                      tick_id: str, parent: str) -> str:
-    gate = tasks.get(HUMAN_GATE_KEY)
-    if gate is not None:
-        return gate.task_id
-    return _create_task(
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key=HUMAN_GATE_KEY, title="Human merge gate",
-        prompt="Waiting for a human to merge the exact verified pull request.",
-        worktree=registration.worktree, assignee=None, parent=parent,
-        prompt_client=registration.prompt_client, gate=True,
-    )
 
 
 def flag_issue_drift(
     *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str, code: str,
     repo: str | None = None,
 ) -> bool:
-    """Block delivery on pinned-issue drift by marking the human gate ``needs_input``.
+    """Stop delivery on pinned-issue drift.
 
-    Creates the gate (parented to an existing card of the tick) when absent.
-    Without any card there is nothing to gate; the drift is logged and persisted
-    as a ``tracker_error`` decision so ``tpo status`` surfaces it. Always returns
-    False.
+    The drift is logged and persisted as a ``tracker_error`` decision so
+    ``tpo status`` surfaces it. Always returns False.
     """
-    registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
-    tasks = get_todo_kanban_tasks(tenant, tick_id)
-    if not tasks:
-        from .decision import record_tracker_error
+    load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
+    from .decision import record_tracker_error
 
-        log.warning(
-            "tick %s: pinned issue drift (%s) but no kanban card exists to gate",
-            tick_id, code,
+    try:
+        # The tick's own decision file is write-once and already exists, so
+        # the drift record lives under its own key.
+        record_tracker_error(
+            state_dir=state_dir, tick_id=f"{tick_id}-issue-drift", project_slug=tenant,
+            code=f"issue_drift:{code}", counts_as_no_progress=True,
         )
-        try:
-            # The tick's own decision file is write-once and already exists, so
-            # the drift record lives under its own key.
-            record_tracker_error(
-                state_dir=state_dir, tick_id=f"{tick_id}-issue-drift", project_slug=tenant,
-                code=f"issue_drift:{code}", counts_as_no_progress=True,
-            )
-        except FileExistsError:
-            log.debug("tick %s: issue drift decision already recorded", tick_id)
-        return False
-    parent = next(iter(tasks.values())).task_id
-    return _needs_input(
-        tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
-        parent=parent, code=code,
-    )
+    except FileExistsError:
+        log.debug("tick %s: issue drift decision already recorded", tick_id)
+    return _blocked(tick_id, f"issue_drift:{code}")
 
 
 def _run_marker(state_dir: Path, tick_id: str, name: str) -> Path:
@@ -587,13 +544,16 @@ def reconcile_todo_completion(
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
-    acceptance = tasks.get(REVIEW_ACCEPTANCE_KEY)
-    if acceptance is None or acceptance.status != "done":
-        return True
 
     finish = tasks.get(FINISH_KEY)
     if finish is None:
-        head = _accepted_head(state_dir, tick_id)
+        try:
+            # The accepted review head is written by the review reconciler when
+            # a review card reports a clean verdict. Its absence is the only
+            # "review not accepted yet" signal there is.
+            head = _accepted_head(state_dir, tick_id)
+        except ResultContractError:
+            return True
         _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo, create=True)
         _create_task(
             tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
@@ -613,7 +573,7 @@ def reconcile_todo_completion(
                 )
             ),
             worktree=registration.worktree, assignee=registration.assignee,
-            parent=acceptance.task_id, prompt_client=registration.prompt_client,
+            prompt_client=registration.prompt_client,
         )
         return True
     if finish.status != "done":
@@ -646,71 +606,32 @@ def reconcile_todo_completion(
             raise ResultContractError("pr_identity_mismatch")
         pr_number = int(pr_match.group(2))
     except ResultContractError as exc:
-        return _needs_input(
-            tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
-            parent=finish.task_id, code=exc.code,
-        )
+        return _blocked(tick_id, exc.code)
 
-    gate = tasks.get(HUMAN_GATE_KEY)
-    if gate is None:
-        try:
-            view = _pr_view(registration.worktree, delivery.pr_url)
-            if view.get("url") != delivery.pr_url:
-                raise ResultContractError("pr_identity_mismatch")
-            _verify_pr_identity(
-                registration.worktree, view, branch=registration.branch, repo=repo,
-            )
-            if (
-                view.get("state") not in ("OPEN", "MERGED")
-                or view.get("headRefOid") != delivery.head_sha
-            ):
-                raise ResultContractError("pr_head_drift")
-            if view.get("state") == "OPEN" and (
-                _remote_head(registration.worktree, registration.branch) != delivery.head_sha
-            ):
-                raise ResultContractError("remote_head_drift")
-        except ResultContractError as exc:
-            return _needs_input(
-                tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
-                parent=finish.task_id, code=exc.code,
-            )
-        try:
-            gate_id = _human_merge_gate(
-                tasks=tasks, registration=registration, tenant=tenant,
-                tick_id=tick_id, parent=finish.task_id,
-            )
-        except RetryableReviewRegistration:
-            log.warning("tick %s: human-gate registration remains pending; retrying", tick_id)
-            return False
-        if view.get("state") != "MERGED":
-            _mark_gate_needs_input(
-                gate_id,
-                sanitize_result_text(f"Human merge required: {delivery.pr_url}", maximum=1000),
-            )
-            return True
-    else:
-        gate_id = gate.task_id
-        try:
-            view = _pr_view(registration.worktree, delivery.pr_url)
-            # Same check as the sibling branch above, for the same reason: every
-            # judgement below -- merge state, head, `_check_state`, the issue
-            # close -- is measured on the PR `gh` actually answered with, so the
-            # echoed `url` must be the PR the delivery named. `_verify_pr_identity`
-            # does not cover it: it pins the branch, base and repository, all of
-            # which another pull request of the same repository shares.
-            if view.get("url") != delivery.pr_url:
-                raise ResultContractError("pr_identity_mismatch")
-            _verify_pr_identity(
-                registration.worktree, view, branch=registration.branch, repo=repo,
-            )
-        except ResultContractError as exc:
-            return _block(gate_id, exc.code)
+    try:
+        view = _pr_view(registration.worktree, delivery.pr_url)
+        # Every judgement below -- merge state, head, `_check_state`, the issue
+        # close -- is measured on the PR `gh` actually answered with, so the
+        # echoed `url` must be the PR the delivery named. `_verify_pr_identity`
+        # does not cover it: it pins the branch, base and repository, all of
+        # which another pull request of the same repository shares.
+        if view.get("url") != delivery.pr_url:
+            raise ResultContractError("pr_identity_mismatch")
+        _verify_pr_identity(
+            registration.worktree, view, branch=registration.branch, repo=repo,
+        )
         if view.get("state") != "MERGED" and (
             view.get("state") != "OPEN" or view.get("headRefName") != registration.branch
         ):
-            return _block(gate_id, "pull_request_closed_or_drifted")
+            raise ResultContractError("pull_request_closed_or_drifted")
         if view.get("headRefOid") != delivery.head_sha:
-            return _block(gate_id, "pr_head_drift")
+            raise ResultContractError("pr_head_drift")
+        if view.get("state") == "OPEN" and (
+            _remote_head(registration.worktree, registration.branch) != delivery.head_sha
+        ):
+            raise ResultContractError("remote_head_drift")
+    except ResultContractError as exc:
+        return _blocked(tick_id, exc.code)
 
     try:
         checks = _check_state(
@@ -718,7 +639,7 @@ def reconcile_todo_completion(
             repo=repo, head_sha=delivery.head_sha,
         )
     except ResultContractError as exc:
-        return _block(gate_id, exc.code)
+        return _blocked(tick_id, exc.code)
     if checks == "failed":
         # Not "required_checks_failed": `gh pr checks` runs without `--required`,
         # so this counts advisory checks too. Passing `--required` instead would
@@ -727,24 +648,24 @@ def reconcile_todo_completion(
         # CI but no branch protection -- no check is marked required -- would get
         # that message for every PR. It does not match the anchored
         # `_NO_CHECKS_STDERR_PREFIX`, which is correct: `_check_state` would raise
-        # `checks_unavailable` immediately, never reaching corroboration, and the
-        # gate would block forever, reinstating the wedge this was just fixed for.
-        # We measure every check and name the code for what we measured.
-        return _block(gate_id, "pr_checks_failed")
+        # `checks_unavailable` immediately, never reaching corroboration, and
+        # delivery would stall forever, reinstating the wedge this was just
+        # fixed for. We measure every check and name what we measured.
+        return _blocked(tick_id, "pr_checks_failed")
     if checks == "pending" or view.get("state") != "MERGED":
+        # A verified, open pull request waiting on a human merge is not a
+        # stall: the run is delivered and the board says so.
         return True
 
     try:
-        outcome = close_issue_for_delivery(
+        close_issue_for_delivery(
             project_dir=project_dir, state_dir=state_dir, tick_id=tick_id,
             issue_number=registration.issue_number, pr_number=pr_number,
             pr_url=delivery.pr_url, repo=repo,
         )
     except github_issues.GitHubIssuesError as exc:
-        return _block(gate_id, exc.code)
-    if outcome == "pending":
-        return True
-    return complete_todo_kanban_task(tenant, gate_id)
+        return _blocked(tick_id, exc.code)
+    return True
 
 
 COMPLETION_MARKER = "<!-- tpo-completed tick={tick_id} pr={pr_number} -->"
@@ -771,7 +692,7 @@ def close_issue_for_delivery(
     pair), ``gh issue close``, remove ``tpo:in-progress``. A re-fetch then
     decides: closed, marker comment present, label gone → ``"closed"``;
     otherwise ``"pending"`` (propagation lag; retry next tick). Other
-    ``GitHubIssuesError`` propagate so the caller can block its gate.
+    ``GitHubIssuesError`` propagate so the caller can stall the delivery.
 
     Run markers (written only when ``runs/<tick_id>`` exists — a manual
     ``tick_id`` has none): ``issue-close-started`` before the first remote

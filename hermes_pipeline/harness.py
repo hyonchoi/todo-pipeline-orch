@@ -1983,59 +1983,6 @@ def _kanban_preflight(*, tenant: str) -> None:
         )
 
 
-def _auto_complete_gate_tasks(
-    tenant: str,
-    tick_id: str,
-    *,
-    completed_phase_key: str,
-    phases: list[Phase] | None = None,
-) -> None:
-    """Complete blocked gate tasks whose direct predecessor just finished.
-
-    Gate tasks are created as blocked with --parent pointing to their
-    predecessor. In kanban-as-scheduler mode, the kanban board should
-    unblock them when the parent finishes. However, if the kanban board
-    doesn't propagate the unblock signal, we auto-complete the gate to
-    let child phases proceed.
-
-    Only completes gates whose predecessor matches completed_phase_key,
-    preventing gates from auto-completing at registration time before
-    their parent phase has run.
-
-    Best-effort: exceptions are logged, not raised.
-    """
-    from .kanban_tasks import BLOCKED, complete_todo_kanban_task, get_todo_kanban_tasks
-
-    try:
-        tasks = get_todo_kanban_tasks(tenant, tick_id)
-    except Exception as e:
-        log.warning("failed to query kanban tasks for gate auto-complete: %s", e)
-        return
-
-    # Build predecessor map from the registered card set recovered from the tick:
-    # load_phases() (all profile phases) could map predecessors onto phases that
-    # exist as no kanban task, so gates would never match.
-    if phases is None:
-        from .phases import load_phases
-        phases = load_phases()
-    gate_predecessor = {}
-    for i, phase in enumerate(phases):
-        if getattr(phase, "gate", False) and i > 0:
-            gate_predecessor[phase.phase_key] = phases[i - 1].phase_key
-
-    for phase_key, info in tasks.items():
-        if info.status != BLOCKED:
-            continue
-        # Only auto-complete gates whose predecessor just finished.
-        pred = gate_predecessor.get(phase_key)
-        if pred is None or pred != completed_phase_key:
-            continue
-        if complete_todo_kanban_task(tenant, info.task_id):
-            log.info("auto-completed gate task %s (%s) after %s done", info.task_id, phase_key, completed_phase_key)
-        else:
-            log.warning("gate task %s (%s) remains blocked: auto-complete after %s done failed", info.task_id, phase_key, completed_phase_key)
-
-
 _PRE_RUN_STATUSES = (None, "todo", "ready", "blocked")
 _UNSTARTED_STATUSES = (None, "todo", "ready")
 
@@ -2046,15 +1993,13 @@ def _emit_status_transitions(
     *,
     monitor: _ConvergenceMonitor,
     todo_id: str,
-    on_completed: Callable[[str], None],
 ) -> None:
     """Emit monitor events for every status transition between two snapshots.
 
     Shared by ``poll_registered_phases`` and ``poll_pinned_run``. Keys are
     ordinary keys — dynamic cards (``review:0``, ``finish``) that appear
-    mid-run transition from ``None`` like any other. ``on_completed`` runs
-    after each ``phase_completed`` emission. ``ConvergenceHaltError`` raised by
-    the monitor propagates to the caller.
+    mid-run transition from ``None`` like any other. ``ConvergenceHaltError``
+    raised by the monitor propagates to the caller.
     """
     for phase_key, status in current.items():
         prev = previous.get(phase_key)
@@ -2068,7 +2013,6 @@ def _emit_status_transitions(
             log.info("phase %s: running -> done", phase_key)
             monitor.current_phase_key = None
             monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-            on_completed(phase_key)
 
         elif prev == "running" and status == "failed":
             log.info("phase %s: running -> failed", phase_key)
@@ -2090,12 +2034,10 @@ def _emit_status_transitions(
 
         elif prev in _PRE_RUN_STATUSES and status == "done":
             # Completed between polls without ever being observed as "running"
-            # (fast phase, coarse poll interval). Still emit the event and run
-            # the completion hook so downstream gates aren't left blocked.
+            # (fast phase, coarse poll interval). Still emit the event.
             log.info("phase %s: %s -> done", phase_key, prev or "none")
             monitor.current_phase_key = None
             monitor("phase_completed", {"phase_key": phase_key, "todo_id": todo_id, "duration_ms": 0})
-            on_completed(phase_key)
 
         elif prev in _PRE_RUN_STATUSES and status == "failed":
             log.info("phase %s: %s -> failed", phase_key, prev or "none")
@@ -2119,13 +2061,12 @@ def poll_registered_phases(
     """Poll already-registered kanban cards to completion.
 
     Registration is the production ``tpo tick`` path's job; this function never
-    creates cards. ``cards`` is the registered card set and keys every loop
-    decision: completion, gate terminality, and gate auto-completion.
+    creates or completes cards. ``cards`` is the registered card set and keys
+    the completion decision.
 
     1. Polls get_todo_kanban_status() until every card is terminal.
-    2. Auto-completes gate tasks whose predecessor just finished.
-    3. Emits JSONL events via monitor.
-    4. Calls observe_outcomes() to write the decision store.
+    2. Emits JSONL events via monitor.
+    3. Calls observe_outcomes() to write the decision store.
 
     Returns True if all cards completed successfully (all done), False otherwise.
     Raises ValueError when ``cards`` is empty.
@@ -2133,6 +2074,7 @@ def poll_registered_phases(
     if not cards:
         raise ValueError("poll_registered_phases requires a non-empty registered cards list")
     from .kanban_tasks import (
+        BLOCKED,
         TERMINAL_STATUSES,
         get_todo_kanban_status,
         observe_outcomes,
@@ -2147,31 +2089,15 @@ def poll_registered_phases(
         ", ".join(f"{k}={v}" for k, v in sorted(initial_status.items())) or "(none)",
     )
 
-    # Gate tasks will be auto-completed when their parent phase finishes,
-    # not at registration time — this ensures parent output exists before
-    # child phases can start.
-
     previous_status: dict[str, str] = {}
     all_terminal = False
     current_interval = poll_interval
-    card_by_key = {card.phase_key: card for card in cards}
     # Completion means every *registered* card is terminal — keying this on the
-    # profile phases would spin forever under a manifest fan-out.
-    expected_phase_keys = frozenset(card_by_key)
-
-    def _on_completed(phase_key: str) -> None:
-        # Auto-complete any gate task whose predecessor just finished.
-        _auto_complete_gate_tasks(project_slug, tick_id, completed_phase_key=phase_key, phases=cards)
-
-    def _is_terminal_status(phase_key: str, status: str) -> bool:
-        if status in TERMINAL_STATUSES:
-            return True
-        if status != "blocked":
-            return False
-        card = card_by_key.get(phase_key)
-        # A blocked registered gate waits for auto-completion; a blocked worker
-        # is stuck for good. An unregistered key is never terminal by omission.
-        return card is not None and not card.gate
+    # profile phases would spin forever under a manifest fan-out. ``blocked`` is
+    # terminal: TPO creates no blocked cards, so Hermes only blocks a card whose
+    # worker exhausted its failure limit, and that block is sticky.
+    expected_phase_keys = frozenset(card.phase_key for card in cards)
+    settled_statuses = TERMINAL_STATUSES | {BLOCKED}
 
     while not all_terminal:
         if cancel_event is not None:
@@ -2192,8 +2118,7 @@ def poll_registered_phases(
 
         try:
             _emit_status_transitions(
-                previous_status, status_map,
-                monitor=monitor, todo_id=todo_id, on_completed=_on_completed,
+                previous_status, status_map, monitor=monitor, todo_id=todo_id,
             )
         except ConvergenceHaltError:
             log.warning(
@@ -2209,10 +2134,7 @@ def poll_registered_phases(
         if not all_terminal:
             all_terminal = (
                 expected_phase_keys.issubset(status_map)
-                and all(
-                    _is_terminal_status(phase_key, status)
-                    for phase_key, status in status_map.items()
-                )
+                and all(status in settled_statuses for status in status_map.values())
             )
 
     try:
@@ -2244,10 +2166,10 @@ def poll_pinned_run(
     one would poll a stuck board forever. Its ``wait`` doubles as the backoff
     sleep; setting it ends the poll with ``{}``.
 
-    Unlike ``poll_registered_phases`` this never completes cards: gates
-    (``review-acceptance``, ``human-gate``) belong to the
-    ``tpo tick`` reconcilers, and dynamic cards (``review:0``, ``finish``)
-    appear on later ticks under the same tick id. Transition events are
+    Like ``poll_registered_phases`` this never completes cards; the dynamic
+    cards (``review:0``, ``review-fix:<n>``, ``finish``) are created by the
+    ``tpo tick`` reconcilers on later ticks under the same tick id.
+    Transition events are
     emitted for every key that *changes* relative to the initial fetch, which
     seeds the baseline: cards already terminal when this call starts (settled by
     an earlier tick under the same tick id) are reported in the returned map but
@@ -2283,9 +2205,6 @@ def poll_pinned_run(
         ", ".join(f"{k}={v}" for k, v in sorted(initial_status.items())) or "(none)",
     )
 
-    def _noop(_phase_key: str) -> None:
-        return None
-
     # Seed from the initial snapshot: this poller is called once per tick against
     # a long-lived tick id, sharing one monitor and one ConvergenceDetector across
     # calls. Starting from {} would re-emit phase_completed/phase_failed for every
@@ -2318,7 +2237,7 @@ def poll_pinned_run(
         halted = False
         try:
             _emit_status_transitions(
-                previous_status, status_map, monitor=monitor, todo_id=todo_id, on_completed=_noop
+                previous_status, status_map, monitor=monitor, todo_id=todo_id
             )
         except ConvergenceHaltError:
             log.warning(
@@ -2347,46 +2266,37 @@ def poll_pinned_run(
             return previous_status
 
 
-# ``todos_completion`` writes this marker under ``<state>/runs/<tick_id>/`` once the
-# delivery contract on the ``finish`` card has been verified (see ``_run_marker``).
-_FINISH_VERIFIED_MARKER = "finish-verified"
-
-
-def classify_pinned_run(status_map: Mapping[str, str], run_dir: Path | None) -> str:
+def classify_pinned_run(status_map: Mapping[str, str]) -> str:
     """Classify one settled status map of a plan-pinned (``requires_plan``) run.
 
-    * ``"failed"`` -- any card is ``failed``, or ``archived``: archiving cannot
-      happen under a pinned run, but it is terminal and must never be read as a
-      card still on its way to done.
-    * ``"delivered"`` -- the reconcilers' ``finish`` card is ``done``, the
-      ``human-gate`` card is ``blocked`` (the gate is waiting for a human merge,
-      which is where a pinned run ends), and ``todos_completion`` wrote its
-      ``finish-verified`` marker into *run_dir*. The marker, not the closed card,
-      is the proof the delivery contract was verified. ``blocked`` only: a
-      ``done`` human gate is a merged pull request, reported as ``"failed"``.
+    The verdict is read from the phase states alone. TPO manufactures no cards
+    to stand for its own opinion of a run, so every status in the map was put
+    there by Hermes and means exactly what Hermes means by it.
+
+    * ``"failed"`` -- any observed card is ``failed``, ``archived``, or
+      ``blocked``. ``blocked`` is now unambiguous: Hermes blocks a card only
+      when its worker has exhausted the failure limit
+      (``_record_task_failure`` -> ``gave_up``), and that block is sticky, so
+      the card will never move again. ``archived`` cannot happen under a pinned
+      run, but it is terminal and must never read as still on its way to done.
+    * ``"delivered"`` -- every card is ``done``, the ``finish`` card included.
+      ``finish`` is a plain worker card -- the one that runs the repository
+      gates, pushes the branch and opens the pull request -- and it is the last
+      card a pinned run ever creates, so it is what separates "delivered" from
+      "the reconciler has not created the next card yet": between hops the board
+      is legitimately all-done with the next card still to come. The
+      pull-request invariant is *not* re-checked here: the harness proves it
+      separately with ``verify_pull_request``.
     * ``"in_progress"`` -- anything else; the driver runs another tick.
-
-    The card keys are ``todos_completion.FINISH_KEY`` / ``HUMAN_GATE_KEY`` and
-    ``kanban_tasks.BLOCKED``, imported rather than restated so a rename in the
-    reconcilers cannot silently turn a delivered run into an endless one.
     """
-    from .kanban_tasks import BLOCKED
-    from .todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+    from .todos_completion import FINISH_KEY
 
-    if any(status in ("failed", "archived") for status in status_map.values()):
+    if any(
+        status in ("failed", "archived", "blocked") for status in status_map.values()
+    ):
         return "failed"
-    finish_done = status_map.get(FINISH_KEY) == "done"
-    if finish_done and status_map.get(HUMAN_GATE_KEY) == "done":
-        # A completed human gate means someone merged the pull request, which
-        # ``verify_pull_request`` rejects as ``pr_merged``: the run can never
-        # reach delivered, so fail it informatively rather than tick until the
-        # budget runs out.
-        return "failed"
-    if (
-        finish_done
-        and status_map.get(HUMAN_GATE_KEY) == BLOCKED
-        and run_dir is not None
-        and (run_dir / _FINISH_VERIFIED_MARKER).exists()
+    if status_map.get(FINISH_KEY) == "done" and all(
+        status == "done" for status in status_map.values()
     ):
         return "delivered"
     return "in_progress"
@@ -2400,9 +2310,9 @@ def pinned_tick_budget(step_keys: Iterable[str]) -> int:
     * ``len(step_keys)`` -- the registered cards are one ``plan:<task>`` per
       plan task and nothing else, so the step-key count is the task count, and
       one tick reconciles a task's result while the board runs the next.
-    * ``5`` -- the fixed reconciler hops that own no step key: opening the first
-      review round, ``review-acceptance``, ``finish``, ``human-gate``, and one
-      slack tick for a retryable registration.
+    * ``5`` -- slack for the fixed reconciler hops that own no step key:
+      opening ``review:0``, reconciling its verdict, creating ``finish``,
+      reconciling delivery, and one spare tick for a retryable registration.
     * ``2 * MAX_REVIEW_ROUNDS`` -- each review round can need one tick to
       register the round and another to reconcile its outcome.
 
@@ -3093,8 +3003,8 @@ class TickDrive:
     ``registration`` is the recovered registration, or ``None`` when no tick
     ever registered one; it is retained even on a mid-loop timeout so the caller
     can still quiesce the live run. ``observed_keys`` are the card keys seen in
-    any settled pinned status map -- dynamic cards (``review:0``, ``finish``,
-    ``human-gate``) included -- for the caller to union with the registered step
+    any settled pinned status map -- dynamic cards (``review:0``,
+    ``review-fix:<n>``, ``finish``) included -- for the caller to union with the registered step
     keys at shutdown; it is empty for a non-pinned drive, whose poller reports no
     map. ``ticks_run`` counts ``run_tick`` invocations, always 1 for a
     non-pinned drive. ``failure_code`` is ``None`` for a plain card failure:
@@ -3572,7 +3482,7 @@ def _drive_pinned_ticks(
                 # ``failed`` card instead would be wrong: a single failed card is a
                 # normal, non-halting outcome.
                 failure_code = "convergence_halt"
-            verdict = classify_pinned_run(status_map, registered.run_dir)
+            verdict = classify_pinned_run(status_map)
             if verdict == "failed":
                 break
             if verdict == "delivered":
@@ -4225,7 +4135,7 @@ def run_harness(
         )
         if shutdown_keys is not None and observed_keys:
             # A pinned run's reconcilers add cards that are not registered step
-            # keys (``review:0``, ``finish``, ``human-gate``). Requiring those
+            # keys (``review:0``, ``review-fix:<n>``, ``finish``). Requiring those
             # too is what stops shutdown from reading a board that is still
             # missing a dynamic card as quiescent. Registered order first, then
             # the extras, so the value stays deterministic; a non-pinned drive

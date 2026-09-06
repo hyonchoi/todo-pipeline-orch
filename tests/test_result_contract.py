@@ -1102,14 +1102,12 @@ def test_reconcile_completed_worker_validates_without_a_controller_gate(
     complete = mocker.patch(
         "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=True
     )
-    blocked = mocker.patch("hermes_pipeline.kanban_tasks._mark_gate_needs_input")
 
     for _ in range(2):  # Reconciliation is idempotent across ticks.
         assert reconcile_plan_task_results(
             project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
         )
     complete.assert_not_called()
-    blocked.assert_not_called()
 
 
 def test_reconcile_verifies_earlier_tasks_by_topology_and_the_tip_against_head(
@@ -1499,7 +1497,6 @@ def test_reconcile_invalid_result_reports_no_progress_without_a_blocking_card(
         },
     )
     mocker.patch("hermes_pipeline.kanban_tasks._show_task_payload", return_value={"runs": []})
-    blocked = mocker.patch("hermes_pipeline.kanban_tasks._mark_gate_needs_input")
     complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
 
     with caplog.at_level(logging.ERROR, logger="hermes_pipeline.kanban_tasks"):
@@ -1509,7 +1506,6 @@ def test_reconcile_invalid_result_reports_no_progress_without_a_blocking_card(
 
     assert "TPO result validation failed" in caplog.text
     assert "plan:task-1" in caplog.text
-    blocked.assert_not_called()
     complete.assert_not_called()
 
 

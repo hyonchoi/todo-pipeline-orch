@@ -441,14 +441,15 @@ def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, 
     ) in body
 
 
-def test_prepare_todo_phases_does_not_wrap_gate_phase_with_client_delegation(
-    tmp_path,
-):
+def test_prepare_todo_phases_registers_no_card_for_a_gate_phase(tmp_path):
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
 
     phases_path = tmp_path / "phases.yaml"
     phases_path.write_text(
         "phases:\n"
+        "  - phase_key: work\n"
+        "    name: Work\n"
+        "    prompt: Do the thing.\n"
         "  - phase_key: gate\n"
         "    name: Gate\n"
         "    gate: true\n"
@@ -462,12 +463,7 @@ def test_prepare_todo_phases_does_not_wrap_gate_phase_with_client_delegation(
         prompt_client="codex",
     )
 
-    assert "You are the Hermes dispatcher" not in prepared[0].body
-    assert "codex exec" not in prepared[0].body
-    assert "BEGIN EXTERNAL AGENT PROMPT" not in prepared[0].body
-    assert prepared[0].timeout == 1800
-    assert "External agent timeout" not in prepared[0].body
-    assert "tracked background execution" not in prepared[0].body
+    assert [task.phase_key for task in prepared] == ["work"]
 
 
 def test_prepare_todo_phases_rejects_invalid_todo_before_loading_phases(
@@ -643,11 +639,7 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
         "plan:task-2",
         "review",
         "finish",
-        "human",
     ]
-    assert [task.kind for task in prepared[:2]] == ["worker", "worker"]
-    assert [task.gate for task in prepared[:2]] == [False, False]
-    assert prepared[-1].kind == "human_gate"
     assert "Exact first instruction." in prepared[0].body
     assert "First exact criterion." in prepared[0].body
     assert "uv run pytest tests/test_first.py" in prepared[0].body
@@ -687,16 +679,14 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
         "01TICK:plan:task-2",
         "01TICK:review",
         "01TICK:finish",
-        "01TICK:human",
     ]
-    # Every worker chains directly onto the previous worker: no controller gate
-    # stands between two Plan tasks, so nothing pauses the run for human input.
+    # Every worker chains directly onto the previous worker: nothing pauses the
+    # run for human input, and the ``human`` gate phase registers no card.
     assert [card[card.index("--parent") + 1] for card in cards] == [
         "t_00000001",
         "t_00000002",
         "t_00000003",
         "t_00000004",
-        "t_00000005",
     ]
     assert all(
         card[card.index("--workspace") + 1] == f"dir:{tmp_path}"
@@ -706,8 +696,8 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
     assert cards[1][cards[1].index("--assignee") + 1] == "implementer"
     assert "--goal" in cards[0]
     assert "--goal" in cards[1]
-    # Only the final human gate is sticky-blocked; a Plan task never is.
-    assert [cmd[-1] for cmd in blocked] == ["t_00000006"]
+    # Nothing is ever forced into a status: registration only creates cards.
+    assert blocked == []
 
 
 def test_prepare_todo_phases_keeps_legacy_single_development_card_with_warning(
@@ -740,7 +730,6 @@ def test_prepare_todo_phases_keeps_legacy_single_development_card_with_warning(
         )
 
     assert [task.phase_key for task in prepared] == ["development"]
-    assert prepared[0].kind == "worker"
     assert "legacy" in caplog.text.lower()
     assert "single development card" in caplog.text.lower()
 
@@ -757,7 +746,6 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
             name="One",
             body="already rendered $body",
             turns=5,
-            gate=False,
             timeout=2400,
         ),
         PreparedPhaseTask(
@@ -765,7 +753,6 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
             name="Two",
             body="second body",
             turns=10,
-            gate=False,
             timeout=7200,
         ),
     ]
@@ -1513,59 +1500,8 @@ class TestPrepareAndCreateTodoPhases:
 
         assert task_ids == ["t_00000001", "t_00000002"]
 
-    def test_gate_phase_registered_with_sticky_block_without_goal(
-        self, tmp_path, mocker
-    ):
-        """Gate phases are nonspawnable and receive an explicit sticky block."""
-
-        phases = [
-            FakeGatePhase("phase_8_finish_branch", name="P8", turns=15),
-            FakeGatePhase("phase_9_ship", name="Ship Gate", gate=True),
-        ]
-        mocker.patch("hermes_pipeline.kanban_tasks.load_phases", return_value=phases)
-        mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout='{"id": "t_0000000a"}', stderr="")
-
-        _register_todo_phases(
-            todo_id="TODO-5",
-            tick_id="01TICK",
-            board_slug="demo",
-            project_dir=tmp_path,
-        )
-
-        create_commands = [
-            call.args[0]
-            for call in mock_run.call_args_list
-            if call.args[0][:3] == ["hermes", "kanban", "create"]
-        ]
-        gate_cmd = create_commands[2]
-        assert "--initial-status" not in gate_cmd
-        assert "--goal" not in gate_cmd
-        assert gate_cmd[gate_cmd.index("--parent") + 1] == "t_0000000a"
-        assert gate_cmd[gate_cmd.index("--assignee") + 1] == "-"
-
-        block_commands = [
-            call.args[0]
-            for call in mock_run.call_args_list
-            if call.args[0][:3] == ["hermes", "kanban", "block"]
-        ]
-        assert block_commands == [
-            [
-                "hermes",
-                "kanban",
-                "block",
-                "--kind",
-                "needs_input",
-                "t_0000000a",
-            ]
-        ]
-
-        phase8_cmd = create_commands[1]
-        assert "--goal" in phase8_cmd
-        assert "--initial-status" not in phase8_cmd
-
-    def test_gate_phase_is_not_assigned_to_pipeline_worker(self, tmp_path, mocker):
-        """Gate phases are human checkpoints and must not be worker-dispatchable."""
+    def test_gate_phase_creates_no_card_and_never_blocks(self, tmp_path, mocker):
+        """A gate phase registers nothing: no card, no forced status transition."""
 
         phases = [
             FakeGatePhase("phase_8_finish_branch", name="P8", turns=15),
@@ -1588,10 +1524,15 @@ class TestPrepareAndCreateTodoPhases:
             for call in mock_run.call_args_list
             if call.args[0][:3] == ["hermes", "kanban", "create"]
         ]
+        # The registration barrier and the one worker phase; the gate is absent.
+        assert len(create_commands) == 2
         phase8_cmd = create_commands[1]
-        gate_cmd = create_commands[2]
         assert phase8_cmd[phase8_cmd.index("--assignee") + 1] == "pipeline"
-        assert gate_cmd[gate_cmd.index("--assignee") + 1] == "-"
+        assert "--goal" in phase8_cmd
+        assert not any(
+            call.args[0][:3] == ["hermes", "kanban", "block"]
+            for call in mock_run.call_args_list
+        )
 
 
 class TestAllPhasesComplete:
@@ -2852,19 +2793,6 @@ class TestCancelTodoKanbanTasks:
             call.args[0][:3] == ["hermes", "kanban", "archive"]
             for call in run.call_args_list
         )
-def test_mark_gate_needs_input_uses_installed_hermes_positional_contract(mocker):
-    from hermes_pipeline.kanban_tasks import _mark_gate_needs_input
-
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-    run.return_value = mocker.Mock(returncode=0)
-
-    assert _mark_gate_needs_input("t_0000000a", "bounded reason")
-    assert run.call_args.args[0] == [
-        "hermes", "kanban", "block", "--kind", "needs_input",
-        "t_0000000a", "bounded reason",
-    ]
-
-
 def test_reconcile_plan_task_results_surfaces_registration_code(tmp_path, caplog):
     from hermes_pipeline.kanban_tasks import reconcile_plan_task_results
     from hermes_pipeline.result_contract import ResultContractError
@@ -2982,7 +2910,7 @@ def test_prepare_todo_phases_filters_spec_and_references_to_tracked_repository_f
 
 
 def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles(tmp_path):
-    """Workers see Spec/Reference; controller and human gates never do (C9)."""
+    """Every registered card is a worker, and every worker sees Spec/Reference (C9)."""
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
     from hermes_pipeline.phases import resolve_profile_phases_path
 
@@ -3006,15 +2934,21 @@ def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles
         )
 
     for profile in ("gstack", "agent-skills"):
-        for task in render(profile):
-            assert (marker in task.body) is (not task.gate), (profile, task.phase_key)
-            assert (decisions_marker in task.body) is (not task.gate), (profile, task.phase_key)
+        rendered = render(profile)
+        assert rendered
+        for task in rendered:
+            assert marker in task.body, (profile, task.phase_key)
+            assert decisions_marker in task.body, (profile, task.phase_key)
+        # The agent-skills gate phases register nothing at all.
+        assert not any(
+            task.phase_key in ("phase_1b_spec_gate", "phase_8_ship")
+            for task in rendered
+        ), profile
 
     native = {task.phase_key: task for task in render("native-sdd")}
     assert marker in native["plan:task-1"].body
     assert decisions_marker in native["plan:task-1"].body
     assert not any(key.startswith("validate:") for key in native)
-    assert all(task.kind == "worker" and not task.gate for task in native.values())
     assert not any(key.startswith(("phase_5", "phase_8", "phase_9")) for key in native)
 
 
@@ -3076,7 +3010,8 @@ def test_planned_phase_keys_are_exactly_the_cards_compilation_creates(tmp_path):
         assert not any(key.startswith("validate:") for key in keys)
         assert keys[:2] == ("plan:task-1", "plan:task-2")
 
-    assert planned_phase_keys(extra, source)[2:] == ("review", "human")
+    # The ``human`` gate phase contributes no registration key.
+    assert planned_phase_keys(extra, source)[2:] == ("review",)
 
 
 def test_reconcile_plan_task_results_forwards_repo_to_registration_loader(tmp_path, mocker):

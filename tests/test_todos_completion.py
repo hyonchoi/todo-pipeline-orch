@@ -184,18 +184,18 @@ def test_delivery_authority_must_match_the_project_repo(tmp_path, mocker):
         _delivery_authority(tmp_path, "01TICK", tmp_path, repo="acme/repo")
 
 
-def test_delivery_waits_for_clean_review_gate(tmp_path, mocker):
+def test_delivery_waits_for_the_accepted_review_head(tmp_path, mocker):
+    """No accepted head on disk means the review is not clean yet."""
     state = tmp_path / ".hermes"
     (state / "runs" / "01TICK").mkdir(parents=True)
     (state / "runs" / "01TICK" / "registration.json").write_text("{}")
-    (state / "runs" / "01TICK" / "accepted-review-head").write_text("a" * 40)
     mocker.patch(
         "hermes_pipeline.todos_completion.load_validated_registration",
         return_value=SimpleNamespace(),
     )
     mocker.patch(
         "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
-        return_value={"review-acceptance": SimpleNamespace(status="blocked")},
+        return_value={"review:0": SimpleNamespace(status="done")},
     )
     create = mocker.patch("hermes_pipeline.todos_completion._create_task")
     assert reconcile_todo_completion(
@@ -219,9 +219,7 @@ def test_delivery_creates_finish_only_after_clean_review(tmp_path, mocker):
     )
     mocker.patch(
         "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
-        return_value={
-            "review-acceptance": SimpleNamespace(task_id="review-gate", status="done")
-        },
+        return_value={"review:0": SimpleNamespace(task_id="review-id", status="done")},
     )
     mocker.patch("hermes_pipeline.todos_completion._git", return_value="a" * 40)
     mocker.patch(
@@ -233,7 +231,8 @@ def test_delivery_creates_finish_only_after_clean_review(tmp_path, mocker):
         project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", repo="acme/repo"
     )
     assert create.call_args.kwargs["key"] == "finish"
-    assert create.call_args.kwargs["parent"] == "review-gate"
+    # No parent: TPO creates the card exactly when its prerequisite is proven.
+    assert "parent" not in create.call_args.kwargs
     assert "Do not merge" in create.call_args.kwargs["prompt"]
 
 
@@ -1446,17 +1445,9 @@ def _finish_done_fixture(tmp_path, mocker, *, tasks, view):
     return state
 
 
-def _gate_tasks(status="blocked"):
+def _finish_tasks():
     return {
-        "review-acceptance": SimpleNamespace(task_id="review", status="done"),
-        "finish": SimpleNamespace(task_id="finish-id", status="done"),
-        "human-gate": SimpleNamespace(task_id="human-id", status=status),
-    }
-
-
-def _no_gate_tasks():
-    return {
-        "review-acceptance": SimpleNamespace(task_id="review", status="done"),
+        "review:0": SimpleNamespace(task_id="review", status="done"),
         "finish": SimpleNamespace(task_id="finish-id", status="done"),
     }
 
@@ -1466,49 +1457,46 @@ def _view(state="OPEN", head="a" * 40, url=PR_URL):
 
 
 @pytest.mark.parametrize(
-    ("tasks", "view", "code"),
+    ("view", "code"),
     [
-        pytest.param(_no_gate_tasks(), _view("MERGED", "b" * 40), "pr_head_drift", id="no-gate-merged-drifted"),
-        pytest.param(_no_gate_tasks(), _view("OPEN", "b" * 40), "pr_head_drift", id="no-gate-open-drifted"),
-        pytest.param(_no_gate_tasks(), _view("CLOSED"), "pr_head_drift", id="no-gate-closed"),
-        pytest.param(_gate_tasks(), _view("CLOSED"), "pull_request_closed_or_drifted", id="gate-closed"),
-        pytest.param(_gate_tasks(), _view("OPEN", "b" * 40), "pr_head_drift", id="gate-open-drifted"),
-        pytest.param(_gate_tasks(), _view("MERGED", "b" * 40), "pr_head_drift", id="gate-merged-drifted"),
-        # `gh pr view` echoes the PR it actually read back as `url`. Both branches
-        # must confirm it is the PR the delivery named: everything downstream --
-        # the merge state, the head, `_check_state`, and the issue close -- is
-        # then measured on whatever PR gh answered with. The gate branch omitted
-        # this check while its sibling performed it, so a `gh` that resolved the
-        # url to a different pull request of the same repository could close the
-        # issue on a green build belonging to another PR.
-        pytest.param(_no_gate_tasks(), _view("MERGED", url=OTHER_PR_URL),
-                     "pr_identity_mismatch", id="no-gate-url-mismatch"),
-        pytest.param(_gate_tasks(), _view("MERGED", url=OTHER_PR_URL),
-                     "pr_identity_mismatch", id="gate-url-mismatch"),
+        pytest.param(_view("CLOSED"), "pull_request_closed_or_drifted", id="closed"),
+        pytest.param(_view("OPEN", "b" * 40), "pr_head_drift", id="open-drifted"),
+        pytest.param(_view("MERGED", "b" * 40), "pr_head_drift", id="merged-drifted"),
+        # `gh pr view` echoes the PR it actually read back as `url`. Delivery must
+        # confirm it is the PR the delivery named: everything downstream -- the
+        # merge state, the head, `_check_state`, and the issue close -- is then
+        # measured on whatever PR gh answered with.
+        pytest.param(_view("MERGED", url=OTHER_PR_URL),
+                     "pr_identity_mismatch", id="url-mismatch"),
     ],
 )
-def test_pr_state_guards_block_the_gate_and_never_touch_the_issue(tmp_path, mocker, tasks, view, code):
-    state = _finish_done_fixture(tmp_path, mocker, tasks=tasks, view=view)
-    mocker.patch("hermes_pipeline.todos_completion._create_task", return_value="human-id")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+def test_pr_state_guards_stall_delivery_and_never_touch_the_issue(
+    tmp_path, mocker, caplog, view, code
+):
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=view)
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
     close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery")
     checks = mocker.patch("hermes_pipeline.todos_completion._check_state")
 
-    assert _reconcile(tmp_path, state) is False
-    mark.assert_called_once_with("human-id", f"TPO delivery blocked: {code}")
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert _reconcile(tmp_path, state) is False
+    assert code in caplog.text
+    # No card is created and no status is forced: the False return is the signal.
+    create.assert_not_called()
     close.assert_not_called()
     checks.assert_not_called()
 
 
-def test_remote_head_drift_blocks_before_the_gate_is_armed(tmp_path, mocker):
-    state = _finish_done_fixture(tmp_path, mocker, tasks=_no_gate_tasks(), view=_view())
+def test_remote_head_drift_stalls_delivery(tmp_path, mocker, caplog):
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view())
     remote_head = mocker.patch("hermes_pipeline.todos_completion._remote_head", return_value="c" * 40)
-    mocker.patch("hermes_pipeline.todos_completion._create_task", return_value="human-id")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
 
-    assert _reconcile(tmp_path, state) is False
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert _reconcile(tmp_path, state) is False
     remote_head.assert_called_once_with(tmp_path, "feat/native")
-    mark.assert_called_once_with("human-id", "TPO delivery blocked: remote_head_drift")
+    assert "remote_head_drift" in caplog.text
+    create.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -1518,54 +1506,56 @@ def test_remote_head_drift_blocks_before_the_gate_is_armed(tmp_path, mocker):
         pytest.param("https://github.com/acme/repo/pulls/7", id="not-a-pull-path"),
     ],
 )
-def test_pr_url_outside_the_project_repo_blocks_before_any_pr_read(tmp_path, mocker, pr_url):
-    state = _finish_done_fixture(tmp_path, mocker, tasks=_gate_tasks(), view=_view(url=pr_url))
+def test_pr_url_outside_the_project_repo_blocks_before_any_pr_read(
+    tmp_path, mocker, caplog, pr_url
+):
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view(url=pr_url))
     import hermes_pipeline.todos_completion as module
 
     module.parse_worker_result.return_value.delivery.pr_url = pr_url
     view = mocker.patch("hermes_pipeline.todos_completion._pr_view")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
     close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery")
 
-    assert _reconcile(tmp_path, state) is False
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert _reconcile(tmp_path, state) is False
     view.assert_not_called()
     close.assert_not_called()
-    mark.assert_called_once_with("human-id", "TPO delivery blocked: pr_identity_mismatch")
+    assert "pr_identity_mismatch" in caplog.text
 
 
 def test_open_pr_with_green_checks_keeps_waiting_for_the_human(tmp_path, mocker):
-    state = _finish_done_fixture(tmp_path, mocker, tasks=_gate_tasks(), view=_view())
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view())
     mocker.patch("hermes_pipeline.todos_completion._check_state", return_value="passed")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
     close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery")
-    complete = mocker.patch("hermes_pipeline.todos_completion.complete_todo_kanban_task")
 
     assert _reconcile(tmp_path, state) is True
-    mark.assert_not_called()
+    create.assert_not_called()
     close.assert_not_called()
-    complete.assert_not_called()
 
 
-def test_poisoned_worktree_origin_blocks_delivery_without_gh_writes(tmp_path, mocker, fake_gh):
+def test_poisoned_worktree_origin_blocks_delivery_without_gh_writes(
+    tmp_path, mocker, caplog, fake_gh
+):
     """A worktree-scoped ``url.insteadOf`` cannot redirect delivery to another repo."""
-    state = _finish_done_fixture(tmp_path, mocker, tasks=_gate_tasks(), view=_view("MERGED"))
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view("MERGED"))
     mocker.patch("hermes_pipeline.todos_completion._github_identity", return_value=("evil/repo", "main"))
     mocker.patch("hermes_pipeline.todos_completion._check_state", return_value="passed")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
 
-    assert _reconcile(tmp_path, state) is False
-    mark.assert_called_once_with("human-id", "TPO delivery blocked: delivery_authority_drift")
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert _reconcile(tmp_path, state) is False
+    assert "delivery_authority_drift" in caplog.text
     assert fake_gh.calls == []
 
 
 def test_finish_live_check_is_skipped_only_after_a_verified_marker(tmp_path, mocker):
+    """The marker latches a *local worktree* check no card status records."""
     import hermes_pipeline.todos_completion as module
 
-    state = _finish_done_fixture(tmp_path, mocker, tasks=_gate_tasks(), view=_view())
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view())
     marker = state / "runs" / "01TICK" / "finish-verified"
     mocker.patch("hermes_pipeline.todos_completion._check_state", return_value="pending")
     module._verify_finish.side_effect = ResultContractError("finish_review_head_mismatch")
-    mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
 
     assert _reconcile(tmp_path, state) is False
     assert module._verify_finish.call_args.kwargs["require_current"] is True
@@ -1580,34 +1570,17 @@ def test_finish_live_check_is_skipped_only_after_a_verified_marker(tmp_path, moc
     assert module._verify_finish.call_args.kwargs["require_current"] is False
 
 
-def test_unsafe_pr_url_never_reaches_the_human_merge_prompt(tmp_path, mocker):
+def test_unsafe_pr_url_is_refused_before_any_pr_read(tmp_path, mocker, caplog):
     import hermes_pipeline.todos_completion as module
 
-    state = _finish_done_fixture(tmp_path, mocker, tasks=_no_gate_tasks(), view=_view())
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view())
     module.parse_worker_result.return_value.delivery.pr_url = PR_URL + "\x07"
     module._pr_view.side_effect = lambda *_a: _view(url=PR_URL + "\x07")
-    mocker.patch("hermes_pipeline.todos_completion._create_task", return_value="human-id")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
 
-    assert _reconcile(tmp_path, state) is False
-    module._pr_view.assert_not_called()
-    mark.assert_called_once_with("human-id", "TPO delivery blocked: pr_identity_mismatch")
-
-
-def test_retryable_gate_registration_is_not_progress(tmp_path, mocker, caplog):
-    from hermes_pipeline.review_reconciliation import RetryableReviewRegistration
-
-    state = _finish_done_fixture(tmp_path, mocker, tasks=_no_gate_tasks(), view=_view())
-    mocker.patch(
-        "hermes_pipeline.todos_completion._create_task",
-        side_effect=RetryableReviewRegistration("pending"),
-    )
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
-
-    with caplog.at_level("WARNING", logger="hermes_pipeline.todos_completion"):
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
         assert _reconcile(tmp_path, state) is False
-    mark.assert_not_called()
-    assert "human-gate" in caplog.text
+    module._pr_view.assert_not_called()
+    assert "pr_identity_mismatch" in caplog.text
 
 
 def _reconcile(tmp_path, state, repo="acme/repo"):
@@ -1616,171 +1589,103 @@ def _reconcile(tmp_path, state, repo="acme/repo"):
     )
 
 
-def test_reconciliation_finish_to_gate_to_merged_closes_issue_and_completes_gate(
+def test_reconciliation_open_then_merged_closes_the_issue_without_a_gate_card(
     tmp_path, mocker
 ):
-    tasks = {
-        "review-acceptance": SimpleNamespace(task_id="review", status="done"),
-        "finish": SimpleNamespace(task_id="finish-id", status="done"),
-    }
+    tasks = _finish_tasks()
     view = {"state": "OPEN", "url": PR_URL, "headRefName": "feat/native", "headRefOid": "a" * 40}
     state = _finish_done_fixture(tmp_path, mocker, tasks=tasks, view=view)
-    create = mocker.patch("hermes_pipeline.todos_completion._create_task", return_value="human-id")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
     checks = mocker.patch("hermes_pipeline.todos_completion._check_state", return_value="passed")
     close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery",
                          return_value="pending")
-    complete = mocker.patch("hermes_pipeline.todos_completion.complete_todo_kanban_task",
-                            return_value=True)
 
+    # Open, green: the delivery is verified and simply waits for the human merge.
     assert _reconcile(tmp_path, state)
-    assert create.call_args.kwargs["key"] == "human-gate"
-    assert create.call_args.kwargs["parent"] == "finish-id"
-    mark.assert_called_once_with("human-id", f"Human merge required: {PR_URL}")
+    create.assert_not_called()
     close.assert_not_called()
 
-    tasks["human-gate"] = SimpleNamespace(task_id="human-id", status="blocked")
     view["state"] = "MERGED"
     assert _reconcile(tmp_path, state)
     close.assert_called_once_with(
         project_dir=tmp_path, state_dir=state, tick_id="01TICK", issue_number=3,
         pr_number=7, pr_url=PR_URL, repo="acme/repo",
     )
-    # A blocked tick before the gate existed must not have disabled the live check.
     import hermes_pipeline.todos_completion as module
     assert module._verify_finish.call_args.kwargs["require_current"] is False
-    complete.assert_not_called()
-    assert checks.call_count == 1
 
     close.return_value = "closed"
     assert _reconcile(tmp_path, state)
-    complete.assert_called_once_with("demo", "human-id")
     assert close.call_count == 2
-    assert create.call_count == 1
+    # Checks are read on every pass, including the open-and-green one.
+    assert checks.call_count == 3
+    create.assert_not_called()
 
 
 def test_reconciliation_never_creates_a_closeout_card(tmp_path, mocker):
-    tasks = {
-        "review-acceptance": SimpleNamespace(task_id="review", status="done"),
-        "finish": SimpleNamespace(task_id="finish-id", status="done"),
-    }
     view = {"state": "OPEN", "url": PR_URL, "headRefName": "feat/native", "headRefOid": "a" * 40}
-    state = _finish_done_fixture(tmp_path, mocker, tasks=tasks, view=view)
-    create = mocker.patch("hermes_pipeline.todos_completion._create_task", return_value="human-id")
-    mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=view)
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
+    mocker.patch("hermes_pipeline.todos_completion._check_state", return_value="passed")
     assert _reconcile(tmp_path, state)
-    assert [c.kwargs["key"] for c in create.call_args_list] == ["human-gate"]
+    create.assert_not_called()
     assert not (state / "runs" / "01TICK" / "closeout-date").exists()
 
 
 @pytest.mark.parametrize(
-    ("check_state", "should_complete"),
+    ("check_state", "should_close"),
     [pytest.param("passed", True, id="passed"), pytest.param("pending", False, id="pending")],
 )
-def test_merged_pr_creates_missing_gate_before_checks_without_remote_head(
-    tmp_path, mocker, check_state, should_complete
+def test_merged_pr_reads_checks_without_the_remote_head(
+    tmp_path, mocker, check_state, should_close
 ):
-    tasks = {
-        "review-acceptance": SimpleNamespace(task_id="review", status="done"),
-        "finish": SimpleNamespace(task_id="finish-id", status="done"),
-    }
     view = {"state": "MERGED", "url": PR_URL, "headRefName": "feat/native", "headRefOid": "a" * 40}
-    state = _finish_done_fixture(tmp_path, mocker, tasks=tasks, view=view)
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=view)
     remote_head = mocker.patch("hermes_pipeline.todos_completion._remote_head",
                                side_effect=ResultContractError("remote_branch_missing"))
-    checks = mocker.patch("hermes_pipeline.todos_completion._check_state", return_value=check_state)
-    create = mocker.patch("hermes_pipeline.todos_completion._create_task", return_value="human-id")
+    mocker.patch("hermes_pipeline.todos_completion._check_state", return_value=check_state)
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
     close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery",
                          return_value="closed")
-    complete = mocker.patch("hermes_pipeline.todos_completion.complete_todo_kanban_task",
-                            return_value=True)
-    events = mocker.Mock()
-    events.attach_mock(create, "create")
-    events.attach_mock(checks, "checks")
 
     assert _reconcile(tmp_path, state)
     remote_head.assert_not_called()
-    assert create.call_args.kwargs["key"] == "human-gate"
-    assert create.call_args.kwargs["gate"] is True
-    assert [event[0] for event in events.mock_calls] == ["create", "checks"]
-    if should_complete:
+    create.assert_not_called()
+    if should_close:
         close.assert_called_once()
-        complete.assert_called_once_with("demo", "human-id")
     else:
         close.assert_not_called()
-        complete.assert_not_called()
 
 
-def test_merged_pr_at_wrong_head_blocks_gate_without_touching_issue(tmp_path, mocker):
-    tasks = {
-        "review-acceptance": SimpleNamespace(task_id="review", status="done"),
-        "finish": SimpleNamespace(task_id="finish-id", status="done"),
-        "human-gate": SimpleNamespace(task_id="human-id", status="blocked"),
-    }
+def test_merged_pr_at_wrong_head_stalls_without_touching_the_issue(tmp_path, mocker, caplog):
     view = {"state": "MERGED", "url": PR_URL, "headRefName": "feat/native", "headRefOid": "b" * 40}
-    state = _finish_done_fixture(tmp_path, mocker, tasks=tasks, view=view)
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=view)
     close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery")
 
-    assert _reconcile(tmp_path, state) is False
-    mark.assert_called_once_with("human-id", "TPO delivery blocked: pr_head_drift")
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert _reconcile(tmp_path, state) is False
+    assert "pr_head_drift" in caplog.text
     close.assert_not_called()
 
 
-def test_gh_failure_during_issue_close_blocks_gate_and_retries_next_tick(tmp_path, mocker):
-    tasks = {
-        "review-acceptance": SimpleNamespace(task_id="review", status="done"),
-        "finish": SimpleNamespace(task_id="finish-id", status="done"),
-        "human-gate": SimpleNamespace(task_id="human-id", status="blocked"),
-    }
+def test_gh_failure_during_issue_close_stalls_then_recovers_next_tick(tmp_path, mocker, caplog):
     view = {"state": "MERGED", "url": PR_URL, "headRefName": "feat/native", "headRefOid": "a" * 40}
-    state = _finish_done_fixture(tmp_path, mocker, tasks=tasks, view=view)
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=view)
     mocker.patch("hermes_pipeline.todos_completion._check_state", return_value="passed")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
     close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery",
                          side_effect=GitHubIssuesError("gh_auth", "issue close"))
-    complete = mocker.patch("hermes_pipeline.todos_completion.complete_todo_kanban_task")
 
-    assert _reconcile(tmp_path, state) is False
-    mark.assert_called_once_with("human-id", "TPO delivery blocked: gh_auth")
-    complete.assert_not_called()
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert _reconcile(tmp_path, state) is False
+    assert "gh_auth" in caplog.text
 
     close.side_effect = None
     close.return_value = "closed"
     assert _reconcile(tmp_path, state)
-    complete.assert_called_once_with("demo", "human-id")
+    assert close.call_count == 2
 
 
-def test_flag_issue_drift_marks_existing_human_gate_and_skips_creation(tmp_path, mocker):
-    from hermes_pipeline.todos_completion import flag_issue_drift
-
-    state = tmp_path / ".hermes"
-    mocker.patch(
-        "hermes_pipeline.todos_completion.load_validated_registration",
-        return_value=SimpleNamespace(
-            todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"
-        ),
-    )
-    mocker.patch(
-        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
-        return_value={
-            "plan:task-1": SimpleNamespace(task_id="t-1", status="done"),
-            "human-gate": SimpleNamespace(task_id="gate-1", status="blocked"),
-        },
-    )
-    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
-
-    assert flag_issue_drift(
-        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
-        code="issue_drift", repo="acme/repo",
-    ) is False
-
-    create.assert_not_called()
-    mark.assert_called_once_with("gate-1", "TPO delivery blocked: issue_drift")
-
-
-def test_flag_issue_drift_creates_human_gate_under_an_existing_card(tmp_path, mocker):
+def test_flag_issue_drift_stalls_and_creates_no_card(tmp_path, mocker, caplog):
     from hermes_pipeline.todos_completion import flag_issue_drift
 
     state = tmp_path / ".hermes"
@@ -1790,25 +1695,17 @@ def test_flag_issue_drift_creates_human_gate_under_an_existing_card(tmp_path, mo
             todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"
         ),
     )
-    mocker.patch(
-        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
-        return_value={"plan:task-1": SimpleNamespace(task_id="t-1", status="in_progress")},
-    )
-    create = mocker.patch(
-        "hermes_pipeline.todos_completion._create_task", return_value="gate-new"
-    )
-    mark = mocker.patch("hermes_pipeline.todos_completion._mark_gate_needs_input")
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
 
-    assert flag_issue_drift(
-        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
-        code="issue_closed", repo="acme/repo",
-    ) is False
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert flag_issue_drift(
+            project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+            code="issue_drift", repo="acme/repo",
+        ) is False
 
     assert load.call_args.kwargs["repo"] == "acme/repo"
-    assert create.call_args.kwargs["key"] == "human-gate"
-    assert create.call_args.kwargs["parent"] == "t-1"
-    assert create.call_args.kwargs["gate"] is True
-    mark.assert_called_once_with("gate-new", "TPO delivery blocked: issue_closed")
+    create.assert_not_called()
+    assert "issue_drift" in caplog.text
 
 
 def test_flag_issue_drift_without_cards_only_logs(tmp_path, mocker, caplog):
@@ -1820,12 +1717,9 @@ def test_flag_issue_drift_without_cards_only_logs(tmp_path, mocker, caplog):
             todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"
         ),
     )
-    mocker.patch(
-        "hermes_pipeline.todos_completion.get_todo_kanban_tasks", return_value={}
-    )
     create = mocker.patch("hermes_pipeline.todos_completion._create_task")
 
-    with caplog.at_level("WARNING"):
+    with caplog.at_level("ERROR"):
         assert flag_issue_drift(
             project_dir=tmp_path, state_dir=tmp_path / ".hermes", tenant="demo",
             tick_id="01TICK", code="issue_drift",
@@ -1859,7 +1753,6 @@ def test_flag_issue_drift_without_cards_persists_a_decision(tmp_path, mocker):
         "hermes_pipeline.todos_completion.load_validated_registration",
         return_value=SimpleNamespace(todo_id="TODO-1", worktree=tmp_path, prompt_client="codex"),
     )
-    mocker.patch("hermes_pipeline.todos_completion.get_todo_kanban_tasks", return_value={})
 
     assert flag_issue_drift(
         project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK", code="issue_closed",
@@ -1909,9 +1802,7 @@ def test_finish_card_publishes_the_delivery_result_template(tmp_path, mocker):
     )
     mocker.patch(
         "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
-        return_value={
-            "review-acceptance": SimpleNamespace(task_id="review-gate", status="done")
-        },
+        return_value={"review:0": SimpleNamespace(task_id="review-id", status="done")},
     )
     mocker.patch("hermes_pipeline.todos_completion._git", return_value="a" * 40)
     mocker.patch(

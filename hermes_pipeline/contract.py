@@ -275,7 +275,11 @@ def bundled_profile_dir() -> Path:
 
 
 def required_capabilities(phases: list[Phase]) -> set[str]:
-    """Union of tool names declared across all non-gate phases in phases.yaml."""
+    """Union of tool names declared across every dispatched phase in phases.yaml.
+
+    A ``gate: true`` phase is skipped because it registers no kanban card and
+    runs no worker, so nothing it declares is ever demanded of the contract.
+    """
     caps: set[str] = set()
     for phase in phases:
         if phase.gate:

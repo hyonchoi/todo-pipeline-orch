@@ -835,7 +835,6 @@ class TestPollKanbanPhasesConsoleOutput:
         )
 
         monkeypatch.setattr("hermes_pipeline.harness.time.sleep", lambda *_a, **_kw: None)
-        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
         mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
         mocker.patch(
             "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
@@ -1112,9 +1111,7 @@ class _LiveRunStubs:
         """Script a plan-pinned run whose poller settles on *maps*, in order.
 
         The tick id stays the one the registration carries so later ticks pass
-        ``assert_tick_id_unchanged``, and the ``finish-verified`` marker
-        ``classify_pinned_run`` demands is written by the tick preceding each
-        poll — i.e. after ``clone_sandbox`` created the clone.
+        ``assert_tick_id_unchanged``.
         """
         remaining = list(maps)
         self.current_tick_id = self.pinned_registration.tick_id
@@ -1123,9 +1120,7 @@ class _LiveRunStubs:
         self.pr = dataclasses.replace(self.pr, head_ref=self.pinned_registration.branch)
 
         def tick(*_a, **_k):
-            run_dir = self.pinned_registration.run_dir
-            run_dir.mkdir(parents=True, exist_ok=True)
-            (run_dir / "finish-verified").write_text("a" * 40 + "\n")
+            self.pinned_registration.run_dir.mkdir(parents=True, exist_ok=True)
             return 0
 
         self.tick = tick
@@ -1178,19 +1173,17 @@ _LIVE_PINNED_ORDER = [
 
 
 def _delivered_board(keys=_LiveRunStubs.PINNED_KEYS, extra=("review:0",)) -> dict[str, str]:
-    """A settled, delivered plan-pinned board: finish done and the human gate blocked.
+    """A settled, delivered plan-pinned board: every card done, ``finish`` included.
 
     ``extra`` are the dynamic reconciler cards that are not registered step keys,
     which is exactly what the shutdown key union has to pick up.
     """
-    from hermes_pipeline.kanban_tasks import BLOCKED
-    from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+    from hermes_pipeline.todos_completion import FINISH_KEY
 
     return {
         **dict.fromkeys(keys, "done"),
         **dict.fromkeys(extra, "done"),
         FINISH_KEY: "done",
-        HUMAN_GATE_KEY: BLOCKED,
     }
 
 
@@ -1386,7 +1379,7 @@ class TestRunHarness:
         assert result.pr_numbers == (11,)
 
     def test_native_sdd_unexpected_selection_shuts_down_the_recovered_tick(self, live):
-        live.pin([{"plan:task-1": "done", "plan:task-2": "blocked"}, _delivered_board()])
+        live.pin([{"plan:task-1": "done", "plan:task-2": "running"}, _delivered_board()])
         live.current_tick_id = None  # tick 2 persisted no id: a different selection
 
         result = live.run(profile_name="native-sdd")
@@ -1405,7 +1398,7 @@ class TestRunHarness:
         the run must hand shutdown ``assume_workers_may_exist`` so no branch or
         PR is deleted underneath them.
         """
-        live.pin([{"plan:task-1": "done", "plan:task-2": "blocked"}, _delivered_board()])
+        live.pin([{"plan:task-1": "done", "plan:task-2": "running"}, _delivered_board()])
         scripted_tick = live.tick
         ticks = {"n": 0}
 
@@ -1437,7 +1430,7 @@ class TestRunHarness:
         Nothing spawned under the new id, so shutdown keeps its observed-card
         completeness set and remote cleanup still runs.
         """
-        live.pin([{"plan:task-1": "done", "plan:task-2": "blocked"}, _delivered_board()])
+        live.pin([{"plan:task-1": "done", "plan:task-2": "running"}, _delivered_board()])
         scripted_tick = live.tick
         ticks = {"n": 0}
 
@@ -1474,7 +1467,7 @@ class TestRunHarness:
         forfeiting the check entirely would let a missing card read as quiescent.
         The cards actually observed are the honest completeness set.
         """
-        stuck = {"plan:task-1": "done", "review:0": "blocked"}
+        stuck = {"plan:task-1": "done", "review:0": "running"}
         live.pin([dict(stuck), dict(stuck)])
 
         result = live.run(profile_name="native-sdd")
@@ -1534,7 +1527,7 @@ class TestRunHarness:
         assert live.order[-1] == "shutdown_run"
 
     def test_summary_line_reports_how_many_ticks_ran(self, live, capsys):
-        live.pin([{"plan:task-1": "done", "review:0": "blocked"}, _delivered_board()])
+        live.pin([{"plan:task-1": "done", "review:0": "running"}, _delivered_board()])
 
         live.run(profile_name="native-sdd")
 
@@ -2088,141 +2081,6 @@ class TestKanbanPreflight:
             _kanban_preflight(tenant="sandbox")
 
 
-class TestAutoCompleteGateTasks:
-    """Tests for _auto_complete_gate_tasks()."""
-
-    def test_completes_blocked_gate_tasks(self, mocker):
-        import json as _json
-
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
-
-        header_gate = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_9_ship",
-             "todo_id": "TODO-1", "project_slug": "demo"},
-            sort_keys=True,
-        )
-        header_dev = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_4_development",
-             "todo_id": "TODO-1", "project_slug": "demo"},
-            sort_keys=True,
-        )
-
-        mock_data = [
-            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
-            {"id": "t_dev", "status": "ready", "body": header_dev + "\nphase"},
-        ]
-
-        mock_run = mocker.patch("subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
-        mock_complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
-
-        phases = [
-            Phase(phase_key="phase_8_finish_branch", name="Phase 8", prompt="p8", tools="", turns=0),
-            Phase(phase_key="phase_9_ship", name="Phase 9", prompt="", tools="", turns=0, gate=True),
-        ]
-
-        _auto_complete_gate_tasks(
-            "demo", "01TICK", completed_phase_key="phase_8_finish_branch", phases=phases
-        )
-
-        mock_complete.assert_called_once_with("demo", "t_gate")
-
-    def test_does_not_log_success_when_completion_fails(self, mocker, caplog):
-        import json as _json
-
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
-
-        header_gate = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_9_ship",
-             "todo_id": "TODO-1", "project_slug": "demo"},
-            sort_keys=True,
-        )
-        mock_data = [
-            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
-        ]
-
-        mock_run = mocker.patch("subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
-        mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
-
-        with caplog.at_level("INFO"):
-            phases = [
-                Phase(phase_key="phase_8_finish_branch", name="Phase 8", prompt="p8", tools="", turns=0),
-                Phase(phase_key="phase_9_ship", name="Phase 9", prompt="", tools="", turns=0, gate=True),
-            ]
-            _auto_complete_gate_tasks(
-                "demo", "01TICK", completed_phase_key="phase_8_finish_branch", phases=phases
-            )
-
-        assert "auto-completed gate task" not in caplog.text
-
-    def test_warns_when_completion_fails(self, mocker, caplog):
-        import json as _json
-
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
-
-        header_gate = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_9_ship",
-             "todo_id": "TODO-1", "project_slug": "demo"},
-            sort_keys=True,
-        )
-        mock_data = [
-            {"id": "t_gate", "status": "blocked", "body": header_gate + "\ngate"},
-        ]
-
-        mock_run = mocker.patch("subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
-        mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False)
-
-        with caplog.at_level("WARNING"):
-            phases = [
-                Phase(phase_key="phase_8_finish_branch", name="Phase 8", prompt="p8", tools="", turns=0),
-                Phase(phase_key="phase_9_ship", name="Phase 9", prompt="", tools="", turns=0, gate=True),
-            ]
-            _auto_complete_gate_tasks(
-                "demo", "01TICK", completed_phase_key="phase_8_finish_branch", phases=phases
-            )
-
-        assert "t_gate" in caplog.text
-        assert "phase_9_ship" in caplog.text
-        assert "remains blocked" in caplog.text
-
-    def test_skips_non_blocked_tasks(self, mocker):
-        import json as _json
-
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
-
-        header = _json.dumps(
-            {"tick_id": "01TICK", "phase_key": "phase_2_autoplan",
-             "todo_id": "TODO-1", "project_slug": "demo"},
-            sort_keys=True,
-        )
-
-        mock_data = [
-            {"id": "t1", "status": "running", "body": header},
-            {"id": "t2", "status": "done", "body": header.replace("phase_2_autoplan", "phase_3")},
-        ]
-
-        mock_run = mocker.patch("subprocess.run")
-        mock_run.return_value = mocker.Mock(returncode=0, stdout=_json.dumps(mock_data), stderr="")
-        mock_complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
-
-        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")
-
-        mock_complete.assert_not_called()
-
-    def test_is_best_effort_on_query_failure(self, mocker):
-        """If get_todo_kanban_tasks raises, the function returns without error."""
-        from hermes_pipeline.harness import _auto_complete_gate_tasks
-
-        mocker.patch(
-            "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
-            side_effect=RuntimeError("query failed"),
-        )
-
-        _auto_complete_gate_tasks("demo", "01TICK", completed_phase_key="phase_2_autoplan")  # Should not raise
-
-
 class TestPollRegisteredPhaseTransitions:
     """Transition and event semantics of poll_registered_phases() on a registered card set."""
 
@@ -2280,7 +2138,6 @@ class TestPollRegisteredPhaseTransitions:
         observe.assert_not_called()
 
     def test_emits_phase_failed_event_on_kanban_failure(self, tmp_path, mocker):
-        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
         mocker.patch("time.sleep")
         mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
         mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=[
@@ -2297,7 +2154,6 @@ class TestPollRegisteredPhaseTransitions:
         assert failed[0]["phase_key"] == "phase_2_autoplan"
 
     def test_emits_phase_blocked_event_on_kanban_block(self, tmp_path, mocker):
-        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
         mocker.patch("time.sleep")
         mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
         mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=[
@@ -2318,7 +2174,6 @@ class TestPollRegisteredPhaseTransitions:
         assert blocked[0]["phase_key"] == "phase_4_development"
 
     def test_convergence_halt_stops_polling(self, tmp_path, mocker):
-        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
         mocker.patch("time.sleep")
         mock_observe = mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
 
@@ -2343,53 +2198,11 @@ class TestPollRegisteredPhaseTransitions:
         assert result is False
         mock_observe.assert_called_once()
 
-    def test_auto_completes_blocked_gates(self, tmp_path, mocker):
-        # Record what had already been emitted at each auto-complete call: the
-        # gate hook must run *after* the phase_completed event for that key, so
-        # the event log never lags the board mutation.
-        emitted_at_call = []
-
-        def _record(*_args, completed_phase_key, **_kwargs):
-            written = (tmp_path / "events.jsonl").exists()
-            last = [e["event_type"] for e in self._events(tmp_path)][-1:] if written else []
-            emitted_at_call.append((completed_phase_key, last))
-
-        mock_auto = mocker.patch(
-            "hermes_pipeline.harness._auto_complete_gate_tasks", side_effect=_record
-        )
-        call_count = [0]
-
-        def fake_status(*args, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
-                return {"phase_2_autoplan": "running", "phase_2b_plan_gate": "blocked"}
-            return {"phase_2_autoplan": "done", "phase_2b_plan_gate": "done"}
-
-        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=fake_status)
-        mocker.patch("time.sleep")
-        mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
-        monitor, detector = self._monitor(tmp_path)
-        cards = [
-            Phase(phase_key="phase_2_autoplan", name="Autoplan"),
-            Phase(phase_key="phase_2b_plan_gate", name="Plan gate", gate=True),
-        ]
-
-        self._poll(tmp_path, monitor, detector, cards)
-
-        mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2_autoplan", phases=cards)
-        mock_auto.assert_any_call("demo", "01TICK", completed_phase_key="phase_2b_plan_gate", phases=cards)
-        assert mock_auto.call_count == 2
-        assert emitted_at_call == [
-            ("phase_2_autoplan", ["phase_completed"]),
-            ("phase_2b_plan_gate", ["phase_completed"]),
-        ]
-
     def test_emits_phase_failed_when_ready_transitions_directly_to_failed(self, tmp_path, mocker):
         """Regression: a phase can jump straight from ready/blocked to failed
         without ever passing through running. Prior to this fix, such a
         transition was silently absorbed by the terminal-status check without
         emitting phase_failed or being seen by the convergence detector."""
-        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
         mocker.patch("time.sleep")
         mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
         mocker.patch(
@@ -2408,7 +2221,6 @@ class TestPollRegisteredPhaseTransitions:
         """Regression: fixed 5s poll interval added constant load for
         long-running phases. Interval should grow while status is unchanged
         and reset when a transition occurs."""
-        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
         mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
 
         sleep_calls = []
@@ -2460,13 +2272,6 @@ class TestPollPinnedRun:
         )
         kwargs.update(overrides)
         return poll_pinned_run(**kwargs)
-
-    @staticmethod
-    def _forbid_auto_complete(mocker):
-        def _boom(*_args, **_kwargs):
-            raise AssertionError("poll_pinned_run must never complete cards")
-
-        return mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks", side_effect=_boom)
 
     class _ScriptExhausted(BaseException):
         """Not an Exception: poll_pinned_run's ``except Exception: continue``
@@ -2528,7 +2333,6 @@ class TestPollPinnedRun:
         return status, waiter
 
     def _run(self, tmp_path, mocker, snapshots, step_keys, **overrides):
-        self._forbid_auto_complete(mocker)
         mocker.patch("time.sleep")
         status, waiter = self._fake_status(mocker, snapshots)
         monitor, detector = self._monitor(tmp_path)
@@ -2541,9 +2345,10 @@ class TestPollPinnedRun:
         result, _ = self._run(tmp_path, mocker, [final, final], ["plan:task-1", "plan:task-2"])
         assert result == final
 
-    def test_settles_when_gate_blocked(self, tmp_path, mocker):
-        final = {"plan:task-1": "done", "human-gate": "blocked"}
-        result, _ = self._run(tmp_path, mocker, [final, final], ["plan:task-1", "human-gate"])
+    def test_settles_when_a_card_is_blocked(self, tmp_path, mocker):
+        """``blocked`` settles the poll; classification is the caller's job."""
+        final = {'plan:task-1': 'done', 'plan:task-2': 'blocked'}
+        result, _ = self._run(tmp_path, mocker, [final, final], ["plan:task-1", "plan:task-2"])
         assert result == final
 
     def test_settles_with_failed_card(self, tmp_path, mocker):
@@ -2602,23 +2407,21 @@ class TestPollPinnedRun:
             ("phase_completed", "review:0"),
         ]
 
-    def test_never_calls_auto_complete_gate_tasks(self, tmp_path, mocker):
+    def test_never_completes_cards(self, tmp_path, mocker):
         snapshots = [
-            {"plan:task-1": "running", "plan:task-2": "blocked"},
-            {"plan:task-1": "running", "plan:task-2": "blocked"},
-            # The tick reconciler, not the poller, moves the gate on after plan is done.
+            {"plan:task-1": "running", "plan:task-2": "todo"},
+            {"plan:task-1": "running", "plan:task-2": "todo"},
             {"plan:task-1": "done", "plan:task-2": "ready"},
             {"plan:task-1": "done", "plan:task-2": "done"},
         ]
-        self._forbid_auto_complete(mocker)
+        complete = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
         mocker.patch("time.sleep")
         _, waiter = self._fake_status(mocker, snapshots)
         monitor, detector = self._monitor(tmp_path)
-        from hermes_pipeline import harness
 
         result = self._poll(monitor, detector, ["plan:task-1", "plan:task-2"], cancel_event=waiter)
         assert result == {"plan:task-1": "done", "plan:task-2": "done"}
-        harness._auto_complete_gate_tasks.assert_not_called()
+        complete.assert_not_called()
 
     def test_cancel_before_first_poll_returns_empty_map(self, tmp_path, mocker):
         import threading
@@ -2641,7 +2444,6 @@ class TestPollPinnedRun:
     def test_cancel_after_populated_poll_returns_empty_map(self, tmp_path, mocker):
         """Cancellation is not a result: the last observed map is discarded, so a
         cancelled poll can never be mistaken for a settled one."""
-        self._forbid_auto_complete(mocker)
         sleep = mocker.patch("hermes_pipeline.harness.time.sleep")
         populated = {"plan:task-1": "running", "plan:task-2": "done"}
         # Script ends on a non-settling but populated poll; the fake then cancels.
@@ -2671,7 +2473,6 @@ class TestPollPinnedRun:
         assert len([e for e in self._events(tmp_path) if e["event_type"] == "phase_failed"]) == 3
 
     def test_poll_interval_backs_off_and_resets_on_change(self, tmp_path, mocker):
-        self._forbid_auto_complete(mocker)
         # The poller waits on cancel_event rather than time.sleep, so the waiter
         # records the backoff schedule.
         snapshots = [{"plan:task-1": "ready"}] + [{"plan:task-1": "running"}] * 4 + [{"plan:task-1": "done"}]
@@ -2692,7 +2493,6 @@ class TestPollPinnedRun:
     def test_tracks_current_phase_key_across_the_run(self, tmp_path, mocker):
         """current_phase_key drives partial reports on overall-timeout: it must
         name the in-flight phase mid-poll and clear once that phase completes."""
-        self._forbid_auto_complete(mocker)
         monitor, detector = self._monitor(tmp_path)
         observed: list[str | None] = []
         snapshots = [
@@ -2718,7 +2518,6 @@ class TestPollPinnedRun:
         no branch for it, so a running -> archived card emits nothing. Left alone,
         current_phase_key would keep naming it and an overall-timeout partial
         report would blame a phase that already settled."""
-        self._forbid_auto_complete(mocker)
         monitor, detector = self._monitor(tmp_path)
         snapshots = [{"plan:task-1": "ready"}, {"plan:task-1": "running"}, {"plan:task-1": "archived"}]
         _, waiter = self._fake_status(mocker, snapshots)
@@ -2734,7 +2533,6 @@ class TestPollPinnedRun:
     def test_second_call_does_not_replay_events_from_earlier_ticks(self, tmp_path, mocker):
         """Regression: per-tick calls share one monitor/detector. Cards already
         terminal at the initial fetch must not be re-emitted or re-recorded."""
-        self._forbid_auto_complete(mocker)
         first = {"plan:task-1": "failed", "build": "failed"}
         second = {"plan:task-1": "failed", "build": "failed", "review:0": "done"}
         _, waiter = self._fake_status(
@@ -2898,7 +2696,7 @@ class TestValidateLiveProfile:
         validate_live_profile(phases, name)
 
     def test_native_sdd_accepted(self):
-        """native-sdd's human-gate terminal is live-safe: the harness drives it across ticks."""
+        """native-sdd's terminal phase is live-safe: the harness drives it across ticks."""
         phases = load_phases(resolve_profile_phases_path("native-sdd"))
         validate_live_profile(phases, "native-sdd")
 
@@ -4490,7 +4288,6 @@ class TestPollRegisteredPhases:
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             side_effect=lambda **_kw: pytest.fail("poll_registered_phases must not register"),
         )
-        mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
         mocker.patch("time.sleep")
         observe = mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
         status = mocker.patch(
@@ -4522,9 +4319,11 @@ class TestPollRegisteredPhases:
         assert events.count("phase_started") == 2
         assert events.count("phase_completed") == 2
 
-    def test_poll_uses_supplied_cards_for_gate_terminality(self, tmp_path, mocker):
+    def test_poll_treats_a_blocked_card_as_terminal_and_fails_the_run(
+        self, tmp_path, mocker
+    ):
+        """A blocked card is Hermes's give-up signal: settle, and report failure."""
         from hermes_pipeline.harness import poll_registered_phases
-        from hermes_pipeline.kanban_tasks import KanbanTaskInfo
 
         mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
@@ -4532,55 +4331,29 @@ class TestPollRegisteredPhases:
         )
         mocker.patch("time.sleep")
         mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
-        board = {"a": "ready", "b": "blocked"}
         snapshots = iter([{"a": "running", "b": "blocked"}, {"a": "done", "b": "blocked"}])
+        last = {"a": "ready", "b": "blocked"}
 
         def status(*_a, **_k):
             try:
-                board.update(next(snapshots))
+                last.update(next(snapshots))
             except StopIteration:
                 pass
-            return dict(board)
-
-        class _TrippingCancel:
-            """Cancels after a bounded number of poll waits so a regression that
-            never auto-completes gate B fails (returns False) instead of hanging.
-            A raising status stub would not do: the poll loop swallows it."""
-
-            def __init__(self, budget):
-                self.budget = budget
-
-            def wait(self, _timeout):
-                self.budget -= 1
-                return self.budget < 0
-
-        def complete(_tenant, task_id):
-            board["b"] = "done"
-            return True
+            return dict(last)
 
         mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
-        mocker.patch(
-            "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
-            side_effect=lambda *_a: {
-                key: KanbanTaskInfo(task_id=f"t_{key}", phase_key=key, status=value, todo_id="TODO-1")
-                for key, value in board.items()
-            },
-        )
-        completed = mocker.patch(
-            "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", side_effect=complete
-        )
+        completed = mocker.patch("hermes_pipeline.kanban_tasks.complete_todo_kanban_task")
         monitor, detector = self._monitor(tmp_path)
-        cards = [Phase(phase_key="a", name="A"), Phase(phase_key="b", name="B", gate=True)]
+        cards = [Phase(phase_key="a", name="A"), Phase(phase_key="b", name="B")]
 
         result = poll_registered_phases(
             project_slug="demo", tick_id="01TICK", state_dir=tmp_path / ".hermes",
             todo_id="TODO-1", cards=cards,
             monitor=monitor, detector=detector, poll_interval=0.0, max_poll_interval=0.0,
-            cancel_event=_TrippingCancel(budget=5),
         )
 
-        assert result is True
-        completed.assert_called_once_with("demo", "t_b")
+        assert result is False
+        completed.assert_not_called()
 
     def test_poll_rejects_empty_cards(self, tmp_path, mocker):
         from hermes_pipeline.harness import poll_registered_phases
@@ -6607,8 +6380,7 @@ def _delivered_path_boards() -> tuple[dict[str, str], ...]:
     moves with the drive instead of a literal: if the delivered path ever needs
     another tick, the budget's lower bound tightens with it.
     """
-    from hermes_pipeline.kanban_tasks import BLOCKED
-    from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+    from hermes_pipeline.todos_completion import FINISH_KEY
 
     return (
         {"plan:task-1": "done", "plan:task-2": "done"},
@@ -6617,15 +6389,13 @@ def _delivered_path_boards() -> tuple[dict[str, str], ...]:
             "plan:task-1": "done",
             "plan:task-2": "done",
             "review:0": "done",
-            "review-acceptance": "done",
+            FINISH_KEY: "running",
         },
         {
             "plan:task-1": "done",
             "plan:task-2": "done",
             "review:0": "done",
-            "review-acceptance": "done",
             FINISH_KEY: "done",
-            HUMAN_GATE_KEY: BLOCKED,
         },
     )
 
@@ -7046,168 +6816,89 @@ class TestAssertTickIdUnchanged:
 class TestClassifyPinnedRun:
     """classify_pinned_run(): the pinned driver's per-tick verdict.
 
-    The keys are the reconcilers' own card keys, so the assertions read them
-    from ``todos_completion`` rather than restating string literals.
+    The verdict comes from the phase states alone; there is no marker file and
+    no synthesized card standing for TPO's own opinion of the run.
     """
 
     @staticmethod
-    def _keys():
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
-
-        return FINISH_KEY, HUMAN_GATE_KEY
-
-    @staticmethod
-    def _run_dir(tmp_path: Path, *, verified: bool) -> Path:
-        run_dir = tmp_path / "runs" / "01PINNED"
-        run_dir.mkdir(parents=True)
-        if verified:
-            (run_dir / "finish-verified").write_text("a" * 40 + "\n")
-        return run_dir
-
-    @staticmethod
     def _delivered_map():
-        from hermes_pipeline.kanban_tasks import BLOCKED
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+        from hermes_pipeline.todos_completion import FINISH_KEY
 
-        return {
-            "plan:task-1": "done",
-            "review-acceptance": "done",
-            FINISH_KEY: "done",
-            HUMAN_GATE_KEY: BLOCKED,
-        }
+        return {"plan:task-1": "done", "review:0": "done", FINISH_KEY: "done"}
 
-    def test_delivered_needs_finish_done_gate_blocked_and_marker(self, tmp_path: Path):
+    def test_every_card_done_is_delivered(self):
         from hermes_pipeline.harness import classify_pinned_run
 
-        run_dir = self._run_dir(tmp_path, verified=True)
+        assert classify_pinned_run(self._delivered_map()) == "delivered"
 
-        assert classify_pinned_run(self._delivered_map(), run_dir) == "delivered"
-
-    def test_missing_finish_verified_marker_is_in_progress(self, tmp_path: Path):
+    def test_delivered_does_not_depend_on_any_marker_file(self, tmp_path: Path):
+        """No sidecar is consulted: the same map is delivered with an empty disk."""
         from hermes_pipeline.harness import classify_pinned_run
 
-        run_dir = self._run_dir(tmp_path, verified=False)
+        assert not list(tmp_path.iterdir())
+        assert classify_pinned_run(self._delivered_map()) == "delivered"
 
-        assert classify_pinned_run(self._delivered_map(), run_dir) == "in_progress"
-
-    @pytest.mark.parametrize("gate_status", ["todo", "ready", "running"])
-    def test_gate_not_yet_blocked_is_in_progress(self, tmp_path: Path, gate_status):
+    @pytest.mark.parametrize("status", ["todo", "ready", "running"])
+    def test_any_unfinished_card_is_in_progress(self, status):
         from hermes_pipeline.harness import classify_pinned_run
+        from hermes_pipeline.todos_completion import FINISH_KEY
 
-        _finish, gate = self._keys()
-        run_dir = self._run_dir(tmp_path, verified=True)
-        status_map = dict(self._delivered_map(), **{gate: gate_status})
+        status_map = dict(self._delivered_map(), **{FINISH_KEY: status})
 
-        assert classify_pinned_run(status_map, run_dir) == "in_progress"
+        assert classify_pinned_run(status_map) == "in_progress"
 
-    def test_finish_not_done_is_in_progress(self, tmp_path: Path):
+    def test_failed_card_is_failed(self):
         from hermes_pipeline.harness import classify_pinned_run
-
-        finish, _gate = self._keys()
-        run_dir = self._run_dir(tmp_path, verified=True)
-        status_map = dict(self._delivered_map(), **{finish: "blocked"})
-
-        assert classify_pinned_run(status_map, run_dir) == "in_progress"
-
-    def test_in_progress_mid_run(self, tmp_path: Path):
-        from hermes_pipeline.harness import classify_pinned_run
-
-        run_dir = self._run_dir(tmp_path, verified=False)
 
         assert (
-            classify_pinned_run({"plan:task-1": "done", "plan:task-2": "blocked"}, run_dir)
-            == "in_progress"
-        )
-
-    def test_failed_card_is_failed(self, tmp_path: Path):
-        from hermes_pipeline.harness import classify_pinned_run
-
-        run_dir = self._run_dir(tmp_path, verified=False)
-
-        assert (
-            classify_pinned_run({"plan:task-1": "failed", "plan:task-2": "done"}, run_dir)
+            classify_pinned_run({"plan:task-1": "failed", "plan:task-2": "done"})
             == "failed"
         )
 
-    def test_archived_card_is_failed_not_progress(self, tmp_path: Path):
+    def test_blocked_card_is_failed(self):
+        """With no synthesized gates, ``blocked`` can only be Hermes's give-up."""
+        from hermes_pipeline.harness import classify_pinned_run
+        from hermes_pipeline.kanban_tasks import BLOCKED
+
+        assert (
+            classify_pinned_run({"plan:task-1": BLOCKED, "plan:task-2": "done"})
+            == "failed"
+        )
+
+    def test_archived_card_is_failed_not_progress(self):
         """``archived`` should never appear under a pinned run, but it is terminal
         and must never be mistaken for a card still on its way to done."""
         from hermes_pipeline.harness import classify_pinned_run
 
-        run_dir = self._run_dir(tmp_path, verified=False)
-
         assert (
-            classify_pinned_run({"plan:task-1": "archived", "plan:task-2": "done"}, run_dir)
+            classify_pinned_run({"plan:task-1": "archived", "plan:task-2": "done"})
             == "failed"
         )
 
-    def test_failed_wins_over_delivered(self, tmp_path: Path):
+    def test_failed_wins_over_delivered(self):
         from hermes_pipeline.harness import classify_pinned_run
 
-        run_dir = self._run_dir(tmp_path, verified=True)
         status_map = dict(self._delivered_map(), **{"review:0": "failed"})
 
-        assert classify_pinned_run(status_map, run_dir) == "failed"
+        assert classify_pinned_run(status_map) == "failed"
 
-    def test_empty_map_is_in_progress(self, tmp_path: Path):
+    def test_all_done_without_a_finish_card_is_in_progress(self):
+        """Between reconciler hops the board is legitimately all-done.
+
+        The plan workers close before the review card exists; reading that as
+        delivered would end the run with no pull request at all.
+        """
         from hermes_pipeline.harness import classify_pinned_run
-
-        run_dir = self._run_dir(tmp_path, verified=True)
-
-        assert classify_pinned_run({}, run_dir) == "in_progress"
-
-    def test_absent_run_dir_is_in_progress(self, tmp_path: Path):
-        from hermes_pipeline.harness import classify_pinned_run
-
-        assert classify_pinned_run(self._delivered_map(), tmp_path / "nope") == "in_progress"
-
-    def test_merged_human_gate_is_failed(self, tmp_path: Path):
-        """A ``done`` human gate means the PR was merged, which
-        ``verify_pull_request`` rejects as ``pr_merged``. Fail informatively
-        instead of ticking to the budget waiting for a ``blocked`` gate."""
-        from hermes_pipeline.harness import classify_pinned_run
-        from hermes_pipeline.todos_completion import HUMAN_GATE_KEY
-
-        run_dir = self._run_dir(tmp_path, verified=True)
-        status_map = dict(self._delivered_map(), **{HUMAN_GATE_KEY: "done"})
-
-        assert classify_pinned_run(status_map, run_dir) == "failed"
-
-    def test_merged_human_gate_is_failed_without_the_marker_too(self, tmp_path: Path):
-        from hermes_pipeline.harness import classify_pinned_run
-        from hermes_pipeline.todos_completion import HUMAN_GATE_KEY
-
-        run_dir = self._run_dir(tmp_path, verified=False)
-        status_map = dict(self._delivered_map(), **{HUMAN_GATE_KEY: "done"})
-
-        assert classify_pinned_run(status_map, run_dir) == "failed"
-
-    def test_done_human_gate_without_finish_is_still_in_progress(self, tmp_path: Path):
-        """Only a *delivered* finish plus a merged gate is the pr_merged shape."""
-        from hermes_pipeline.harness import classify_pinned_run
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
-
-        run_dir = self._run_dir(tmp_path, verified=False)
 
         assert (
-            classify_pinned_run(
-                {"plan:task-1": "done", FINISH_KEY: "running", HUMAN_GATE_KEY: "done"},
-                run_dir,
-            )
+            classify_pinned_run({"plan:task-1": "done", "plan:task-2": "done"})
             == "in_progress"
         )
 
-    def test_marker_path_matches_the_reconciler(self, tmp_path: Path):
-        """The marker the driver looks for is the one ``todos_completion`` writes."""
+    def test_empty_map_is_in_progress(self):
         from hermes_pipeline.harness import classify_pinned_run
-        from hermes_pipeline.todos_completion import _run_marker
 
-        state_dir = tmp_path / ".hermes"
-        marker = _run_marker(state_dir, "01PINNED", "finish-verified")
-        marker.parent.mkdir(parents=True)
-        marker.write_text("a" * 40 + "\n")
-
-        assert classify_pinned_run(self._delivered_map(), marker.parent) == "delivered"
+        assert classify_pinned_run({}) == "in_progress"
 
 
 class TestPinnedTickBudget:
@@ -7594,7 +7285,7 @@ class TestDriveTicks:
 
     def test_native_sdd_reaches_delivered_after_four_ticks(self, tmp_path: Path, mocker):
         from hermes_pipeline.harness import drive_ticks
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+        from hermes_pipeline.todos_completion import FINISH_KEY
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
@@ -7604,7 +7295,6 @@ class TestDriveTicks:
         registration, run_tick, poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 4, maps=maps, recorder=order
         )
-        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
 
         drive = drive_ticks(**kwargs)
 
@@ -7615,14 +7305,7 @@ class TestDriveTicks:
         assert drive.failure_code is None
         assert drive.registration is registration
         assert drive.observed_keys == frozenset(
-            {
-                "plan:task-1",
-                "plan:task-2",
-                "review:0",
-                "review-acceptance",
-                FINISH_KEY,
-                HUMAN_GATE_KEY,
-            }
+            {"plan:task-1", "plan:task-2", "review:0", FINISH_KEY}
         )
         # Registration is recovered on tick 1 only; later ticks re-assert the id.
         assert order.count("recover_pinned_registration") == 1
@@ -7638,7 +7321,7 @@ class TestDriveTicks:
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
         maps = [
-            {"plan:task-1": "done", "plan:task-2": "blocked"},
+            {"plan:task-1": "done", "plan:task-2": "running"},
             {"plan:task-1": "done", "plan:task-2": "failed"},
         ]
         registration, _run, _poll = self._pinned_patches(
@@ -7660,7 +7343,7 @@ class TestDriveTicks:
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
-        stuck = {"plan:task-1": "done", "plan:task-2": "blocked"}
+        stuck = {"plan:task-1": "done", "plan:task-2": "running"}
         registration, _run, _poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
         )
@@ -7678,16 +7361,14 @@ class TestDriveTicks:
     def test_native_sdd_reports_every_settled_board(self, tmp_path: Path, mocker):
         """Each settled tick emits ``tick_completed`` so the events log shows the hops."""
         from hermes_pipeline.harness import drive_ticks
-        from hermes_pipeline.kanban_tasks import BLOCKED
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
-        first = {"plan:task-1": "done", "plan:task-2": BLOCKED}
+        first = {"plan:task-1": "done", "plan:task-2": "running"}
         second = _delivered_board(keys=_PINNED_STEPS, extra=())
         registration, _run, _poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(first), dict(second)]
         )
-        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
 
         drive = drive_ticks(**kwargs)
 
@@ -7701,7 +7382,7 @@ class TestDriveTicks:
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
-        stuck = {"plan:task-1": "done", "plan:task-2": "blocked"}
+        stuck = {"plan:task-1": "done", "plan:task-2": "running"}
         self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
         )
@@ -7736,14 +7417,14 @@ class TestDriveTicks:
         assert drive.success is False
 
     def test_native_sdd_delivered_beats_stall_detection(self, tmp_path: Path, mocker):
-        """The real race: the board is already final on tick 1 and the marker
-        only lands during tick 2, so both settled maps are identical and the
-        classify-before-stall ordering is the only thing that decides. Testing
-        it with a *changing* map would let a stall-first driver pass.
+        """A delivered board ends the drive before the stall test can see it twice.
+
+        The verdict now comes from card states alone, so the board that settles
+        delivered on tick 1 is delivered on tick 1: a driver that tested for a
+        repeated map first would tick again and report ``tick_stalled``.
         """
         from hermes_pipeline.harness import drive_ticks
-        from hermes_pipeline.kanban_tasks import BLOCKED
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+        from hermes_pipeline.todos_completion import FINISH_KEY
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
@@ -7751,33 +7432,21 @@ class TestDriveTicks:
             "plan:task-1": "done",
             "plan:task-2": "done",
             FINISH_KEY: "done",
-            HUMAN_GATE_KEY: BLOCKED,
         }
-        marker = self._registration(state).run_dir / "finish-verified"
-
-        def _marker_lands_during_tick_two(call_number, _kwargs):
-            # ``todos_completion`` verifies the delivery and writes the marker on
-            # the tick *after* the finish card closed: the board does not move,
-            # so tick 1 and tick 2 settle on byte-identical maps.
-            if call_number == 2:
-                marker.parent.mkdir(parents=True, exist_ok=True)
-                marker.write_text("a" * 40 + "\n")
-
-        registration, _run, poll = self._pinned_patches(
+        _registration, _run, poll = self._pinned_patches(
             mocker,
             state,
             tick_ids=[_PINNED_TICK] * 2,
             maps=[dict(done), dict(done)],
-            on_poll=_marker_lands_during_tick_two,
         )
 
         drive = drive_ticks(**kwargs)
 
-        assert poll.calls and len(poll.calls) == 2
+        assert len(poll.calls) == 1
         assert drive.success is True
         assert drive.failure_code is None
         assert drive.tick_error is None
-        assert drive.ticks_run == 2
+        assert drive.ticks_run == 1
 
     def test_native_sdd_stall_compares_the_immediately_previous_tick(
         self, tmp_path: Path, mocker
@@ -7794,8 +7463,8 @@ class TestDriveTicks:
         maps = [
             {"plan:task-1": "done", "plan:task-2": "todo"},
             {"plan:task-1": "done", "plan:task-2": "ready"},
-            {"plan:task-1": "done", "plan:task-2": "blocked"},
-            {"plan:task-1": "done", "plan:task-2": "blocked"},
+            {"plan:task-1": "done", "plan:task-2": "running"},
+            {"plan:task-1": "done", "plan:task-2": "running"},
         ]
         registration, _run, poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 4, maps=maps
@@ -7819,8 +7488,7 @@ class TestDriveTicks:
         then skip the card it must quiesce.
         """
         from hermes_pipeline.harness import drive_ticks
-        from hermes_pipeline.kanban_tasks import BLOCKED
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+        from hermes_pipeline.todos_completion import FINISH_KEY
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
@@ -7830,20 +7498,18 @@ class TestDriveTicks:
                 "plan:task-1": "done",
                 "plan:task-2": "done",
                 FINISH_KEY: "done",
-                HUMAN_GATE_KEY: BLOCKED,
             },
         ]
         registration, _run, _poll = self._pinned_patches(
             mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=maps
         )
-        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
 
         drive = drive_ticks(**kwargs)
 
         assert drive.success is True
         assert "review:0" in drive.observed_keys
         assert drive.observed_keys == frozenset(
-            {"plan:task-1", "plan:task-2", "review:0", FINISH_KEY, HUMAN_GATE_KEY}
+            {"plan:task-1", "plan:task-2", "review:0", FINISH_KEY}
         )
 
     # -- S4: the whole-run deadline is shared by every tick and poll ---------
@@ -7851,19 +7517,17 @@ class TestDriveTicks:
     def test_native_sdd_ticks_share_one_shrinking_deadline(self, tmp_path: Path, mocker):
         from hermes_pipeline import harness as mod
         from hermes_pipeline.harness import drive_ticks
-        from hermes_pipeline.kanban_tasks import BLOCKED
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+        from hermes_pipeline.todos_completion import FINISH_KEY
 
         kwargs = self._pinned_kwargs(tmp_path, timeout=100)
         state = kwargs["project_state"]
         clock = self._clock(mocker)
         maps = [
-            {"plan:task-1": "done", "plan:task-2": "blocked"},
+            {"plan:task-1": "done", "plan:task-2": "running"},
             {
                 "plan:task-1": "done",
                 "plan:task-2": "done",
                 FINISH_KEY: "done",
-                HUMAN_GATE_KEY: BLOCKED,
             },
         ]
         registration, run_tick, _poll = self._pinned_patches(
@@ -7875,7 +7539,6 @@ class TestDriveTicks:
             tick_cost=4.0,
             poll_cost=6.0,
         )
-        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
         real = mod._run_with_timeout
         poll_timeouts: list[int] = []
 
@@ -7904,7 +7567,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK],
-            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "running"}],
             clock=clock,
             poll_cost=200.0,
         )
@@ -7953,7 +7616,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK, "02OTHER"],
-            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "running"}],
         )
 
         drive = drive_ticks(**kwargs)
@@ -7985,7 +7648,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK, "02NONE"],
-            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "running"}],
         )
         self._phases_sentinel(state, "02NONE", "picked_none")
 
@@ -8036,7 +7699,7 @@ class TestDriveTicks:
         )
         mocker.patch(
             "hermes_pipeline.harness.poll_pinned_run",
-            return_value={"plan:task-1": "done", "plan:task-2": "blocked"},
+            return_value={"plan:task-1": "done", "plan:task-2": "running"},
         )
 
         drive = drive_ticks(**kwargs)
@@ -8070,7 +7733,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK],
-            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "running"}],
         )
         if registered:
             mocker.patch(
@@ -8124,7 +7787,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK] * 2,
-            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "running"}],
         )
         real = mod._run_with_timeout
         calls = {"n": 0}
@@ -8193,7 +7856,7 @@ class TestDriveTicks:
         )
         mocker.patch(
             "hermes_pipeline.harness.poll_pinned_run",
-            return_value={"plan:task-1": "done", "plan:task-2": "blocked"},
+            return_value={"plan:task-1": "done", "plan:task-2": "running"},
         )
 
         drive = drive_ticks(**kwargs)
@@ -8208,8 +7871,7 @@ class TestDriveTicks:
 
     def test_native_sdd_run_tick_timeout_uses_remaining_budget(self, tmp_path: Path, mocker):
         from hermes_pipeline.harness import drive_ticks
-        from hermes_pipeline.kanban_tasks import BLOCKED
-        from hermes_pipeline.todos_completion import FINISH_KEY, HUMAN_GATE_KEY
+        from hermes_pipeline.todos_completion import FINISH_KEY
 
         kwargs = self._pinned_kwargs(tmp_path, timeout=120)
         state = kwargs["project_state"]
@@ -8222,11 +7884,9 @@ class TestDriveTicks:
                     "plan:task-1": "done",
                     "plan:task-2": "done",
                     FINISH_KEY: "done",
-                    HUMAN_GATE_KEY: BLOCKED,
                 }
             ],
         )
-        (registration.run_dir / "finish-verified").write_text("a" * 40 + "\n")
 
         drive = drive_ticks(**kwargs)
 
@@ -8353,7 +8013,7 @@ class TestDriveTicks:
             mocker,
             state,
             tick_ids=[_PINNED_TICK] * 2,
-            maps=[{"plan:task-1": "done", "plan:task-2": "blocked"}],
+            maps=[{"plan:task-1": "done", "plan:task-2": "running"}],
         )
         cancelled = PollCancellationError("poll worker did not stop")
         real = mod._run_with_timeout

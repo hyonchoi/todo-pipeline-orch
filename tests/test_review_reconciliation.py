@@ -2,7 +2,6 @@ from types import SimpleNamespace
 
 from hermes_pipeline.result_contract import ReviewEvidence
 from hermes_pipeline.review_reconciliation import (
-    REVIEW_ACCEPTANCE_KEY,
     _ensure_initial_review,
     _ensure_round,
     reconcile_reviews,
@@ -26,10 +25,10 @@ def _task(task_id, status="done"):
     return SimpleNamespace(task_id=task_id, status=status)
 
 
-def test_initial_review_is_fresh_role_and_persistent_gate(tmp_path, mocker):
+def test_initial_review_is_the_only_card_the_reconciler_creates(tmp_path, mocker):
     create = mocker.patch(
         "hermes_pipeline.review_reconciliation._create_task",
-        side_effect=["review-id", "acceptance-id"],
+        side_effect=["review-id"],
     )
     mocker.patch(
         "hermes_pipeline.review_reconciliation._implementation_head",
@@ -45,12 +44,11 @@ def test_initial_review_is_fresh_role_and_persistent_gate(tmp_path, mocker):
 
     assert create.call_args_list[0].kwargs["key"] == "review:0"
     assert create.call_args_list[0].kwargs["assignee"] == "reviewer"
-    # The last Plan worker is the review's parent: no controller gate remains
-    # between the implementation chain and the review.
+    # The last Plan worker is the review's parent.
     assert create.call_args_list[0].kwargs["parent"] == "worker-2"
     assert "fresh, independent, read-only" in create.call_args_list[0].kwargs["prompt"]
-    assert create.call_args_list[1].kwargs["key"] == REVIEW_ACCEPTANCE_KEY
-    assert create.call_args_list[1].kwargs["gate"] is True
+    # Nothing else: TPO synthesizes no card to stand for its own acceptance.
+    assert len(create.call_args_list) == 1
 
 
 def test_initial_review_defers_until_every_plan_worker_is_done(tmp_path, mocker):
@@ -107,43 +105,29 @@ def test_implementation_head_revalidates_the_chain_without_gate_cards(tmp_path, 
     assert topology.call_args.kwargs["expected_parent_sha"] == "a" * 40
 
 
-def test_partial_round_registration_retry_reuses_barrier_and_defers_rereview(
-    tmp_path, mocker
-):
-    import pytest
-
+def test_round_registers_one_worker_card_parented_on_the_review(tmp_path, mocker):
     registration = _registration(tmp_path)
     create = mocker.patch(
-        "hermes_pipeline.review_reconciliation._create_task",
-        side_effect=["barrier", RuntimeError("crash")],
-    )
-    with pytest.raises(RuntimeError, match="crash"):
-        _ensure_round(
-            project_dir=tmp_path,
-            round_number=1, parent="review", registration=registration,
-            tenant="demo", tick_id="01TICK", tasks={}, findings=(),
-        )
-    assert [call.kwargs["key"] for call in create.call_args_list] == [
-        "review:1", "review-fix:1"
-    ]
-
-    create.reset_mock()
-    create.side_effect = ["fix", "validation"]
-    complete = mocker.patch(
-        "hermes_pipeline.review_reconciliation.complete_todo_kanban_task",
-        return_value=True,
+        "hermes_pipeline.review_reconciliation._create_task", return_value="fix",
     )
     _ensure_round(
         project_dir=tmp_path,
         round_number=1, parent="review", registration=registration,
-        tenant="demo", tick_id="01TICK",
-        tasks={"review:1": _task("barrier", "blocked")}, findings=(),
+        tenant="demo", tick_id="01TICK", tasks={}, findings=(),
     )
-    assert [call.kwargs["key"] for call in create.call_args_list] == [
-        "review-fix:1", "fix-validation:1"
-    ]
-    assert all(call.kwargs["key"] != "re-review:1" for call in create.call_args_list)
-    complete.assert_called_once_with("demo", "barrier")
+    assert [call.kwargs["key"] for call in create.call_args_list] == ["review-fix:1"]
+    assert create.call_args.kwargs["parent"] == "review"
+    assert create.call_args.kwargs["assignee"] == "implementer"
+
+    # Idempotent: an existing fix card registers nothing further.
+    create.reset_mock()
+    _ensure_round(
+        project_dir=tmp_path,
+        round_number=1, parent="review", registration=registration,
+        tenant="demo", tick_id="01TICK",
+        tasks={"review-fix:1": _task("fix", "running")}, findings=(),
+    )
+    create.assert_not_called()
 
 
 def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
@@ -176,27 +160,18 @@ def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
         "hermes_pipeline.review_reconciliation.subprocess.run",
         side_effect=subprocess.TimeoutExpired(["hermes"], 30),
     )
-    mocker.patch("hermes_pipeline.review_reconciliation._block_gate_task")
-    needs_input = mocker.patch(
-        "hermes_pipeline.review_reconciliation._mark_gate_needs_input"
-    )
 
     assert reconcile_reviews(
         project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK"
     )
     marker = state / "runs" / "01TICK" / "pending-review-create.json"
     assert '"step_key": "review:0"' in marker.read_text()
-    needs_input.assert_not_called()
 
     get_tasks.side_effect = [
         validation_tasks,
-        {
-            **validation_tasks,
-            "review:0": _task("t_11111111", "todo"),
-            REVIEW_ACCEPTANCE_KEY: _task("t_22222222", "blocked"),
-        },
+        {**validation_tasks, "review:0": _task("t_11111111", "todo")},
     ]
-    find.side_effect = ["t_11111111", "t_22222222"]
+    find.side_effect = ["t_11111111"]
     run.reset_mock()
 
     assert reconcile_reviews(
@@ -204,7 +179,6 @@ def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
     )
     assert not marker.exists()
     run.assert_not_called()
-    needs_input.assert_not_called()
 
 
 def test_malformed_success_mid_round_recovers_partial_chain_without_escalation(
@@ -221,7 +195,6 @@ def test_malformed_success_mid_round_recovers_partial_chain_without_escalation(
     base_tasks = {
         "plan:task-1": _task("worker-1"),
         "review:0": _task("review"),
-        REVIEW_ACCEPTANCE_KEY: _task("acceptance", "blocked"),
     }
     get_tasks = mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
@@ -242,22 +215,11 @@ def test_malformed_success_mid_round_recovers_partial_chain_without_escalation(
     )
     find = mocker.patch(
         "hermes_pipeline.review_reconciliation._find_task_id_in_snapshot",
-        side_effect=[None, None],
+        side_effect=[None],
     )
     run = mocker.patch(
         "hermes_pipeline.review_reconciliation.subprocess.run",
-        side_effect=[
-            SimpleNamespace(returncode=0, stdout='{"id":"t_11111111"}'),
-            SimpleNamespace(returncode=0, stdout="not-json"),
-        ],
-    )
-    mocker.patch(
-        "hermes_pipeline.review_reconciliation.complete_todo_kanban_task",
-        return_value=True,
-    )
-    mocker.patch("hermes_pipeline.review_reconciliation._block_gate_task")
-    needs_input = mocker.patch(
-        "hermes_pipeline.review_reconciliation._mark_gate_needs_input"
+        side_effect=[SimpleNamespace(returncode=0, stdout="not-json")],
     )
 
     assert reconcile_reviews(
@@ -265,13 +227,10 @@ def test_malformed_success_mid_round_recovers_partial_chain_without_escalation(
     )
     marker = state / "runs" / "01TICK" / "pending-review-create.json"
     assert '"step_key": "review-fix:1"' in marker.read_text()
-    needs_input.assert_not_called()
 
-    get_tasks.return_value = {
-        **base_tasks,
-        "review:1": _task("t_11111111", "blocked"),
-    }
-    find.side_effect = ["t_22222222", "t_33333333"]
+    # The board snapshot still lags, so the retry re-enters the round and
+    # recovers the created card by its idempotency key instead of creating one.
+    find.side_effect = ["t_22222222"]
     run.reset_mock()
 
     assert reconcile_reviews(
@@ -279,10 +238,9 @@ def test_malformed_success_mid_round_recovers_partial_chain_without_escalation(
     )
     assert not marker.exists()
     run.assert_not_called()
-    needs_input.assert_not_called()
 
 
-def test_clean_review_completes_acceptance_without_round_cards(tmp_path, mocker):
+def test_clean_review_persists_the_accepted_head_and_creates_no_cards(tmp_path, mocker):
     state = tmp_path / ".hermes"
     (state / "runs" / "01TICK").mkdir(parents=True)
     (state / "runs" / "01TICK" / "registration.json").write_text("{}")
@@ -291,11 +249,7 @@ def test_clean_review_completes_acceptance_without_round_cards(tmp_path, mocker)
         "hermes_pipeline.review_reconciliation.load_validated_registration",
         return_value=registration,
     )
-    tasks = {
-        "plan:task-1": _task("worker-1"),
-        "review:0": _task("review"),
-        REVIEW_ACCEPTANCE_KEY: _task("acceptance", "blocked"),
-    }
+    tasks = {"plan:task-1": _task("worker-1"), "review:0": _task("review")}
     mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
         return_value=tasks,
@@ -310,20 +264,20 @@ def test_clean_review_completes_acceptance_without_round_cards(tmp_path, mocker)
         "hermes_pipeline.review_reconciliation._review_result",
         return_value=SimpleNamespace(review=ReviewEvidence("clean", ())),
     )
-    complete = mocker.patch(
-        "hermes_pipeline.review_reconciliation.complete_todo_kanban_task",
-        return_value=True,
-    )
     create = mocker.patch("hermes_pipeline.review_reconciliation._create_task")
 
     assert reconcile_reviews(
         project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK"
     )
-    complete.assert_called_once_with("demo", "acceptance")
+    # The accepted head on disk is the only acceptance record; no card is made
+    # or completed to mirror it.
+    assert (
+        state / "runs" / "01TICK" / "accepted-review-head"
+    ).read_text().strip() == "a" * 40
     create.assert_not_called()
 
 
-def test_fifth_findings_blocks_gate_and_creates_no_sixth_round(tmp_path, mocker):
+def test_fifth_findings_stalls_and_creates_no_sixth_round(tmp_path, mocker, caplog):
     state = tmp_path / ".hermes"
     (state / "runs" / "01TICK").mkdir(parents=True)
     (state / "runs" / "01TICK" / "registration.json").write_text("{}")
@@ -332,14 +286,9 @@ def test_fifth_findings_blocks_gate_and_creates_no_sixth_round(tmp_path, mocker)
         "hermes_pipeline.review_reconciliation.load_validated_registration",
         return_value=registration,
     )
-    tasks = {
-        "plan:task-1": _task("worker-1"),
-        "review:0": _task("review"),
-        REVIEW_ACCEPTANCE_KEY: _task("acceptance", "blocked"),
-    }
+    tasks = {"plan:task-1": _task("worker-1"), "review:0": _task("review")}
     for round_number in range(1, 6):
         tasks[f"review-fix:{round_number}"] = _task(f"fix-{round_number}")
-        tasks[f"fix-validation:{round_number}"] = _task(f"validation-{round_number}")
         tasks[f"re-review:{round_number}"] = _task(f"rereview-{round_number}")
     mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
@@ -369,16 +318,15 @@ def test_fifth_findings_blocks_gate_and_creates_no_sixth_round(tmp_path, mocker)
     )
     mocker.patch("hermes_pipeline.review_reconciliation.verify_worker_git_result")
     mocker.patch("hermes_pipeline.review_reconciliation.verify_worker_git_topology")
-    block = mocker.patch("hermes_pipeline.review_reconciliation._mark_gate_needs_input")
     create = mocker.patch("hermes_pipeline.review_reconciliation._create_task")
 
-    assert not reconcile_reviews(
-        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK"
-    )
+    with caplog.at_level("ERROR"):
+        assert not reconcile_reviews(
+            project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK"
+        )
     create.assert_not_called()
-    reason = block.call_args.args[1]
-    assert "limit reached" in reason
-    assert "super-secret-value" not in reason
+    assert "limit reached" in caplog.text
+    assert "super-secret-value" not in caplog.text
 
 
 def test_reconcile_reviews_forwards_repo_to_registration_loader(tmp_path, mocker):
@@ -412,7 +360,7 @@ def test_review_card_publishes_the_full_result_metadata_template(tmp_path, mocke
 
     create = mocker.patch(
         "hermes_pipeline.review_reconciliation._create_task",
-        side_effect=["review-id", "acceptance-id"],
+        side_effect=["review-id"],
     )
     mocker.patch(
         "hermes_pipeline.review_reconciliation._implementation_head",
@@ -442,10 +390,11 @@ def test_rereview_card_publishes_its_own_step_key_template(tmp_path, mocker):
     )
 
     _ensure_rereview(
-        project_dir=tmp_path, round_number=2, validation_id="validation-id",
+        project_dir=tmp_path, round_number=2, fix_id="fix-id",
         head_sha="d" * 40, registration=_worker_card_registration(tmp_path),
         tenant="demo", tick_id="01TICK", tasks={},
     )
+    assert create.call_args.kwargs["parent"] == "fix-id"
 
     assert render_result_template(
         tick_id="01TICK", todo_id="TODO-42", step_key="re-review:2",
@@ -458,9 +407,8 @@ def test_review_fix_card_publishes_the_committing_worker_template(tmp_path, mock
 
     create = mocker.patch(
         "hermes_pipeline.review_reconciliation._create_task",
-        side_effect=["barrier-id", "fix-id", "validation-id"],
+        side_effect=["fix-id"],
     )
-    mocker.patch("hermes_pipeline.review_reconciliation.complete_todo_kanban_task")
 
     _ensure_round(
         project_dir=tmp_path, round_number=1, parent="review-id",
@@ -477,9 +425,5 @@ def test_review_fix_card_publishes_the_committing_worker_template(tmp_path, mock
     assert render_result_template(
         tick_id="01TICK", todo_id="TODO-42", step_key="review-fix:1",
     ) in fix_call.kwargs["prompt"]
-    # Controller gates are TPO-completed and must stay free of worker schema.
-    gate_call = next(
-        call for call in create.call_args_list
-        if call.kwargs["key"] == "fix-validation:1"
-    )
-    assert "```json" not in gate_call.kwargs["prompt"]
+    # The fix card is the round's only card.
+    assert len(create.call_args_list) == 1

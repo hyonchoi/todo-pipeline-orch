@@ -100,8 +100,7 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
     expected_keys = [f"plan:task-{number}" for number in range(1, TASK_COUNT + 1)]
     assert len(prepared) == TASK_COUNT
     assert [task.phase_key for task in prepared] == expected_keys
-    assert [task.kind for task in prepared] == ["worker"] * TASK_COUNT
-    assert not any(task.gate for task in prepared)
+
 
     task_ids: dict[str, str] = {}
     create_commands: list[list[str]] = []

@@ -1784,9 +1784,8 @@ class TestResumeIssueCloseout:
             manifest=object(),
         ))
         mocker.patch(tc + "get_todo_kanban_tasks", return_value={
-            "review-acceptance": SimpleNamespace(task_id="review", status="done"),
+            "review:0": SimpleNamespace(task_id="review", status="done"),
             "finish": SimpleNamespace(task_id="finish-id", status="done"),
-            "human-gate": SimpleNamespace(task_id="human-id", status="blocked"),
         })
         mocker.patch(tc + "parse_worker_result", return_value=SimpleNamespace(
             delivery=SimpleNamespace(pr_url=self.PR_URL, branch="feat/todo-10", head_sha="a" * 40),
@@ -1800,18 +1799,14 @@ class TestResumeIssueCloseout:
             "state": "MERGED", "url": self.PR_URL, "headRefName": "feat/todo-10", "headRefOid": "a" * 40,
         })
         mocker.patch(tc + "_check_state", return_value="passed")
-        return {
-            "complete": mocker.patch(tc + "complete_todo_kanban_task", return_value=True),
-            "mark": mocker.patch(tc + "_mark_gate_needs_input"),
-            "flag": mocker.patch(tc + "flag_issue_drift"),
-        }
+        return {"flag": mocker.patch(tc + "flag_issue_drift")}
 
     def _tick(self, project_dir, mocker, tick_id):
         return _run_project_tick(
             project_dir=project_dir, config=Config(prompt_client="codex"), tick_id=tick_id, mocker=mocker,
         )
 
-    def test_propagation_lag_is_pending_then_the_next_tick_completes_the_gate(
+    def test_propagation_lag_is_pending_then_the_next_tick_closes_the_issue(
         self, tmp_path, mocker, fake_gh, caplog
     ):
         project_dir = _create_project(tmp_path, "demo")
@@ -1820,7 +1815,6 @@ class TestResumeIssueCloseout:
         mocks = self._delivery_ready(mocker, project_dir, run_dir)
 
         self._tick(project_dir, mocker, "01LAG1")
-        mocks["complete"].assert_not_called()
         assert (run_dir / "issue-close-started").exists()
         assert not (run_dir / "issue-closed").exists()
 
@@ -1830,7 +1824,6 @@ class TestResumeIssueCloseout:
             self._tick(project_dir, mocker, "01LAG2")
 
         mocks["flag"].assert_not_called()
-        mocks["complete"].assert_called_once_with("demo", "human-id")
         assert (run_dir / "issue-closed").exists()
         assert "closeout in progress" in caplog.text
         assert remote["writes"].count("comment") == 1
@@ -1851,20 +1844,19 @@ class TestResumeIssueCloseout:
         self._tick(project_dir, mocker, "01CRASH2")
 
         mocks["flag"].assert_not_called()
-        mocks["complete"].assert_called_once_with("demo", "human-id")
         assert remote["writes"] == ["comment", "close", "edit"]
         assert len(remote["comments"]) == 1
         assert "tpo:in-progress" not in remote["labels"]
 
-    def test_label_removal_failure_blocks_the_gate_then_recovers(self, tmp_path, mocker, fake_gh):
+    def test_label_removal_failure_stalls_delivery_then_recovers(self, tmp_path, mocker, fake_gh, caplog):
         project_dir = _create_project(tmp_path, "demo")
         run_dir = _write_prior_registration(project_dir)
         remote = self._remote_issue(fake_gh, edit_rc=1)
         mocks = self._delivery_ready(mocker, project_dir, run_dir)
 
-        selection = self._tick(project_dir, mocker, "01LABEL1")
-        mocks["complete"].assert_not_called()
-        mocks["mark"].assert_called_once_with("human-id", "TPO delivery blocked: gh_rejected")
+        with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+            selection = self._tick(project_dir, mocker, "01LABEL1")
+        assert "gh_rejected" in caplog.text
         selection.cb.observe.assert_called_once_with(
             picked=None, counts_as_no_progress=True, detail="delivery reconciliation blocked"
         )
@@ -1873,6 +1865,5 @@ class TestResumeIssueCloseout:
         self._tick(project_dir, mocker, "01LABEL2")
 
         mocks["flag"].assert_not_called()
-        mocks["complete"].assert_called_once_with("demo", "human-id")
         assert remote["writes"] == ["comment", "close", "edit", "edit"]
         assert (run_dir / "issue-closed").exists()

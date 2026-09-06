@@ -165,7 +165,6 @@ def scripted_kanban(mocker):
     snapshot = [_kanban_task(_TICK_ID, key, "archived") for key in _KEYS]
     mocker.patch("hermes_pipeline.harness._kanban_preflight")
     mocker.patch("hermes_pipeline.harness.time.sleep")
-    mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
     mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
     mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
     cancel = mocker.patch("hermes_pipeline.harness._cancel_registered_tasks", return_value=True)
@@ -353,10 +352,9 @@ def test_keep_dir_touches_nothing_remote_and_prunes_only_the_config(live, script
 #
 # The compiled-plan profile is not driven to completion by a single ``tpo tick``:
 # the first tick registers the run and its ``plan:`` worker cards, and each
-# later tick reconciles finished cards into the next stage (review, finish,
-# human-gate). The harness therefore has to keep ticking the same run until the
-# board is quiescent and the human gate stands, and to fail closed when a tick
-# changes nothing.
+# later tick reconciles finished cards into the next stage (review, then finish).
+# The harness therefore has to keep ticking the same run until every card is done,
+# and to fail closed when a tick changes nothing.
 
 _NATIVE_SDD = "native-sdd"
 _PLAN_PATH = f"docs/harness/{_RUN_TOKEN}-plan.md"
@@ -400,7 +398,6 @@ def native_sdd_kanban(mocker, monkeypatch):
 
     mocker.patch("hermes_pipeline.harness._kanban_preflight")
     mocker.patch("hermes_pipeline.harness.time.sleep")
-    mocker.patch("hermes_pipeline.harness._auto_complete_gate_tasks")
     mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
     mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
     cancel = mocker.patch("hermes_pipeline.harness._cancel_registered_tasks", return_value=True)
@@ -496,30 +493,22 @@ class _NativeSddSandbox(_LiveSandbox):
         return super().run(**overrides)
 
 
-def _happy_native_sdd_script(*, verified: bool = True) -> dict[int, Callable[[_NativeSddSandbox], None]]:
-    """The reconciler hops of a delivered run: review, finish, then the human gate.
+def _happy_native_sdd_script() -> dict[int, Callable[[_NativeSddSandbox], None]]:
+    """The reconciler hops of a delivered run: the review card, then the finish card.
 
-    With ``verified=False`` tick 4 raises the gate exactly as the happy path does but
-    ``todos_completion`` never writes its ``finish-verified`` marker, which is the
-    proof of delivery ``classify_pinned_run`` requires.
+    The ``finish`` worker is the one that pushes the branch and opens the pull
+    request, so the push happens on the tick that registers it. When that card
+    closes, every card on the board is ``done`` and the run is delivered.
     """
 
     def review(sandbox):
-        sandbox.board.update({"review:0": "ready", "review-acceptance": "blocked"})
+        sandbox.board["review:0"] = "ready"
 
     def finish(sandbox):
-        sandbox.board.update({"review-acceptance": "done", "finish": "ready"})
-
-    def human_gate(sandbox):
+        sandbox.board["finish"] = "ready"
         sandbox.push_branch()
-        sandbox.board["human-gate"] = "blocked"
-        if not verified:
-            return
-        marker = sandbox.project_dir / ".hermes" / "runs" / _TICK_ID / "finish-verified"
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(_git("rev-parse", "HEAD", cwd=sandbox.worktree) + "\n")
 
-    return {2: review, 3: finish, 4: human_gate}
+    return {2: review, 3: finish}
 
 
 @pytest.mark.real_git
@@ -535,8 +524,8 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
     assert result.pr_numbers == (_PR,)
     assert result.cleanup_leftovers == ()
 
-    # The same isolated config drove one registration tick and three reconciling ticks.
-    assert len(live.tick_calls) == 4
+    # The same isolated config drove one registration tick and two reconciling ticks.
+    assert len(live.tick_calls) == 3
     assert {tick["config"] for tick in live.tick_calls} == {str(live.workspace / "state" / "tpo-config.yaml")}
     assert all(tick["argv"][-2:] == ["tick", "sandbox"] for tick in live.tick_calls)
     assert (live.project_dir / _PLAN_PATH).is_file()
@@ -546,15 +535,15 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
     # ``verify_pull_request`` accepted it only because it is open and unmerged.
     assert ("pr", "view") in live.gh_verbs()
 
-    # The board the run ends on -- the human gate standing BLOCKED behind a done
-    # finish -- is pinned by the per-tick snapshots, and the delivery verdict was
-    # taken from the ``finish-verified`` marker written into the run dir.
+    # The board the run ends on -- every card done, the ``finish`` card included --
+    # is pinned by the per-tick snapshots, and it is the whole delivery verdict:
+    # no marker file and no synthesized gate card take part.
     events = [
         json.loads(line)
         for line in (live.workspace / "artifacts" / "events.jsonl").read_text().splitlines()
     ]
     boards = [event["status_map"] for event in events if event["event_type"] == "tick_completed"]
-    assert len(boards) == 4
+    assert len(boards) == 3
     # Every reported board really is settled: complete in the step keys and holding
     # no card still on its way anywhere.
     assert all(
@@ -565,20 +554,12 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
         _REGISTRATION_BARRIER: "done",  # fixture-only stand-in for the run's own card
         "plan:task-1": "done",
         "review:0": "done",
-        "review-acceptance": "done",
         "finish": "done",
-        "human-gate": "blocked",
     }
 
-    # The report's phases are the transitions the poller *observed*. The emitter does
-    # handle a card first seen as blocked (``_UNSTARTED_STATUSES`` holds ``None``), so
-    # the sole reason ``human-gate`` is absent is the baseline: poll_pinned_run seeds
-    # ``previous_status`` from the fetch that opens each tick's poll, and ticks never
-    # run during a poll -- so a card a tick created already ``blocked`` (human-gate)
-    # or flipped straight to ``done`` (the gates) is in that state before the first
-    # comparison and never counts as a change. Emitting for the standing gate would
-    # also be wrong here: generate_report scores ``blocked`` as a failed phase, which
-    # would report a delivered run as having failed one.
+    # The report's phases are the transitions the poller *observed*: poll_pinned_run
+    # seeds ``previous_status`` from the fetch that opens each tick's poll, so a card
+    # already in its final state at that point counts as no change.
     report = json.loads(result.report_path.read_text())
     assert report["profile"] == _NATIVE_SDD
     assert {phase["phase_key"] for phase in report["phases"]} == {"plan:task-1", "review:0", "finish"}
@@ -627,50 +608,6 @@ def test_native_sdd_stall_fails_closed(tmp_path, monkeypatch, fake_gh, native_sd
 
 
 @pytest.mark.real_git
-def test_native_sdd_gate_without_finish_verified_never_delivers(
-    tmp_path, monkeypatch, fake_gh, native_sdd_kanban
-):
-    """A standing human gate is not delivery: without the marker the run fails closed.
-
-    Tick 4 raises the gate exactly as the delivered run does -- ``finish`` done,
-    ``human-gate`` blocked, branch pushed -- but writes no ``finish-verified``, so
-    ``classify_pinned_run`` must keep the verdict at ``in_progress`` and the driver
-    must end on a fail-closed code rather than reporting a delivered run.
-    """
-    live = _NativeSddSandbox(
-        tmp_path, monkeypatch, fake_gh, native_sdd_kanban.board,
-        script=_happy_native_sdd_script(verified=False),
-    )
-
-    result = live.run()
-
-    assert result.exit_code == 1, result.summary
-    assert "tick_stalled" in result.summary or "tick_budget_exhausted" in result.summary
-    # The run never succeeded, so its pushed branch is never promoted to a verified PR.
-    assert result.pr_numbers == ()
-    assert not (live.project_dir / ".hermes" / "runs" / _TICK_ID / "finish-verified").exists()
-    events = [
-        json.loads(line)
-        for line in (live.workspace / "artifacts" / "events.jsonl").read_text().splitlines()
-    ]
-    boards = [event["status_map"] for event in events if event["event_type"] == "tick_completed"]
-    assert boards[-1]["finish"] == "done"
-    assert boards[-1]["human-gate"] == "blocked"
-
-    # Cleanup still ran: the run cancelled once, the issue closed, the pushed branch swept.
-    native_sdd_kanban.cancel.assert_called_once()
-    gh_calls = live.fake_gh.gh_calls()
-    assert ["issue", "close", str(_ISSUE), "--repo", _REPO, "--reason", "completed"] in gh_calls
-    assert _remote_branches(live.bare) == ["main"]
-    # Shutdown rediscovers the pushed branch's PR and closes it, even though the
-    # run never verified one of its own.
-    assert [call[:5] for call in gh_calls if call[:2] == ["pr", "close"]] == [
-        ["pr", "close", str(_PR), "--repo", _REPO]
-    ]
-    assert live.removed[-1] == live.workspace
-
-
-@pytest.mark.real_git
 def test_non_quiescent_pinned_board_leaves_branch_and_pr(
     tmp_path, monkeypatch, fake_gh, native_sdd_kanban
 ):
@@ -678,8 +615,8 @@ def test_non_quiescent_pinned_board_leaves_branch_and_pr(
     live = _NativeSddSandbox(
         tmp_path, monkeypatch, fake_gh, native_sdd_kanban.board, script=_happy_native_sdd_script()
     )
-    # The gate and its finish card are still live when shutdown re-reads the board.
-    native_sdd_kanban.snapshot_overrides.update({"finish": "running", "human-gate": "running"})
+    # The finish card is still live when shutdown re-reads the board.
+    native_sdd_kanban.snapshot_overrides.update({"finish": "running"})
     real_shutdown = harness_mod.shutdown_run
     monkeypatch.setattr(
         harness_mod, "shutdown_run",

@@ -15,7 +15,6 @@ from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from .config import PromptClient
 from .outcomes import (
@@ -59,8 +58,10 @@ log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
 
-# A "blocked" kanban task is a GATE, not an error: it deliberately holds the
-# project in-flight (blocked ∉ COMPLETION_STATUSES) until a human approves.
+# Hermes moves a card to "blocked" when a worker has exhausted its failure
+# limit (``_record_task_failure`` -> ``gave_up``); the block event is sticky, so
+# ``recompute_ready`` never promotes it back. TPO creates no blocked cards of
+# its own, so "blocked" means exactly one thing: the phase gave up.
 BLOCKED = "blocked"
 
 # Statuses that count as "complete" for the purpose of determining whether
@@ -103,22 +104,13 @@ def _build_json_header(
 
 @dataclass(frozen=True)
 class PreparedPhaseTask:
+    """One dispatchable worker card. Gate phases never reach here."""
+
     phase_key: str
     name: str
     body: str
     turns: int
-    gate: bool
     timeout: int = 1800
-    kind: Literal["worker", "controller_gate", "human_gate"] | None = None
-
-    def __post_init__(self) -> None:
-        inferred = "controller_gate" if self.gate else "worker"
-        kind = self.kind or inferred
-        if kind not in {"worker", "controller_gate", "human_gate"}:
-            raise ValueError(f"invalid prepared task kind: {kind!r}")
-        if self.gate != (kind != "worker"):
-            raise ValueError("prepared task gate and kind disagree")
-        object.__setattr__(self, "kind", kind)
 
 
 @dataclass(frozen=True)
@@ -651,34 +643,6 @@ def _recover_and_archive_uncertain_task(
     return _persist_and_archive_cleanup(project_dir, cleanup)
 
 
-def _block_gate_task(task_id: str) -> None:
-    """Write Hermes's sticky human-input block event for an unassigned gate."""
-    try:
-        result = subprocess.run(
-            [
-                "hermes",
-                "kanban",
-                "block",
-                "--kind",
-                "needs_input",
-                task_id,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=HERMES_COMMAND_TIMEOUT,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise RuntimeError(
-            f"failed to block kanban gate {task_id}: {type(exc).__name__}"
-        ) from exc
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"failed to block kanban gate {task_id}: "
-            f"rc={result.returncode}"
-        )
-
-
 def _complete_registration_barrier(task_id: str) -> None:
     """Commit a durable phase registration by completing its barrier."""
     try:
@@ -773,8 +737,8 @@ def prepare_todo_phases(
     """Render every phase card for ``todo_id`` without touching Hermes.
 
     ``plan_path``/``spec_path``/``reference_paths``/``decisions`` come from the
-    selected issue; nothing is resolved from TODOS.md. Every worker card carries
-    the ``Decisions:`` block (gates never do). When ``project_dir`` is given the Plan's
+    selected issue; nothing is resolved from TODOS.md. Every card carries the
+    ``Decisions:`` block. When ``project_dir`` is given the Plan's
     optional ``tpo-plan`` manifest is validated (and compiled) and Spec/Reference
     paths are checked for repository containment.
     """
@@ -825,9 +789,13 @@ def prepare_todo_phases(
             "phase_8_finish_branch",
             "phase_9_human_review",
         }:
-            # Native manifest runs add these cards only after their controller
-            # prerequisites have been reconciled. Static registration would let
-            # delivery bypass the persistent clean-review acceptance gate.
+            # Native manifest runs add these cards only after their
+            # prerequisites have been reconciled by the tick reconcilers.
+            continue
+        if phase.gate:
+            # A gate phase dispatches no worker, so it gets no kanban card.
+            # Its terminal meaning is carried by the phase it follows: a worker
+            # that exits non-zero lands in Hermes's sticky ``blocked``.
             continue
         compile_plan_tasks = getattr(phase, "compile_plan_tasks", False)
         if compile_plan_tasks and manifest is not None:
@@ -884,9 +852,7 @@ def prepare_todo_phases(
                             + _external_agent_prompt_block(rendered_worker)
                         ),
                         turns=phase.turns,
-                        gate=False,
                         timeout=phase.timeout,
-                        kind="worker",
                     )
                 )
             continue
@@ -903,28 +869,20 @@ def prepare_todo_phases(
             project_slug=board_slug,
             plan_path=plan_reference_value,
             plan_hash=plan_source.plan_hash if plan_source is not None else None,
-            # Every worker sees the Spec/Reference context; gates never do.
-            spec_path=spec_paths[0] if spec_paths and not phase.gate else None,
-            reference_paths=None if phase.gate else references,
+            spec_path=spec_paths[0] if spec_paths else None,
+            reference_paths=references,
             prompt_client=prompt_client,
             template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
-            decisions=None if phase.gate else decisions,
+            decisions=decisions,
         )
-        if phase.gate:
-            body_prompt = rendered_prompt
-        else:
-            body_prompt = _external_agent_prompt_block(rendered_prompt)
-        delegation = (
-            ""
-            if phase.gate
-            else _external_client_delegation_block(
-                prompt_client,
-                timeout=phase.timeout,
-                tools=phase.tools,
-                # Profile phases publish no result template: their results are
-                # never parsed, and the prompt comes from overridable YAML.
-                expects_result_metadata=False,
-            )
+        body_prompt = _external_agent_prompt_block(rendered_prompt)
+        delegation = _external_client_delegation_block(
+            prompt_client,
+            timeout=phase.timeout,
+            tools=phase.tools,
+            # Profile phases publish no result template: their results are
+            # never parsed, and the prompt comes from overridable YAML.
+            expects_result_metadata=False,
         )
         prepared.append(
             PreparedPhaseTask(
@@ -942,9 +900,7 @@ def prepare_todo_phases(
                     + body_prompt
                 ),
                 turns=phase.turns,
-                gate=phase.gate,
                 timeout=phase.timeout,
-                kind=getattr(phase, "kind", None),
             )
         )
     return prepared
@@ -958,6 +914,8 @@ def planned_phase_keys(phases_path: str | Path | None, plan_source) -> tuple[str
         if manifest is not None and phase.phase_key in {
             "phase_5_review", "phase_8_finish_branch", "phase_9_human_review",
         }:
+            continue
+        if phase.gate:
             continue
         if getattr(phase, "compile_plan_tasks", False) and manifest is not None:
             keys.extend(f"plan:{task.id}" for task in manifest.tasks)
@@ -1136,9 +1094,8 @@ def create_prepared_todo_phases(
 ) -> list[str]:
     """Create a nonspawnable registration barrier and its phase task chain.
 
-    Every phase follows the barrier or preceding phase; gates remain unassigned
-    and receive a sticky Hermes block event. Barrier completion commits the
-    registration only after the expected-phase sentinel is durable.
+    Every phase follows the barrier or preceding phase. Barrier completion
+    commits the registration only after the expected-phase sentinel is durable.
 
     Args:
         prepared: Fully rendered phase tasks, in registration order.
@@ -1189,7 +1146,6 @@ def create_prepared_todo_phases(
     created_task_ids.append(barrier_id)
 
     for phase in prepared:
-        is_gate = phase.kind != "worker"
         cmd = [
             "hermes",
             "kanban",
@@ -1204,22 +1160,21 @@ def create_prepared_todo_phases(
             "--idempotency-key",
             f"{tick_id}:{phase.phase_key}",
             "--assignee",
-            "-" if is_gate else assignee,
+            assignee,
             "--json",
         ]
         cmd.extend(["--parent", previous_dependency_id or barrier_id])
-        if not is_gate:
-            cmd.extend(
-                [
-                    "--max-runtime",
-                    str(phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
-                    "--max-retries",
-                    "1",
-                    "--goal",
-                    "--goal-max-turns",
-                    str(phase.turns),
-                ]
-            )
+        cmd.extend(
+            [
+                "--max-runtime",
+                str(phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+                "--max-retries",
+                "1",
+                "--goal",
+                "--goal-max-turns",
+                str(phase.turns),
+            ]
+        )
 
         log.info(
             "registering prepared kanban task: phase=%s tick=%s",
@@ -1248,21 +1203,6 @@ def create_prepared_todo_phases(
                 f"{cleanup_detail}"
             )
 
-        if is_gate:
-            try:
-                _block_gate_task(task_id)
-            except Exception as exc:
-                cleanup_succeeded = _persist_and_archive_cleanup(
-                    project_dir,
-                    cleanup,
-                )
-                cleanup_detail = (
-                    "" if cleanup_succeeded else "; cleanup remains pending"
-                )
-                raise RuntimeError(
-                    f"failed to apply sticky block to gate {phase.phase_key} "
-                    f"for tick {tick_id}: {exc}{cleanup_detail}"
-                ) from exc
         previous_dependency_id = task_id
 
     if cancel_event is not None and cancel_event.is_set():
@@ -1457,32 +1397,6 @@ def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:
         return False
 
 
-def _mark_gate_needs_input(task_id: str, reason: str) -> bool:
-    """Persist a bounded diagnostic on a controller gate without leaking evidence."""
-    from .result_contract import sanitize_result_text
-
-    diagnostic = sanitize_result_text(reason, maximum=1000)
-    try:
-        result = subprocess.run(
-            [
-                "hermes",
-                "kanban",
-                "block",
-                "--kind",
-                "needs_input",
-                task_id,
-                diagnostic,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=HERMES_COMMAND_TIMEOUT,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    return result.returncode == 0
-
-
 def _validation_blocked_marker(state_dir: Path, tick_id: str) -> Path:
     return state_dir / "runs" / tick_id / RESULT_VALIDATION_BLOCKED_MARKER
 
@@ -1547,7 +1461,7 @@ def reconcile_plan_task_results(
     *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str,
     repo: str | None = None,
 ) -> bool:
-    """Validate completed manifest workers and advance their controller gates.
+    """Validate completed manifest workers against the Plan manifest.
 
     Hermes remains authoritative for runs and task state. The local registration
     supplies only immutable authority and the pinned worktree used for Git checks.
@@ -2072,10 +1986,12 @@ def all_phases_complete(
 ) -> bool:
     """Check if all kanban tasks for a tick are in completion statuses.
 
-    Completion statuses: done, failed. Archived phases (from mid-registration
-    cleanup) are excluded — they indicate the tick didn't finish cleanly,
-    so we hold the lock until the operator intervenes or the stale lock
-    is reclaimed.
+    Completion statuses: done, failed, blocked. ``blocked`` counts because TPO
+    creates no blocked cards: Hermes only blocks a card whose worker exhausted
+    its failure limit, and that block is sticky, so the card will never move
+    again. Archived phases (from mid-registration cleanup) are excluded — they
+    indicate the tick didn't finish cleanly, so we hold the lock until the
+    operator intervenes or the stale lock is reclaimed.
 
     Args:
         tenant: Tenant (project slug) to filter by.
@@ -2118,7 +2034,7 @@ def all_phases_complete(
         return False
 
     for phase_key, status in status_map.items():
-        if status not in COMPLETION_STATUSES:
+        if status not in COMPLETION_STATUSES and status != BLOCKED:
             log.debug(
                 "phase %s for tick %s is still %s (not in completion status %s)",
                 phase_key, tick_id, status, sorted(COMPLETION_STATUSES),
@@ -2135,10 +2051,6 @@ def all_phases_complete(
             expected_keys = json.loads(expected_file.read_text())
             for key in expected_keys:
                 if key not in status_map:
-                    # Plan-gate exception: when rejected, the gate task is
-                    # archived (no longer in the kanban list). A rejection
-                    # sidecar on disk is the authoritative signal — treat it
-                    # as a completion (failed) status so the tick advances.
                     log.warning(
                         "expected phase %s not found in status map for tick %s "
                         "(partial registration suspected)",

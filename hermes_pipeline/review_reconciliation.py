@@ -2,21 +2,19 @@
 from __future__ import annotations
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
 from .kanban_tasks import (
     KANBAN_QUERY_TIMEOUT,
     PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS,
-    _block_gate_task,
     _build_json_header,
     _external_agent_prompt_block,
     _external_client_delegation_block,
     _find_task_id_in_snapshot,
-    _mark_gate_needs_input,
     _parse_task_id,
     _show_task_payload,
-    complete_todo_kanban_task,
     get_todo_kanban_tasks,
 )
 from .result_contract import (
@@ -32,8 +30,9 @@ from .result_contract import (
 )
 from .state import _atomic_write_text
 
+log = logging.getLogger(__name__)
+
 MAX_REVIEW_ROUNDS = 5
-REVIEW_ACCEPTANCE_KEY = "review-acceptance"
 
 
 class RetryableReviewRegistration(RuntimeError):
@@ -70,14 +69,6 @@ def _persist_accepted_head(state_dir: Path, tick_id: str, head_sha: str) -> None
     )
 
 
-def _accept_review(*, state_dir: Path, tick_id: str, head_sha: str,
-                   tenant: str, acceptance) -> bool:
-    _persist_accepted_head(state_dir, tick_id, head_sha)
-    return acceptance.status == "done" or complete_todo_kanban_task(
-        tenant, acceptance.task_id
-    )
-
-
 def _head(worktree: Path) -> str:
     result = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True
@@ -96,14 +87,17 @@ def _body(*, tick_id: str, todo_id: str, tenant: str, key: str, prompt: str) -> 
 def _create_task(
     *, project_dir: Path | None = None, tenant: str, tick_id: str, todo_id: str,
     key: str, title: str,
-    prompt: str, worktree: Path, assignee: str | None, parent: str,
-    prompt_client: str, gate: bool = False,
+    prompt: str, worktree: Path, assignee: str | None, parent: str | None = None,
+    prompt_client: str,
 ) -> str:
+    """Create one assigned worker card. ``parent`` omitted means immediately ready.
+
+    Every card this module and delivery create is a real worker: it publishes
+    the result template and its verdict is its own exit status.
+    """
     project_dir = project_dir or worktree
-    task_prompt = prompt if gate else (
+    task_prompt = (
         _external_client_delegation_block(
-            # Every non-gate card this module and delivery create publishes the
-            # result template.
             prompt_client, timeout=1800, tools="", expects_result_metadata=True,
         )
         + _external_agent_prompt_block(prompt)
@@ -115,14 +109,13 @@ def _create_task(
             prompt=task_prompt,
         ),
         "--workspace", f"dir:{worktree}", "--idempotency-key", f"{tick_id}:{key}",
-        "--assignee", "-" if gate else (assignee or "default"),
-        "--parent", parent, "--json",
+        "--assignee", assignee or "default",
+        "--json",
+        "--max-runtime", str(1800 + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+        "--max-retries", "1", "--goal", "--goal-max-turns", "20",
     ]
-    if not gate:
-        cmd.extend([
-            "--max-runtime", str(1800 + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
-            "--max-retries", "1", "--goal", "--goal-max-turns", "20",
-        ])
+    if parent is not None:
+        cmd.extend(["--parent", parent])
     marker = _persist_pending_create(project_dir, tick_id, key)
     task_id = _find_task_id_in_snapshot(
         tenant=tenant, tick_id=tick_id, phase_key=key
@@ -142,13 +135,6 @@ def _create_task(
         raise RetryableReviewRegistration(
             f"review task registration remains pending for {key}"
         )
-    if gate:
-        try:
-            _block_gate_task(task_id)
-        except (RuntimeError, OSError) as exc:
-            raise RetryableReviewRegistration(
-                f"review gate registration remains pending for {key}"
-            ) from exc
     _clear_pending_create(marker, tick_id=tick_id, key=key)
     return task_id
 
@@ -214,50 +200,29 @@ def _ensure_initial_review(*, project_dir: Path, tasks: dict, registration, tena
         return
     parent = workers[-1].task_id
     head_sha = _implementation_head(tasks=tasks, registration=registration, tick_id=tick_id)
-    review = tasks.get("review:0")
-    if review is None:
-        review_id = _create_task(
-            project_dir=project_dir,
-            tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-            key="review:0", title="Independent review",
-            prompt=_review_prompt(
-                head_sha, tick_id=tick_id, todo_id=registration.todo_id,
-                step_key="review:0",
-            ),
-            worktree=registration.worktree,
-            assignee=registration.review_assignee or registration.assignee, parent=parent,
-            prompt_client=registration.prompt_client,
-        )
-    else:
-        review_id = review.task_id
-    if tasks.get(REVIEW_ACCEPTANCE_KEY) is None:
-        _create_task(
-            project_dir=project_dir,
-            tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-            key=REVIEW_ACCEPTANCE_KEY, title="Review acceptance gate",
-            prompt="TPO completes this persistent gate only after a validated clean review.",
-            worktree=registration.worktree, assignee=None, parent=review_id, gate=True,
-            prompt_client=registration.prompt_client,
-        )
+    if tasks.get("review:0") is not None:
+        return
+    _create_task(
+        project_dir=project_dir,
+        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
+        key="review:0", title="Independent review",
+        prompt=_review_prompt(
+            head_sha, tick_id=tick_id, todo_id=registration.todo_id,
+            step_key="review:0",
+        ),
+        worktree=registration.worktree,
+        assignee=registration.review_assignee or registration.assignee, parent=parent,
+        prompt_client=registration.prompt_client,
+    )
 
 
 def _ensure_round(*, project_dir: Path, round_number: int, parent: str, registration, tenant: str,
                   tick_id: str, tasks: dict, findings: tuple[dict[str, str], ...]) -> None:
-    barrier_key = f"review:{round_number}"
     fix_key = f"review-fix:{round_number}"
-    validation_key = f"fix-validation:{round_number}"
+    if fix_key in tasks:
+        return
     residual = sanitize_result_text(json.dumps(findings, sort_keys=True), maximum=8000)
-    barrier = tasks.get(barrier_key)
-    barrier_id = barrier.task_id if barrier else _create_task(
-        project_dir=project_dir,
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key=barrier_key, title=f"Review round {round_number} barrier",
-        prompt="Round registration barrier.", worktree=registration.worktree,
-        assignee=None, parent=parent, gate=True,
-        prompt_client=registration.prompt_client,
-    )
-    fix = tasks.get(fix_key)
-    fix_id = fix.task_id if fix else _create_task(
+    _create_task(
         project_dir=project_dir,
         tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id, key=fix_key,
         title=f"Fix review findings round {round_number}",
@@ -267,23 +232,12 @@ def _ensure_round(*, project_dir: Path, round_number: int, parent: str, registra
                 tick_id=tick_id, todo_id=registration.todo_id, step_key=fix_key,
             )
         ),
-        worktree=registration.worktree, assignee=registration.assignee, parent=barrier_id,
+        worktree=registration.worktree, assignee=registration.assignee, parent=parent,
         prompt_client=registration.prompt_client,
     )
-    validation = tasks.get(validation_key)
-    validation.task_id if validation else _create_task(
-        project_dir=project_dir,
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key=validation_key, title=f"Validate review fixes round {round_number}",
-        prompt="TPO validates fix metadata and Git evidence before completing this gate.",
-        worktree=registration.worktree, assignee=None, parent=fix_id, gate=True,
-        prompt_client=registration.prompt_client,
-    )
-    if barrier is None or barrier.status != "done":
-        complete_todo_kanban_task(tenant, barrier_id)
 
 
-def _ensure_rereview(*, project_dir: Path, round_number: int, validation_id: str, head_sha: str,
+def _ensure_rereview(*, project_dir: Path, round_number: int, fix_id: str, head_sha: str,
                      registration, tenant: str, tick_id: str, tasks: dict) -> None:
     key = f"re-review:{round_number}"
     if key in tasks:
@@ -297,7 +251,7 @@ def _ensure_rereview(*, project_dir: Path, round_number: int, validation_id: str
         ),
         worktree=registration.worktree,
         assignee=registration.review_assignee or registration.assignee,
-        parent=validation_id, prompt_client=registration.prompt_client,
+        parent=fix_id, prompt_client=registration.prompt_client,
     )
 
 
@@ -318,9 +272,8 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
     except RetryableReviewRegistration:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
-    acceptance = tasks.get(REVIEW_ACCEPTANCE_KEY)
     review = tasks.get("review:0")
-    if acceptance is None or review is None or review.status != "done":
+    if review is None or review.status != "done":
         return True
     try:
         expected_parent = _implementation_head(
@@ -329,22 +282,19 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
         evidence = _review_result(
             review.task_id, tick_id=tick_id, todo_id=registration.todo_id,
             key="review:0", worktree=registration.worktree,
-            head_sha=expected_parent, require_current="review:1" not in tasks,
+            head_sha=expected_parent, require_current="review-fix:1" not in tasks,
         )
         assert evidence.review is not None
         if evidence.review.verdict == "clean":
-            return _accept_review(
-                state_dir=state_dir, tick_id=tick_id, head_sha=expected_parent,
-                tenant=tenant, acceptance=acceptance,
-            )
+            _persist_accepted_head(state_dir, tick_id, expected_parent)
+            return True
         findings = evidence.review.findings
         parent = review.task_id
         for round_number in range(1, MAX_REVIEW_ROUNDS + 1):
             tasks = get_todo_kanban_tasks(tenant, tick_id)
             rereview_key = f"re-review:{round_number}"
             fix_key = f"review-fix:{round_number}"
-            validation_key = f"fix-validation:{round_number}"
-            if fix_key not in tasks or validation_key not in tasks:
+            if fix_key not in tasks:
                 _ensure_round(
                     project_dir=project_dir, round_number=round_number, parent=parent,
                     registration=registration,
@@ -352,8 +302,7 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
                 )
                 return True
             fix = tasks[fix_key]
-            validation = tasks[validation_key]
-            if fix is None or validation is None or fix.status != "done":
+            if fix.status != "done":
                 return True
             fix_result = parse_worker_result(
                 _show_task_payload(fix.task_id), tick_id=tick_id,
@@ -364,19 +313,18 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
                 registration.worktree, fix_result.git,
                 expected_parent_sha=expected_parent,
             )
-            if validation.status != "done":
+            # The re-review card's existence is the record that this round's fix
+            # was already validated against a live worktree: after it exists the
+            # worktree has legitimately moved on, so only the topology holds.
+            if rereview_key not in tasks:
                 verify_worker_git_result(
                     registration.worktree, fix_result.git,
                     expected_parent_sha=expected_parent,
                 )
             expected_parent = fix_result.git.resulting_head_sha
-            if validation.status != "done":
-                if not complete_todo_kanban_task(tenant, validation.task_id):
-                    return False
-                return True
             _ensure_rereview(
                 project_dir=project_dir, round_number=round_number,
-                validation_id=validation.task_id,
+                fix_id=fix.task_id,
                 head_sha=expected_parent, registration=registration,
                 tenant=tenant, tick_id=tick_id, tasks=tasks,
             )
@@ -389,30 +337,26 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
                 rereview.task_id, tick_id=tick_id, todo_id=registration.todo_id,
                 key=rereview_key, worktree=registration.worktree,
                 head_sha=expected_parent,
-                require_current=f"review:{round_number + 1}" not in tasks,
+                require_current=f"review-fix:{round_number + 1}" not in tasks,
             )
             assert evidence.review is not None
             if evidence.review.verdict == "clean":
-                return _accept_review(
-                    state_dir=state_dir, tick_id=tick_id, head_sha=expected_parent,
-                    tenant=tenant, acceptance=acceptance,
-                )
+                _persist_accepted_head(state_dir, tick_id, expected_parent)
+                return True
             findings = evidence.review.findings
             parent = rereview.task_id
-        diagnostic = sanitize_result_text(
-            "Review remediation limit reached: " + json.dumps(findings, sort_keys=True),
-            maximum=1000,
+        log.error(
+            "tick %s: review remediation limit reached: %s", tick_id,
+            sanitize_result_text(json.dumps(findings, sort_keys=True), maximum=1000),
         )
-        if not _mark_gate_needs_input(acceptance.task_id, diagnostic):
-            return False
         return False
     except RetryableReviewRegistration:
         return True
     except (ResultContractError, RuntimeError, OSError) as exc:
-        diagnostic = sanitize_result_text(
-            f"TPO review reconciliation failed: {getattr(exc, 'code', type(exc).__name__)}",
-            maximum=1000,
+        log.error(
+            "tick %s: review reconciliation failed: %s", tick_id,
+            sanitize_result_text(
+                getattr(exc, "code", type(exc).__name__), maximum=1000
+            ),
         )
-        if not _mark_gate_needs_input(acceptance.task_id, diagnostic):
-            return False
         return False

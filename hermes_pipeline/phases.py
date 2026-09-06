@@ -96,7 +96,12 @@ class Phase:
     turns: int = 0
     timeout: int = 1800
     terminal: bool = False
+    # ``gate: true`` means the phase dispatches nothing: it registers no kanban
+    # card, so nothing observes it. A phase's terminal verdict is its worker's
+    # own exit status -- non-zero lands the card in Hermes's sticky ``blocked``.
     gate: bool = False
+    # Parsed only so profiles that still carry the key stay loadable; nothing
+    # reads it. Removing the key from the bundled profiles is a follow-up.
     kind: Literal["worker", "controller_gate", "human_gate"] | None = None
     compile_plan_tasks: bool = False
 

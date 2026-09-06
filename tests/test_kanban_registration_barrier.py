@@ -11,9 +11,8 @@ def _prepared_phases():
     from hermes_pipeline.kanban_tasks import PreparedPhaseTask
 
     return [
-        PreparedPhaseTask("phase_1", "One", "body one", 5, False, 2400),
-        PreparedPhaseTask("phase_gate", "Gate", "gate body", 0, True, 9999),
-        PreparedPhaseTask("phase_2", "Two", "body two", 10, False, 7200),
+        PreparedPhaseTask("phase_1", "One", "body one", 5, 2400),
+        PreparedPhaseTask("phase_2", "Two", "body two", 10, 7200),
     ]
 
 
@@ -26,7 +25,6 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     ids_by_key = {
         "__registration_barrier__": "t_0000000b",
         "phase_1": "t_00000001",
-        "phase_gate": "t_0000000a",
         "phase_2": "t_00000002",
     }
     events: list[str] = []
@@ -62,13 +60,12 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
         board_slug="demo",
         project_dir=tmp_path,
         assignee="pipeline",
-    ) == ["t_00000001", "t_0000000a", "t_00000002"]
+    ) == ["t_00000001", "t_00000002"]
 
+    # No block: registration only ever creates cards.
     assert events == [
         "create:__registration_barrier__",
         "create:phase_1",
-        "create:phase_gate",
-        "block:t_0000000a",
         "create:phase_2",
         "persist-expected",
         "complete:t_0000000b",
@@ -101,16 +98,10 @@ def test_registration_barrier_owns_executable_chain_and_commits_last(
     assert first[first.index("--max-retries") + 1] == "1"
     assert "--initial-status" not in first
 
-    gate = create_commands["phase_gate"]
-    assert gate[gate.index("--assignee") + 1] == "-"
-    assert "--goal" not in gate
-    assert "--max-runtime" not in gate
-    assert "--max-retries" not in gate
-    assert gate[gate.index("--parent") + 1] == "t_00000001"
-    assert "--initial-status" not in gate
-
     second = create_commands["phase_2"]
-    assert second[second.index("--parent") + 1] == "t_0000000a"
+    assert second[second.index("--parent") + 1] == "t_00000001"
+    assert second[second.index("--assignee") + 1] == "pipeline"
+    assert "--goal" in second
     assert (
         second[second.index("--max-runtime") + 1]
         == "7260"
