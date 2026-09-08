@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import dataclasses
-import hashlib
 import json
 import logging
 import os
@@ -22,13 +21,10 @@ import yaml
 from hermes_pipeline import harness as harness_mod
 from hermes_pipeline.contract import ContractSchemaError
 from hermes_pipeline.github_issues import (
-    LABEL_VOCABULARY,
     GitHubIssuesError,
     compile_eligible_issues,
     gh_bin,
     issue_from_api,
-    parse_issue_body,
-    render_issue_body,
 )
 from hermes_pipeline.harness import (
     ConvergenceDetector,
@@ -58,8 +54,8 @@ from hermes_pipeline.harness import (
     cards_for_registered_keys,
     cleanup_remote,
     clone_sandbox,
-    commit_plan,
     create_harness_issue,
+    create_run_anchor,
     discover_candidate_prs,
     discover_remote_artifacts,
     fetch_pull_request,
@@ -74,7 +70,6 @@ from hermes_pipeline.harness import (
     read_current_tick_id,
     read_recorded_branch,
     ready_issue_numbers,
-    reconcile_created_issue,
     recover_pinned_registration,
     recover_tick_registration,
     resolve_sandbox_repo,
@@ -94,7 +89,6 @@ from hermes_pipeline.phases import (
     load_phases,
     resolve_profile_phases_path,
 )
-from hermes_pipeline.plan_manifest import validate_plan_candidate
 from tests.gh_fakes import API_ARGV, issue_payload, seed_project_issues, todo_payload
 
 
@@ -1151,7 +1145,10 @@ class _LiveRunStubs:
         self._stub(monkeypatch, "take_baseline", lambda *_a, **_k: self.baseline)
         self._stub(monkeypatch, "write_project_contract", lambda *_a, **_k: None)
         self._stub(monkeypatch, "create_harness_issue", lambda *_a, **_k: self.issue)
-        self._stub(monkeypatch, "commit_plan", lambda *_a, **_k: "a" * 40)
+        self._stub(monkeypatch, "verify_harness_issue", lambda *_a, **_k: None)
+        monkeypatch.setattr(harness_mod, "assert_pinned_registration_unchanged",
+            lambda project_dir, project_state, **kwargs: harness_mod.assert_tick_id_unchanged(project_state, expected=kwargs["saved"].tick_id))
+        self._stub(monkeypatch, "create_run_anchor", lambda *_a, **_k: "a" * 40)
         self._stub(monkeypatch, "wait_for_issue_visible", lambda *a, **k: self.wait_visible(*a, **k))
         self._stub(monkeypatch, "read_current_tick_id", lambda *_a, **_k: self.current_tick_id)
         self._stub(monkeypatch, "run_tick", lambda *a, **k: self.tick(*a, **k))
@@ -1225,7 +1222,7 @@ class _LiveRunStubs:
 _LIVE_HAPPY_ORDER = [
     "resolve_sandbox_repo", "_run_token", "preflight_check", "github_preflight", "_kanban_preflight",
     "clone_sandbox", "sandbox_seed_check", "take_baseline", "write_project_contract",
-    "create_harness_issue", "commit_plan", "wait_for_issue_visible", "read_current_tick_id", "run_tick",
+    "create_harness_issue", "wait_for_issue_visible", "verify_harness_issue", "create_run_anchor", "read_current_tick_id", "run_tick",
     "recover_tick_registration", "poll_registered_phases", "discover_remote_artifacts",
     "verify_pull_request", "shutdown_run",
 ]
@@ -1233,8 +1230,8 @@ _LIVE_HAPPY_ORDER = [
 _LIVE_PINNED_ORDER = [
     "resolve_sandbox_repo", "_run_token", "preflight_check", "github_preflight", "_kanban_preflight",
     "clone_sandbox", "sandbox_seed_check", "take_baseline", "write_project_contract",
-    "create_harness_issue", "commit_plan", "wait_for_issue_visible", "read_current_tick_id", "run_tick",
-    "recover_pinned_registration", "poll_pinned_run", "discover_remote_artifacts",
+    "create_harness_issue", "wait_for_issue_visible", "verify_harness_issue", "create_run_anchor", "read_current_tick_id", "run_tick",
+    "recover_pinned_registration", "poll_pinned_run", "read_current_tick_id", "discover_remote_artifacts",
     "verify_pull_request", "shutdown_run",
 ]
 
@@ -1311,8 +1308,8 @@ class TestRunHarness:
         assert live.args["sandbox_seed_check"] == (live.project_dir, live.SANDBOX)
         assert live.kwargs["take_baseline"] == {"viewer": "octocat", "default_branch": "main"}
         assert live.args["write_project_contract"] == (live.project_dir, "gstack")
-        assert live.kwargs["create_harness_issue"] == {"run_token": "tok00000", "baseline": live.baseline}
-        assert live.args["commit_plan"] == (live.project_dir, live.issue)
+        assert live.kwargs["create_harness_issue"] == {"run_token": "tok00000", "baseline": live.baseline, "transaction_id": live.kwargs["create_harness_issue"]["transaction_id"]}
+        assert live.args["create_run_anchor"] == (live.project_dir, live.issue)
         assert live.args["run_tick"] == ("sandbox",)
         assert live.kwargs["run_tick"] == {
             "cwd": live.workspace, "log_path": live.artifacts_dir / "tick.log", "timeout": 60,
@@ -1328,14 +1325,14 @@ class TestRunHarness:
         assert poll["state_dir"] == live.project_dir / ".hermes"
         assert poll["cards"] == list(_GSTACK_PHASES[:2])
         assert live.kwargs["discover_remote_artifacts"] == {
-            "issue": live.issue, "baseline": live.baseline, "plan_sha": "a" * 40,
+            "issue": live.issue, "baseline": live.baseline, "run_base_sha": "a" * 40,
             "provenance_dir": live.artifacts_dir / "provenance",
         }
         assert live.args["verify_pull_request"] == (live.artifacts,)
         assert live.kwargs["verify_pull_request"] == {"default_branch": "main"}
         assert live.args["shutdown_run"] == (live.project_dir, live.SANDBOX)
         assert live.kwargs["shutdown_run"] == {
-            "issue": live.issue, "baseline": live.baseline, "plan_sha": "a" * 40,
+            "issue": live.issue, "baseline": live.baseline, "run_base_sha": "a" * 40,
             "tick_id": "tick-1", "expected_phase_keys": _LIVE_KEYS,
             "provenance_dir": live.artifacts_dir / "provenance",
             "staging_root": live.artifacts_dir / "staging", "keep_remote": False,
@@ -1355,11 +1352,11 @@ class TestRunHarness:
         assert result.exit_code == 0
         assert seen["pinned"] is False
         assert seen["repo"] is None
-        assert seen["plan_sha"] is None
+        assert seen["run_base_sha"] is None
         assert seen["plan_text"] is None
 
     def test_native_sdd_pins_the_drive_to_the_committed_plan(self, live, monkeypatch):
-        """A ``requires_plan`` profile drives pinned, against the Plan commit_plan wrote."""
+        """A ``requires_plan`` profile drives pinned, against the Plan create_run_anchor wrote."""
         seen: dict = {}
         real = harness_mod.drive_ticks
         live._stub(monkeypatch, "drive_ticks", lambda **kw: (seen.update(kw), real(**kw))[1])
@@ -1370,7 +1367,7 @@ class TestRunHarness:
         assert result.exit_code == 0
         assert seen["pinned"] is True
         assert seen["repo"] == "acme/sandbox"
-        assert seen["plan_sha"] == "a" * 40
+        assert seen["run_base_sha"] == "a" * 40
         assert seen["plan_text"] == harness_mod._plan_document(live.issue.todo_id)
 
     def test_profile_defaults_to_native_sdd(self, live):
@@ -1435,6 +1432,36 @@ class TestRunHarness:
         assert f"expected {live.pinned_registration.branch}" in failed[0]["detail"]
         assert live.issue.branch not in failed[0]["detail"]
         assert live.order.index("shutdown_run") < live.order.index("_prune_retained_state")
+
+    @pytest.mark.parametrize("interruption", [KeyboardInterrupt, SystemExit])
+    def test_creation_interruption_retains_recovery_without_shutdown(self, live, monkeypatch, interruption):
+        def interrupted(*args, **kwargs):
+            recovery = live.project_dir / ".hermes" / "todo-create"
+            recovery.mkdir(parents=True, exist_ok=True)
+            (recovery / "pending.json").write_text("pending")
+            raise interruption()
+        monkeypatch.setattr(harness_mod, "create_harness_issue", interrupted)
+        with pytest.raises(interruption):
+            live.run()
+        assert live.workspace.exists()
+        assert (live.project_dir / ".hermes" / "todo-create" / "pending.json").read_text() == "pending"
+        assert "shutdown_run" not in live.order
+
+    def test_readiness_fetch_failure_retains_recovery_and_never_ticks(self, live, monkeypatch):
+        def unavailable(*args, **kwargs):
+            raise GitHubIssuesError("gh_unavailable", "api")
+        monkeypatch.setattr(harness_mod, "verify_harness_issue", unavailable)
+        with pytest.raises(GitHubIssuesError):
+            live.run()
+        assert live.workspace.exists()
+        assert "run_tick" not in live.order
+        assert "create_run_anchor" not in live.order
+
+    def test_anchor_only_branch_cannot_pass_implementation(self, live):
+        live.artifacts = dataclasses.replace(live.artifacts, deletable_branches=((live.pr.head_ref, "a" * 40),))
+        result = live.run()
+        assert result.exit_code == 1
+        assert "implementation_missing" in result.summary
 
     def test_gstack_pr_head_is_not_pinned_to_a_branch(self, live):
         """The head invariant is pinned-only: an unpinned run has no registered branch."""
@@ -1785,7 +1812,7 @@ class TestRunHarness:
         assert live.order[-1] == "shutdown_run"
         assert live.kwargs["shutdown_run"]["tick_id"] is None
         assert live.kwargs["shutdown_run"]["expected_phase_keys"] is None
-        assert not live.workspace.exists()
+        assert live.workspace.exists()
 
     def test_tick_error_becomes_exit_1_after_shutdown(self, live):
         def recover(*_a, **_k):
@@ -3863,31 +3890,25 @@ def _harness_issue(number: int = 42, token: str = "tok00000") -> HarnessIssue:
         number=number,
         todo_id=f"TODO-{number}",
         branch=f"feat/harness-{token}",
-        plan_path=f"docs/harness/{token}-plan.md",
         title=f"[harness {token}] Implement mock name normalization",
         run_token=token,
+        transaction_id="12345678-1234-4234-9234-123456789abc",
     )
 
 
 class TestHappyPathFixture:
     def test_rendered_issue_parses_back_eligible(self, tmp_project):
-        branch = f"feat/harness-{_RUN_TOKEN}"
-        plan_path = f"docs/harness/{_RUN_TOKEN}-plan.md"
-        body = render_issue_body(
-            harness_mod._issue_fields(branch=branch, plan_path=plan_path), include_empty=False
-        )
-        issue = issue_from_api(
-            issue_payload(7, title=_HARNESS_TITLE, body=body, labels=harness_mod._harness_labels()),
-            repo="acme/sandbox",
-        )
-
-        result = compile_eligible_issues(tmp_project, [issue], in_flight=(), requires_plan=False)
-
+        from hermes_pipeline.todos_create import render_create_body
+        request = harness_mod._harness_create_request(tmp_project, run_token=_RUN_TOKEN, transaction_id="12345678-1234-4234-9234-123456789abc")
+        body = render_create_body(request, issue_number=7)
+        issue = issue_from_api(issue_payload(7, title=_HARNESS_TITLE, body=body), repo="acme/sandbox")
+        result = compile_eligible_issues(tmp_project, [issue], in_flight=(), requires_plan=True)
         assert result.blocked_reasons == {}
         assert result.todo_ids == frozenset({"TODO-7"})
-        (candidate,) = result.candidates
-        assert candidate.entry.branch_values == (branch,)
-        assert candidate.entry.plan_values == (plan_path,)
+        candidate, = result.candidates
+        assert candidate.entry.branch_values == (f"feat/harness-{_RUN_TOKEN}",)
+        assert candidate.entry.plan_values == ()
+        assert candidate.plan_source.kind == "embedded"
 
     @pytest.mark.parametrize("todo_id", ["TODO-x", "todo-1", "TODO-1\n", "", "TODO-", "TODO-\u0661"])  # U+0661: ARABIC-INDIC DIGIT ONE
     def test_plan_document_rejects_bad_todo_id(self, todo_id):
@@ -3938,335 +3959,119 @@ class TestHappyPathFixture:
         assert result.returncode == 0, result.stdout + result.stderr
         assert "1 passed" in result.stdout
 
-    def test_harness_labels_are_in_vocabulary(self):
-        labels = harness_mod._harness_labels()
-
-        names = {name for name, _, _ in LABEL_VOCABULARY}
-        assert set(labels) <= names
-        assert labels[:2] == ["tpo:todo", "ready-for-agent"]
-        assert set(labels[2:]) == {
-            "priority:P1",
-            "effort:S",
-            "phase:4-development",
-            "test-coverage:required",
-            "security-review:not-required",
-            "ui-review:not-required",
-        }
-        assert len(labels) == len(set(labels))
 
 
 class TestCreateHarnessIssue:
     sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="file:///nonexistent-sandbox")
 
-    @staticmethod
-    def _listing(*pages: list[dict] | Exception):
-        """Serve one response per call from *pages* (last one repeats); record the count.
+    @pytest.mark.parametrize("token", ["ABCD1234", "abcd123", "abcd12345", "abcd/234", "abcd1234\n"])
+    def test_rejects_malformed_run_token(self, tmp_path, token):
+        with pytest.raises(ValueError):
+            create_harness_issue(tmp_path, self.sandbox, run_token=token, baseline=_baseline())
 
-        An ``Exception`` entry is served as ``rc=1`` with an HTTP 502 stderr.
-        """
-        state = {"calls": 0}
+    def test_uses_validated_request_workflow_and_retains_authored_input(self, tmp_path, mocker):
+        from hermes_pipeline.todos_create import CreateRequest
+        mocker.patch("hermes_pipeline.github_issues.ensure_labels")
+        execute = mocker.patch("hermes_pipeline.todos_create.execute_create", return_value=37)
+        verify = mocker.patch.object(harness_mod, "verify_harness_issue")
+        issue = create_harness_issue(tmp_path, self.sandbox, run_token=_RUN_TOKEN, baseline=_baseline())
+        request = execute.call_args.args[2]
+        assert isinstance(request, CreateRequest)
+        assert execute.call_args.args[1] == tmp_path / ".hermes"
+        assert execute.call_args.kwargs == {"approved_repo": self.sandbox.repo}
+        assert request.fields["Branch"] == issue.branch
+        assert issue.number == 37
+        assert request.transaction_id == issue.transaction_id
+        assert (tmp_path / ".hermes" / "todo-create-input" / f"{issue.transaction_id}.json").exists()
+        verify.assert_called_once_with(tmp_path, self.sandbox, issue)
 
-        def handler(argv):
-            page = pages[min(state["calls"], len(pages) - 1)]
-            state["calls"] += 1
-            if isinstance(page, Exception):
-                return 1, "", "HTTP 502: Bad Gateway\n"
-            return 0, json.dumps([page]), ""
+    @pytest.mark.parametrize("code", ["duplicate_marker", "issue_drift", "late_drift", "create_pending", "audit_failed"])
+    def test_partial_or_conflicting_creation_retains_recovery(self, tmp_path, mocker, code):
+        from hermes_pipeline.todos_create import TodoCreateError
+        mocker.patch("hermes_pipeline.github_issues.ensure_labels")
+        mocker.patch("hermes_pipeline.todos_create.execute_create", side_effect=TodoCreateError(code))
+        with pytest.raises(HarnessRemoteCleanupError, match="issue_unverified") as error:
+            create_harness_issue(tmp_path, self.sandbox, run_token=_RUN_TOKEN, baseline=_baseline())
+        assert code in error.value.detail
+        assert len(list((tmp_path / ".hermes" / "todo-create-input").glob("*.json"))) == 1
 
-        return handler, state
+    def test_fresh_invocations_use_fresh_uuid_and_explicit_retry_reuses_it(self, tmp_path, mocker):
+        mocker.patch("hermes_pipeline.github_issues.ensure_labels")
+        execute = mocker.patch("hermes_pipeline.todos_create.execute_create", return_value=37)
+        mocker.patch.object(harness_mod, "verify_harness_issue")
+        one = create_harness_issue(tmp_path, self.sandbox, run_token=_RUN_TOKEN, baseline=_baseline())
+        two = create_harness_issue(tmp_path, self.sandbox, run_token=_RUN_TOKEN, baseline=_baseline())
+        retry = create_harness_issue(tmp_path, self.sandbox, run_token=_RUN_TOKEN, baseline=_baseline(), transaction_id=one.transaction_id)
+        assert one.transaction_id != two.transaction_id
+        assert one == retry
+        assert execute.call_args_list[0].args[2] == execute.call_args_list[2].args[2]
 
-    def _serve_labels(self, fake_gh, existing: list[str] | None = None):
-        """``gh label list`` reports *existing* (default: the whole vocabulary); create succeeds."""
-        names = existing if existing is not None else [name for name, _, _ in LABEL_VOCABULARY]
-        fake_gh.on(*_LABEL_LIST_ARGV, stdout=json.dumps([{"name": name} for name in names]))
-        fake_gh.on(*_LABEL_CREATE_ARGV, stdout="")
+    @pytest.mark.parametrize("parent", [".hermes", ".hermes/todo-create-input"])
+    def test_symlink_parent_is_rejected_before_writing(self, tmp_path, parent):
+        project = tmp_path / "project"
+        outside = tmp_path / "outside"
+        project.mkdir()
+        outside.mkdir()
+        link = project / parent
+        link.parent.mkdir(parents=True, exist_ok=True)
+        link.symlink_to(outside, target_is_directory=True)
+        with pytest.raises(HarnessRemoteCleanupError, match="issue_request_path"):
+            harness_mod._harness_create_request(project, run_token="tok00000", transaction_id="12345678-1234-4234-9234-123456789abc")
+        assert list(outside.iterdir()) == []
 
-    def _serve_view(self, fake_gh, number: int, title: str = _HARNESS_TITLE, **extra):
-        fake_gh.on(
-            *API_ARGV,
-            f"repos/acme/sandbox/issues/{number}",
-            stdout=json.dumps(issue_payload(number, title=title, **extra)),
-        )
+    def test_saved_request_tampering_is_not_overwritten(self, tmp_path):
+        transaction = "12345678-1234-4234-9234-123456789abc"
+        harness_mod._harness_create_request(tmp_path, run_token=_RUN_TOKEN, transaction_id=transaction)
+        path = tmp_path / ".hermes" / "todo-create-input" / f"{transaction}.json"
+        path.write_text("tampered")
+        with pytest.raises(HarnessRemoteCleanupError, match="issue_request_drift"):
+            harness_mod._harness_create_request(tmp_path, run_token=_RUN_TOKEN, transaction_id=transaction)
+        assert path.read_text() == "tampered"
 
-    def _create(self, fake_gh, tmp_project, **kwargs):
-        kwargs.setdefault("sleep", lambda _: None)
-        return create_harness_issue(
-            tmp_project, self.sandbox, run_token=_RUN_TOKEN, baseline=_baseline(), **kwargs
-        )
 
-    def test_creates_issue_with_renderer_labels_and_token_title(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh)
-        self._serve_view(fake_gh, 7)
-        captured: dict[str, str] = {}
+class TestHarnessReadiness:
+    @pytest.mark.real_git
+    @pytest.mark.parametrize("mutation", ["body", "dual", "malformed", "ready", "triage", "title", "closed"])
+    def test_readiness_drift_fails_closed_with_authored_input_retained(self, tmp_path, mocker, mutation):
+        from hermes_pipeline.todos_create import render_create_body
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        issue = _harness_issue(37)
+        request = harness_mod._harness_create_request(project_dir, run_token=issue.run_token, transaction_id=issue.transaction_id)
+        body = render_create_body(request, issue_number=issue.number)
+        labels = ["tpo:todo", "ready-for-agent", "priority:P1", "effort:S", "phase:4-development",
+                  "test-coverage:required", "security-review:not-required", "ui-review:not-required"]
+        title, state = issue.title, "open"
+        if mutation == "body":
+            body = body.replace("strip surrounding whitespace", "keep whitespace")
+        elif mutation == "dual":
+            body = "### Plan\n\ndocs/other.md\n\n" + body
+        elif mutation == "malformed":
+            body = body.replace("</details>", "")
+        elif mutation == "ready":
+            labels.remove("ready-for-agent")
+        elif mutation == "triage":
+            labels.append("needs-triage")
+        elif mutation == "title":
+            title = "Foreign title"
+        elif mutation == "closed":
+            state = "closed"
+        fresh = issue_from_api(issue_payload(issue.number, body=body, title=title, state=state, labels=labels), repo=sandbox.repo)
+        mocker.patch("hermes_pipeline.github_issues.fetch_issue", return_value=fresh)
+        with pytest.raises(HarnessRemoteCleanupError, match="issue_readiness_drift"):
+            harness_mod.verify_harness_issue(project_dir, sandbox, issue)
+        assert (project_dir / ".hermes" / "todo-create-input" / f"{issue.transaction_id}.json").exists()
 
-        def create(argv):
-            captured["body"] = Path(argv[argv.index("--body-file") + 1]).read_text()
-            return 0, _ISSUE_URL.format(7), ""
-
-        fake_gh.on("gh", "issue", "create", handler=create)
-
-        issue = self._create(fake_gh, tmp_project)
-
-        assert issue == HarnessIssue(
-            number=7,
-            todo_id="TODO-7",
-            branch=f"feat/harness-{_RUN_TOKEN}",
-            plan_path=f"docs/harness/{_RUN_TOKEN}-plan.md",
-            title=_HARNESS_TITLE,
-            run_token=_RUN_TOKEN,
-        )
-        (argv,) = [call for call in fake_gh.gh_calls() if call[:2] == ["issue", "create"]]
-        assert argv[argv.index("--repo") + 1] == "acme/sandbox"
-        assert argv[argv.index("--title") + 1] == _HARNESS_TITLE
-        given = [argv[i + 1] for i, item in enumerate(argv) if item == "--label"]
-        assert given == harness_mod._harness_labels()
-        sections = parse_issue_body(captured["body"])
-        assert sections["Branch"] == (f"feat/harness-{_RUN_TOKEN}",)
-        assert sections["Plan"] == (f"docs/harness/{_RUN_TOKEN}-plan.md",)
-        assert "_No response_" not in captured["body"]
-        api_calls = [call for call in fake_gh.gh_calls() if call[:1] == ["api"]]
-        assert [call[-1] for call in api_calls] == ["repos/acme/sandbox/issues/7"]
-
-    def test_ensures_labels_before_creating(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh, existing=["tpo:todo"])
-        self._serve_view(fake_gh, 7)
-        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(7))
-
-        self._create(fake_gh, tmp_project)
-
-        verbs = [tuple(call[:2]) for call in fake_gh.gh_calls()]
-        assert verbs.index(("label", "list")) < verbs.index(("issue", "create"))
-        created = [call[-1] for call in fake_gh.gh_calls() if call[:2] == ["label", "create"]]
-        assert "ready-for-agent" in created
-        assert "phase:4-development" in created
-        assert max(i for i, v in enumerate(verbs) if v == ("label", "create")) < verbs.index(("issue", "create"))
-
-    def test_rejects_malformed_run_token(self, fake_gh, tmp_project):
-        for token in ("ABCD1234", "abcd123", "abcd12345", "abcd/234", "abcd 234", "abcd-234", "abcd1234\n", ""):
-            with pytest.raises(ValueError):
-                create_harness_issue(tmp_project, self.sandbox, run_token=token, baseline=_baseline())
-        assert fake_gh.gh_calls() == []
-
-    def test_adopted_number_with_foreign_title_is_reconciled(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(12))
-        self._serve_view(fake_gh, 12, title="Somebody else's issue")
-        handler, state = self._listing([issue_payload(123, title=_HARNESS_TITLE)])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-
-        issue = self._create(fake_gh, tmp_project)
-
-        assert issue.number == 123
-        assert issue.todo_id == "TODO-123"
-        assert state["calls"] == 1
-
-    def test_adopted_number_that_is_a_pull_request_is_reconciled(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(12))
-        self._serve_view(fake_gh, 12, pull_request=True)
-        handler, _ = self._listing([issue_payload(123, title=_HARNESS_TITLE)])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-
-        assert self._create(fake_gh, tmp_project).number == 123
-
-    def test_timeout_after_remote_success_is_reconciled(self, fake_gh, tmp_project, caplog):
-        self._serve_labels(fake_gh)
-        fake_gh.on(
-            "gh", "issue", "create", raises=subprocess.TimeoutExpired(cmd="gh issue create", timeout=60)
-        )
-        handler, state = self._listing([], [], [issue_payload(7, title=_HARNESS_TITLE)])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-        sleeps: list[float] = []
-
-        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
-            issue = self._create(fake_gh, tmp_project, sleep=sleeps.append)
-
-        assert issue.number == 7
-        assert issue.todo_id == "TODO-7"
-        assert state["calls"] == 3
-        assert sleeps == [2.0, 2.0]
-        assert "reconciled issue #7 after create failure" in caplog.text
-
-    def test_malformed_create_stdout_reconciles(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", stdout="Creating issue... done\n")
-        handler, state = self._listing([issue_payload(7, title=_HARNESS_TITLE)])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-        sleeps: list[float] = []
-
-        issue = self._create(fake_gh, tmp_project, sleep=sleeps.append)
-
-        assert issue.number == 7
-        assert state["calls"] == 1
-        assert sleeps == []
-
-    def test_oserror_from_create_is_reconciled(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", raises=PermissionError("body file"))
-        handler, state = self._listing([issue_payload(7, title=_HARNESS_TITLE)])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-
-        issue = self._create(fake_gh, tmp_project)
-
-        assert issue.number == 7
-        assert state["calls"] == 1
-
-    @pytest.mark.parametrize(
-        ("code", "failure"),
-        [
-            ("gh_auth", {"rc": 1, "stderr": "error: not logged in\n"}),
-            ("gh_missing", {"raises": FileNotFoundError("gh")}),
-            ("gh_version", {"rc": 1, "stderr": "unknown flag: --body-file\n"}),
-            ("gh_not_found", {"rc": 1, "stderr": "HTTP 404: Not Found\n"}),
-            ("gh_rejected", {"rc": 1, "stderr": "HTTP 422: Validation Failed\n"}),
-        ],
-    )
-    def test_create_failure_without_side_effect_is_raised_without_listing(
-        self, fake_gh, tmp_project, code, failure
-    ):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", **failure)
-        handler, state = self._listing([issue_payload(7, title=_HARNESS_TITLE)])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-        sleeps: list[float] = []
-
-        with pytest.raises(GitHubIssuesError) as exc_info:
-            self._create(fake_gh, tmp_project, sleep=sleeps.append)
-
-        assert exc_info.value.code == code
-        assert state["calls"] == 0
-        assert sleeps == []
-
-    @pytest.mark.parametrize(
-        "view_failure",
-        [
-            {"rc": 1, "stderr": "HTTP 404: Not Found\n"},
-            {"rc": 1, "stderr": "HTTP 403: Forbidden\n"},
-            {"raises": subprocess.TimeoutExpired(cmd="gh api", timeout=60)},
-        ],
-    )
-    def test_verification_failure_falls_through_to_reconciliation(self, fake_gh, tmp_project, view_failure):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", stdout=_ISSUE_URL.format(12))
-        fake_gh.on(*API_ARGV, "repos/acme/sandbox/issues/12", **view_failure)
-        handler, state = self._listing([issue_payload(12, title=_HARNESS_TITLE)])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-
-        issue = self._create(fake_gh, tmp_project)
-
-        assert issue.number == 12
-        assert state["calls"] == 1
-
-    def test_zero_matches_after_retries_raises_issue_unverified(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", rc=1, stderr="HTTP 502\n")
-        handler, state = self._listing([issue_payload(8, title="unrelated")])
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-        sleeps: list[float] = []
-
-        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
-            self._create(fake_gh, tmp_project, sleep=sleeps.append)
-
-        assert exc_info.value.code == "issue_unverified"
-        assert state["calls"] == 5
-        assert sleeps == [2.0] * 4
-        assert isinstance(exc_info.value.__cause__, GitHubIssuesError)
-        assert (
-            f"gh issue list --repo acme/sandbox --state all --search '[harness {_RUN_TOKEN}] in:title'"
-            in exc_info.value.detail
-        )
-        assert str(exc_info.value).startswith("issue_unverified: ")
-
-    def test_two_matches_raises_issue_ambiguous(self, fake_gh, tmp_project):
-        self._serve_labels(fake_gh)
-        fake_gh.on("gh", "issue", "create", rc=1, stderr="HTTP 502\n")
-        handler, _ = self._listing(
-            [issue_payload(10, title=_HARNESS_TITLE), issue_payload(11, title=_HARNESS_TITLE + " (again)")]
-        )
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-
-        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
-            self._create(fake_gh, tmp_project)
-
-        assert exc_info.value.code == "issue_ambiguous"
-        assert exc_info.value.detail == (
-            f"#10, #11 in acme/sandbox for [harness {_RUN_TOKEN}]; "
-            "close duplicates: gh issue close <n> --repo acme/sandbox"
-        )
-
-    def _reconcile(self, tmp_project, **kwargs):
-        kwargs.setdefault("sleep", lambda _: None)
-        return reconcile_created_issue(
-            tmp_project,
-            self.sandbox,
-            run_token=_RUN_TOKEN,
-            baseline=_baseline(),
-            cause=RuntimeError("boom"),
-            **kwargs,
-        )
-
-    def test_listing_skips_pull_requests(self, fake_gh, tmp_project):
-        handler, _ = self._listing(
-            [
-                issue_payload(6, title=_HARNESS_TITLE, pull_request=True),
-                issue_payload(7, title=_HARNESS_TITLE),
-            ]
-        )
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-
-        assert self._reconcile(tmp_project) == 7
-
-    def test_listing_requires_title_prefix(self, fake_gh, tmp_project):
-        handler, _ = self._listing(
-            [
-                issue_payload(6, title=f"Re: {_HARNESS_TITLE}"),
-                issue_payload(7, title=_HARNESS_TITLE),
-            ]
-        )
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-
-        assert self._reconcile(tmp_project) == 7
-
-    def test_listing_quotes_viewer_and_uses_list_timeout(self, fake_gh, tmp_project):
-        baseline = dataclasses.replace(_baseline(), viewer="octo cat/x")
-        fake_gh.on(*API_ARGV, "--paginate", "--slurp", stdout=json.dumps([[issue_payload(7, title=_HARNESS_TITLE)]]))
-
-        number = reconcile_created_issue(
-            tmp_project, self.sandbox, run_token=_RUN_TOKEN, baseline=baseline, cause=RuntimeError("boom")
-        )
-
-        assert number == 7
-        (argv,) = fake_gh.gh_calls()
-        assert argv[-1] == "repos/acme/sandbox/issues?state=all&creator=octo%20cat%2Fx&per_page=100"
-        assert fake_gh.kwargs[0]["timeout"] == 180.0
-
-    def test_listing_failures_are_retried_then_adopted(self, fake_gh, tmp_project, caplog):
-        handler, state = self._listing(
-            RuntimeError(), RuntimeError(), [issue_payload(7, title=_HARNESS_TITLE)]
-        )
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-        sleeps: list[float] = []
-
-        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.harness"):
-            number = self._reconcile(tmp_project, sleep=sleeps.append)
-
-        assert number == 7
-        assert state["calls"] == 3
-        assert sleeps == [2.0, 2.0]
-        assert "reconcile listing attempt 1 failed" in caplog.text
-        assert "reconcile listing attempt 2 failed" in caplog.text
-
-    def test_listing_failing_every_attempt_raises_issue_unverified(self, fake_gh, tmp_project):
-        handler, state = self._listing(RuntimeError())
-        fake_gh.on(*_LIST_ARGV, handler=handler)
-        sleeps: list[float] = []
-
-        with pytest.raises(HarnessRemoteCleanupError) as exc_info:
-            self._reconcile(tmp_project, sleep=sleeps.append)
-
-        assert exc_info.value.code == "issue_unverified"
-        assert state["calls"] == 5
-        assert sleeps == [2.0] * 4
+    def test_misleading_issue_headings_remain_plan_prose(self, tmp_path, monkeypatch):
+        from hermes_pipeline.todos_create import render_create_body
+        monkeypatch.setattr(harness_mod, "_HARNESS_PLAN", harness_mod._HARNESS_PLAN.replace(
+            "1. Add focused tests", "### Branch\n\nfeat/untrusted\n\n### Plan\n\ndocs/not-authority.md\n\n1. Add focused tests"))
+        request = harness_mod._harness_create_request(tmp_path, run_token="tok00000", transaction_id="12345678-1234-4234-9234-123456789abc")
+        body = render_create_body(request, issue_number=37)
+        parsed = issue_from_api(issue_payload(37, body=body), repo="acme/sandbox")
+        assert parsed.branch_values == ("feat/harness-tok00000",)
+        assert parsed.plan_values == ()
+        assert parsed.plan_source.kind == "embedded"
+        assert "docs/not-authority.md" in parsed.plan_source.document
 
 
 class TestHarnessIssue:
@@ -4275,115 +4080,130 @@ class TestHarnessIssue:
         with pytest.raises(ValueError):
             HarnessIssue(
                 number=number, todo_id="TODO-1", branch="feat/harness-tok00000",
-                plan_path="docs/harness/tok00000-plan.md", title="[harness tok00000] x", run_token="tok00000",
+                title="[harness tok00000] x", run_token="tok00000",
             )
 
-    @pytest.mark.parametrize(
-        "plan_path",
-        [
-            "/docs/harness/tok00000-plan.md",
-            "docs/harness/../tok00000-plan.md",
-            "docs/harness/TOK00000-plan.md",
-            "docs/harness/tok0000-plan.md",
-            "docs/harness/tok00000-plan.md\n",
-            "plans/tok00000-plan.md",
-        ],
-    )
-    def test_rejects_bad_plan_path(self, plan_path):
-        with pytest.raises(ValueError):
-            dataclasses.replace(_harness_issue(), plan_path=plan_path)
-
-    def test_accepts_canonical_plan_path(self):
-        assert _harness_issue().plan_path == "docs/harness/tok00000-plan.md"
 
 
-class TestCommitPlan:
+class TestRunAnchor:
     @pytest.mark.real_git
-    def test_commit_plan_commits_when_clone_config_requires_signing(self, tmp_path):
-        project_dir, _ = _seeded_clone(tmp_path)
-        _real_git("config", "--local", "commit.gpgsign", "true", cwd=project_dir)
-        _real_git("config", "--local", "user.signingkey", "0000DEAD", cwd=project_dir)
-
-        sha = commit_plan(project_dir, _harness_issue(42))
-
-        assert sha == _real_git("rev-parse", "HEAD", cwd=project_dir)
-        assert _real_git("log", "-1", "--format=%G?", cwd=project_dir) == "N"
-
-    @pytest.mark.real_git
-    def test_commit_plan_document_validates_for_issue_number(self, tmp_path):
+    def test_completed_anchor_rewound_to_parent_fails_closed(self, tmp_path):
         project_dir, _ = _seeded_clone(tmp_path)
         issue = _harness_issue(42)
-
-        sha = commit_plan(project_dir, issue)
-
-        assert sha == _real_git("rev-parse", "HEAD", cwd=project_dir)
-        assert _real_git("status", "--porcelain", cwd=project_dir) == ""
-        assert _real_git("log", "-1", "--format=%s", cwd=project_dir) == "docs(harness): plan for TODO-42"
-        manifest = validate_plan_candidate(project_dir, issue.plan_path, expected_todo_id="TODO-42")
-        assert manifest is not None
-        assert manifest.todo_id == "TODO-42"
-        document = (project_dir / issue.plan_path).read_text()
-        assert document.startswith("# TODO-42 Mock Name Normalization Plan\n")
-        assert '"todo_id": "TODO-42"' in document
-        assert '"todo_id": "TODO-1"' not in document
+        parent = _real_git("rev-parse", "HEAD", cwd=project_dir)
+        anchor = harness_mod.create_run_anchor(project_dir, issue)
+        _real_git("update-ref", "HEAD", parent, anchor, cwd=project_dir)
+        with pytest.raises(HarnessPreflightError, match="anchor_head_moved"):
+            harness_mod.create_run_anchor(project_dir, issue)
+        assert _real_git("rev-parse", "HEAD", cwd=project_dir) == parent
 
     @pytest.mark.real_git
-    def test_commit_plan_does_not_push_and_pins_no_verify(self, tmp_path, monkeypatch):
+    def test_interrupted_compare_and_swap_reuses_persisted_anchor(self, tmp_path, monkeypatch):
         project_dir, _ = _seeded_clone(tmp_path)
-        recorded: list[list[str]] = []
-
-        def recording_git(argv, **kwargs):
-            recorded.append(list(argv))
-            return subprocess.run(argv, **kwargs)
-
-        monkeypatch.setattr(harness_mod, "_git", recording_git)
-
-        commit_plan(project_dir, _harness_issue(3))
-
-        verbs = [harness_mod._git_verb(argv[1:]) for argv in recorded]
-        assert "commit" in verbs
-        assert "push" not in verbs
-        (commit_argv,) = [argv for argv in recorded if harness_mod._git_verb(argv[1:]) == "commit"]
-        assert "--no-verify" in commit_argv
-        assert _split_git_argv(commit_argv)[2][:2] == ["-c", "commit.gpgsign=false"]
-        assert commit_argv[-2:] == ["--", "docs/harness/tok00000-plan.md"]
-        assert _real_git("rev-parse", "origin/main", cwd=project_dir) != _real_git("rev-parse", "HEAD", cwd=project_dir)
-
-    @pytest.mark.real_git
-    def test_commit_plan_commits_only_the_plan(self, tmp_path):
-        project_dir, _ = _seeded_clone(tmp_path)
-        (project_dir / "SECRET.txt").write_text("hunter2\n")
-        _real_git("add", "SECRET.txt", cwd=project_dir)
-
-        commit_plan(project_dir, _harness_issue(3))
-
-        committed = _real_git("show", "--name-only", "--format=", "HEAD", cwd=project_dir).splitlines()
-        assert committed == ["docs/harness/tok00000-plan.md"]
-        assert _real_git("status", "--porcelain", cwd=project_dir) == "A  SECRET.txt"
-
-    @pytest.mark.real_git
-    def test_commit_plan_is_idempotent(self, tmp_path):
-        project_dir, _ = _seeded_clone(tmp_path)
-        issue = _harness_issue(3)
-
-        first = commit_plan(project_dir, issue)
-        second = commit_plan(project_dir, issue)
-
-        assert first == second == _real_git("rev-parse", "HEAD", cwd=project_dir)
+        issue = _harness_issue(42)
+        original = harness_mod._run_git
+        parent = _real_git("rev-parse", "HEAD", cwd=project_dir)
+        def interrupted(args, **kwargs):
+            if args[:2] == ["update-ref", "HEAD"]:
+                raise OSError("interrupted before update")
+            return original(args, **kwargs)
+        monkeypatch.setattr(harness_mod, "_run_git", interrupted)
+        with pytest.raises(OSError):
+            harness_mod.create_run_anchor(project_dir, issue)
+        record = json.loads((project_dir / ".git" / "harness-anchor.json").read_text())
+        assert _real_git("rev-parse", "HEAD", cwd=project_dir) == parent
+        monkeypatch.setattr(harness_mod, "_run_git", original)
+        assert harness_mod.create_run_anchor(project_dir, issue) == record["anchor"]
         assert _real_git("rev-list", "--count", "HEAD", cwd=project_dir) == "2"
 
     @pytest.mark.real_git
-    def test_commit_plan_recommits_when_tracked_plan_differs(self, tmp_path):
+    def test_distinct_runs_on_identical_parent_have_unique_empty_anchors(self, tmp_path):
+        (tmp_path / "first").mkdir()
+        first_dir, _ = _seeded_clone(tmp_path / "first")
+        second_dir = tmp_path / "second"
+        _real_git("clone", str(first_dir), str(second_dir), cwd=tmp_path)
+        _real_git("config", "user.name", "Harness", cwd=second_dir)
+        _real_git("config", "user.email", "harness@localhost", cwd=second_dir)
+        first = _harness_issue(42)
+        second = dataclasses.replace(first, transaction_id="1acf32e8-81b2-4ef7-867b-a77630cae376")
+        first_sha = harness_mod.create_run_anchor(first_dir, first)
+        second_sha = harness_mod.create_run_anchor(second_dir, second)
+        assert first_sha != second_sha
+        assert _real_git("rev-parse", "HEAD^", cwd=first_dir) == _real_git("rev-parse", "HEAD^", cwd=second_dir)
+        assert _real_git("rev-parse", "HEAD^{tree}", cwd=first_dir) == _real_git("rev-parse", "HEAD^{tree}", cwd=second_dir)
+
+    @pytest.mark.real_git
+    def test_unborn_head_does_not_create_anchor(self, tmp_path):
+        _real_git("init", "-q", "-b", "main", cwd=tmp_path)
+        with pytest.raises(HarnessPreflightError, match="anchor_unborn_head"):
+            harness_mod.create_run_anchor(tmp_path, _harness_issue(42))
+        assert not (tmp_path / ".git" / "harness-anchor.json").exists()
+
+    @pytest.mark.real_git
+    def test_anchor_alone_can_prove_cleanup_ownership(self, tmp_path):
+        project_dir, sandbox = _seeded_clone(tmp_path)
+        issue = _harness_issue(42)
+        sha = harness_mod.create_run_anchor(project_dir, issue)
+        _real_git("push", "origin", f"HEAD:refs/heads/{issue.branch}", cwd=project_dir)
+        assert harness_mod.branch_has_run_provenance(
+            project_dir, sandbox, name=issue.branch, tip_sha=sha, run_base_sha=sha,
+            default_branch="main", provenance_dir=tmp_path / "provenance",
+        )
+
+    @pytest.mark.real_git
+    def test_anchor_uses_configured_identity_despite_ambient_overrides(self, tmp_path, monkeypatch):
         project_dir, _ = _seeded_clone(tmp_path)
-        issue = _harness_issue(3)
-        first = commit_plan(project_dir, issue)
-        (project_dir / issue.plan_path).write_text("# stale\n")
-        _real_git("commit", "-am", "tamper", cwd=project_dir)
+        for role in ("AUTHOR", "COMMITTER"):
+            monkeypatch.setenv(f"GIT_{role}_NAME", "Unexpected")
+            monkeypatch.setenv(f"GIT_{role}_EMAIL", "unexpected@example.com")
+        harness_mod.create_run_anchor(project_dir, _harness_issue(42))
+        assert _real_git("log", "-1", "--format=%an|%ae|%cn|%ce", cwd=project_dir) == "|".join([
+            harness_mod._HARNESS_GIT_USER_NAME, harness_mod._HARNESS_GIT_USER_EMAIL,
+            harness_mod._HARNESS_GIT_USER_NAME, harness_mod._HARNESS_GIT_USER_EMAIL,
+        ])
 
-        second = commit_plan(project_dir, issue)
+    @pytest.mark.real_git
+    def test_anchor_is_empty_retry_stable_and_preserves_index(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        issue = _harness_issue(42)
+        parent = _real_git("rev-parse", "HEAD", cwd=project_dir)
+        (project_dir / "staged.txt").write_text("staged\n")
+        (project_dir / "untracked.txt").write_text("untracked\n")
+        _real_git("add", "staged.txt", cwd=project_dir)
+        status = _real_git("status", "--porcelain", cwd=project_dir)
+        _real_git("config", "commit.gpgsign", "true", cwd=project_dir)
+        sha = harness_mod.create_run_anchor(project_dir, issue)
+        assert sha == harness_mod.create_run_anchor(project_dir, issue)
+        assert _real_git("rev-parse", "HEAD^", cwd=project_dir) == parent
+        assert _real_git("rev-parse", "HEAD^{tree}", cwd=project_dir) == _real_git("rev-parse", f"{parent}^{{tree}}", cwd=project_dir)
+        assert _real_git("show", "--format=", "--name-only", sha, cwd=project_dir) == ""
+        assert _real_git("status", "--porcelain", cwd=project_dir) == status
+        assert _real_git("rev-parse", "origin/main", cwd=project_dir) == parent
+        message = _real_git("log", "-1", "--format=%B", cwd=project_dir)
+        assert "tpo-harness-anchor" in message
+        assert "TODO-42" in message
+        assert issue.run_token in message
 
-        assert second != first
-        assert (project_dir / issue.plan_path).read_text() == harness_mod._plan_document("TODO-3")
+    @pytest.mark.real_git
+    def test_anchor_fails_closed_after_head_movement(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        issue = _harness_issue(42)
+        harness_mod.create_run_anchor(project_dir, issue)
+        _real_git("commit", "--allow-empty", "-m", "unexpected", cwd=project_dir)
+        head = _real_git("rev-parse", "HEAD", cwd=project_dir)
+        with pytest.raises(HarnessPreflightError, match="anchor_head_moved"):
+            harness_mod.create_run_anchor(project_dir, issue)
+        assert _real_git("rev-parse", "HEAD", cwd=project_dir) == head
+
+    @pytest.mark.real_git
+    def test_distinct_transactions_have_distinct_anchors(self, tmp_path):
+        project_dir, _ = _seeded_clone(tmp_path)
+        issue = _harness_issue(42)
+        first = harness_mod.create_run_anchor(project_dir, issue)
+        second_issue = dataclasses.replace(issue, transaction_id="1acf32e8-81b2-4ef7-867b-a77630cae376")
+        with pytest.raises(HarnessPreflightError, match="anchor_identity_mismatch"):
+            harness_mod.create_run_anchor(project_dir, second_issue)
+        assert _real_git("rev-parse", "HEAD", cwd=project_dir) == first
 
 
 class TestPollRegisteredPhases:
@@ -4731,16 +4551,16 @@ def _foreign_clone(tmp_path: Path, sandbox: SandboxRepo, name: str = "foreign") 
 
 
 def _run_branch(project_dir: Path, issue: HarnessIssue, name: str = "feat/x") -> tuple[str, str]:
-    """The legitimate flow: plan commit on a new branch, agent commit on top, pushed. (plan_sha, tip)."""
+    """The legitimate flow: run anchor on a new branch, agent commit on top, pushed. (run_base_sha, tip)."""
     _real_git("checkout", "-q", "-b", name, "main", cwd=project_dir)
-    plan_sha = commit_plan(project_dir, issue)
+    run_base_sha = create_run_anchor(project_dir, issue)
     (project_dir / "agent.txt").write_text("agent work\n")
     _real_git("add", ".", cwd=project_dir)
     _real_git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "agent work", cwd=project_dir)
     _real_git("push", "-q", "origin", name, cwd=project_dir)
     tip = _real_git("rev-parse", "HEAD", cwd=project_dir)
     _real_git("checkout", "-q", "main", cwd=project_dir)
-    return plan_sha, tip
+    return run_base_sha, tip
 
 
 def _provenance_dir(project_dir: Path) -> Path:
@@ -4751,27 +4571,27 @@ def _provenance_dir(project_dir: Path) -> Path:
 @pytest.mark.real_git
 class TestBranchProvenance:
     def _check(
-        self, project_dir: Path, sandbox: SandboxRepo, name: str, tip: str, plan_sha: str, default: str = "main"
+        self, project_dir: Path, sandbox: SandboxRepo, name: str, tip: str, run_base_sha: str, default: str = "main"
     ) -> bool:
         return branch_has_run_provenance(
-            project_dir, sandbox, name=name, tip_sha=tip, plan_sha=plan_sha, default_branch=default,
+            project_dir, sandbox, name=name, tip_sha=tip, run_base_sha=run_base_sha, default_branch=default,
             provenance_dir=_provenance_dir(project_dir),
         )
 
     def test_graft_in_agent_clone_does_not_forge_provenance(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7())
+        run_base_sha, _ = _run_branch(project_dir, _issue7())
         ops_tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
         _real_git("fetch", "-q", "origin", "ops", cwd=project_dir)
-        _real_git("replace", "--graft", ops_tip, plan_sha, cwd=project_dir)
+        _real_git("replace", "--graft", ops_tip, run_base_sha, cwd=project_dir)
         # The forgery works inside the clone: ancestry there now claims ops descends from the plan.
-        assert _real_git("merge-base", "--is-ancestor", plan_sha, ops_tip, cwd=project_dir) == ""
+        assert _real_git("merge-base", "--is-ancestor", run_base_sha, ops_tip, cwd=project_dir) == ""
 
-        assert self._check(project_dir, sandbox, "ops", ops_tip, plan_sha) is False
+        assert self._check(project_dir, sandbox, "ops", ops_tip, run_base_sha) is False
 
     def test_provenance_dir_is_recreated_fresh_on_every_check(self, tmp_path: Path, monkeypatch):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, tip = _run_branch(project_dir, _issue7())
+        run_base_sha, tip = _run_branch(project_dir, _issue7())
         provenance_dir = _provenance_dir(project_dir)
         assert not provenance_dir.exists()
         seen: list[list[str]] = []
@@ -4785,14 +4605,14 @@ class TestBranchProvenance:
 
         monkeypatch.setattr("hermes_pipeline.harness._git", spy)
 
-        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is True
+        assert self._check(project_dir, sandbox, "feat/x", tip, run_base_sha) is True
         # The root is harness-owned and persists; each check ran in a fresh ``prov-*`` subdir
         # that was removed afterwards, and unrelated files in the root are left alone.
         assert provenance_dir.is_dir()
         assert not (provenance_dir / "HEAD").exists()
         keep = provenance_dir / "keep.txt"
         keep.write_text("operator file\n")
-        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is True
+        assert self._check(project_dir, sandbox, "feat/x", tip, run_base_sha) is True
         assert keep.read_text() == "operator file\n"
         assert list(provenance_dir.glob("prov-*")) == []
         assert sum(1 for argv in seen if "init" in argv) == 2
@@ -4804,19 +4624,19 @@ class TestBranchProvenance:
         assert ancestry and all(_split_git_argv(argv)[2][:2] == ["-c", "core.useReplaceRefs=false"] for argv in ancestry)
 
     def test_preseeded_grafts_and_alternates_are_discarded(self, fake_gh, tmp_path: Path):
-        # Plan commit exists only in the clone; a forger plants a bare repo in the provenance ROOT
+        # run anchor exists only in the clone; a forger plants a bare repo in the provenance ROOT
         # pointing at the clone's objects (alternates) and grafting the operator tip onto the plan.
         # The check runs in a fresh ``prov-*`` subdir, so the planted files cannot shape ancestry.
         project_dir, sandbox = _seeded_clone(tmp_path)
         baseline = take_baseline(project_dir, sandbox, viewer="octocat", default_branch="main")
         _real_git("checkout", "-q", "-b", "plan-only", "main", cwd=project_dir)
-        plan_sha = commit_plan(project_dir, _issue7())
+        run_base_sha = create_run_anchor(project_dir, _issue7())
         _real_git("checkout", "-q", "main", cwd=project_dir)
         ops_tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
         provenance_dir = _provenance_dir(project_dir)
         _real_git("init", "-q", "--bare", str(provenance_dir), cwd=tmp_path)
         (provenance_dir / "info").mkdir(exist_ok=True)
-        (provenance_dir / "info" / "grafts").write_text(f"{ops_tip} {plan_sha}\n")
+        (provenance_dir / "info" / "grafts").write_text(f"{ops_tip} {run_base_sha}\n")
         (provenance_dir / "objects" / "info").mkdir(parents=True, exist_ok=True)
         (provenance_dir / "objects" / "info" / "alternates").write_text(f"{project_dir / '.git' / 'objects'}\n")
         sentinel = provenance_dir / "SENTINEL"
@@ -4825,7 +4645,7 @@ class TestBranchProvenance:
         fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
 
         artifacts = discover_remote_artifacts(
-            project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+            project_dir, sandbox, issue=_issue7(), baseline=baseline, run_base_sha=run_base_sha,
             provenance_dir=provenance_dir,
         )
 
@@ -4838,12 +4658,12 @@ class TestBranchProvenance:
 
     def test_provenance_root_containing_clone_is_rejected_before_any_deletion(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, tip = _run_branch(project_dir, _issue7())
+        run_base_sha, tip = _run_branch(project_dir, _issue7())
         before = sorted(str(p.relative_to(project_dir)) for p in project_dir.rglob("*"))
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
             branch_has_run_provenance(
-                project_dir, sandbox, name="feat/x", tip_sha=tip, plan_sha=plan_sha, default_branch="main",
+                project_dir, sandbox, name="feat/x", tip_sha=tip, run_base_sha=run_base_sha, default_branch="main",
                 provenance_dir=project_dir.parent,
             )
 
@@ -4854,10 +4674,10 @@ class TestBranchProvenance:
 
     def test_inherited_git_dir_does_not_redirect_provenance(self, tmp_path: Path, monkeypatch):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7())
+        run_base_sha, _ = _run_branch(project_dir, _issue7())
         ops_tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
         _real_git("fetch", "-q", "origin", "ops", cwd=project_dir)
-        _real_git("replace", "--graft", ops_tip, plan_sha, cwd=project_dir)
+        _real_git("replace", "--graft", ops_tip, run_base_sha, cwd=project_dir)
         monkeypatch.setenv("GIT_DIR", str(project_dir / ".git"))
         monkeypatch.setenv("GIT_ALTERNATE_OBJECT_DIRECTORIES", str(project_dir / ".git" / "objects"))
         envs: list[dict] = []
@@ -4869,7 +4689,7 @@ class TestBranchProvenance:
 
         monkeypatch.setattr("hermes_pipeline.harness._git", spy)
 
-        assert self._check(project_dir, sandbox, "ops", ops_tip, plan_sha) is False
+        assert self._check(project_dir, sandbox, "ops", ops_tip, run_base_sha) is False
         assert envs and all("GIT_DIR" not in env and "GIT_ALTERNATE_OBJECT_DIRECTORIES" not in env for env in envs)
         assert _provenance_dir(project_dir).is_dir()
         assert list(_provenance_dir(project_dir).glob("prov-*")) == []
@@ -4877,15 +4697,15 @@ class TestBranchProvenance:
     @pytest.mark.parametrize("bad", ["abc", "g" * 40, "", "0" * 39, "HEAD"])
     def test_malformed_tip_sha_fails_closed(self, tmp_path: Path, bad: str):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7())
+        run_base_sha, _ = _run_branch(project_dir, _issue7())
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
-            self._check(project_dir, sandbox, "feat/x", bad, plan_sha)
+            self._check(project_dir, sandbox, "feat/x", bad, run_base_sha)
 
         assert exc_info.value.code == "pr_discovery_incomplete"
 
     @pytest.mark.parametrize("bad", ["abc", "g" * 40, "", "refs/harness/default"])
-    def test_malformed_plan_sha_fails_closed(self, tmp_path: Path, bad: str):
+    def test_malformed_run_base_sha_fails_closed(self, tmp_path: Path, bad: str):
         project_dir, sandbox = _seeded_clone(tmp_path)
         _, tip = _run_branch(project_dir, _issue7())
 
@@ -4895,27 +4715,27 @@ class TestBranchProvenance:
         assert exc_info.value.code == "pr_discovery_incomplete"
 
     def test_plan_absent_from_remote_lacks_provenance(self, tmp_path: Path):
-        # The plan commit exists only in the clone (never pushed): no remote branch can be the run's.
+        # The run anchor exists only in the clone (never pushed): no remote branch can be the run's.
         project_dir, sandbox = _seeded_clone(tmp_path)
         _real_git("checkout", "-q", "-b", "plan-only", "main", cwd=project_dir)
-        plan_sha = commit_plan(project_dir, _issue7())
+        run_base_sha = create_run_anchor(project_dir, _issue7())
         _real_git("checkout", "-q", "main", cwd=project_dir)
         tip = _push_new_branch(project_dir, "feat/x", email="test@localhost")
 
-        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is False
+        assert self._check(project_dir, sandbox, "feat/x", tip, run_base_sha) is False
 
     def test_invalid_default_branch_name_lacks_provenance(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, tip = _run_branch(project_dir, _issue7())
+        run_base_sha, tip = _run_branch(project_dir, _issue7())
 
-        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha, default="a..b") is False
+        assert self._check(project_dir, sandbox, "feat/x", tip, run_base_sha, default="a..b") is False
 
     def test_default_branch_missing_on_remote_fails_closed(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, tip = _run_branch(project_dir, _issue7())
+        run_base_sha, tip = _run_branch(project_dir, _issue7())
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
-            self._check(project_dir, sandbox, "feat/x", tip, plan_sha, default="trunk")
+            self._check(project_dir, sandbox, "feat/x", tip, run_base_sha, default="trunk")
 
         assert exc_info.value.code == "pr_discovery_incomplete"
 
@@ -4929,29 +4749,29 @@ class TestBranchProvenance:
 
     def test_legit_run_branch_has_provenance(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, tip = _run_branch(project_dir, _issue7())
+        run_base_sha, tip = _run_branch(project_dir, _issue7())
 
-        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is True
+        assert self._check(project_dir, sandbox, "feat/x", tip, run_base_sha) is True
 
     def test_foreign_branch_after_baseline_lacks_provenance(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7())
+        run_base_sha, _ = _run_branch(project_dir, _issue7())
         tip = _push_new_branch(_foreign_clone(tmp_path, sandbox), "ops", email="mallory@example.com")
 
-        assert self._check(project_dir, sandbox, "ops", tip, plan_sha) is False
+        assert self._check(project_dir, sandbox, "ops", tip, run_base_sha) is False
 
     def test_foreign_branch_merging_plan_commit_lacks_provenance(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7())
+        run_base_sha, _ = _run_branch(project_dir, _issue7())
         foreign = _foreign_clone(tmp_path, sandbox)
         _push_new_branch(foreign, "ops", email="mallory@example.com")
         _real_git("fetch", "-q", "origin", "feat/x", cwd=foreign)
         _real_git("-c", "commit.gpgsign=false", "merge", "-q", "--no-ff", "-m", "absorb plan", "origin/feat/x", cwd=foreign)
         _real_git("push", "-q", "origin", "ops", cwd=foreign)
         tip = _real_git("rev-parse", "HEAD", cwd=foreign)
-        assert _real_git("merge-base", "--is-ancestor", plan_sha, tip, cwd=foreign) == ""  # plan IS an ancestor
+        assert _real_git("merge-base", "--is-ancestor", run_base_sha, tip, cwd=foreign) == ""  # plan IS an ancestor
 
-        assert self._check(project_dir, sandbox, "ops", tip, plan_sha) is False
+        assert self._check(project_dir, sandbox, "ops", tip, run_base_sha) is False
 
     def test_fast_forwarded_foreign_branch_lacks_provenance(self, tmp_path: Path):
         # ops = foreign commit, then run branch rebased on top: plan is ancestor of tip, foreign commit is not below plan.
@@ -4960,15 +4780,15 @@ class TestBranchProvenance:
         _push_new_branch(foreign, "ops", email="mallory@example.com")
         _real_git("fetch", "-q", "origin", cwd=project_dir)
         _real_git("checkout", "-q", "-b", "feat/x", "origin/ops", cwd=project_dir)
-        plan_sha = commit_plan(project_dir, _issue7())
+        run_base_sha = create_run_anchor(project_dir, _issue7())
         _real_git("push", "-q", "origin", "feat/x:ops", cwd=project_dir)
         _real_git("checkout", "-q", "main", cwd=project_dir)
 
-        assert self._check(project_dir, sandbox, "ops", plan_sha, plan_sha) is False
+        assert self._check(project_dir, sandbox, "ops", run_base_sha, run_base_sha) is False
 
     def test_tip_moved_between_discovery_and_check(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, stale_tip = _run_branch(project_dir, _issue7())
+        run_base_sha, stale_tip = _run_branch(project_dir, _issue7())
         foreign = _foreign_clone(tmp_path, sandbox)
         _real_git("checkout", "-q", "-b", "feat/x", "origin/feat/x", cwd=foreign)
         (foreign / "more.txt").write_text("more\n")
@@ -4976,23 +4796,23 @@ class TestBranchProvenance:
         _real_git("-c", "commit.gpgsign=false", "commit", "-q", "-m", "more", cwd=foreign)
         _real_git("push", "-q", "origin", "feat/x", cwd=foreign)
 
-        assert self._check(project_dir, sandbox, "feat/x", stale_tip, plan_sha) is False
+        assert self._check(project_dir, sandbox, "feat/x", stale_tip, run_base_sha) is False
 
     def test_plan_reachable_from_default_is_vacuous(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha = commit_plan(project_dir, _issue7())
+        run_base_sha = create_run_anchor(project_dir, _issue7())
         _real_git("push", "-q", "origin", "main", cwd=project_dir)
         tip = _push_new_branch(project_dir, "feat/x", email="test@localhost")
 
-        assert self._check(project_dir, sandbox, "feat/x", tip, plan_sha) is False
+        assert self._check(project_dir, sandbox, "feat/x", tip, run_base_sha) is False
 
     def test_fetch_failure_fails_closed(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, tip = _run_branch(project_dir, _issue7())
+        run_base_sha, tip = _run_branch(project_dir, _issue7())
         broken = dataclasses.replace(sandbox, url=f"file://{tmp_path / 'missing.git'}")
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
-            self._check(project_dir, broken, "feat/x", tip, plan_sha)
+            self._check(project_dir, broken, "feat/x", tip, run_base_sha)
 
         assert exc_info.value.code == "pr_discovery_incomplete"
         # The git failure detail (not just the ``git_error`` code) reaches the operator.
@@ -5000,11 +4820,11 @@ class TestBranchProvenance:
 
     def test_provenance_dir_inside_clone_is_rejected(self, tmp_path: Path):
         project_dir, sandbox = _seeded_clone(tmp_path)
-        plan_sha, tip = _run_branch(project_dir, _issue7())
+        run_base_sha, tip = _run_branch(project_dir, _issue7())
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
             branch_has_run_provenance(
-                project_dir, sandbox, name="feat/x", tip_sha=tip, plan_sha=plan_sha, default_branch="main",
+                project_dir, sandbox, name="feat/x", tip_sha=tip, run_base_sha=run_base_sha, default_branch="main",
                 provenance_dir=project_dir / ".hermes" / "provenance",
             )
 
@@ -5171,15 +4991,15 @@ class TestDiscoverRemoteArtifacts:
         )
         return project_dir, sandbox, baseline
 
-    def _discover(self, project_dir, sandbox, baseline, plan_sha) -> RemoteArtifacts:
+    def _discover(self, project_dir, sandbox, baseline, run_base_sha) -> RemoteArtifacts:
         return discover_remote_artifacts(
-            project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+            project_dir, sandbox, issue=_issue7(), baseline=baseline, run_base_sha=run_base_sha,
             provenance_dir=_provenance_dir(project_dir),
         )
 
     def test_classifies_branches_and_prs_by_run_provenance(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/x")
+        run_base_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/x")
         (project_dir / ".hermes").mkdir(exist_ok=True)
         (project_dir / ".hermes" / "pipeline_branch.txt").write_text("recorded/x\n")
         foreign = _foreign_clone(tmp_path, sandbox)
@@ -5195,7 +5015,7 @@ class TestDiscoverRemoteArtifacts:
         fake_gh.on(*_pr_view_argv(9), stdout=json.dumps(_pr_view_payload(9, head="ops", title="[harness abcd1234] TODO-7")))
         fake_gh.on(*_pr_view_argv(11), stdout=json.dumps(_pr_view_payload(11, head="main", title="[harness abcd1234]")))
 
-        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+        artifacts = self._discover(project_dir, sandbox, baseline, run_base_sha)
 
         assert artifacts.issue_number == 7
         assert [pr.number for pr in artifacts.prs] == [5]
@@ -5213,7 +5033,7 @@ class TestDiscoverRemoteArtifacts:
 
     def test_clone_local_insteadof_cannot_hide_heads_from_discovery(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/harness-abcd1234")
+        run_base_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/harness-abcd1234")
         # The agent plants a clone-local rewrite of the sandbox URL to an empty decoy remote.
         decoy = tmp_path / "decoy.git"
         decoy.mkdir()
@@ -5222,20 +5042,20 @@ class TestDiscoverRemoteArtifacts:
         fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
         fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
 
-        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+        artifacts = self._discover(project_dir, sandbox, baseline, run_base_sha)
 
         assert artifacts.deletable_branches == (("feat/harness-abcd1234", feat_sha),)
 
     def test_issue_branch_query_used_without_recorded_branch(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/harness-abcd1234")
+        run_base_sha, _ = _run_branch(project_dir, _issue7(), "feat/harness-abcd1234")
         fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[{"number": 5}]]))
         fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
         fake_gh.on(
             *_pr_view_argv(5), stdout=json.dumps(_pr_view_payload(5, head="feat/harness-abcd1234"))
         )
 
-        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+        artifacts = self._discover(project_dir, sandbox, baseline, run_base_sha)
 
         # issue.branch is also the provenance head: queried once.
         assert [argv[-1] for argv in fake_gh.gh_calls()[:2]] == [_ISSUE_BRANCH_PULLS_ARGV[-1], _SEARCH_ARGV[-1]]
@@ -5245,33 +5065,33 @@ class TestDiscoverRemoteArtifacts:
 
     def test_protected_named_new_head_is_leftover(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/x")
+        run_base_sha, feat_sha = _run_branch(project_dir, _issue7(), "feat/x")
         _real_git("push", "-q", "origin", "feat/x:refs/heads/Master", cwd=project_dir)
         master_sha = _real_git("rev-parse", "feat/x", cwd=project_dir)
         fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
         fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
         fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
 
-        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+        artifacts = self._discover(project_dir, sandbox, baseline, run_base_sha)
 
         assert artifacts.deletable_branches == (("feat/x", feat_sha),)
         assert artifacts.leftovers == (f"branch Master ({master_sha[:7]}): protected",)
 
     def test_incomplete_search_results_propagate(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+        run_base_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
         fake_gh.on(*_ISSUE_BRANCH_PULLS_ARGV, stdout=json.dumps([[]]))
         fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
         fake_gh.on(*_SEARCH_ARGV, stdout=_search_page(5, incomplete=True))
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
-            self._discover(project_dir, sandbox, baseline, plan_sha)
+            self._discover(project_dir, sandbox, baseline, run_base_sha)
 
         assert exc_info.value.code == "pr_discovery_incomplete"
 
     def test_origin_swap_does_not_widen_enumeration(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+        run_base_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
         other = tmp_path / "other"
         other.mkdir()
         other_bare = _make_bare_remote(other, {"README.md": "other\n"})
@@ -5282,7 +5102,7 @@ class TestDiscoverRemoteArtifacts:
         fake_gh.on(*_PULLS_ARGV, stdout=json.dumps([[]]))
         fake_gh.on(*_SEARCH_ARGV, stdout=_search_page())
 
-        artifacts = self._discover(project_dir, sandbox, baseline, plan_sha)
+        artifacts = self._discover(project_dir, sandbox, baseline, run_base_sha)
 
         assert [name for name, _ in artifacts.deletable_branches] == ["feat/x"]
         assert not any(" X " in line for line in artifacts.leftovers)
@@ -5300,11 +5120,11 @@ class TestDiscoverRemoteArtifacts:
 
     def test_provenance_dir_inside_clone_is_rejected(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+        run_base_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
             discover_remote_artifacts(
-                project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+                project_dir, sandbox, issue=_issue7(), baseline=baseline, run_base_sha=run_base_sha,
                 provenance_dir=project_dir / "provenance",
             )
 
@@ -5313,11 +5133,11 @@ class TestDiscoverRemoteArtifacts:
 
     def test_provenance_root_containing_clone_is_rejected(self, fake_gh, tmp_path: Path):
         project_dir, sandbox, baseline = self._setup(tmp_path)
-        plan_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
+        run_base_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
             discover_remote_artifacts(
-                project_dir, sandbox, issue=_issue7(), baseline=baseline, plan_sha=plan_sha,
+                project_dir, sandbox, issue=_issue7(), baseline=baseline, run_base_sha=run_base_sha,
                 provenance_dir=project_dir.parent,
             )
 
@@ -5889,7 +5709,7 @@ class TestRunGitHardening:
 
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
             harness_mod.branch_has_run_provenance(
-                tmp_path / "clone", _SANDBOX, name="feat/x", tip_sha="a" * 40, plan_sha="b" * 40,
+                tmp_path / "clone", _SANDBOX, name="feat/x", tip_sha="a" * 40, run_base_sha="b" * 40,
                 default_branch="main", provenance_dir=tmp_path / "prov",
             )
 
@@ -5907,21 +5727,6 @@ class TestRunGitHardening:
         with pytest.raises(HarnessRemoteCleanupError) as exc_info:
             harness_mod._ensure_provenance_dir(tmp_path / "prov")
         assert exc_info.value.detail.startswith("fresh provenance dir carries config:")
-
-
-class TestListRunIssuesNumberScreening:
-    def test_bool_and_non_positive_numbers_are_skipped(self, fake_gh, tmp_path: Path):
-        page = [
-            {"number": True, "title": _HARNESS_TITLE},
-            {"number": 0, "title": _HARNESS_TITLE},
-            {"number": -3, "title": _HARNESS_TITLE},
-            {"number": 12, "title": _HARNESS_TITLE},
-        ]
-        fake_gh.on(*_LIST_ARGV, stdout=json.dumps([page]))
-        sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
-
-        assert harness_mod._list_run_issues(tmp_path, sandbox, run_token=_RUN_TOKEN, baseline=_baseline()) == [12]
-
 
 
 def _kanban_task(tick_id: str, phase_key: str, status: str) -> dict[str, object]:
@@ -5949,7 +5754,7 @@ class TestShutdownRun:
         kwargs = dict(
             issue=_harness_issue(7),
             baseline=_baseline(),
-            plan_sha="a" * 40,
+            run_base_sha="a" * 40,
             tick_id=tick_id,
             expected_phase_keys=self._KEYS,
             provenance_dir=tmp_path / "prov",
@@ -6103,7 +5908,7 @@ class TestShutdownRun:
         stubs.snapshot.assert_called_with("sandbox")
         stubs.discover.assert_called_once_with(
             tmp_path / "clone", self._SANDBOX, issue=_harness_issue(7), baseline=_baseline(),
-            plan_sha="a" * 40, provenance_dir=tmp_path / "prov",
+            run_base_sha="a" * 40, provenance_dir=tmp_path / "prov",
         )
         stubs.cleanup.assert_called_once_with(
             tmp_path / "clone", self._SANDBOX, stubs.discover.return_value,
@@ -6346,7 +6151,7 @@ class TestShutdownRun:
         sleeps: list[float] = []
 
         report = shutdown_run(
-            tmp_path / "clone", self._SANDBOX, issue=_harness_issue(7), baseline=_baseline(), plan_sha="a" * 40,
+            tmp_path / "clone", self._SANDBOX, issue=_harness_issue(7), baseline=_baseline(), run_base_sha="a" * 40,
             tick_id="tick-1", expected_phase_keys=self._KEYS, provenance_dir=tmp_path / "prov",
             staging_root=tmp_path / "staging", quiescence_timeout=30.0, poll_interval=5.0,
             sleep=sleeps.append, now=lambda: 0.0,
@@ -6562,7 +6367,7 @@ class _PinnedFixture:
     project_dir: Path
     state: Path
     issue: HarnessIssue
-    plan_sha: str
+    run_base_sha: str
     plan_text: str
     worktree: Path
     run_dir: Path
@@ -6585,7 +6390,7 @@ class _PinnedFixture:
         kwargs: dict[str, object] = {
             "issue": self.issue,
             "repo": _PINNED_REPO,
-            "plan_sha": self.plan_sha,
+            "run_base_sha": self.run_base_sha,
             "plan_text": self.plan_text,
         }
         kwargs.update(overrides)
@@ -6602,13 +6407,14 @@ def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _Pinn
     _real_git("config", "user.email", "harness@example.com", cwd=project_dir)
     _real_git("config", "user.name", "Harness", cwd=project_dir)
     plan_text = _pinned_manifest(f"TODO-{issue}")
-    (project_dir / _PINNED_PLAN).write_text(plan_text)
+    (project_dir / "README.md").write_text("seed\n")
     _real_git("add", ".", cwd=project_dir)
     _real_git("commit", "-qm", "plan", cwd=project_dir)
     _real_git("remote", "add", "origin", f"https://github.com/{_PINNED_REPO}.git", cwd=project_dir)
-    plan_sha = _real_git("rev-parse", "HEAD", cwd=project_dir)
+    run_base_sha = _real_git("rev-parse", "HEAD", cwd=project_dir)
 
-    body = f"### Plan\n\n{_PINNED_PLAN}\n\n### Branch\n\n{_PINNED_BRANCH}\n"
+    from hermes_pipeline.plan_manifest import render_embedded_plan
+    body = f"### Branch\n\n{_PINNED_BRANCH}\n\n" + render_embedded_plan(plan_text, expected_todo_id=f"TODO-{issue}")
     payload = issue_payload(
         issue,
         title="Pinned run",
@@ -6621,7 +6427,7 @@ def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _Pinn
         state_dir=state,
         tick_id=_PINNED_TICK,
         selected_issue=issue_from_api(payload, repo=_PINNED_REPO),
-        plan_path=_PINNED_PLAN,
+        plan_path=None,
         profile="native-sdd",
         prompt_client="claude",
         assignee="pipeline",
@@ -6637,11 +6443,10 @@ def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _Pinn
             number=issue,
             todo_id=f"TODO-{issue}",
             branch=_PINNED_BRANCH,
-            plan_path=_PINNED_PLAN,
             title="Pinned run",
             run_token="tok00000",
         ),
-        plan_sha=plan_sha,
+        run_base_sha=run_base_sha,
         plan_text=plan_text,
         worktree=registration.worktree,
         run_dir=state / "runs" / _PINNED_TICK,
@@ -6662,7 +6467,7 @@ class TestRecoverPinnedRegistration:
         assert reg.phase_keys == _PINNED_STEPS
         assert reg.worktree == fx.worktree
         assert reg.branch == _PINNED_BRANCH
-        assert reg.base_sha == fx.plan_sha
+        assert reg.base_sha == fx.run_base_sha
         assert reg.run_dir == fx.run_dir
         assert reg.pinned is True
 
@@ -6738,37 +6543,26 @@ class TestRecoverPinnedRegistration:
         # The type name only: an unmodelled exception's message is not trusted.
         assert excinfo.value.detail == "UnicodeEncodeError"
 
-    def test_forged_plan_via_replace_ref_is_plan_mismatch(self, tmp_path: Path):
-        # The clone is agent-controlled: a replace ref makes ``git show
-        # <plan_sha>:<plan_path>`` return forged Plan bytes, so the contract's
-        # own hash check passes against the forgery. The harness must still pin
-        # the hash to the Plan text it committed itself.
+    def test_tampered_embedded_artifact_is_invalid(self, tmp_path):
         fx = _pinned_registration(tmp_path)
-        forged = fx.plan_text + "\n<!-- forged -->\n"
-        (fx.project_dir / _PINNED_PLAN).write_text(forged)
-        _real_git("commit", "-qam", "forged", cwd=fx.project_dir)
-        forged_sha = _real_git("rev-parse", "HEAD", cwd=fx.project_dir)
-        _real_git("replace", "-f", fx.plan_sha, forged_sha, cwd=fx.project_dir)
-        shown = _real_git("show", f"{fx.plan_sha}:{_PINNED_PLAN}", cwd=fx.project_dir)
-        assert "forged" in shown
-        true_hash = json.loads(fx.registration_path.read_text())["plan_hash"]
-        fx.edit_registration(plan_hash=hashlib.sha256(forged.encode()).hexdigest())
-
-        with pytest.raises(HarnessTickError) as excinfo:
+        artifact = fx.run_dir / "plan.md"
+        assert artifact.exists()
+        artifact.write_text(fx.plan_text + "\nforged\n")
+        with pytest.raises(HarnessTickError) as error:
             fx.recover()
+        assert error.value.code == "registration_invalid"
+        assert error.value.tick_id == _PINNED_TICK
 
-        assert excinfo.value.code == "registration_plan_mismatch"
-        assert excinfo.value.tick_id == _PINNED_TICK
+    def test_authored_digest_mismatch_keeps_tick_identity(self, tmp_path):
+        fx = _pinned_registration(tmp_path)
+        with pytest.raises(HarnessTickError) as error:
+            fx.recover(plan_text=fx.plan_text + "different authored expectation\n")
+        assert error.value.code == "registration_plan_mismatch"
+        assert error.value.tick_id == _PINNED_TICK
 
-        # Race variant: the true hash is restored while the replace ref stays in
-        # place, so the contract's own check must fail against the forged bytes.
-        fx.edit_registration(plan_hash=true_hash)
-
-        with pytest.raises(HarnessTickError) as excinfo:
-            fx.recover()
-
-        assert excinfo.value.code == "registration_invalid"
-        assert excinfo.value.tick_id == _PINNED_TICK
+    def test_authored_hash_normalizes_line_endings_and_trailing_newlines(self, tmp_path):
+        fx = _pinned_registration(tmp_path)
+        assert fx.recover(plan_text=fx.plan_text.replace("\n", "\r\n") + "\r\n").pinned
 
     def test_branch_mismatch_is_unexpected(self, tmp_path: Path):
         fx = _pinned_registration(tmp_path)
@@ -6780,16 +6574,13 @@ class TestRecoverPinnedRegistration:
         assert excinfo.value.detail == f"branch {_PINNED_BRANCH} != feat/other"
         assert excinfo.value.tick_id == _PINNED_TICK
 
-    def test_plan_path_mismatch_is_unexpected(self, tmp_path: Path):
+    def test_wrong_source_is_invalid(self, tmp_path):
         fx = _pinned_registration(tmp_path)
-        other = "docs/harness/other000-plan.md"
-
-        with pytest.raises(HarnessTickError) as excinfo:
-            fx.recover(issue=dataclasses.replace(fx.issue, plan_path=other))
-
-        assert excinfo.value.code == "unexpected_registration"
-        assert excinfo.value.detail == f"plan_path {_PINNED_PLAN} != {other}"
-        assert excinfo.value.tick_id == _PINNED_TICK
+        fx.edit_registration(plan_source_kind="legacy_path")
+        with pytest.raises(HarnessTickError) as error:
+            fx.recover()
+        assert error.value.code == "registration_invalid"
+        assert error.value.tick_id == _PINNED_TICK
 
     def test_sentinel_mismatch_detail_is_capped(self, tmp_path: Path):
         fx = _pinned_registration(tmp_path)
@@ -6806,7 +6597,7 @@ class TestRecoverPinnedRegistration:
         fx.edit_registration(base_sha="not-a-sha")
 
         with pytest.raises(HarnessTickError) as excinfo:
-            fx.recover(plan_sha="not-a-sha")
+            fx.recover(run_base_sha="not-a-sha")
 
         assert excinfo.value.code == "registration_invalid"
 
@@ -6825,10 +6616,10 @@ class TestRecoverPinnedRegistration:
         other = "f" * 40
 
         with pytest.raises(HarnessTickError) as excinfo:
-            fx.recover(plan_sha=other)
+            fx.recover(run_base_sha=other)
 
         assert excinfo.value.code == "registration_base_mismatch"
-        assert excinfo.value.detail == f"{fx.plan_sha} != {other}"
+        assert excinfo.value.detail == f"{fx.run_base_sha} != {other}"
         assert excinfo.value.tick_id == _PINNED_TICK
 
     @pytest.mark.parametrize(
@@ -7252,7 +7043,6 @@ class TestDriveTicks:
             number=_PINNED_ISSUE,
             todo_id=f"TODO-{_PINNED_ISSUE}",
             branch=_PINNED_BRANCH,
-            plan_path=_PINNED_PLAN,
             title="Pinned run",
             run_token="tok00000",
         )
@@ -7383,7 +7173,39 @@ class TestDriveTicks:
         mocker.patch("hermes_pipeline.harness.run_tick", side_effect=run_tick)
         mocker.patch("hermes_pipeline.harness.poll_pinned_run", side_effect=poll)
         mocker.patch("hermes_pipeline.harness.recover_pinned_registration", side_effect=_recover)
+        mocker.patch.object(harness_mod, "assert_pinned_registration_unchanged",
+            side_effect=lambda project_dir, project_state, **kwargs: harness_mod.assert_tick_id_unchanged(project_state, expected=kwargs["saved"].tick_id))
         return registration, run_tick, poll
+
+    @pytest.mark.real_git
+    @pytest.mark.parametrize("tamper_at", ["tick", "poll"])
+    def test_real_registration_drift_never_reaches_delivered_success(self, tmp_path, mocker, tamper_at):
+        fx = _pinned_registration(tmp_path)
+        saved = fx.recover()
+        (fx.state / "current_tick_id.txt").unlink()
+        kwargs = self._kwargs(tmp_path, project_dir=fx.project_dir, project_state=fx.state, issue=fx.issue,
+            pinned=True, repo=_PINNED_REPO, run_base_sha=fx.run_base_sha, plan_text=fx.plan_text)
+        calls = {"ticks": 0, "polls": 0}
+        def tick(*args, **kwargs):
+            calls["ticks"] += 1
+            (fx.state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+            if calls["ticks"] == 2 and tamper_at == "tick":
+                fx.edit_registration(base_sha="f" * 40)
+            return 0
+        def poll(**kwargs):
+            calls["polls"] += 1
+            if calls["polls"] == 2:
+                if tamper_at == "poll":
+                    fx.edit_registration(base_sha="f" * 40)
+                return {IMPLEMENTATION_KEY: "done", "review:0": "done", "finish": "done"}
+            return {IMPLEMENTATION_KEY: "done"}
+        mocker.patch.object(harness_mod, "run_tick", side_effect=tick)
+        mocker.patch.object(harness_mod, "poll_pinned_run", side_effect=poll)
+        result = harness_mod.drive_ticks(**kwargs)
+        assert not result.success
+        assert result.failure_code == "registration_base_mismatch"
+        assert result.registration == saved
+        assert result.tick_error.tick_id == _PINNED_TICK
 
     # -- non-pinned (gstack / agent-skills): today's single tick ------------
 
@@ -7550,7 +7372,7 @@ class TestDriveTicks:
             tmp_path,
             pinned=True,
             repo=_PINNED_REPO,
-            plan_sha="a" * 40,
+            run_base_sha="a" * 40,
             plan_text="# Plan\n",
             **overrides,
         )
