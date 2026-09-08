@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -333,7 +335,8 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
     [
         (
             "codex",
-            'codex exec --sandbox workspace-write - < "$PROMPT_FILE"',
+            'codex exec --sandbox workspace-write '
+            '-c sandbox_workspace_write.network_access=true - < "$PROMPT_FILE"',
             "claude -p",
         ),
         (
@@ -423,7 +426,11 @@ _HOSTILE_PROMPT = (
 @pytest.mark.parametrize(
     ("prompt_client", "expected_command"),
     [
-        ("codex", 'codex exec --sandbox workspace-write - < "$PROMPT_FILE"'),
+        (
+            "codex",
+            'codex exec --sandbox workspace-write '
+            '-c sandbox_workspace_write.network_access=true - < "$PROMPT_FILE"',
+        ),
         (
             "claude",
             "claude -p --permission-mode dontAsk --allowedTools Read,Bash"
@@ -508,6 +515,81 @@ def test_shell_metacharacters_in_a_phase_prompt_reach_the_card_unchanged(
     )
     assert command_line.endswith('< "$PROMPT_FILE"`')
     assert "Plan's" not in command_line
+
+
+@pytest.mark.parametrize("prompt_client", ["codex", "claude"])
+def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
+    tmp_path, prompt_client
+):
+    """Run the advertised shell sequence with an unset PROMPT_FILE and fake client."""
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    prompt = _HOSTILE_PROMPT + "\nSecond line: $(false) and \\ stay literal."
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        f"    prompt: {json.dumps(prompt)}\n"
+        "    tools: Read,Bash\n"
+        "    turns: 5\n"
+    )
+    body = prepare_todo_phases(
+        todo_id="TODO-41", tick_id="01CLIENT", board_slug="demo",
+        phases_path=phases_path, prompt_client=prompt_client,
+    )[0].body
+    dispatcher, _, rest = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
+    payload, _, _ = rest.partition("END EXTERNAL AGENT PROMPT\n")
+    assert "Exclude both marker lines" in dispatcher
+    assert "dispatcher instructions and result metadata" in dispatcher
+    assert payload.endswith(prompt + "\n")
+
+    # The dispatcher writes precisely the content between the marker lines.
+    # Run its advertised launch sequence without an inherited prompt variable:
+    # inline VAR=value command < "$VAR" would fail before the client starts.
+    assert "shell-quote the entire absolute path" in dispatcher
+    assert "Replace the whole quoted example" in dispatcher
+    assert "without interpolation or command substitution" in dispatcher
+    prompt_file = tmp_path / "prompt-$PAYLOAD-`false`-apostrophe's.txt"
+    prompt_file.write_text(payload)
+    _, fence, snippet_rest = dispatcher.partition("```sh\n")
+    assert fence, "Dispatcher must provide a safe two-statement launch sequence"
+    snippet, _, _ = snippet_rest.partition("```\n")
+    snippet = snippet.replace(
+        '"/absolute/path/to/already-written-prompt.txt"',
+        shlex.quote(str(prompt_file)),
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    client = fake_bin / prompt_client
+    client.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$@" > "$CAPTURE_ARGS"\n'
+        'cat > "$CAPTURE_STDIN"\n'
+    )
+    client.chmod(0o755)
+    args_file, stdin_file = tmp_path / "args", tmp_path / "stdin"
+    env = dict(os.environ)
+    env.pop("PROMPT_FILE", None)
+    env.update(
+        PATH=f"{fake_bin}:{env['PATH']}",
+        CAPTURE_ARGS=str(args_file), CAPTURE_STDIN=str(stdin_file),
+    )
+    completed = subprocess.run(
+        ["/bin/sh", "-eu", "-c", snippet], env=env,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert stdin_file.read_bytes() == payload.encode()
+    assert "BEGIN EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
+    assert "END EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
+    expected_args = (
+        ["exec", "--sandbox", "workspace-write", "-c",
+         "sandbox_workspace_write.network_access=true", "-"]
+        if prompt_client == "codex"
+        else ["-p", "--permission-mode", "dontAsk", "--allowedTools", "Read,Bash"]
+    )
+    assert args_file.read_text().splitlines() == expected_args
 
 
 def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, mocker):

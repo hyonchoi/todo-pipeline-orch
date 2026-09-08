@@ -169,7 +169,10 @@ def _external_client_delegation_block(
         # is used), instructions are read from stdin." ``-`` is given
         # explicitly because a prompt argument *plus* piped stdin makes Codex
         # append the stdin as a separate ``<stdin>`` block instead.
-        command = "codex exec --sandbox workspace-write -"
+        command = (
+            "codex exec --sandbox workspace-write "
+            "-c sandbox_workspace_write.network_access=true -"
+        )
     elif prompt_client == "claude":
         tool_names = [tool.strip() for tool in tools.split(",") if tool.strip()]
         if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", tool) for tool in tool_names):
@@ -204,7 +207,10 @@ def _external_client_delegation_block(
         "from the delimited block below and pass only that prompt to the "
         "external client.\n"
         "Deliver that prompt on the external client's standard input. Write "
-        "the delimited block below to a prompt file, set `PROMPT_FILE` to its "
+        "only the content between the opening (BEGIN) and closing (END) "
+        "external-agent prompt marker lines below to a prompt file. "
+        "Exclude both marker lines, all dispatcher instructions and result metadata, "
+        "and any text outside those boundaries. Set `PROMPT_FILE` to its "
         "path, and redirect the file into the command shown next. Never place "
         "the prompt in the command line itself.\n"
         "Write the prompt file to a temporary directory outside this "
@@ -221,10 +227,20 @@ def _external_client_delegation_block(
         "argument would truncate or that the shell would expand -- which is "
         "why standard input is required and a command-line prompt is not "
         "acceptable.\n"
-        "`PROMPT_FILE` must be set in the same shell invocation that launches "
-        "the client; if you write the file in a separate invocation, "
-        "substitute the prompt file's literal path in its place so the "
-        "redirect cannot read an empty path.\n"
+        "After writing the prompt file, assign `PROMPT_FILE` in a separate "
+        "shell statement before the client command, in the same shell invocation. "
+        "Never use an inline environment assignment on the client command: "
+        "the shell expands the redirect before that assignment takes effect. "
+        "Use this launch sequence and shell-quote the entire absolute path "
+        "of the already-written prompt file (for example with Python's "
+        "`shlex.quote`). Replace the whole quoted example, including its "
+        "surrounding quotes, with that shell-quoted value. The path must be "
+        "passed literally, without interpolation or command substitution; "
+        "do not just insert a path inside the example's double quotes:\n"
+        "```sh\n"
+        'PROMPT_FILE="/absolute/path/to/already-written-prompt.txt"\n'
+        f'{command} < "$PROMPT_FILE"\n'
+        "```\n"
         f'Required external command: `{command} < "$PROMPT_FILE"`\n'
         f"External agent timeout: {timeout} seconds.\n"
         f"The external client deadline is {timeout} seconds. The Hermes worker "
