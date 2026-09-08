@@ -278,6 +278,17 @@ def _external_client_delegation_block(
         '`kanban_block(kind="needs_input", reason=<exact reason>)`. '
         "Do not inspect, implement, or commit partial work; you must not inspect "
         "partial changes, and must not implement or commit the phase yourself.\n"
+        "After the external client exits successfully, use the external client's "
+        "reported gate and test evidence to collect the result. Do not re-run "
+        "test, build, or install commands, and do not modify the worktree while "
+        "collecting result metadata; even verification commands can generate "
+        "untracked files such as uv.lock. Use read-only Git observations for "
+        "repository facts, then perform the final clean-worktree check after "
+        "all evidence collection and immediately before completing the card. "
+        "If required verification evidence is missing or the worktree is dirty, "
+        'call `kanban_block(kind="needs_input", reason=<exact reason>)`; '
+        "do not invent successful verification or a clean-worktree result, and "
+        "do not clean up or commit the work yourself.\n"
         + closing
     )
 

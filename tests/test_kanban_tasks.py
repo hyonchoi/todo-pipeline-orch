@@ -3349,7 +3349,11 @@ def test_contained_paths_drop_on_git_timeout(tmp_path, mocker, caplog):
     assert any("TimeoutExpired" in r.getMessage() for r in caplog.records)
 
 
-def test_implementation_card_publishes_the_result_metadata_template(tmp_path):
+@pytest.mark.parametrize("prompt_client", ["codex", "claude"])
+@pytest.mark.parametrize("phase_key", [IMPLEMENTATION_KEY, "phase_1"])
+def test_implementation_card_publishes_the_result_metadata_template(
+    tmp_path, prompt_client, phase_key
+):
     """The worker cannot satisfy the strict contract it is never shown.
 
     This is the one profile phase whose result IS parsed -- the reviewed head is
@@ -3364,7 +3368,7 @@ def test_implementation_card_publishes_the_result_metadata_template(tmp_path):
     phases_path.write_text(
         "requires_plan: true\n"
         "phases:\n"
-        "  - phase_key: phase_4_development\n"
+        f"  - phase_key: {phase_key}\n"
         "    name: Development\n"
         "    prompt: implement legacy plan\n"
         "    tools: Read,Write,Edit,Bash\n"
@@ -3386,7 +3390,7 @@ def test_implementation_card_publishes_the_result_metadata_template(tmp_path):
         tick_id="01TICK",
         board_slug="demo",
         phases_path=phases_path,
-        prompt_client="codex",
+        prompt_client=prompt_client,
         plan_path="docs/plan.md",
         project_dir=tmp_path,
     )
@@ -3394,16 +3398,32 @@ def test_implementation_card_publishes_the_result_metadata_template(tmp_path):
     # The dispatcher closes the card, so the template it must copy is published
     # on its side of the boundary -- never inside the delimited client prompt.
     dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
-    assert render_result_template(
+    template = render_result_template(
         tick_id="01TICK",
         todo_id="TODO-41",
         step_key=IMPLEMENTATION_KEY,
         acceptance_criteria=("First exact criterion.",),
-    ) in dispatcher
-    assert "metadata.tpo_result" in dispatcher
-    # "exactly, never paraphrase" must not override a stated substitution, or a
-    # defect-bearing review gets published as clean.
-    assert "substitution the template" in dispatcher
+    )
+    assert (template in dispatcher) == (phase_key == IMPLEMENTATION_KEY)
+    if phase_key == IMPLEMENTATION_KEY:
+        assert "metadata.tpo_result" in dispatcher
+        # "exactly, never paraphrase" must not override a stated substitution, or a
+        # defect-bearing review gets published as clean.
+        assert "substitution the template" in dispatcher
+    assert "use the external client's reported gate and test evidence" in dispatcher
+    assert "Do not re-run test, build, or install commands" in dispatcher
+    assert "do not modify the worktree while collecting result metadata" in dispatcher
+    assert "read-only Git observations" in dispatcher
+    assert "final clean-worktree check after all evidence collection" in dispatcher
+    assert "before completing the card" in dispatcher
+    assert "If required verification evidence is missing or the worktree is dirty" in dispatcher
+    assert 'kanban_block(kind="needs_input"' in dispatcher
+    assert "do not invent successful verification" in dispatcher
+    assert "do not clean up or commit the work yourself" in dispatcher
+    payload = prepared[0].body.partition("BEGIN EXTERNAL AGENT PROMPT\n")[2]
+    payload = payload.partition("END EXTERNAL AGENT PROMPT\n")[0]
+    assert payload.endswith("implement legacy plan\n")
+    assert "Do not re-run test, build, or install commands" not in payload
 
 
 def test_profile_phase_prompt_cannot_claim_a_template_it_never_publishes(tmp_path):
