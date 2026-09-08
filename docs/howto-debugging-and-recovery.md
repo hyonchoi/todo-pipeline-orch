@@ -117,6 +117,23 @@ Add `tpo:on-hold` to the issue. It is excluded from selection, and if the issue
 is already registered the next tick flags `issue_on_hold` and the run stops at a
 `needs_input` boundary. Remove the label to resume.
 
+### A run upgraded in the middle of a review round
+
+`review_round_upgrade_discontinuity` in the tick log means the board still
+carries a `review-fix:<n>`, `re-review:<n>` or `fix-validation:<n>` card from
+the removed review-round machinery. Such a run is not recoverable in place: its
+`review:0` was read-only, so its report ends at the implementation head, the
+round's own card made the fix commit that moved HEAD past that head, and
+`accepted-review-head` was never written -- so every tick would demand a HEAD
+the run has already left behind. **Abandon the tick and re-select the TODO** by the
+procedure under [Abandoning a run](#abandoning-a-run): touch the `abandoned`
+marker so the registration stops pinning its issue and the next tick can select
+again, then remove the pinned worktree and branch. The legacy round cards are
+left on the board and can be listed with
+`hermes kanban list --tenant <project>`. Before this code
+existed the same board reported `head_mismatch` every tick, which blamed the
+worker's topology for what is purely a discontinuity across the upgrade.
+
 ### Tracker error decisions
 
 When `gh` or the `origin` remote is unusable, the tick persists a decision whose
@@ -153,8 +170,9 @@ with `hermes kanban show <task-id> --json`.
 If the expected repository, branch, worktree, base SHA, TODO hash, Plan hash,
 PR head, or remote head differs from observed state, preserve both sides and
 resolve the cause manually. TPO never resets, cleans, deletes, force-pushes, or
-repairs a drifted worktree or branch. A fifth unsuccessful review-fix round is
-also a manual `needs_input` boundary; automation does not create round six.
+repairs a drifted worktree or branch. A review card that exits nonzero is also
+a manual boundary: it lands in Hermes's sticky `blocked` and automation creates
+nothing to remediate it.
 
 **"verbose output not showing up"**
 

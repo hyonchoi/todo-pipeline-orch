@@ -9,12 +9,35 @@ from hermes_pipeline.kanban_tasks import (
     _archive_tasks,
     all_phases_complete,
     get_todo_kanban_status,
-    register_todo_phases,
 )
 
 
-class TestRegisterTodoPhasesLegacy:
-    """Tests for legacy CLI fallback and edge cases in register_todo_phases."""
+def _register_todo_phases(**kwargs):
+    """Prepare then create back-to-back, as ``cli._tick_project`` does.
+
+    Stands in for the deleted convenience wrapper so the creation-path assertions
+    below keep exercising the production functions.
+    """
+    from hermes_pipeline.kanban_tasks import (
+        create_prepared_todo_phases,
+        prepare_todo_phases,
+    )
+
+    assignee = kwargs.pop("assignee", "default")
+    cancel_event = kwargs.pop("cancel_event", None)
+    prepared = prepare_todo_phases(**kwargs)
+    return create_prepared_todo_phases(
+        prepared=prepared,
+        tick_id=kwargs["tick_id"],
+        board_slug=kwargs["board_slug"],
+        project_dir=kwargs["project_dir"],
+        assignee=assignee,
+        cancel_event=cancel_event,
+    )
+
+
+class TestCreatePreparedTodoPhasesLegacy:
+    """Legacy CLI fallback and edge cases on the prepare + create path."""
 
     def test_legacy_cli_output_format(self, tmp_path, mocker):
         """Old CLI returns 'Created t_xxx  (ready, assignee=-)' — fallback parsing."""
@@ -35,7 +58,7 @@ class TestRegisterTodoPhasesLegacy:
             "    timeout: 1800\n"
         )
 
-        task_ids = register_todo_phases(
+        task_ids = _register_todo_phases(
             todo_id="TODO-10",
             tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
             board_slug="demo",
@@ -65,7 +88,7 @@ class TestRegisterTodoPhasesLegacy:
         )
 
         with pytest.raises(RuntimeError, match="failed to parse"):
-            register_todo_phases(
+            _register_todo_phases(
                 todo_id="TODO-10",
                 tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
                 board_slug="demo",
@@ -87,7 +110,7 @@ class TestRegisterTodoPhasesLegacy:
         )
 
         with pytest.raises(ValueError, match="invalid todo_id"):
-            register_todo_phases(
+            _register_todo_phases(
                 todo_id="INVALID",
                 tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
                 board_slug="demo",
@@ -109,7 +132,7 @@ class TestRegisterTodoPhasesLegacy:
         )
 
         with pytest.raises(ValueError, match="invalid todo_id"):
-            register_todo_phases(
+            _register_todo_phases(
                 todo_id="TODO-10; rm -rf /",
                 tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
                 board_slug="demo",
@@ -135,7 +158,7 @@ class TestRegisterTodoPhasesLegacy:
             "    timeout: 1800\n"
         )
 
-        register_todo_phases(
+        _register_todo_phases(
             todo_id="TODO-10",
             tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
             board_slug="demo",
@@ -172,7 +195,7 @@ class TestRegisterTodoPhasesLegacy:
             "    timeout: 1800\n"
         )
 
-        register_todo_phases(
+        _register_todo_phases(
             todo_id="TODO-10",
             tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
             board_slug="demo",

@@ -1,3 +1,4 @@
+deprecated: true
 phases:
   - phase_key: "phase_2_autoplan"
     name: "Phase 2: Autoplan"

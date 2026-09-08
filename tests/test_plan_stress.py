@@ -1,3 +1,11 @@
+"""A 50-task Plan at the new bound: one card, one report, fifty commits.
+
+``MAX_PLAN_TASKS`` used to be a card-count stress: fifty ``plan:<task-id>``
+cards, fifty creates, a fifty-deep ``--parent`` chain. The phase registers one
+card now, so what is left to stress is the single report the profile obliges
+that card to make: fifty commits measured in one hop from ``base_sha``, and
+fifty acceptance criteria echoed inside the ``MAX_METADATA_BYTES`` cap.
+"""
 from __future__ import annotations
 
 import json
@@ -31,39 +39,20 @@ def _manifest() -> str:
     return f"# Stress plan\n\n```json tpo-plan\n{json.dumps(payload)}\n```\n"
 
 
-def _worker_result(number: int, parent: str, head: str) -> dict[str, object]:
-    criterion = f"Change {number} is observable."
-    command = f"uv run pytest tests/test_change_{number}.py"
-    return {
-        "schema_version": 1,
-        "tick_id": TICK_ID,
-        "todo_id": TODO_ID,
-        "step_key": f"plan:task-{number}",
-        "verdict": "success",
-        "external_session_id": f"session-{number}",
-        "git": {
-            "expected_parent_sha": parent,
-            "resulting_head_sha": head,
-            "task_commit_sha": head,
-            "changed_files": [f"change-{number}.txt"],
-        },
-        "tdd": {
-            "red": {"command": command, "exit_code": 1},
-            "green": {"command": command, "exit_code": 0},
-            "refactor": {"command": command, "exit_code": 0},
-        },
-        "acceptance": [{"criterion": criterion, "status": "passed"}],
-    }
-
-
-def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_idempotent(
+def test_fifty_task_manifest_is_one_card_one_report_and_fifty_commits(
     tmp_path, mocker
 ):
     from hermes_pipeline.kanban_tasks import (
         KanbanTaskInfo,
-        create_prepared_todo_phases,
         prepare_todo_phases,
         reconcile_plan_task_results,
+    )
+    from hermes_pipeline.phases import IMPLEMENTATION_KEY
+    from hermes_pipeline.plan_manifest import legacy_plan_source
+    from hermes_pipeline.result_contract import (
+        MAX_METADATA_BYTES,
+        manifest_acceptance_criteria,
+        render_result_template,
     )
     from hermes_pipeline.run_registration import register_pinned_run
     from tests.gh_fakes import make_issue
@@ -78,12 +67,11 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
     phases.write_text(
         "requires_plan: true\n"
         "phases:\n"
-        "  - phase_key: development\n"
+        "  - phase_key: phase_4_development\n"
         "    name: Development\n"
-        "    prompt: legacy fallback\n"
+        "    prompt: implement the plan\n"
         "    tools: Read,Write,Edit,Bash\n"
-        "    turns: 20\n"
-        "    compile_plan_tasks: true\n"
+        "    turns: 100\n"
     )
     _git(repo, "add", ".")
     _git(repo, "commit", "-qm", "base")
@@ -97,58 +85,8 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
         plan_path="plan.md",
         project_dir=repo,
     )
-    expected_keys = [
-        key
-        for number in range(1, TASK_COUNT + 1)
-        for key in (f"plan:task-{number}", f"validate:task-{number}")
-    ]
-    assert len(prepared) == 2 * TASK_COUNT
-    assert [task.phase_key for task in prepared] == expected_keys
-    assert [task.kind for task in prepared] == [
-        kind
-        for _ in range(TASK_COUNT)
-        for kind in ("worker", "controller_gate")
-    ]
-
-    task_ids: dict[str, str] = {}
-    create_commands: list[list[str]] = []
-
-    def run(cmd, **_kwargs):
-        if cmd[:3] == ["hermes", "kanban", "create"]:
-            key = cmd[cmd.index("--idempotency-key") + 1]
-            task_ids.setdefault(key, f"t_{len(task_ids) + 1:08x}")
-            create_commands.append(cmd)
-            return mocker.Mock(
-                returncode=0, stdout=json.dumps({"id": task_ids[key]}), stderr=""
-            )
-        return mocker.Mock(returncode=0, stdout="", stderr="")
-
-    run_mock = mocker.patch(
-        "hermes_pipeline.kanban_tasks.subprocess.run", side_effect=run
-    )
-    first_ids = create_prepared_todo_phases(
-        prepared=prepared,
-        tick_id=TICK_ID,
-        board_slug="stress",
-        project_dir=repo,
-    )
-    second_ids = create_prepared_todo_phases(
-        prepared=prepared,
-        tick_id=TICK_ID,
-        board_slug="stress",
-        project_dir=repo,
-    )
-    mocker.stop(run_mock)
-    assert first_ids == second_ids
-    assert len(first_ids) == 2 * TASK_COUNT
-    first_commands = create_commands[: 2 * TASK_COUNT + 1]
-    for index, command in enumerate(first_commands[1:]):
-        parent = command[command.index("--parent") + 1]
-        assert parent == task_ids[
-            f"{TICK_ID}:__registration_barrier__"
-            if index == 0
-            else f"{TICK_ID}:{expected_keys[index - 1]}"
-        ]
+    # Fifty tasks, one card. The board no longer scales with the Plan.
+    assert [task.phase_key for task in prepared] == [IMPLEMENTATION_KEY]
 
     state = repo / ".hermes"
     registration = register_pinned_run(
@@ -166,69 +104,102 @@ def test_fifty_task_manifest_registration_and_reconciliation_are_bounded_and_ide
         prompt_client="claude",
         assignee="pipeline",
         review_assignee=None,
-        step_keys=tuple(expected_keys),
+        step_keys=(IMPLEMENTATION_KEY,),
     )
-    cards: dict[str, KanbanTaskInfo] = {}
-    results: dict[str, dict[str, object]] = {}
-    completed_gates: set[str] = set()
+    manifest = legacy_plan_source(
+        repo, "plan.md", expected_todo_id=TODO_ID
+    ).manifest
+    criteria = manifest_acceptance_criteria(manifest)
+    assert len(criteria) == TASK_COUNT
+    # One report now answers for every task's criteria, so the whole Plan's
+    # criteria must fit the cap that used to apply one task at a time. Fifty
+    # ordinary criteria leave an order of magnitude of headroom; a Plan whose
+    # combined criteria exceed the cap is unreportable, which is why the
+    # template is measured here and not merely rendered.
+    template = render_result_template(
+        tick_id=TICK_ID, todo_id=TODO_ID, step_key=IMPLEMENTATION_KEY,
+        acceptance_criteria=criteria,
+    )
+    assert len(template.encode()) < MAX_METADATA_BYTES
+
+    base = _git(registration.worktree, "rev-parse", "HEAD")
+    changed = []
     for number in range(1, TASK_COUNT + 1):
-        worker_key = f"plan:task-{number}"
-        gate_key = f"validate:task-{number}"
-        cards[worker_key] = KanbanTaskInfo(
-            f"worker-{number}", worker_key, "queued", TODO_ID
+        path = registration.worktree / f"change-{number}.txt"
+        path.write_text(str(number))
+        changed.append(path.name)
+        _git(registration.worktree, "add", path.name)
+        _git(registration.worktree, "commit", "-qm", f"change {number}")
+    head = _git(registration.worktree, "rev-parse", "HEAD")
+
+    payload = {
+        "runs": [
+            {
+                "status": "succeeded",
+                "metadata": {
+                    "tpo_result": {
+                        "schema_version": 1,
+                        "tick_id": TICK_ID,
+                        "todo_id": TODO_ID,
+                        "step_key": IMPLEMENTATION_KEY,
+                        "verdict": "success",
+                        "git": {
+                            "expected_parent_sha": base,
+                            "resulting_head_sha": head,
+                            "task_commit_sha": head,
+                            "changed_files": changed,
+                        },
+                        "acceptance": [
+                            {"criterion": criterion, "status": "passed"}
+                            for criterion in criteria
+                        ],
+                    }
+                },
+            }
+        ]
+    }
+    assert len(json.dumps(payload["runs"][0]["metadata"])) < MAX_METADATA_BYTES
+
+    cards = {
+        IMPLEMENTATION_KEY: KanbanTaskInfo(
+            "worker", IMPLEMENTATION_KEY, "done", TODO_ID
         )
-        cards[gate_key] = KanbanTaskInfo(
-            f"gate-{number}", gate_key, "blocked", TODO_ID
-        )
+    }
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         side_effect=lambda *_args: cards,
     )
     mocker.patch(
-        "hermes_pipeline.kanban_tasks._show_task_payload",
-        side_effect=lambda task_id: results[task_id],
+        "hermes_pipeline.kanban_tasks._show_task_payload", return_value=payload
+    )
+    complete = mocker.patch(
+        "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=True
     )
 
-    def complete(_tenant, task_id):
-        completed_gates.add(task_id)
-        return True
-
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks.complete_todo_kanban_task",
-        side_effect=complete,
-    )
-    parent = _git(registration.worktree, "rev-parse", "HEAD")
-    for number in range(1, TASK_COUNT + 1):
-        path = registration.worktree / f"change-{number}.txt"
-        path.write_text(str(number))
-        _git(registration.worktree, "add", path.name)
-        _git(registration.worktree, "commit", "-qm", f"change {number}")
-        head = _git(registration.worktree, "rev-parse", "HEAD")
-        worker_key = f"plan:task-{number}"
-        gate_key = f"validate:task-{number}"
-        worker_id = f"worker-{number}"
-        gate_id = f"gate-{number}"
-        cards[worker_key] = KanbanTaskInfo(worker_id, worker_key, "done", TODO_ID)
-        results[worker_id] = {
-            "runs": [
-                {
-                    "status": "succeeded",
-                    "metadata": {"tpo_result": _worker_result(number, parent, head)},
-                }
-            ]
-        }
-        assert len(json.dumps(results[worker_id]["runs"][0]["metadata"])) < 64 * 1024
+    for _ in range(2):  # Reconciliation is idempotent across ticks.
         assert reconcile_plan_task_results(
-            project_dir=repo,
-            state_dir=state,
-            tenant="stress",
-            tick_id=TICK_ID,
+            project_dir=repo, state_dir=state, tenant="stress", tick_id=TICK_ID
         )
-        cards[gate_key] = KanbanTaskInfo(gate_id, gate_key, "done", TODO_ID)
-        parent = head
+    # Nothing is completed and nothing is blocked: the card is a pure worker.
+    complete.assert_not_called()
 
-    assert completed_gates == {f"gate-{number}" for number in range(1, 51)}
-    assert reconcile_plan_task_results(
+    # The card is still the chain tip, so it is verified against the live
+    # worktree.
+    stray = registration.worktree / "stray.txt"
+    stray.write_text("uncommitted")
+    assert not reconcile_plan_task_results(
         project_dir=repo, state_dir=state, tenant="stress", tick_id=TICK_ID
     )
-    assert completed_gates == {f"gate-{number}" for number in range(1, 51)}
+    stray.unlink()
+
+    # Forty-nine commits is short of what fifty tasks owe, whatever the count.
+    payload["runs"][0]["metadata"]["tpo_result"]["git"].update(
+        resulting_head_sha=_git(registration.worktree, "rev-parse", "HEAD~1"),
+        task_commit_sha=_git(registration.worktree, "rev-parse", "HEAD~1"),
+        changed_files=changed[:-1],
+    )
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="stress", tick_id=TICK_ID
+    )
+    marker = state / "runs" / TICK_ID / "result-validation-blocked"
+    assert json.loads(marker.read_text())["code"] == "commit_count_mismatch"

@@ -396,6 +396,43 @@ def test_load_phase_profile_rejects_non_boolean_requires_plan(tmp_path, value):
         load_phase_profile(p)
 
 
+def test_load_phase_profile_reads_deprecated(tmp_path):
+    p = tmp_path / "phases.yaml"
+    p.write_text("deprecated: true\n" + FIXTURE)
+
+    profile = load_phase_profile(p)
+
+    assert profile == PhaseProfile(phases=tuple(load_phases(p)), deprecated=True)
+
+
+def test_load_phase_profile_defaults_deprecated_false(tmp_path):
+    p = tmp_path / "phases.yaml"
+    p.write_text(FIXTURE)
+
+    assert load_phase_profile(p).deprecated is False
+
+
+@pytest.mark.parametrize("value", ["yes", 1, None])
+def test_load_phase_profile_rejects_non_boolean_deprecated(tmp_path, value):
+    p = tmp_path / "phases.yaml"
+    data = yaml.safe_load(FIXTURE)
+    data["deprecated"] = value
+    p.write_text(yaml.safe_dump(data, sort_keys=False))
+
+    with pytest.raises(ValueError, match="deprecated.*boolean"):
+        load_phase_profile(p)
+
+
+def test_bundled_gstack_is_deprecated_and_native_sdd_is_not():
+    gstack = load_phase_profile(resolve_profile_phases_path("gstack"))
+    native_sdd = load_phase_profile(resolve_profile_phases_path("native-sdd"))
+    agent_skills = load_phase_profile(resolve_profile_phases_path("agent-skills"))
+
+    assert gstack.deprecated is True
+    assert native_sdd.deprecated is False
+    assert agent_skills.deprecated is False
+
+
 @pytest.mark.parametrize("timeout", ["2400", True, 0, -1])
 def test_load_phases_rejects_invalid_timeout(tmp_path, timeout):
     phases_path = tmp_path / "phases.yaml"
@@ -542,7 +579,7 @@ def test_resolve_profile_phases_path_unknown_raises_with_available_profiles():
         resolve_profile_phases_path("bogus-profile")
 
 
-def test_load_phases_no_args_still_returns_gstack_phases():
+def test_load_phases_no_args_still_returns_legacy_implicit_gstack_phases():
     phases = load_phases()
     assert phases[0].phase_key == "phase_2_autoplan"
 

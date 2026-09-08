@@ -82,6 +82,9 @@ Out of scope:
   agent-skills plugin skills are installed (out of scope, see Decisions).
 - Migrating existing projects — `profile` defaults to `"gstack"`, matching
   current behavior with zero contract changes required.
+  *Superseded by [ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md)
+  (2026-09-02): the default profile is `native-sdd`; `gstack` is deprecated.
+  Contracts without a `profile` key still resolve to `gstack`.*
 
 ## Agent-skills profile phase mapping
 
@@ -169,6 +172,9 @@ applies to this package's own schema versioning, not just VERSION/pyproject).
 
 - **Always:** keep `gstack` as the default profile for contracts that don't
   specify one — this must not require any migration for existing projects.
+  *Superseded by [ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md)
+  (2026-09-02): the default profile is `native-sdd`; `gstack` is deprecated.
+  Contracts without a `profile` key still resolve to `gstack`.*
 - **Ask first:** removing or renaming any `gstack` profile phase_key (a
   project's `.hermes/` state may reference phase_keys from an in-flight tick).
 - **Never:** make phase_keys collide across profiles in a way that could

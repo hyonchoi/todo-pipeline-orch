@@ -87,6 +87,16 @@ def _validate_prompt_template(template: str, source: str) -> None:
             )
 
 
+#: The phase whose one card implements the whole Plan of a manifest-pinned run.
+#: A fixed key, exactly as ``review_reconciliation.REVIEW_PHASE_KEY`` names
+#: ``phase_5_review``: the profile owns this phase's prompt, tools and budget,
+#: and the card's step key IS the phase key. A manifest-pinned run no longer
+#: registers one ``plan:<task-id>`` card per Plan task -- the profile's prompt
+#: addresses one agent orchestrating all of them, and its ``turns``/``timeout``
+#: budget is stated for that whole phase.
+IMPLEMENTATION_KEY = "phase_4_development"
+
+
 @dataclass(frozen=True)
 class Phase:
     phase_key: str
@@ -96,8 +106,22 @@ class Phase:
     turns: int = 0
     timeout: int = 1800
     terminal: bool = False
+    # ``gate: true`` means the phase dispatches nothing: it registers no kanban
+    # card, so nothing observes it. A phase's terminal verdict is its worker's
+    # own exit status -- non-zero lands the card in Hermes's sticky ``blocked``.
     gate: bool = False
+    # Parsed only so profiles that still carry the key stay loadable; nothing
+    # reads it. Removing the key from the bundled profiles is a follow-up.
     kind: Literal["worker", "controller_gate", "human_gate"] | None = None
+    # Vestigial, exactly like ``kind`` above: parsed only so the bundled
+    # ``native-sdd`` profile -- which still declares ``compile_plan_tasks:
+    # true`` on ``phase_4_development`` -- stays loadable. Nothing reads it. It
+    # used to fan the phase out into one card per Plan task, each handed the
+    # whole phase's turn/timeout budget and a TPO-authored instruction in place
+    # of the profile's prompt; the phase now registers one card carrying the
+    # profile's own prompt, and ``IMPLEMENTATION_KEY`` is what identifies it.
+    # Removing the key from the bundled profile is a follow-up: the profile is
+    # the specification, and this change must not edit it.
     compile_plan_tasks: bool = False
 
 
@@ -105,6 +129,7 @@ class Phase:
 class PhaseProfile:
     phases: tuple[Phase, ...]
     requires_plan: bool = False
+    deprecated: bool = False
 
 
 @dataclass(frozen=True)
@@ -255,14 +280,26 @@ def load_profile_prerequisites(profile: str) -> ProfilePrerequisites:
 
 
 def load_phase_profile(config_path: Path | str | None = None) -> PhaseProfile:
+    """Load a phase profile from ``config_path``.
+
+    With no argument, falls back to the bundled legacy implicit profile
+    (``contract.LEGACY_IMPLICIT_PROFILE``) — the one a contract without a
+    ``profile`` key resolves to.
+    """
     if config_path is None:
-        config_path = resolve_profile_phases_path("gstack")
+        # Lazy import: contract.py imports this module at top level.
+        from .contract import LEGACY_IMPLICIT_PROFILE
+
+        config_path = resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE)
     config_path = Path(config_path)
     with open(config_path) as f:
         data = yaml.safe_load(f)
     requires_plan = data.get("requires_plan", False) if isinstance(data, dict) else False
     if type(requires_plan) is not bool:
         raise ValueError(f"{config_path}: requires_plan must be a boolean")
+    deprecated = data.get("deprecated", False) if isinstance(data, dict) else False
+    if type(deprecated) is not bool:
+        raise ValueError(f"{config_path}: deprecated must be a boolean")
     raw_phases = data.get("phases") if isinstance(data, dict) else None
     if not isinstance(raw_phases, list) or not raw_phases:
         raise ValueError(f"{config_path}: phases must contain at least one phase")
@@ -275,11 +312,18 @@ def load_phase_profile(config_path: Path | str | None = None) -> PhaseProfile:
                 f"{config_path}:{source}: timeout must be a positive integer"
             )
         phases.append(phase)
-    return PhaseProfile(phases=tuple(phases), requires_plan=requires_plan)
+    return PhaseProfile(
+        phases=tuple(phases), requires_plan=requires_plan, deprecated=deprecated
+    )
 
 
 def load_phases(config_path: Path | str | None = None) -> list[Phase]:
-    """Load the phase list while preserving the historical public API."""
+    """Load the phase list while preserving the historical public API.
+
+    With no argument this inherits :func:`load_phase_profile`'s fallback to the
+    bundled ``contract.LEGACY_IMPLICIT_PROFILE`` — the profile a contract
+    without a ``profile`` key resolves to, not ``contract.DEFAULT_PROFILE``.
+    """
     return list(load_phase_profile(config_path).phases)
 
 
@@ -338,6 +382,7 @@ def _render_phase_prompt(
     prompt_client: PromptClient = "claude",
     template_source: str | None = None,
     decisions: Mapping[str, str] | None = None,
+    context_facts: Mapping[str, str] | None = None,
 ) -> str:
     """Inject the pipeline context the phase prompt needs.
 
@@ -346,6 +391,13 @@ def _render_phase_prompt(
     prepend a non-templated context header and ALSO support strict named
     substitution for phases that want to weave pipeline and client vocabulary
     into prose.
+
+    `context_facts` are additional per-card pipeline facts (the reviewed head
+    SHA, the branch) that a reconciler-created card needs but the phase profile
+    must not have to declare a placeholder for. They join the non-templated
+    context header, so the profile's prompt text stays exactly the profile's
+    own words. Omitted entirely when absent, keeping output byte-identical for
+    every caller that has no per-card fact to add.
 
     `plan_path`/`spec_path`/`reference_paths` are optional, pre-validated (existence +
     project_dir containment already checked by the caller) values taken from the
@@ -358,12 +410,19 @@ def _render_phase_prompt(
     phase may consult a TODOS.md entry. Values are sanitized before rendering.
     """
     source = template_source or "<phase prompt>"
+    from .result_contract import sanitize_result_text
+
     header = (
         f"Pipeline context:\n"
         f"- todo_id: {todo_id}\n"
         f"- tick_id: {tick_id}\n"
         f"- project_slug: {project_slug}\n"
-        f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
+        + "".join(
+            f"- {sanitize_result_text(key, maximum=80)}: "
+            f"{sanitize_result_text(value, maximum=200)}\n"
+            for key, value in (context_facts or {}).items()
+        )
+        + f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
     )
     spec_reference_block = ""
     if plan_path:
@@ -380,8 +439,6 @@ def _render_phase_prompt(
     if spec_reference_block:
         header += spec_reference_block + "\n"
     if decisions:
-        from .result_contract import sanitize_result_text
-
         header += "Decisions:\n" + "".join(
             f"- {sanitize_result_text(key, maximum=80)}: "
             f"{sanitize_result_text(value, maximum=200)}\n"

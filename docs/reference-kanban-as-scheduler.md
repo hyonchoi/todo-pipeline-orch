@@ -3,33 +3,45 @@
 `tpo tick` uses the Hermes kanban board as the source of truth for
 pipeline phase state. Instead of writing internal state files tracking which
 phase is active, phases are registered as one kanban task chain with
-`--parent` dependencies. Gate phases, when a profile defines them, stay in that
-chain but are created unassigned and explicitly receive a sticky `needs_input`
-block. Kanban status queries (`get_todo_kanban_status`,
+`--parent` dependencies. A gate phase dispatches no worker, so registration skips it entirely: no card is created for it and no block is ever applied. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
-For `native-sdd`, the chain is compiled from the tracked `tpo-plan` manifest:
+For `native-sdd`, the chain does NOT scale with the `tpo-plan` manifest. The
+Plan gets one implementation card, whatever its task count:
 
 ```text
-plan worker -> controller gate -> plan worker -> controller gate
+implementation (phase_4_development)
             -> independent review -> review acceptance gate
-            -> finish -> TODO closeout -> human merge gate
+            -> finish -> TODO closeout -> open, unmerged PR + human merge decision
 ```
 
-Controller gates are unassigned and are completed only by TPO after validating
-the closing worker's `metadata.tpo_result` and independent Git facts. Stable
-keys use the tick and step identity, including `plan:<task-id>`,
-`validate:<task-id>`, `review:<round>`, `review-fix:<round>`,
-`fix-validation:<round>`, and `re-review:<round>`. A legacy Plan without a
-manifest retains the static single-development/review/finish/human chain for
-compatibility. Retry still validates the registered repository, worktree,
+The manifest is still authority -- it gates eligibility, pins the Plan hash,
+supplies the acceptance criteria the card must report, and sets the commit-count
+bound -- but it compiles to no cards. The profile's `phase_4_development` prompt
+is what orders the Plan's tasks, runs a fresh native implementer subagent for
+each, and makes exactly one atomic commit per task; TPO delivers that prompt
+verbatim and adds no instruction of its own. On the next tick TPO validates the
+card's `metadata.tpo_result` and independent Git facts -- exactly `len(tasks)`
+commits on the first-parent mainline from the pinned base SHA, with the real
+diff matching the reported `changed_files` -- before the chain may advance to
+review. The run's terminal boundary is the open, unmerged pull request and its
+human merge decision, which no card represents. Stable keys use the tick and
+step identity: `phase_4_development`, `review:0`, and `finish`. Review is
+binary -- the profile's reviewer commits its own fixes, so no remediation cards
+are fanned out from findings. A run registered before the per-Plan-task fan-out
+was deleted names `plan:<task-id>` keys and no longer loads; such a run fails
+closed with `registration_invalid` rather than being verified against a card
+shape that no longer exists, and it must be drained before upgrading. A legacy
+Plan without a manifest retains the static development/review/finish/human
+chain, but its implementation card publishes no result template and its result
+is never parsed. Retry still validates the registered repository, worktree,
 branch, pinned base TODO, and Plan hashes, but bypasses manifest-only dynamic
 reconcilers.
 
 Hermes >= 0.19.0 is required for the Kanban and closing-result contracts.
 
-For the default `gstack` profile, completion of the terminal Phase 8 task means
+For the deprecated `gstack` profile, completion of the terminal Phase 8 task means
 the branch was handed to a PR, not merged. `tpo tick` reads
 `.hermes/pipeline_branch.txt` and skips new selection while that PR is open,
 closed without merge, or temporarily unverifiable. Once GitHub reports the PR as
@@ -265,7 +277,7 @@ tick starts
     +-- for each phase:
     |       persist current create intent + known cleanup IDs
     |       -> create task parented to barrier/previous phase
-    |          and, for a gate, leave it unassigned and apply needs_input block
+    |          (a gate phase is skipped before this point: no card, no block)
     |       -> persist the returned ID first in child-first cleanup order
     |
     v
@@ -286,9 +298,9 @@ dependencies allow each later executable phase to run when its predecessor ends.
   from the board, not hidden in `.hermes/phase_started/` files.
 - The `--parent` dependency chain means kanban preserves the configured phase
   order — the orchestrator doesn't need to manage phase ordering.
-- Gate phases stay in the parent chain, while their sticky `needs_input` block
-  keeps them nonspawnable until the gate is explicitly resolved. The default
-  `gstack` profile has no gate phase.
+- A gate phase is not in the chain at all: registration skips it, so it has no
+  card and no block, and its terminal meaning is carried by the phase it
+  follows. The default `gstack` profile has no gate phase.
 - `todo` means an executable task is still waiting on its parent. `ready` means
   it is runnable and queued for dispatch.
 
@@ -310,11 +322,10 @@ expected chain and lets completion checks reject a partial board snapshot. It
 then replaces the cleanup marker with a barrier-commit-pending marker and
 completes the registration barrier. The marker spans that remote mutation and
 is cleared only after success. Completing the barrier satisfies the first
-phase's parent: an executable first phase moves from `todo` to `ready`, while a
-gate first phase remains sticky-blocked. Later tasks wait for their preceding
-phase. Gate tasks are unassigned and receive
-`hermes kanban block --kind needs_input`, so their block remains explicit while
-the parent chain preserves phase order.
+phase's parent: the first executable phase moves from `todo` to `ready`, and
+later tasks wait for their preceding phase, so the parent chain preserves phase
+order. A gate phase is skipped during registration and so never appears in the
+chain.
 
 An inconclusive create is fail-closed. The registration call retries the same
 idempotency key and takes a snapshot; if the task is still not visible, the
@@ -362,7 +373,7 @@ prepare_todo_phases(
 | `todo_id` | `str` | — | TODO ID (e.g., "TODO-10"). Embedded in task body JSON header. |
 | `tick_id` | `str` | — | ULID tick ID embedded in each task body header. |
 | `board_slug` | `str` | — | Project slug embedded in each task body header. |
-| `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is packaged `gstack`; production resolves `contract.profile` and passes its path explicitly. |
+| `phases_path` | `str \| Path \| None` | `None` | Profile `phases.yaml`. The low-level default is the packaged legacy implicit profile (`contract.LEGACY_IMPLICIT_PROFILE`, i.e. `gstack`), never the `tpo init` default; production resolves `contract.profile` and passes its path explicitly. |
 | `prompt_client` | `PromptClient` | `"claude"` | Renders the fixed product label, verified skill invocation vocabulary, and external-client delegation guidance. |
 
 **Returns:** All `PreparedPhaseTask` values in profile order.
@@ -382,8 +393,7 @@ with respect to Hermes: no task is created.
 ### `create_prepared_todo_phases`
 
 Creates already-prepared tasks behind a registration barrier. Every phase follows
-the previous phase with `--parent`; gate phases remain nonspawnable by omitting
-worker assignees and goals, and receive a sticky `needs_input` block.
+the previous phase with `--parent`; a gate phase is skipped and gets no card.
 
 ```python
 create_prepared_todo_phases(
@@ -425,11 +435,11 @@ each prepared phase, it then runs `hermes kanban create` with:
   line
 - `--max-runtime <timeout + 60>` and `--max-retries 1` for executable tasks —
   the selected phase deadline plus cleanup-only grace and a terminal single
-  attempt; gate tasks omit both flags
+  attempt
 
-After creating a gate, it runs
-`hermes kanban block --kind needs_input <gate-task-id>`. After the
-expected-phase sentinel is durable, it completes the barrier.
+No `hermes kanban block` call is ever made, for a gate or for anything else: a
+gate phase is skipped before any create. After the expected-phase sentinel is
+durable, it completes the barrier.
 
 **Mid-registration failure:** The kanban-as-scheduler design requires all phases
 to exist in order. If the second of four phases fails to register, the first
@@ -439,31 +449,13 @@ known parents are not archived until that task is resolved. If cleanup cannot be
 confirmed from an archived-inclusive snapshot, the durable pending marker
 remains and later ticks skip the project until cleanup finishes.
 
-### `register_todo_phases`
+### Preparation and creation are always split
 
-Backward-compatible convenience wrapper for callers that do not need to
-persist state between preparation and task creation. It calls
-`prepare_todo_phases`, then `create_prepared_todo_phases`.
+There is no combined prepare-and-create wrapper. Production `_tick_project`
+calls the two functions separately so its exact sequence is:
 
-```python
-register_todo_phases(
-    *,
-    todo_id: str,
-    tick_id: str,
-    board_slug: str,
-    project_dir: str | Path,
-    phases_path: str | Path | None = None,
-    assignee: str = "default",
-    prompt_client: PromptClient = "claude",
-) -> list[str]
-```
-
-The wrapper accepts the union of the preparation and creation parameters and
-returns the created task IDs. A render failure occurs before the creation call,
-including when a later phase is malformed. Production `_tick_project` uses the
-two functions separately so its exact sequence is:
-
-1. prepare every rendered body;
+1. prepare every rendered body (a render failure, including a malformed later
+   phase, happens here, before any task exists);
 2. persist `current_tick_id.txt` and the `tick_started` outcome;
 3. create the prepared Hermes tasks.
 
@@ -487,7 +479,7 @@ get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]
 - `todo` — executable phase is waiting for its `--parent`
 - `running` — phase is actively executing
 - `ready` — executable phase is runnable and queued
-- `blocked` — human gate phase has a sticky `needs_input` block
+- `blocked` — Hermes's own sticky block, set when a worker exits non-zero in a way it cannot retry
 - `done` — phase completed successfully
 - `failed` — phase execution failed
 - `archived` — phase was archived mid-registration (abandoned)
@@ -552,8 +544,18 @@ observe_outcomes(
 | `done` | `phase_complete` | `{"outcome": "phase_complete", "phase_key": "phase_2_autoplan"}` |
 | `failed` | `failed_at_phase_<key>` | `{"outcome": "failed_at_phase_phase_4_development", "detail": {"kanban_status": "failed"}}` |
 | `archived` | `failed_at_phase_<key>` | `{"outcome": "failed_at_phase_phase_2_autoplan", "detail": {"kanban_status": "archived"}}` |
-| `todo`, `running`, `ready`, `blocked` | (skipped) | In-flight phases are not written |
-| all `done` | `all_phases_complete` | `{"outcome": "all_phases_complete"}` |
+| `blocked` | `failed_at_phase_<key>` | `{"outcome": "failed_at_phase_phase_5_review", "detail": {"kanban_status": "blocked"}}` |
+| `todo`, `running`, `ready` | (skipped) | In-flight phases are not written |
+| all `done` or `failed` | `all_phases_complete` | `{"outcome": "all_phases_complete"}` |
+
+`blocked` is terminal and sticky, not in-flight, and `all_phases_complete`
+counts it as complete so a tick cannot spin on it -- so a blocked card releases
+the project lock and lets the scan move to the next TODO. Writing no outcome for
+it left the circuit breaker and the decision store with neither a success nor a
+failure for a run that abandoned its branch, worktree and unmerged work, so the
+failure line is written. It does NOT get the `all_phases_complete` sentinel:
+`blocked` is not in `COMPLETION_STATUSES`, and an abandoned run carrying an
+all-complete sentinel would be the false success itself.
 
 **High-watermark dedup:** If an outcome for a phase_key already exists in the
 file, it is not written again. Running `observe_outcomes` twice with the same

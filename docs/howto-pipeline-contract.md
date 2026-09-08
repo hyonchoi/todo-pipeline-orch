@@ -26,10 +26,12 @@ Wrote pipeline execution contract: /path/to/<project>/.hermes/pipeline.toml
 The file looks like:
 ```toml
 # Pipeline execution contract — read at tick start.
-schema_version = 2
+# See docs/tutorial-getting-started.md and `tpo doctor --help`.
+schema_version = 3
 assignee = "default"
+review_assignee = "default"
 capabilities = ["Bash", "Edit", "Read", "Write"]
-profile = "gstack"
+profile = "native-sdd"
 ```
 
 If a contract already exists, `init` is a no-op. Use `--force` to regenerate:
@@ -38,7 +40,7 @@ If a contract already exists, `init` is a no-op. Use `--force` to regenerate:
 uv run tpo init <project> --force
 ```
 
-Use `--profile` to select a pipeline skill-set profile other than the default `gstack`:
+Use `--profile` to select a pipeline skill-set profile other than the default `native-sdd`:
 
 ```bash
 uv run tpo init <project> --profile agent-skills
@@ -68,16 +70,18 @@ Four possible outcomes:
 Edit `.hermes/pipeline.toml` directly to customize the assignee, capabilities, or profile:
 
 ```toml
-schema_version = 2
+schema_version = 3
 assignee = "pipeline"           # your Hermes profile name
+review_assignee = "reviewer"    # Hermes profile for review cards
 capabilities = ["Bash", "Edit", "Read", "Write", "Agent"]
-profile = "gstack"              # which phases.yaml to run
+profile = "native-sdd"          # which phases.yaml to run
 ```
 
 - **`schema_version`** — Do not edit manually. Bump only when the contract field set changes. Regenerate with `init --force` instead.
 - **`assignee`** — Passed as `--assignee` when registering each phase's kanban task. Change this to route phases to a different Hermes profile.
+- **`review_assignee`** — The Hermes profile that review cards are registered to, so an independent review runs under a different profile than the workers. `init` writes `"default"`; `init --assignee <name>` re-renders it as a copy of `assignee`.
 - **`capabilities`** — The tool set phases are allowed to use. If a phase in the selected profile's phases.yaml requires a tool not in this list, the tick fails with a capability mismatch error.
-- **`profile`** — Which pipeline skill-set profile's phases.yaml to run (e.g. `gstack`, `agent-skills`). See [How to use the agent-skills profile](howto-agent-skills-profile.md).
+- **`profile`** — Which pipeline skill-set profile's phases.yaml to run (`native-sdd` by default, or `agent-skills`; `gstack` is deprecated). Omitting the key entirely is legacy behavior: the contract then resolves to `gstack` and `doctor`/`tick` print a deprecation notice. See [How to use the agent-skills profile](howto-agent-skills-profile.md).
 
 ### 4. Fix Drift
 
@@ -93,7 +97,7 @@ capabilities = ["Bash", "Edit", "Agent", "Read", "Write"]
 uv run tpo init <project> --force
 ```
 
-This overwrites the file with capabilities computed from the current profile's phases.yaml. Any custom assignee or capabilities will be lost.
+This overwrites the file with capabilities computed from the current profile's phases.yaml. Any custom `assignee`, `review_assignee`, or `capabilities` will be lost.
 
 ## Verification
 
@@ -101,7 +105,7 @@ Confirm the contract is valid and the assignee is used by ticks:
 
 ```bash
 uv run tpo doctor <project>
-# Should print: OK: schema_version=2 assignee=... profile=... capabilities=[...]
+# Should print: OK: schema_version=3 assignee=... profile=... capabilities=[...]
 
 uv run tpo tick
 # Run a tick, check logs for: "registered N kanban tasks for TODO-X"
@@ -115,7 +119,7 @@ uv run tpo tick
 
 **"ContractVersionMismatchError: schema_version=99, expected 2"**
 - The contract file has a `schema_version` the code doesn't recognize.
-- **Fix:** Run `tpo init <project> --force` to regenerate with the current schema version. This resets `profile` to `gstack` unless you also pass `--profile <name>` — if the project was previously running a non-default profile, re-specify it explicitly or the regenerated contract will silently switch phase sets.
+- **Fix:** Run `tpo init <project> --force` to regenerate with the current schema version. This resets `profile` to `native-sdd` unless you also pass `--profile <name>` — if the project was previously running a non-default profile, re-specify it explicitly or the regenerated contract will silently switch phase sets.
 
 **"ContractMissingError"**
 - No `.hermes/pipeline.toml` exists for this project.

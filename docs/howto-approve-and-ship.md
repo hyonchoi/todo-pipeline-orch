@@ -1,6 +1,6 @@
 # Legacy: Approve and Ship a TODO
 
-Use this only for existing sidecars from older/default-overridden profiles that include a `phase_9_ship` gate. The current default `gstack` profile ends at Phase 8 PR handoff and does not run `tpo approve`.
+Use this only for existing sidecars from older/default-overridden profiles that include a `phase_9_ship` gate. Neither the default `native-sdd` profile nor the deprecated `gstack` profile runs `tpo approve`: both end at a PR handoff (followed, under `native-sdd`, by a terminal human merge gate).
 
 ## Prerequisites
 

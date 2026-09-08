@@ -109,6 +109,16 @@ class ApproveRefused(Exception):
     """A deterministic guard refused the approve. Not an internal error."""
 
 
+class ChecksInconclusive(Exception):
+    """The CI status cannot be decided from the evidence supplied.
+
+    Raised by :func:`ci_is_green` when the rollup it was handed carries no
+    verdict either way. It is not a failure of gh or git, so it is not a
+    ``ShipError``; it is a demand that the caller -- which, unlike the
+    predicate, knows the repo and the sha -- go and corroborate.
+    """
+
+
 @contextmanager
 def approve_lock(state_dir: Path | str):
     """Serialize approve via a non-blocking exclusive flock.
@@ -176,12 +186,55 @@ def git_tree_clean(cwd: Path | str) -> bool:
 def ci_is_green(checks: list) -> bool:
     """True if every status-rollup entry is a success.
 
-    An empty list means no CI checks are configured for the repo — treated as
-    green so approve does not deadlock on repos without required checks.
     Handles both CheckRun ({status, conclusion}) and StatusContext ({state}).
+
+    An EMPTY rollup raises :class:`ChecksInconclusive` rather than answering.
+    It used to answer ``True`` ("no CI checks are configured for the repo —
+    treated as green so approve does not deadlock on repos without required
+    checks"), and that rule is unsound: an empty rollup is not evidence that no
+    CI is configured, it is evidence that the rollup is empty. That shape has
+    at least six causes and only one of them is "there is no gate to pass".
+    The dangerous one is a workflow STARTUP FAILURE — a run is created,
+    concludes ``failure`` and produces zero jobs — which is precisely what an
+    agent that breaks ``.github/workflows/*`` leaves behind, and which reports
+    no checks at all through ``gh``. A live example: ``WearExerciseManager`` at
+    ``4c14b532d7da2a99a9e3b337fece90a5336fdc43`` reports no checks, while its
+    ``check-suites`` show one ``github-actions`` suite with
+    ``latest_check_runs_count: 0`` and ``conclusion: failure``.
+
+    This function is handed a bare list — no repo, no sha — so it *cannot*
+    corroborate the absence itself, and no bool it could return would be
+    honest. ``False`` would be safe but still a claim the input does not
+    support: it would silently convert "undetermined" into "red" and wedge a
+    genuinely CI-less repo forever behind a message telling its operator to
+    wait for checks that will never arrive. Raising is the only way a
+    bool-returning predicate can say "I cannot tell", and it forces the next
+    caller to confront the ambiguity instead of silently inheriting a false
+    green. That corroboration is worked out in
+    ``todos_completion._rollup_is_honestly_empty`` and is performed here by
+    :func:`_bump_and_merge`, the one production caller, which knows the
+    repository and the sha: it asks the head commit's check-suites and commit
+    statuses directly instead of re-reading the rollup.
+
+    Note what that rule is NOT, because both halves are tempting and both are
+    wrong. It is not "does any suite exist": GitHub opens a check suite for
+    EVERY installed App subscribing to ``check_suite``, whether or not that App
+    ever produces a run, so a nonzero ``total_count`` is the ordinary state of a
+    repository with a common App installed. And it is not "a suite with zero
+    check runs is a failure": a zero-run suite with a NULL conclusion is a
+    third-party App that was notified and did nothing, which is benign. The
+    discriminators are the conclusion and the App — zero runs WITH a conclusion
+    is the startup-failure family, and a zero-run ``github-actions`` suite stays
+    fail-closed because "workflows about to start" and "workflows that will
+    never report" are not separable from the payload.
     """
     if not checks:
-        return True
+        raise ChecksInconclusive(
+            "status-check rollup is empty; an empty rollup is not evidence "
+            "that no CI is configured (a workflow startup failure reports the "
+            "same shape), so it must be corroborated against the head commit's "
+            "check-suites before it can be read as green"
+        )
     for c in checks:
         state = (c.get("state") or "").upper()
         if state:  # StatusContext
@@ -370,6 +423,72 @@ def _check_ship_guards(
         )
 
 
+def _corroborate_empty_rollup(
+    *, project_dir: Path | str, view: dict, head_sha: str
+) -> tuple[bool, str]:
+    """Ask the head commit itself whether an empty rollup means "no gate".
+
+    Returns ``(proven, detail)``. ``proven`` is True ONLY when the absence of a
+    CI gate has been established against the commit; ``detail`` explains either
+    what was proven (for the audit line) or why it was not (for the refusal).
+
+    :func:`ci_is_green` is handed a bare list and so cannot corroborate anything;
+    this layer knows the repository and the sha, so it can. The rule it applies
+    is ``todos_completion._rollup_is_honestly_empty`` -- IMPORTED, not restated.
+    A second copy of "when is an empty rollup honest" is precisely what let ship
+    and todos_completion drift apart until ship was merging on a shape
+    todos_completion already refused. The import is function-local, matching
+    ``cli.py``; ``todos_completion`` does not import ``ship`` (directly or
+    transitively), so a module-level import would also be acyclic today, and
+    keeping it at the call site keeps it that way.
+
+    The repository is the ``origin`` of *project_dir*, which is the same remote
+    :func:`gh_pr_view` resolved the pull request through (it runs with
+    ``cwd=project_dir``), so the commit asked about is the commit whose rollup
+    came back empty.
+
+    NEVER RAISES for a corroboration failure: every way of failing to establish
+    the negative -- an unidentifiable repository, an unreadable check-suites
+    page, a timeout -- comes back as ``(False, reason)``, because an error while
+    proving a negative is not proof of the negative, and the merge it would
+    unlock is irreversible and outward-facing.
+    """
+    from . import github_issues
+    from .result_contract import ResultContractError
+    from .todos_completion import _rollup_is_honestly_empty
+
+    rollup_sha = view.get("headRefOid")
+    if not isinstance(rollup_sha, str) or not rollup_sha:
+        return False, "the pull request view does not describe which commit the rollup belongs to"
+    if rollup_sha != head_sha:
+        return False, (
+            f"the rollup does not describe {head_sha} (the commit that would be "
+            f"merged); the pull request head is now {rollup_sha}"
+        )
+    try:
+        repo = github_issues.repository_identity(Path(project_dir))
+    except github_issues.GitHubIssuesError as exc:
+        return False, f"the repository behind {project_dir} could not be identified ({exc})"
+    try:
+        proven = _rollup_is_honestly_empty(
+            Path(project_dir), repo=repo, head_sha=head_sha
+        )
+    except ResultContractError as exc:
+        return False, (
+            f"the checks of {repo}@{head_sha} could not be read ({exc}); an error "
+            "while proving a negative is not proof of the negative"
+        )
+    if not proven:
+        return False, (
+            f"the check-suites of {repo}@{head_sha} do not prove that no gate "
+            "exists (a workflow startup failure reports this same shape)"
+        )
+    return True, (
+        f"{repo}@{head_sha} has no check suite that produced a run, no suite "
+        "carrying a conclusion, no github-actions suite and no commit statuses"
+    )
+
+
 def _bump_and_merge(
     *,
     sidecar: ShipSidecar,
@@ -391,12 +510,38 @@ def _bump_and_merge(
 
     view = gh_pr_view(sidecar.work_branch, cwd=project_dir)
     checks = view.get("statusCheckRollup") or []
-    if not checks:
-        log.warning(
-            "no CI checks found for %s; proceeding (nothing to gate on)",
-            sidecar.work_branch,
+    try:
+        green = ci_is_green(checks)
+    except ChecksInconclusive as exc:
+        # This branch used to log "no CI checks found; proceeding (nothing to
+        # gate on)" and squash-merge, which is how a workflow startup failure
+        # merged as a green build. Refusing outright fixed that but wedged
+        # every genuinely CI-less repository forever, which costs the autonomy
+        # property outright. So: corroborate, and merge only on a PROVEN
+        # absence. Every other outcome -- disproved, unreadable, or about the
+        # wrong commit -- refuses, because the merge is irreversible.
+        proven, detail = _corroborate_empty_rollup(
+            project_dir=project_dir, view=view, head_sha=sidecar.pr_head_sha
         )
-    if not ci_is_green(checks):
+        if not proven:
+            log.warning(
+                "CI status for %s is undetermined: %s (%s)",
+                sidecar.work_branch, exc, detail,
+            )
+            raise ApproveRefused(
+                f"CI status for {sidecar.work_branch} is undetermined: {exc}. "
+                f"The empty rollup was not corroborated: {detail}. Approve will "
+                "not merge (the bump commit is already pushed)."
+            ) from exc
+        # A merge that passed through no CI gate at all is worth a permanent
+        # record even though it is the correct outcome here.
+        _audit(
+            state_dir,
+            f"merging TODO-{sidecar.todo_id} on {sidecar.work_branch} with no "
+            f"CI gate: the empty rollup is corroborated -- {detail}",
+        )
+        green = True
+    if not green:
         raise ApproveRefused(
             "CI is not green yet; re-run approve once checks pass "
             "(the bump commit is already pushed)"

@@ -11,11 +11,10 @@ import logging
 import os
 import re
 import subprocess
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
 
 from .config import PromptClient
 from .outcomes import (
@@ -25,9 +24,15 @@ from .outcomes import (
 )
 from .phases import (
     CLIENT_VOCABULARY,
+    IMPLEMENTATION_KEY,
     _render_phase_prompt,
     load_phase_profile,
     load_phases,
+)
+from .result_contract import (
+    RESULT_TEMPLATE_HEADING,
+    manifest_acceptance_criteria,
+    render_result_template,
 )
 from .state import _atomic_write_text
 
@@ -38,12 +43,31 @@ _REGISTRATION_BARRIER_PHASE_KEY = "__registration_barrier__"
 _REGISTRATION_BARRIER_INFRASTRUCTURE = "registration_barrier"
 PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS = 60
 
+# The first dynamic card the review reconciler builds on the implementation
+# card. Defined here so the result reconciler can recognise it without
+# importing review_reconciliation, which imports this module.
+INITIAL_REVIEW_KEY = "review:0"
+
+# Run-scoped evidence that a Plan result failed validation. Plain cron ticks
+# have no budget to exhaust and the board shows every worker done, so the stall
+# would otherwise be visible only in the log. The marker blocks nothing.
+RESULT_VALIDATION_BLOCKED_MARKER = "result-validation-blocked"
+
+# The marker code for a stall that is not a rejected result. It never collides
+# with a ResultContractError code, so an operator can tell a wiring problem
+# (a card or step key that is not there) from work TPO refused.
+# ``gate_completion_failed`` went with the legacy ``validate:<id>`` gate
+# completion: a registration that still names those keys cannot load any more.
+CHAIN_WIRING_INCOMPLETE_CODE = "chain_wiring_incomplete"
+
 log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
 
-# A "blocked" kanban task is a GATE, not an error: it deliberately holds the
-# project in-flight (blocked ∉ COMPLETION_STATUSES) until a human approves.
+# Hermes moves a card to "blocked" when a worker has exhausted its failure
+# limit (``_record_task_failure`` -> ``gave_up``); the block event is sticky, so
+# ``recompute_ready`` never promotes it back. TPO creates no blocked cards of
+# its own, so "blocked" means exactly one thing: the phase gave up.
 BLOCKED = "blocked"
 
 # Statuses that count as "complete" for the purpose of determining whether
@@ -86,22 +110,13 @@ def _build_json_header(
 
 @dataclass(frozen=True)
 class PreparedPhaseTask:
+    """One dispatchable worker card. Gate phases never reach here."""
+
     phase_key: str
     name: str
     body: str
     turns: int
-    gate: bool
     timeout: int = 1800
-    kind: Literal["worker", "controller_gate", "human_gate"] | None = None
-
-    def __post_init__(self) -> None:
-        inferred = "controller_gate" if self.gate else "worker"
-        kind = self.kind or inferred
-        if kind not in {"worker", "controller_gate", "human_gate"}:
-            raise ValueError(f"invalid prepared task kind: {kind!r}")
-        if self.gate != (kind != "worker"):
-            raise ValueError("prepared task gate and kind disagree")
-        object.__setattr__(self, "kind", kind)
 
 
 @dataclass(frozen=True)
@@ -137,16 +152,50 @@ def _external_client_delegation_block(
     prompt_client: PromptClient,
     timeout: int,
     tools: str,
+    result_template: str | None = None,
 ) -> str:
-    """Return the dispatcher contract prepended to executable phase tasks."""
+    """Return the dispatcher contract prepended to executable phase tasks.
+
+    ``result_template`` is the rendered ``metadata.tpo_result`` template, and it
+    is published here rather than inside the delimited prompt below: the
+    dispatcher is the party that closes the card, so the schema and its
+    instructions are addressed to it. The delimited block stays exactly the
+    phase profile's or Plan task's own words, which is what the external client
+    is asked to execute. Passing ``None`` publishes no template, and the
+    dispatcher is told only to carry the same result metadata forward.
+    """
+    launch_setup = ""
+    launch_guidance = ""
     if prompt_client == "codex":
-        command = "codex exec --sandbox workspace-write"
+        # ``codex exec [PROMPT]``: "If not provided as an argument (or if `-`
+        # is used), instructions are read from stdin." ``-`` is given
+        # explicitly because a prompt argument *plus* piped stdin makes Codex
+        # append the stdin as a separate ``<stdin>`` block instead.
+        command = (
+            "codex exec --sandbox workspace-write "
+            "-c sandbox_workspace_write.network_access=true "
+            '--add-dir "$TPO_GIT_COMMON_DIR" -'
+        )
+        launch_setup = (
+            'TPO_GIT_COMMON_DIR="$(git rev-parse --path-format=absolute '
+            '--git-common-dir)" || exit 1\n'
+            'case "$TPO_GIT_COMMON_DIR" in /*) ;; *) exit 1 ;; esac\n'
+            '[ -d "$TPO_GIT_COMMON_DIR" ] || exit 1\n'
+        )
+        launch_guidance = (
+            "Run the entire launch sequence from the selected phase worktree. "
+            "Resolve its absolute Git common directory there immediately before "
+            "launch; stop if resolution fails. Grant only that metadata directory "
+            "with `--add-dir`, retaining workspace-write and the network override. "
+            "Do not grant the parent checkout or broader filesystem access.\n"
+        )
     elif prompt_client == "claude":
         tool_names = [tool.strip() for tool in tools.split(",") if tool.strip()]
         if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", tool) for tool in tool_names):
             raise ValueError("Claude allowed tool names must be simple identifiers")
         allowed_tools = ",".join(tool_names)
-        command = 'claude -p "<external-agent prompt>" --permission-mode dontAsk'
+        # ``claude -p`` with no prompt argument reads the prompt from stdin.
+        command = "claude -p --permission-mode dontAsk"
         if allowed_tools:
             command += f" --allowedTools {allowed_tools}"
     else:
@@ -154,6 +203,18 @@ def _external_client_delegation_block(
             f"prompt_client must be one of ('claude', 'codex'), got {prompt_client!r}"
         )
     agent_product = CLIENT_VOCABULARY[prompt_client]["agent_product"]
+    if result_template is None:
+        closing = "When completing the task, include the same result metadata.\n\n"
+    else:
+        closing = (
+            "When completing the task, set `metadata.tpo_result` to exactly the "
+            f"object in the \"{RESULT_TEMPLATE_HEADING}\" template below, filled "
+            "with the Git facts of the worktree you own and the values the "
+            "external client reported; never summarize or paraphrase it, and "
+            "apply any substitution the template itself states for a section.\n"
+            + result_template
+            + "\n"
+        )
     return (
         "External client delegation:\n"
         "You are the Hermes dispatcher, not the implementation agent.\n"
@@ -161,7 +222,44 @@ def _external_client_delegation_block(
         f"external client ({agent_product}). Build the external-agent prompt "
         "from the delimited block below and pass only that prompt to the "
         "external client.\n"
-        f"Required external command: `{command}`\n"
+        "Deliver that prompt on the external client's standard input. Write "
+        "only the content between the opening (BEGIN) and closing (END) "
+        "external-agent prompt marker lines below to a prompt file. "
+        "Exclude both marker lines, all dispatcher instructions and result metadata, "
+        "and any text outside those boundaries. Set `PROMPT_FILE` to its "
+        "path, and redirect the file into the command shown next. Never place "
+        "the prompt in the command line itself.\n"
+        "Write the prompt file to a temporary directory outside this "
+        "repository -- for example `PROMPT_FILE=\"$(mktemp -d)/prompt.txt\"` "
+        "-- and never anywhere inside the worktree you were given, not even a "
+        "gitignored path. This phase verifies that the worktree is clean, and "
+        "an untracked prompt file there fails the run with `worktree_dirty` "
+        "before any work begins.\n"
+        "Copy the prompt byte-for-byte into that file: no shell interpolation "
+        "or command substitution, no added quoting or escaping, no "
+        "re-wrapping, no truncation, and no summarizing. The prompt is a "
+        "specification whose prose is arbitrary -- it contains apostrophes, "
+        "double quotes, `$`, backticks, and newlines that a quoted shell "
+        "argument would truncate or that the shell would expand -- which is "
+        "why standard input is required and a command-line prompt is not "
+        "acceptable.\n"
+        "After writing the prompt file, assign `PROMPT_FILE` in a separate "
+        "shell statement before the client command, in the same shell invocation. "
+        "Never use an inline environment assignment on the client command: "
+        "the shell expands the redirect before that assignment takes effect. "
+        "Use this launch sequence and shell-quote the entire absolute path "
+        "of the already-written prompt file (for example with Python's "
+        "`shlex.quote`). Replace the whole quoted example, including its "
+        "surrounding quotes, with that shell-quoted value. The path must be "
+        "passed literally, without interpolation or command substitution; "
+        "do not just insert a path inside the example's double quotes:\n"
+        f"{launch_guidance}"
+        "```sh\n"
+        'PROMPT_FILE="/absolute/path/to/already-written-prompt.txt"\n'
+        f"{launch_setup}"
+        f'{command} < "$PROMPT_FILE"\n'
+        "```\n"
+        f'Required external command: `{command} < "$PROMPT_FILE"`\n'
         f"External agent timeout: {timeout} seconds.\n"
         f"The external client deadline is {timeout} seconds. The Hermes worker "
         f"has a {PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS}-second cleanup grace "
@@ -180,7 +278,18 @@ def _external_client_delegation_block(
         '`kanban_block(kind="needs_input", reason=<exact reason>)`. '
         "Do not inspect, implement, or commit partial work; you must not inspect "
         "partial changes, and must not implement or commit the phase yourself.\n"
-        "When completing the task, include the same result metadata.\n\n"
+        "After the external client exits successfully, use the external client's "
+        "reported gate and test evidence to collect the result. Do not re-run "
+        "test, build, or install commands, and do not modify the worktree while "
+        "collecting result metadata; even verification commands can generate "
+        "untracked files such as uv.lock. Use read-only Git observations for "
+        "repository facts, then perform the final clean-worktree check after "
+        "all evidence collection and immediately before completing the card. "
+        "If required verification evidence is missing or the worktree is dirty, "
+        'call `kanban_block(kind="needs_input", reason=<exact reason>)`; '
+        "do not invent successful verification or a clean-worktree result, and "
+        "do not clean up or commit the work yourself.\n"
+        + closing
     )
 
 
@@ -618,34 +727,6 @@ def _recover_and_archive_uncertain_task(
     return _persist_and_archive_cleanup(project_dir, cleanup)
 
 
-def _block_gate_task(task_id: str) -> None:
-    """Write Hermes's sticky human-input block event for an unassigned gate."""
-    try:
-        result = subprocess.run(
-            [
-                "hermes",
-                "kanban",
-                "block",
-                "--kind",
-                "needs_input",
-                task_id,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=HERMES_COMMAND_TIMEOUT,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        raise RuntimeError(
-            f"failed to block kanban gate {task_id}: {type(exc).__name__}"
-        ) from exc
-    if result.returncode != 0:
-        raise RuntimeError(
-            f"failed to block kanban gate {task_id}: "
-            f"rc={result.returncode}"
-        )
-
-
 def _complete_registration_barrier(task_id: str) -> None:
     """Commit a durable phase registration by completing its barrier."""
     try:
@@ -740,8 +821,8 @@ def prepare_todo_phases(
     """Render every phase card for ``todo_id`` without touching Hermes.
 
     ``plan_path``/``spec_path``/``reference_paths``/``decisions`` come from the
-    selected issue; nothing is resolved from TODOS.md. Every worker card carries
-    the ``Decisions:`` block (gates never do). When ``project_dir`` is given the Plan's
+    selected issue; nothing is resolved from TODOS.md. Every card carries the
+    ``Decisions:`` block. When ``project_dir`` is given the Plan's
     optional ``tpo-plan`` manifest is validated (and compiled) and Spec/Reference
     paths are checked for repository containment.
     """
@@ -792,94 +873,19 @@ def prepare_todo_phases(
             "phase_8_finish_branch",
             "phase_9_human_review",
         }:
-            # Native manifest runs add these cards only after their controller
-            # prerequisites have been reconciled. Static registration would let
-            # delivery bypass the persistent clean-review acceptance gate.
+            # Native manifest runs defer these cards, not their prompts: the
+            # review card cannot exist until the Plan tasks are done and the
+            # finish card until the review is accepted. The reconcilers that
+            # create them render THIS profile's ``phase_5_review`` and
+            # ``phase_8_finish_branch`` prompts (see
+            # ``review_reconciliation.render_profile_prompt``), so deferring
+            # creation never substitutes a TPO-authored instruction.
             continue
-        compile_plan_tasks = getattr(phase, "compile_plan_tasks", False)
-        if compile_plan_tasks and manifest is not None:
-            for plan_task in manifest.tasks:
-                worker_key = f"plan:{plan_task.id}"
-                worker_prompt = (
-                    f"Implement Plan task {plan_task.id}: {plan_task.title}\n\n"
-                    f"Instructions:\n{plan_task.instructions}\n\n"
-                    "Acceptance criteria:\n"
-                    + "\n".join(f"- {item}" for item in plan_task.acceptance_criteria)
-                    + "\n\nVerification:\n"
-                    + "\n".join(f"- {item}" for item in plan_task.verification)
-                    + f"\n\nRequired commit message: {plan_task.commit_message}\n"
-                    "Complete only this task using red-green-refactor TDD. "
-                    "Report the required structured result metadata when closing."
-                )
-                rendered_worker = _render_phase_prompt(
-                    "",
-                    todo_id=todo_id,
-                    tick_id=tick_id,
-                    project_slug=board_slug,
-                    plan_path=plan_reference_value,
-                    plan_hash=plan_source.plan_hash if plan_source is not None else None,
-                    spec_path=spec_paths[0] if spec_paths else None,
-                    reference_paths=references,
-                    prompt_client=prompt_client,
-                    template_source=f"manifest:{worker_key}",
-                    decisions=decisions,
-                ) + worker_prompt
-                prepared.append(
-                    PreparedPhaseTask(
-                        phase_key=worker_key,
-                        name=f"Plan task {plan_task.id}: {plan_task.title}",
-                        body=(
-                            _build_json_header(
-                                tick_id=tick_id,
-                                phase_key=worker_key,
-                                todo_id=todo_id,
-                                project_slug=board_slug,
-                            )
-                            + "\n"
-                            + _external_client_delegation_block(
-                                prompt_client,
-                                timeout=phase.timeout,
-                                tools=phase.tools,
-                            )
-                            + _external_agent_prompt_block(rendered_worker)
-                        ),
-                        turns=phase.turns,
-                        gate=False,
-                        timeout=phase.timeout,
-                        kind="worker",
-                    )
-                )
-                validation_key = f"validate:{plan_task.id}"
-                validation_body = (
-                    _build_json_header(
-                        tick_id=tick_id,
-                        phase_key=validation_key,
-                        todo_id=todo_id,
-                        project_slug=board_slug,
-                    )
-                    + "\nController validation gate for Plan task "
-                    + plan_task.id
-                    + ". TPO completes this gate only after validating the worker "
-                    "result metadata and Git evidence.\nAcceptance criteria:\n"
-                    + "\n".join(f"- {item}" for item in plan_task.acceptance_criteria)
-                )
-                prepared.append(
-                    PreparedPhaseTask(
-                        phase_key=validation_key,
-                        name=f"Validate Plan task {plan_task.id}",
-                        body=validation_body,
-                        turns=0,
-                        gate=True,
-                        kind="controller_gate",
-                    )
-                )
+        if phase.gate:
+            # A gate phase dispatches no worker, so it gets no kanban card.
+            # Its terminal meaning is carried by the phase it follows: a worker
+            # that exits non-zero lands in Hermes's sticky ``blocked``.
             continue
-        if compile_plan_tasks and manifest is None:
-            log.warning(
-                "%s uses a legacy Plan without a tpo-plan manifest; "
-                "dispatching one legacy single development card",
-                todo_id,
-            )
         rendered_prompt = _render_phase_prompt(
             phase.prompt,
             todo_id=todo_id,
@@ -887,25 +893,35 @@ def prepare_todo_phases(
             project_slug=board_slug,
             plan_path=plan_reference_value,
             plan_hash=plan_source.plan_hash if plan_source is not None else None,
-            # Every worker sees the Spec/Reference context; gates never do.
-            spec_path=spec_paths[0] if spec_paths and not phase.gate else None,
-            reference_paths=None if phase.gate else references,
+            spec_path=spec_paths[0] if spec_paths else None,
+            reference_paths=references,
             prompt_client=prompt_client,
             template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
-            decisions=None if phase.gate else decisions,
+            decisions=decisions,
         )
-        if phase.gate:
-            body_prompt = rendered_prompt
-        else:
-            body_prompt = _external_agent_prompt_block(rendered_prompt)
-        delegation = (
-            ""
-            if phase.gate
-            else _external_client_delegation_block(
-                prompt_client,
-                timeout=phase.timeout,
-                tools=phase.tools,
-            )
+        body_prompt = _external_agent_prompt_block(rendered_prompt)
+        delegation = _external_client_delegation_block(
+            prompt_client,
+            timeout=phase.timeout,
+            tools=phase.tools,
+            # Profile phases publish no result template: their results are
+            # never parsed, and the prompt comes from overridable YAML. The one
+            # exception is the implementation card of a manifest-pinned run:
+            # ``reconcile_plan_task_results`` and ``_implementation_head`` parse
+            # its report to anchor the reviewed head, so it must be told what to
+            # report. The template stays on the dispatcher's side of the
+            # delimiters, so the profile's prompt still reaches the client
+            # unmodified.
+            result_template=(
+                render_result_template(
+                    tick_id=tick_id,
+                    todo_id=todo_id,
+                    step_key=phase.phase_key,
+                    acceptance_criteria=manifest_acceptance_criteria(manifest),
+                )
+                if manifest is not None and phase.phase_key == IMPLEMENTATION_KEY
+                else None
+            ),
         )
         prepared.append(
             PreparedPhaseTask(
@@ -923,9 +939,7 @@ def prepare_todo_phases(
                     + body_prompt
                 ),
                 turns=phase.turns,
-                gate=phase.gate,
                 timeout=phase.timeout,
-                kind=getattr(phase, "kind", None),
             )
         )
     return prepared
@@ -940,11 +954,9 @@ def planned_phase_keys(phases_path: str | Path | None, plan_source) -> tuple[str
             "phase_5_review", "phase_8_finish_branch", "phase_9_human_review",
         }:
             continue
-        if getattr(phase, "compile_plan_tasks", False) and manifest is not None:
-            for task in manifest.tasks:
-                keys.extend((f"plan:{task.id}", f"validate:{task.id}"))
-        else:
-            keys.append(phase.phase_key)
+        if phase.gate:
+            continue
+        keys.append(phase.phase_key)
     return tuple(keys)
 
 
@@ -1118,9 +1130,8 @@ def create_prepared_todo_phases(
 ) -> list[str]:
     """Create a nonspawnable registration barrier and its phase task chain.
 
-    Every phase follows the barrier or preceding phase; gates remain unassigned
-    and receive a sticky Hermes block event. Barrier completion commits the
-    registration only after the expected-phase sentinel is durable.
+    Every phase follows the barrier or preceding phase. Barrier completion
+    commits the registration only after the expected-phase sentinel is durable.
 
     Args:
         prepared: Fully rendered phase tasks, in registration order.
@@ -1171,7 +1182,6 @@ def create_prepared_todo_phases(
     created_task_ids.append(barrier_id)
 
     for phase in prepared:
-        is_gate = phase.kind != "worker"
         cmd = [
             "hermes",
             "kanban",
@@ -1186,22 +1196,21 @@ def create_prepared_todo_phases(
             "--idempotency-key",
             f"{tick_id}:{phase.phase_key}",
             "--assignee",
-            "-" if is_gate else assignee,
+            assignee,
             "--json",
         ]
         cmd.extend(["--parent", previous_dependency_id or barrier_id])
-        if not is_gate:
-            cmd.extend(
-                [
-                    "--max-runtime",
-                    str(phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
-                    "--max-retries",
-                    "1",
-                    "--goal",
-                    "--goal-max-turns",
-                    str(phase.turns),
-                ]
-            )
+        cmd.extend(
+            [
+                "--max-runtime",
+                str(phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+                "--max-retries",
+                "1",
+                "--goal",
+                "--goal-max-turns",
+                str(phase.turns),
+            ]
+        )
 
         log.info(
             "registering prepared kanban task: phase=%s tick=%s",
@@ -1230,21 +1239,6 @@ def create_prepared_todo_phases(
                 f"{cleanup_detail}"
             )
 
-        if is_gate:
-            try:
-                _block_gate_task(task_id)
-            except Exception as exc:
-                cleanup_succeeded = _persist_and_archive_cleanup(
-                    project_dir,
-                    cleanup,
-                )
-                cleanup_detail = (
-                    "" if cleanup_succeeded else "; cleanup remains pending"
-                )
-                raise RuntimeError(
-                    f"failed to apply sticky block to gate {phase.phase_key} "
-                    f"for tick {tick_id}: {exc}{cleanup_detail}"
-                ) from exc
         previous_dependency_id = task_id
 
     if cancel_event is not None and cancel_event.is_set():
@@ -1302,51 +1296,6 @@ def create_prepared_todo_phases(
         )
 
     return phase_task_ids
-
-
-def register_todo_phases(
-    *,
-    todo_id: str,
-    tick_id: str,
-    board_slug: str,
-    project_dir: str | Path,
-    phases_path: str | Path | None = None,
-    assignee: str = "default",
-    prompt_client: PromptClient = "claude",
-    plan_path: str | None = None,
-    spec_path: str | None = None,
-    reference_paths: Sequence[str] = (),
-    decisions: Mapping[str, str] | None = None,
-    cancel_event: object | None = None,
-    transform_prepared: Callable[[list[PreparedPhaseTask]], list[PreparedPhaseTask]] | None = None,
-) -> list[str]:
-    """Prepare and register phases as backward-compatible kanban tasks.
-
-    ``transform_prepared`` lets a caller inspect or adjust the rendered cards
-    (the offline harness rewrites the last worker card) before they are created.
-    """
-    prepared = prepare_todo_phases(
-        todo_id=todo_id,
-        tick_id=tick_id,
-        board_slug=board_slug,
-        phases_path=phases_path,
-        prompt_client=prompt_client,
-        plan_path=plan_path,
-        spec_path=spec_path,
-        reference_paths=reference_paths,
-        project_dir=project_dir,
-        decisions=decisions,
-    )
-    if transform_prepared is not None:
-        prepared = transform_prepared(prepared)
-    return create_prepared_todo_phases(
-        prepared=prepared,
-        tick_id=tick_id,
-        board_slug=board_slug,
-        project_dir=project_dir,
-        assignee=assignee,
-        cancel_event=cancel_event,
-    )
 
 
 def _persist_expected_phases(
@@ -1484,37 +1433,71 @@ def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:
         return False
 
 
-def _mark_gate_needs_input(task_id: str, reason: str) -> bool:
-    """Persist a bounded diagnostic on a controller gate without leaking evidence."""
-    from .result_contract import sanitize_result_text
+def _validation_blocked_marker(state_dir: Path, tick_id: str) -> Path:
+    return state_dir / "runs" / tick_id / RESULT_VALIDATION_BLOCKED_MARKER
 
-    diagnostic = sanitize_result_text(reason, maximum=1000)
+
+def validation_blocked_summary(state_dir: Path, tick_id: str) -> str:
+    """One bounded line naming the stalled step and code, or "" if not stalled.
+
+    Read by the tick so its circuit-breaker alert says what is stuck; a manifest
+    run has no human gate to stand at, so this is the only push signal.
+    """
     try:
-        result = subprocess.run(
-            [
-                "hermes",
-                "kanban",
-                "block",
-                "--kind",
-                "needs_input",
-                task_id,
-                diagnostic,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=HERMES_COMMAND_TIMEOUT,
-            check=False,
+        payload = json.loads(
+            _validation_blocked_marker(state_dir, tick_id).read_text(encoding="utf-8")
         )
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    return result.returncode == 0
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    step_key = payload.get("step_key")
+    code = payload.get("code")
+    if not isinstance(step_key, str) or not isinstance(code, str):
+        return ""
+    return f"{step_key[:256]} {code[:200]}".strip()
+
+
+def _record_validation_blocked(
+    state_dir: Path, *, tick_id: str, step_key: str, code: str, reason: str
+) -> None:
+    """Persist why the chain stopped advancing, beside the run's other evidence.
+
+    Idempotent: repeated no-progress ticks rewrite the same bounded payload.
+    """
+    try:
+        _atomic_write_text(
+            _validation_blocked_marker(state_dir, tick_id),
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "tick_id": tick_id,
+                    "step_key": step_key,
+                    "code": code,
+                    "reason": reason,
+                },
+                sort_keys=True,
+            )
+            + "\n",
+        )
+    except OSError:
+        # Diagnostic evidence only: never turn a failed write into a new failure.
+        log.warning("tick %s: could not record the blocked-validation marker", tick_id)
+
+
+def _clear_validation_blocked(state_dir: Path, tick_id: str) -> None:
+    """Drop a stale marker once every Plan result validates again."""
+    try:
+        _validation_blocked_marker(state_dir, tick_id).unlink(missing_ok=True)
+    except OSError:
+        log.warning("tick %s: could not clear the blocked-validation marker", tick_id)
 
 
 def reconcile_plan_task_results(
     *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str,
     repo: str | None = None,
 ) -> bool:
-    """Validate completed manifest workers and advance their controller gates.
+    """Validate completed manifest workers against the Plan manifest.
 
     Hermes remains authoritative for runs and task state. The local registration
     supplies only immutable authority and the pinned worktree used for Git checks.
@@ -1557,51 +1540,74 @@ def reconcile_plan_task_results(
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
-    expected_parent = registration.base_sha
-    for plan_task in registration.manifest.tasks:
-        worker_key = f"plan:{plan_task.id}"
-        gate_key = f"validate:{plan_task.id}"
-        if worker_key not in registration.step_keys or gate_key not in registration.step_keys:
-            return False
-        worker = tasks.get(worker_key)
-        gate = tasks.get(gate_key)
-        if worker is None or gate is None:
-            return False
-        if worker.status != "done":
-            return True
-        payload = _show_task_payload(worker.task_id)
-        try:
-            result = parse_worker_result(
-                payload,
-                tick_id=tick_id,
-                todo_id=registration.todo_id,
-                step_key=worker_key,
-                acceptance_criteria=plan_task.acceptance_criteria,
-            )
-            if gate.status == "done":
-                verify_worker_git_topology(
-                    registration.worktree,
-                    result.git,
-                    expected_parent_sha=expected_parent,
-                )
-            else:
-                verify_worker_git_result(
-                    registration.worktree,
-                    result.git,
-                    expected_parent_sha=expected_parent,
-                )
-        except ResultContractError as exc:
-            diagnostic = sanitize_result_text(
-                f"TPO result validation failed: {exc.code}", maximum=1000
-            )
-            _mark_gate_needs_input(gate.task_id, diagnostic)
-            log.warning("tick %s step %s: %s", tick_id, worker_key, diagnostic)
-            return False
-        expected_parent = result.git.resulting_head_sha
-        if gate.status != "done" and not complete_todo_kanban_task(
-            tenant, gate.task_id
-        ):
-            return False
+    # Which check applies is read off the board, never off local state: a lost
+    # or moved state_dir must not turn a resumed run into a verification
+    # failure. ``verify_worker_git_result`` adds "this commit is the current
+    # HEAD and the worktree is clean" to the immutable topology facts, so it can
+    # only hold while the implementation card is the chain tip. The initial
+    # review is the first card built on top of the Plan's last commit; once it
+    # exists, the profile's reviewer may have advanced HEAD with its own
+    # review-fix commit and the tip check no longer applies.
+    review_started = INITIAL_REVIEW_KEY in tasks
+
+    def stalled(*, step_key: str, code: str, reason: str) -> bool:
+        """Record a structural stall the same way a rejected result is recorded."""
+        log.error("tick %s step %s: %s: %s", tick_id, step_key, code, reason)
+        _record_validation_blocked(
+            state_dir, tick_id=tick_id, step_key=step_key, code=code, reason=reason
+        )
+        return False
+
+    if IMPLEMENTATION_KEY not in registration.step_keys:
+        return stalled(
+            step_key=IMPLEMENTATION_KEY,
+            code=CHAIN_WIRING_INCOMPLETE_CODE,
+            reason="step key is not registered for this run",
+        )
+    worker = tasks.get(IMPLEMENTATION_KEY)
+    if worker is None:
+        return stalled(
+            step_key=IMPLEMENTATION_KEY,
+            code=CHAIN_WIRING_INCOMPLETE_CODE,
+            reason="no card for this step key on the board",
+        )
+    if worker.status != "done":
+        return True
+    verify = verify_worker_git_topology if review_started else verify_worker_git_result
+    try:
+        result = parse_worker_result(
+            _show_task_payload(worker.task_id),
+            tick_id=tick_id,
+            todo_id=registration.todo_id,
+            step_key=IMPLEMENTATION_KEY,
+            acceptance_criteria=manifest_acceptance_criteria(registration.manifest),
+        )
+        verify(
+            registration.worktree,
+            result.git,
+            expected_parent_sha=registration.base_sha,
+            expected_commits=len(registration.manifest.tasks),
+        )
+    except ResultContractError as exc:
+        # No card is blocked here: the implementation card must never open a
+        # human-input boundary mid-run. Returning False makes the tick report no
+        # progress; the marker and the log are where an operator finds why.
+        reason = sanitize_result_text(str(exc), maximum=1000)
+        log.error(
+            "tick %s step %s: TPO result validation failed: %s",
+            tick_id,
+            IMPLEMENTATION_KEY,
+            reason,
+        )
+        _record_validation_blocked(
+            state_dir,
+            tick_id=tick_id,
+            step_key=IMPLEMENTATION_KEY,
+            code=sanitize_result_text(exc.code, maximum=200),
+            reason=reason,
+        )
+        return False
+    _clear_validation_blocked(state_dir, tick_id)
     return True
 
 
@@ -1968,10 +1974,12 @@ def all_phases_complete(
 ) -> bool:
     """Check if all kanban tasks for a tick are in completion statuses.
 
-    Completion statuses: done, failed. Archived phases (from mid-registration
-    cleanup) are excluded — they indicate the tick didn't finish cleanly,
-    so we hold the lock until the operator intervenes or the stale lock
-    is reclaimed.
+    Completion statuses: done, failed, blocked. ``blocked`` counts because TPO
+    creates no blocked cards: Hermes only blocks a card whose worker exhausted
+    its failure limit, and that block is sticky, so the card will never move
+    again. Archived phases (from mid-registration cleanup) are excluded — they
+    indicate the tick didn't finish cleanly, so we hold the lock until the
+    operator intervenes or the stale lock is reclaimed.
 
     Args:
         tenant: Tenant (project slug) to filter by.
@@ -2014,7 +2022,7 @@ def all_phases_complete(
         return False
 
     for phase_key, status in status_map.items():
-        if status not in COMPLETION_STATUSES:
+        if status not in COMPLETION_STATUSES and status != BLOCKED:
             log.debug(
                 "phase %s for tick %s is still %s (not in completion status %s)",
                 phase_key, tick_id, status, sorted(COMPLETION_STATUSES),
@@ -2031,10 +2039,6 @@ def all_phases_complete(
             expected_keys = json.loads(expected_file.read_text())
             for key in expected_keys:
                 if key not in status_map:
-                    # Plan-gate exception: when rejected, the gate task is
-                    # archived (no longer in the kanban list). A rejection
-                    # sidecar on disk is the authoritative signal — treat it
-                    # as a completion (failed) status so the tick advances.
                     log.warning(
                         "expected phase %s not found in status map for tick %s "
                         "(partial registration suspected)",
@@ -2115,13 +2119,28 @@ def observe_outcomes(
                         sort_keys=True,
                     )
                 )
-        elif status == "archived":
+        elif status in ("archived", BLOCKED):
+            # ``blocked`` is a terminal, sticky state: Hermes sets it when a
+            # phase exits non-zero in a way it cannot retry, and
+            # ``all_phases_complete`` deliberately accepts it as complete so the
+            # tick does not spin on it forever. That combination used to make
+            # the abandonment SILENT -- the prior tick read as finished, the
+            # project lock was released and the scan moved on, while this
+            # function wrote no line at all and the ``all_phases_complete``
+            # sentinel below is gated on the narrower ``COMPLETION_STATUSES``.
+            # The circuit breaker and the decision store were therefore left
+            # with neither a success nor a failure for a run that abandoned its
+            # branch, worktree and unmerged work. A run must never report a
+            # success it did not earn, so a block is recorded in exactly the
+            # vocabulary ``failed`` uses, with the phase key naming where the
+            # run stopped. The completion semantics are not the defect and are
+            # left alone.
             if phase_key not in existing:
                 new_outcomes.append(
                     json.dumps(
                         {
                             "outcome": "failed_at_phase_" + phase_key,
-                            "detail": {"kanban_status": "archived"},
+                            "detail": {"kanban_status": status},
                         },
                         sort_keys=True,
                     )

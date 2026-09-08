@@ -111,7 +111,7 @@ class FakeArgs:
 
 class TestTickContractAssignee:
     def test_tick_uses_contract_assignee(self, tmp_path, mocker):
-        """register_todo_phases is called with the contract's assignee."""
+        """create_prepared_todo_phases is called with the contract's assignee."""
         mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
@@ -220,7 +220,9 @@ class TestTickContractAssignee:
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
         result = _cmd_tick(FakeArgs(), config)
 
-        assert result == 0  # scan-level result: per-project errors don't abort the scan
+        # The scan is not aborted -- the loop still reaches every other project
+        # -- but a project whose tick raised is reported: rc 1, not 0.
+        assert result == 1
         mock_register.assert_not_called()
 
     def test_tick_stale_contract_version_skips_project(self, tmp_path, mocker):
@@ -239,7 +241,8 @@ class TestTickContractAssignee:
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
         result = _cmd_tick(FakeArgs(), config)
 
-        assert result == 0
+        # Fails closed for that project *and* says so in the exit code.
+        assert result == 1
         mock_register.assert_not_called()
 
     def test_tick_blocks_unverified_profile_before_registration(self, tmp_path, mocker):
@@ -273,7 +276,7 @@ class TestTickContractAssignee:
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
         result = _cmd_tick(FakeArgs(), config)
 
-        assert result == 0
+        assert result == 1
         run_selection.assert_not_called()
         mock_register.assert_not_called()
         agent_skills_path = resolve_profile_phases_path("agent-skills")
@@ -1543,8 +1546,48 @@ class TestTickFixRound1:
         )
 
         assert results.call_args.kwargs["repo"] == REPO  # C7: identity threaded, not re-resolved
-        selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
+        selection.cb.observe.assert_called_once_with(
+            picked=None, counts_as_no_progress=True, detail="result reconciliation blocked"
+        )
         assert fake_gh.calls.count(list(ORIGIN_ARGV)) == 1
+
+    def test_blocked_reconciler_alert_names_the_stalled_step_and_code(
+        self, tmp_path, mocker, fake_gh
+    ):
+        """A manifest run has no human gate, so the alert is the push signal.
+
+        Without the step key and code the operator only learns that nothing
+        moved, and the same tick repeats forever.
+        """
+        project_dir = _create_project(tmp_path, "demo")
+        run_dir = _write_prior_registration(project_dir)
+        (run_dir / "result-validation-blocked").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "tick_id": "01PRIOR",
+                    "step_key": "plan:task-2",
+                    "code": "worktree_dirty",
+                    "reason": "worktree_dirty",
+                }
+            )
+            + "\n"
+        )
+        seed_project_issues(
+            fake_gh, [todo_payload(10, title="test", labels=("tpo:todo", "ready-for-agent", "tpo:in-progress"))]
+        )
+        mocker.patch("hermes_pipeline.kanban_tasks.reconcile_plan_task_results", return_value=False)
+        mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+
+        selection = _run_project_tick(
+            project_dir=project_dir, config=Config(prompt_client="codex"), tick_id="01NAMED", mocker=mocker,
+        )
+
+        selection.cb.observe.assert_called_once_with(
+            picked=None,
+            counts_as_no_progress=True,
+            detail="result reconciliation blocked: plan:task-2 worktree_dirty",
+        )
 
     @pytest.mark.parametrize(("status_map", "observed"), [({}, True), ({"task-1": "running"}, False)])
     def test_in_flight_prior_tick_without_cards_is_a_stall(
@@ -1744,9 +1787,8 @@ class TestResumeIssueCloseout:
             manifest=object(),
         ))
         mocker.patch(tc + "get_todo_kanban_tasks", return_value={
-            "review-acceptance": SimpleNamespace(task_id="review", status="done"),
+            "review:0": SimpleNamespace(task_id="review", status="done"),
             "finish": SimpleNamespace(task_id="finish-id", status="done"),
-            "human-gate": SimpleNamespace(task_id="human-id", status="blocked"),
         })
         mocker.patch(tc + "parse_worker_result", return_value=SimpleNamespace(
             delivery=SimpleNamespace(pr_url=self.PR_URL, branch="feat/todo-10", head_sha="a" * 40),
@@ -1760,18 +1802,14 @@ class TestResumeIssueCloseout:
             "state": "MERGED", "url": self.PR_URL, "headRefName": "feat/todo-10", "headRefOid": "a" * 40,
         })
         mocker.patch(tc + "_check_state", return_value="passed")
-        return {
-            "complete": mocker.patch(tc + "complete_todo_kanban_task", return_value=True),
-            "mark": mocker.patch(tc + "_mark_gate_needs_input"),
-            "flag": mocker.patch(tc + "flag_issue_drift"),
-        }
+        return {"flag": mocker.patch(tc + "flag_issue_drift")}
 
     def _tick(self, project_dir, mocker, tick_id):
         return _run_project_tick(
             project_dir=project_dir, config=Config(prompt_client="codex"), tick_id=tick_id, mocker=mocker,
         )
 
-    def test_propagation_lag_is_pending_then_the_next_tick_completes_the_gate(
+    def test_propagation_lag_is_pending_then_the_next_tick_closes_the_issue(
         self, tmp_path, mocker, fake_gh, caplog
     ):
         project_dir = _create_project(tmp_path, "demo")
@@ -1780,7 +1818,6 @@ class TestResumeIssueCloseout:
         mocks = self._delivery_ready(mocker, project_dir, run_dir)
 
         self._tick(project_dir, mocker, "01LAG1")
-        mocks["complete"].assert_not_called()
         assert (run_dir / "issue-close-started").exists()
         assert not (run_dir / "issue-closed").exists()
 
@@ -1790,7 +1827,6 @@ class TestResumeIssueCloseout:
             self._tick(project_dir, mocker, "01LAG2")
 
         mocks["flag"].assert_not_called()
-        mocks["complete"].assert_called_once_with("demo", "human-id")
         assert (run_dir / "issue-closed").exists()
         assert "closeout in progress" in caplog.text
         assert remote["writes"].count("comment") == 1
@@ -1811,26 +1847,26 @@ class TestResumeIssueCloseout:
         self._tick(project_dir, mocker, "01CRASH2")
 
         mocks["flag"].assert_not_called()
-        mocks["complete"].assert_called_once_with("demo", "human-id")
         assert remote["writes"] == ["comment", "close", "edit"]
         assert len(remote["comments"]) == 1
         assert "tpo:in-progress" not in remote["labels"]
 
-    def test_label_removal_failure_blocks_the_gate_then_recovers(self, tmp_path, mocker, fake_gh):
+    def test_label_removal_failure_stalls_delivery_then_recovers(self, tmp_path, mocker, fake_gh, caplog):
         project_dir = _create_project(tmp_path, "demo")
         run_dir = _write_prior_registration(project_dir)
         remote = self._remote_issue(fake_gh, edit_rc=1)
         mocks = self._delivery_ready(mocker, project_dir, run_dir)
 
-        selection = self._tick(project_dir, mocker, "01LABEL1")
-        mocks["complete"].assert_not_called()
-        mocks["mark"].assert_called_once_with("human-id", "TPO delivery blocked: gh_rejected")
-        selection.cb.observe.assert_called_once_with(picked=None, counts_as_no_progress=True)
+        with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+            selection = self._tick(project_dir, mocker, "01LABEL1")
+        assert "gh_rejected" in caplog.text
+        selection.cb.observe.assert_called_once_with(
+            picked=None, counts_as_no_progress=True, detail="delivery reconciliation blocked"
+        )
 
         remote["edit_rc"] = 0
         self._tick(project_dir, mocker, "01LABEL2")
 
         mocks["flag"].assert_not_called()
-        mocks["complete"].assert_called_once_with("demo", "human-id")
         assert remote["writes"] == ["comment", "close", "edit", "edit"]
         assert (run_dir / "issue-closed").exists()

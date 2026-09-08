@@ -78,11 +78,69 @@ class TestTickSubcommand:
         mocker.patch("hermes_pipeline.cli._tick_project", side_effect=fail_tick)
         caplog.set_level(logging.ERROR)
 
+        # 1, not 0: a raised tick is a failed scan (cross-project isolation
+        # is unchanged -- see
+        # ``test_tick_ticks_every_project_then_reports_failure``).
         assert _cmd_tick(
             FakeArgs(), Config(projects_dir=projects_dir, state_dir=state_dir)
-        ) == 0
+        ) == 1
+        # The traceback the crash log now carries renders the chained cause,
+        # so the redaction has to survive the traceback too.
         assert secret not in caplog.text
         assert "error_type=RuntimeError" in caplog.text
+        assert "Traceback (most recent call last)" in caplog.text
+
+    def test_an_exception_whose_str_raises_does_not_abort_the_scan(
+        self, tmp_path, mocker, caplog
+    ):
+        """Rendering the crash must not become a second, fatal crash.
+
+        Both ``sanitize_result_text(e)`` and ``_sanitized_traceback(e)`` run
+        inside the per-project ``except`` and both render the exception, so an
+        exception whose ``__str__`` itself raises propagated out of
+        ``_cmd_tick``. ``main`` calls ``args.func`` bare, so the remaining
+        projects never ticked, the ``crashed`` list was discarded, and the
+        interpreter printed its own UNSANITIZED traceback to stderr -- which
+        ``run_tick`` appends verbatim to ``artifacts/tick.log`` and whose tail
+        becomes ``tick_crashed``'s detail. The old ``error_type``-only handler
+        could not do this.
+        """
+        secret = "prompt-token=secret-value"
+
+        class Unrenderable(RuntimeError):
+            def __str__(self):
+                raise ValueError(f"cannot render {secret}")
+
+            __repr__ = __str__
+
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "aaa-demo")
+        _create_project(projects_dir, "zzz-later")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        seen: list[str] = []
+
+        def fail_tick(*, project_slug, **_kwargs):
+            seen.append(project_slug)
+            raise Unrenderable("unused")
+
+        mocker.patch("hermes_pipeline.cli._tick_project", side_effect=fail_tick)
+        caplog.set_level(logging.ERROR)
+
+        assert _cmd_tick(
+            FakeArgs(), Config(projects_dir=projects_dir, state_dir=state_dir)
+        ) == 1
+        # Isolation held: the later project still ticked...
+        assert seen == ["aaa-demo", "zzz-later"]
+        # ...and the scan still reported both as failed rather than losing the
+        # list to a propagating exception.
+        assert "2 of 2 project tick(s) failed" in caplog.text
+        # The type name is the whole diagnosis available, and it must be there.
+        assert "error_type=Unrenderable" in caplog.text
+        # Nothing the failed renderer was holding may reach the log.
+        assert secret not in caplog.text
 
     def test_tick_prior_in_flight_skips(self, tmp_path, mocker):
         """Prior tick still has in-flight kanban tasks -> skip."""
@@ -566,8 +624,8 @@ class TestTickSubcommand:
             counts_as_no_progress=True,
         )
 
-    def test_tick_no_prior_proceeds(self, tmp_path, mocker):
-        """No prior tick -> proceed normally."""
+    def test_tick_no_prior_proceeds(self, tmp_path, mocker, caplog):
+        """No prior tick -> proceed normally; undeclared profile warns once."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
         mock_selection.return_value = _make_decision()
 
@@ -579,8 +637,109 @@ class TestTickSubcommand:
         state_dir.mkdir()
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
-        result = _cmd_tick(FakeArgs(), config)
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            result = _cmd_tick(FakeArgs(), config)
         assert result == 0
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        # Exactly one notice: the undeclared case already carries the migration.
+        assert deprecations == [
+            "project demo: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+    def test_tick_explicit_gstack_profile_warns_deprecated(self, tmp_path, mocker, caplog):
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "gstack"\n'
+        )
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        assert deprecations == [
+            "project demo: profile 'gstack' is deprecated; migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+    def test_tick_native_sdd_profile_emits_no_deprecation(self, tmp_path, mocker, caplog):
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "native-sdd"\n'
+        )
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.WARNING, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        assert not any("deprecated" in r.getMessage() for r in caplog.records)
+
+    def test_tick_without_a_contract_prepares_legacy_implicit_phases(
+        self, tmp_path, mocker
+    ):
+        """No pipeline.toml -> the tick still prepares the legacy implicit
+        profile's phases, independent of what new projects now default to."""
+        import hermes_pipeline.contract as contract_mod
+        from hermes_pipeline.contract import DEFAULT_PROFILE, LEGACY_IMPLICIT_PROFILE
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+        # The spy relies on _tick_project importing PipelineContract inside the
+        # function: hoisting that import to module scope would leave built empty.
+        real_contract = contract_mod.PipelineContract
+        built: list = []
+        mocker.patch.object(
+            contract_mod,
+            "PipelineContract",
+            side_effect=lambda **kw: built.append(real_contract(**kw)) or built[-1],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision(picked="TODO-10"),
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["t_1"],
+        )
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo", contract=False)
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        legacy_keys = [
+            phase.phase_key
+            for phase in load_phases(resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE))
+        ]
+        default_keys = [
+            phase.phase_key
+            for phase in load_phases(resolve_profile_phases_path(DEFAULT_PROFILE))
+        ]
+        assert legacy_keys != default_keys  # the regression would be invisible otherwise
+        prepared = create.call_args.kwargs["prepared"]
+        assert [task.phase_key for task in prepared] == legacy_keys
+        # The synthesized contract must name the legacy profile too, so the run
+        # is never recorded as DEFAULT_PROFILE while running legacy phases.
+        assert built, "the spy saw no PipelineContract construction"
+        assert built[0].profile == LEGACY_IMPLICIT_PROFILE
 
     def test_tick_selection_uses_project_state_dir(self, tmp_path, mocker):
         """Selection decisions are persisted under the project, not global state."""
@@ -722,8 +881,96 @@ class TestTickSubcommand:
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
         result = _cmd_tick(FakeArgs(), config)
-        # Per-project error is caught, tick returns 0 (error isolated)
-        assert result == 0
+        # The scan ticks every project, then reports failure. Isolation is not
+        # silence: a swallowed crash reported as success is what let a crashed
+        # tick reach the harness as an unchanged board and be misdiagnosed as
+        # ``tick_stalled``.
+        assert result == 1
+
+    def test_tick_ticks_every_project_then_reports_failure(self, tmp_path, mocker):
+        """Cross-project isolation stays; the exit code stops being a lie.
+
+        A project whose tick raises must not abort the scan -- the later
+        projects still tick -- but the scan must exit non-zero so a caller
+        (notably the harness driver) cannot read a crashed tick as a quiet
+        success.
+        """
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        for name in ("aaa-first", "zzz-second"):
+            _create_project(projects_dir, name)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+
+        # Pin the order so "a later project still ticks" is what is asserted,
+        # not "some project other than the failing one ticked".
+        mocker.patch(
+            "hermes_pipeline.cli._rotate_projects", side_effect=lambda projects, _sd: projects
+        )
+        ticked: list[str] = []
+
+        def _tick(*, project_slug, **_kwargs):
+            ticked.append(project_slug)
+            if project_slug == "aaa-first":
+                raise RuntimeError("boom")
+
+        mocker.patch("hermes_pipeline.cli._tick_project", side_effect=_tick)
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        result = _cmd_tick(FakeArgs(), config)
+
+        assert ticked == ["aaa-first", "zzz-second"], (
+            "the scan must keep ticking after a project raises"
+        )
+        assert result == 1
+
+    def test_tick_returns_zero_when_no_project_raises(self, tmp_path, mocker):
+        """The non-zero exit is reserved for a raised tick, not any tick at all."""
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        for name in ("aaa-first", "zzz-second"):
+            _create_project(projects_dir, name)
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        mocker.patch("hermes_pipeline.cli._tick_project")
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+
+        assert _cmd_tick(FakeArgs(), config) == 0
+
+    def test_tick_failure_log_carries_message_and_traceback(self, tmp_path, mocker, caplog):
+        """``error_type=FileNotFoundError`` with no path is not a diagnosis.
+
+        Live run 3 lost real debugging time to exactly that line: the class name
+        with neither the missing path nor a traceback.
+        """
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        _create_project(projects_dir, "demo")
+        state_dir = tmp_path / "state"
+        state_dir.mkdir()
+        mocker.patch(
+            "hermes_pipeline.cli._tick_project",
+            side_effect=FileNotFoundError(2, "No such file or directory", "/gone/plan.md"),
+        )
+
+        config = Config(projects_dir=projects_dir, state_dir=state_dir)
+        with caplog.at_level(logging.ERROR, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(), config) == 1
+
+        failures = [
+            record
+            for record in caplog.records
+            if "tick failed" in record.getMessage()
+        ]
+        assert failures, "the crash must be logged"
+        message = failures[0].getMessage()
+        assert "/gone/plan.md" in message
+        assert "FileNotFoundError" in message
+        assert "Traceback (most recent call last)" in message, (
+            "the traceback must be logged, not just the exception class"
+        )
+        assert "cli.py" in message, "the traceback must name the frames"
 
     def test_tick_observe_outcomes_exception(self, tmp_path, mocker):
         """observe_outcomes for prior tick raises -> warning, tick skips."""
@@ -987,7 +1234,15 @@ class TestCliHelpers:
 class TestTickProjectContractWarning:
     def test_tick_project_without_contract_warns_but_runs(self, tmp_path, mocker, caplog):
         mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
-        mocker.patch("hermes_pipeline.cli._cli_sp.run", return_value=MagicMock(returncode=0))
+        # ``cli._cli_sp`` IS the ``subprocess`` module, so this patch reaches
+        # every subprocess call in the tick, ``fetch_kanban_snapshot``
+        # included. ``stdout`` must therefore be real text: a bare MagicMock
+        # reached ``json.loads`` and crashed the tick, which used to be
+        # invisible here because the scan swallowed it and still returned 0.
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            return_value=MagicMock(returncode=0, stdout="", stderr=""),
+        )
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         _create_project(projects_dir, "demo", contract=False)
@@ -1001,3 +1256,92 @@ class TestTickProjectContractWarning:
             and "tpo init" in r.getMessage() and r.levelname == "WARNING"
             for r in caplog.records
         )
+        # A contract-less project resolves to the same deprecated implicit
+        # profile as a contract that omits `profile`, and it is the population
+        # that most needs the migration hint (ADR-0004), so it gets the same
+        # single notice.
+        deprecations = [
+            r.getMessage() for r in caplog.records
+            if r.levelname == "WARNING" and "deprecated" in r.getMessage()
+        ]
+        assert deprecations == [
+            "project demo: pipeline.toml does not declare a profile; the implicit "
+            "default 'gstack' is deprecated. Migrate with: "
+            "tpo init demo --force --profile native-sdd"
+        ]
+
+
+class TestTickLegacyPathPlan:
+    """A repository-path Plan must spawn cards under a ``requires_plan`` profile."""
+
+    @staticmethod
+    def _git(cwd, *args):
+        import subprocess
+
+        return subprocess.run(
+            ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
+        )
+
+    def test_tick_legacy_path_plan_prepares_cards_under_native_sdd(
+        self, tmp_path, mocker, fake_gh, caplog
+    ):
+        """A manifest-free ``### Plan`` repository path is a valid plan source.
+
+        The tick must build its ``PlanReference`` from the compiled plan source
+        and prepare cards; it must not record ``failed_to_spawn``.
+        """
+        projects_dir = tmp_path / "projects"
+        projects_dir.mkdir()
+        project_dir = _create_project(projects_dir, "demo")
+        (project_dir / ".hermes" / "pipeline.toml").write_text(
+            PIPELINE_TOML + 'profile = "native-sdd"\n'
+        )
+        docs = project_dir / "docs"
+        docs.mkdir()
+        (docs / "legacy.md").write_text("# Legacy plan\n\nDo the bounded thing.\n")
+        self._git(project_dir, "init", "-q", "-b", "main")
+        self._git(project_dir, "config", "user.email", "test@example.com")
+        self._git(project_dir, "config", "user.name", "Test")
+        self._git(project_dir, "add", "docs")
+        self._git(project_dir, "commit", "-qm", "base")
+        self._git(
+            project_dir, "remote", "add", "origin", "https://github.com/acme/repo.git"
+        )
+
+        body = (
+            "### What\n\nWidget\n\n### Plan\n\ndocs/legacy.md\n\n### Branch\n\nfeat/todo\n"
+        )
+        seed_project_issues(fake_gh, [todo_payload(10, title="test", body=body)])
+        mocker.patch(
+            "hermes_pipeline.cli.run_selection",
+            return_value=_make_decision(picked="TODO-10"),
+        )
+        create = mocker.patch(
+            "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
+            return_value=["t_1"],
+        )
+        # ``cli._cli_sp`` IS the ``subprocess`` module, so patching its ``run``
+        # would also blind ``run_registration``'s git calls. Only stub ``hermes``.
+        import subprocess
+
+        real_run = subprocess.run
+
+        def run(cmd, *args, **kwargs):
+            if cmd and cmd[0] == "hermes":
+                return MagicMock(returncode=0, stdout="", stderr="")
+            return real_run(cmd, *args, **kwargs)
+
+        mocker.patch("hermes_pipeline.cli._cli_sp.run", side_effect=run)
+        config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
+
+        with caplog.at_level(logging.ERROR, logger="hermes_pipeline.cli"):
+            assert _cmd_tick(FakeArgs(project="demo"), config) == 0
+
+        outcomes = project_dir / ".hermes" / "outcomes"
+        recorded = "".join(
+            path.read_text() for path in sorted(outcomes.glob("*")) if path.is_file()
+        )
+        assert "failed_to_spawn" not in recorded, caplog.text
+        assert create.called, caplog.text
+        prepared = create.call_args.kwargs["prepared"]
+        assert prepared, "the tick prepared no phase cards"
