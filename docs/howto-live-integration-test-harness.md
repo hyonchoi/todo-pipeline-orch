@@ -30,6 +30,14 @@ and the prompt client are all real.
 - The selected prompt client (`claude` or `codex`) installed and authenticated.
   Preflight checks only the client selected by `prompt_client`.
 
+The Codex dispatcher uses `workspace-write` with the per-command setting
+`sandbox_workspace_write.network_access=true` so agents can fetch dependencies
+and access GitHub; it does not change global Codex configuration. The dispatcher
+copies only the content inside the prompt markers into its stdin file, excluding
+the marker lines. It assigns the prompt variable before redirecting stdin and
+shell-quotes the literal file path. Existing kanban cards retain their original
+instructions, so start a new harness run to exercise these dispatcher fixes.
+
 ## One-time sandbox setup
 
 Create a dedicated, disposable repository (empty, or containing only a README /
