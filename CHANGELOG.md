@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1
+
+### Patch Changes
+
+- Align the happy-path harness with embedded GitHub issue Plans and recoverable empty run anchors.
+
 ## 1.0.0
 
 ### Major Changes
