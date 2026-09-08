@@ -1,7 +1,7 @@
 """Integration tests — the live flow driven end-to-end through run_harness.
 
 Exercises the live orchestration (GitHub preflight, sandbox clone and seed check,
-baseline, issue + plan commit, production tick, card polling, PR verification,
+baseline, issue + run anchor, production tick, card polling, PR verification,
 fail-closed shutdown, report) against a local bare Git remote standing in for the
 sandbox. ``gh`` is served by the ``fake_gh`` recorder, the production tick is
 replaced by a runner that persists the tick state and pushes the agent's branch,
@@ -28,7 +28,6 @@ from hermes_pipeline import harness as harness_mod
 from hermes_pipeline.github_issues import (
     LABEL_VOCABULARY,
     issue_from_api,
-    render_issue_body,
 )
 from hermes_pipeline.harness import HarnessCleanupError, SandboxRepo, run_harness
 from hermes_pipeline.phases import (
@@ -103,17 +102,30 @@ def _serve_github(fake_gh, *, title: str, pr_exists: Callable[[], bool] = lambda
         stdout=json.dumps([{"name": name} for name, _, _ in LABEL_VOCABULARY]),
     )
     fake_gh.on("gh", "label", "create", "--repo", _REPO)
-    listing_state = {"created": False, "lag": 1}
+    listing_state = {"created": False, "lag": 1, "body": "", "labels": []}
+    fake_gh.on("git", "remote", "get-url", "origin", stdout=f"https://github.com/{_REPO}.git\n")
+    fake_gh.on("gh", "repo", "view", "--json", "defaultBranchRef", stdout="main\n")
 
     def create_issue(argv):
         listing_state["created"] = True
+        listing_state["body"] = Path(argv[argv.index("--body-file") + 1]).read_text()
+        listing_state["labels"] = [argv[i + 1] for i, value in enumerate(argv) if value == "--label"]
         return 0, f"https://github.com/{_REPO}/issues/{_ISSUE}\n", ""
 
     fake_gh.on("gh", "issue", "create", handler=create_issue)
     fake_gh.on(
         *API_ARGV, f"repos/{_REPO}/issues/{_ISSUE}",
-        stdout=json.dumps(issue_payload(_ISSUE, title=title)),
+        handler=lambda argv: (0, json.dumps(issue_payload(_ISSUE, title=title, body=listing_state["body"], labels=listing_state["labels"], html_url=f"https://github.com/{_REPO}/issues/{_ISSUE}")), ""),
     )
+    def edit_issue(argv):
+        if "--body-file" in argv:
+            listing_state["body"] = Path(argv[argv.index("--body-file") + 1]).read_text()
+        if "--add-label" in argv:
+            listing_state["labels"].append(argv[argv.index("--add-label") + 1])
+        if "--remove-label" in argv:
+            listing_state["labels"].remove(argv[argv.index("--remove-label") + 1])
+        return 0, "", ""
+    fake_gh.on("gh", "issue", "edit", handler=edit_issue)
     pr_head = quote(_BRANCH, safe="")
 
     def paginated(argv):
@@ -121,11 +133,14 @@ def _serve_github(fake_gh, *, title: str, pr_exists: Callable[[], bool] = lambda
         if path.startswith(f"repos/{_REPO}/issues?"):
             # GitHub's label-filtered listing lags a fresh create: empty before the
             # create, empty once more right after it, then the issue appears as ready.
+            if "state=all" in path:
+                payloads = [issue_payload(_ISSUE, title=title, body=listing_state["body"], labels=listing_state["labels"], html_url=f"https://github.com/{_REPO}/issues/{_ISSUE}")] if listing_state["created"] else []
+                return 0, json.dumps([payloads]), ""
             if not listing_state["created"] or listing_state["lag"] > 0:
                 if listing_state["created"]:
                     listing_state["lag"] -= 1
                 return 0, json.dumps([[]]), ""
-            ready = issue_payload(_ISSUE, title=title, labels=["tpo:todo", "ready-for-agent"])
+            ready = issue_payload(_ISSUE, title=title, body=listing_state["body"], labels=listing_state["labels"], html_url=f"https://github.com/{_REPO}/issues/{_ISSUE}")
             return 0, json.dumps([[ready]]), ""
         if path.startswith(f"repos/{_REPO}/pulls?"):
             numbers = [{"number": _PR}] if f"head=acme:{pr_head}&" in path and pr_exists() else []
@@ -273,7 +288,7 @@ def test_happy_path_live_flow_with_local_bare_remote(live, capsys, scripted_kanb
     assert tick["config"] == str(live.workspace / "state" / "tpo-config.yaml")
     assert "TPO_CONFIG_FILE" not in os.environ
     assert (live.project_dir / ".hermes" / "pipeline.toml").is_file()
-    assert (live.project_dir / f"docs/harness/{_RUN_TOKEN}-plan.md").is_file()
+    assert not (live.project_dir / f"docs/harness/{_RUN_TOKEN}-plan.md").exists()
 
     # Report and events carry the live identity.
     assert result.report_path is not None and result.report_path.is_file()
@@ -422,7 +437,7 @@ class _NativeSddSandbox(_LiveSandbox):
     """``_LiveSandbox`` whose fake tick plays the native-sdd tick sequence on ``board``.
 
     Call 1 runs the REAL ``register_pinned_run`` against the clone (the harness has
-    already committed the Plan at HEAD) and acts as the plan worker inside the run
+    already created its empty anchor at HEAD) and acts as the plan worker inside the run
     worktree. Later calls act as the reconciler: they only move cards. ``script``
     maps the call number to that call's effect; unscripted calls change nothing.
     """
@@ -445,9 +460,9 @@ class _NativeSddSandbox(_LiveSandbox):
     def _register(self) -> None:
         state = self.project_dir / ".hermes"
         title = harness_mod._issue_title(_RUN_TOKEN)
-        body = render_issue_body(
-            harness_mod._issue_fields(branch=_BRANCH, plan_path=_PLAN_PATH), include_empty=False
-        )
+        from hermes_pipeline.todos_create import load_create_request, render_create_body
+        request_path, = (state / "todo-create-input").glob("*.json")
+        body = render_create_body(load_create_request(request_path), issue_number=_ISSUE)
         payload = issue_payload(
             _ISSUE, title=title, body=body, html_url=f"https://github.com/{_REPO}/issues/{_ISSUE}"
         )
@@ -456,7 +471,7 @@ class _NativeSddSandbox(_LiveSandbox):
             state_dir=state,
             tick_id=_TICK_ID,
             selected_issue=issue_from_api(payload, repo=_REPO),
-            plan_path=_PLAN_PATH,
+            plan_path=None,
             profile=_NATIVE_SDD,
             prompt_client="claude",
             assignee="pipeline",
@@ -532,7 +547,7 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
     assert len(live.tick_calls) == 3
     assert {tick["config"] for tick in live.tick_calls} == {str(live.workspace / "state" / "tpo-config.yaml")}
     assert all(tick["argv"][-2:] == ["tick", "sandbox"] for tick in live.tick_calls)
-    assert (live.project_dir / _PLAN_PATH).is_file()
+    assert not (live.project_dir / _PLAN_PATH).exists()
 
     # The PR is listed for ``head=acme:<branch>`` only once that branch reaches the
     # remote, so a verified PR number means the run's own branch was pushed, and

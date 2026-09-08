@@ -2,7 +2,8 @@
 
 `tpo test` drives one production `tpo tick` against a **live, disposable GitHub
 sandbox repository**. It clones the sandbox, files a real `tpo:todo` issue,
-commits a Plan, runs the production tick as a subprocess, follows the Hermes
+publishes an embedded issue Plan, creates an empty local run anchor, runs the
+production tick as a subprocess, follows the Hermes
 kanban cards it registers, requires exactly one attributable pull request, and
 then tears everything down fail-closed. Nothing is faked: `gh`, `git`, Hermes,
 and the prompt client are all real.
@@ -130,24 +131,45 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    `sandbox_seed_check` (seed files tracked, `.gitignore` ignores `.hermes/`;
    `sandbox_not_seeded` otherwise), ensure the `tpo:*` labels exist, and take a
    baseline snapshot of the remote heads.
-3. **Issue and plan** — create the issue
-   `[harness <token>] Implement mock name normalization` carrying the mirror
-   labels, then commit the Plan document locally (`docs/harness/<token>-plan.md`);
-   it lands in the PR branch, never on the default branch. The issue names the
-   branch `feat/harness-<token>`, but the agent may choose another name; in a
-   kept workspace the actual branch is in `projects/<slug>/.hermes/pipeline_branch.txt`.
+3. **Issue, Plan, and anchor** — create
+   `[harness <token>] Implement mock name normalization` through the validated
+   request workflow behind `tpo todos create`. Each invocation gets a fresh
+   transaction UUID; retries within its isolated workspace reuse that UUID and
+   the production creation lock and reconciliation state. The workflow creates
+   a triaged issue, binds its assigned number into the embedded Plan's
+   schema-v1 `json tpo-plan` manifest, and publishes the final body and readiness
+   labels. The harness verifies the authored body, title, open state, audit
+   findings, and labels; ambiguous ownership or failed readiness prevents ticking
+   and retains recovery artifacts. A matching title alone never proves ownership.
+
+   No implementation Plan file is tracked or committed under `docs/`. After
+   readiness, `create_run_anchor` uses `git commit-tree` with the current HEAD's
+   tree and parent, signing disabled, and the sandbox identity. Its message
+   carries `tpo-harness-anchor`, the transaction UUID, run token, and issue
+   identity. A durable pending record precedes compare-and-swap `git update-ref`;
+   a completed record permits only reuse of that verified anchor. Retries never
+   stack anchors; an unborn or unexpectedly moved HEAD fails closed. Tracked
+   content, the index, untracked files, and the remote default branch stay
+   unchanged. Setup neither precreates the implementation branch nor pushes.
+   The saved `run_base_sha` follows ticking, registration, discovery, and shutdown;
+   serialized `base_sha` fields retain their existing names. The issue names
+   `feat/harness-<token>`; pinned runs require that branch. In a kept workspace
+   the selected branch is in `projects/<slug>/.hermes/pipeline_branch.txt`.
 4. **Tick** — wait until GitHub's label-filtered listing shows the run's issue
-   as the only ready `tpo:todo` issue (the listing lags a fresh create by
-   seconds; `issue_not_visible` after 60 s), then run the production `tpo tick`
-   as a subprocess with an isolated `TPO_CONFIG_FILE` (log at
-   `artifacts/tick.log`) and recover its registration (`tick_id`, expected
-   phase keys). A plan-gated profile recovers the registration through the
-   production trust boundary — `registration.json` is read against the clone
-   and validated — and additionally requires that the run pinned the harness's
-   own Plan commit and Plan bytes (`registration_invalid`,
-   `registration_base_mismatch`, `registration_plan_mismatch`). The
-   `tick_registered` event records `tick_id`, `phase_keys` and, for a pinned
-   run, `pinned`, `worktree` and `branch` — the isolated checkout the run owns.
+   as the only ready `tpo:todo` issue (`issue_not_visible` after 60 s), then
+   recheck the final issue before running production `tpo tick` as a subprocess
+   with an isolated `TPO_CONFIG_FILE` (log at `artifacts/tick.log`). Recover its
+   `tick_id` and expected phase keys. For a plan-gated profile, use the production
+   registration loader, then require embedded schema-v3 authority with
+   `plan_path=None`, the expected repository, issue, branch, `run_base_sha`, and
+   Plan digest (`registration_invalid`, `unexpected_registration`,
+   `registration_base_mismatch`, `registration_plan_mismatch`). Hash only the
+   Plan document as UTF-8, normalize line endings to LF and exactly one trailing
+   newline, and retain the assigned issue number. Issue fields and the folding
+   wrapper are excluded. The issue manifest remains schema-v1; production
+   registration readers still support v2 and v3 and legacy repository Plans.
+   The `tick_registered` event records `tick_id`, `phase_keys` and, for a pinned
+   run, `pinned`, `worktree`, and `branch`.
 5. **Poll / drive** — a non-plan profile polls the registered kanban cards once
    until every card is terminal, auto-completing gate cards behind their
    predecessors. A plan-gated run instead loops: poll the registered cards until
@@ -177,6 +199,10 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    delivered. `classify_pinned_run` reads card statuses only — the
    `finish-verified` marker is written by the production delivery reconciler and
    is not part of the harness's verdict.
+   The pinned registration and authored Plan expectation are revalidated before
+   and after later ticks and polling, preserving the same authority through
+   implementation, review, and finish. Validation failures retain the tick
+   identity so shutdown can account for workers.
 6. **PR invariant** — exactly one open, unmerged pull request attributable to
    this run must exist and target the default branch (a `pr_invariant_failed`
    event with `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, or
@@ -185,11 +211,12 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    to the issue but pushed from any other head is not this run's delivery. When
    discovery itself cannot classify every branch or PR the run fails with
    `pr_discovery_incomplete` instead; no `pr_invariant_failed` event is emitted
-   for that case.
+   for that case. An anchor-only branch proves cleanup ownership but fails
+   delivery with `implementation_missing`; it is not implementation success.
 7. **Shutdown** (always runs once the issue exists, even after a failure) —
    cancel the tick's kanban tasks, prove quiescence from the archived-inclusive
    snapshot, discover remote artifacts by run provenance (every non-default
-   commit must descend from the run's plan commit), close the issue, close the
+   commit must descend from the run's empty anchor), close the issue, close the
    PR, and delete the branch with `git push --force-with-lease`. Anything that
    could not be verified or removed is printed as a leftover with the manual
    command that finishes it.
@@ -209,7 +236,7 @@ for a non-plan profile, one per reconciler hop for a plan-gated one.
 | Code | Meaning |
 |------|---------|
 | 0 | Every phase passed, the PR invariant held, and cleanup completed |
-| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (`pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head`), `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_crashed`, `tick_failed`, plus the plan-pinned drive's `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown. |
+| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (`implementation_missing`, `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head`), `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_crashed`, `tick_failed`, plus the plan-pinned drive's `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown. |
 | 2 | Profile, preflight, or cleanup error (`cleanup_incomplete`, including when the shutdown discovery fails as well) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory). A `HarnessCleanupError` message prints the retained path; `cleanup_incomplete` prints the remote leftovers with their manual commands. |
 
 ## `--keep` and manual cleanup
@@ -304,15 +331,19 @@ the post-run PR invariant is what checks it. No card is expected to be
 | `failed_to_spawn`, `tick_timeout`, `tick_failed` | Production tick problems; re-run with `--keep`, then read `artifacts/tick.log` |
 | `tick_crashed` | `tpo tick` exited non-zero: at least one project's tick raised. The scan still ticked every project (crashes are isolated), and the detail is `rc=<n>` plus the tail of `artifacts/tick.log`, which carries the failing project's `tick failed: error_type=… : …` line and its traceback. Before this code existed the crash was invisible and the run was misreported as `tick_stalled` |
 | `registration_invalid` | The run's `registration.json` was rejected by the production contract loader; the detail is the contract error |
-| `registration_base_mismatch` | The run pinned a `base_sha` other than the harness's Plan commit |
-| `registration_plan_mismatch` | The registered `plan_hash` is not the hash of the Plan text the harness committed (what a `git replace` forgery in the clone would produce) |
+| `registration_base_mismatch` | The run pinned a `base_sha` other than the harness's saved empty run anchor (`run_base_sha`) |
+| `registration_plan_mismatch` | The registered `plan_hash` differs from the independently expected harness-authored embedded Plan document |
 | `unexpected_selection` | A later tick registered a *different* run in `current_tick_id.txt`, or persisted none; the harness refuses to keep driving another run's cards, and because that run's workers are unaccounted for it closes the issue but skips branch and PR cleanup. A later tick that merely selected nothing (`picked_none`) is treated as no progress and reported as `tick_stalled` instead |
 | `tick_stalled` | Three consecutive ticks settled on an identical, undelivered board — one no-progress tick is tolerated (several reconciler hops legitimately change nothing and need the next tick), a second in a row is a stall. The detail names the consecutive count. Re-run with `--keep` and read `artifacts/tick.log` plus the last `tick_stalled` event's `status_map` |
 | `tick_budget_exhausted` | The plan-pinned run consumed `pinned_tick_budget(step_keys)` ticks without reaching a verdict; the budget is deliberately generous, so this means the run is stuck |
 | `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head` | PR invariant failed (none, several, a non-open attributable PR, a PR whose base is not the default branch, or — plan-pinned only — a PR raised from a head other than the registered branch; a wrong-base PR is still cleaned up) |
 | `pr_discovery_incomplete` | Provenance could not classify every branch/PR at the post-run check (exit 1; the workspace is removed after a clean shutdown). If the shutdown discovery fails too, cleanup is skipped for safety, the run ends with `cleanup_incomplete` (exit 2) and the leftovers list the manual commands |
 | `cleanup_incomplete` | At least one remote operation failed; the detail names the retained workspace; finish the printed commands, then remove it |
-| `issue_unverified`, `issue_ambiguous` | The created issue could not be reconciled by title/token after a `gh` failure; close duplicates by hand |
+| `issue_unverified` | Production creation or transaction reconciliation failed; inspect the retained UUID request and creation state before recovering any remote issue |
+| `issue_readiness_drift`, `issue_request_drift`, `issue_request_path` | The issue no longer matches the authored ready issue, the saved request changed, or its parent path is unsafe; ticking stops and recovery artifacts are retained |
+| `anchor_unborn_head`, `anchor_head_moved` | HEAD is unborn or no longer matches the recorded parent/anchor; setup refuses to create a retry anchor |
+| `anchor_record_invalid`, `anchor_identity_mismatch`, `anchor_record_missing` | Anchor recovery evidence is invalid, belongs to another run, or is absent despite an existing anchor; preserve the clone for inspection |
+| `implementation_missing` | The attributable PR branch contains only the empty run anchor; cleanup ownership does not satisfy delivery |
 
 A missing `git` or `gh` fails preflight with a `Missing dependency: ...`
 message; a missing `hermes` or prompt client raises its own dependency error
@@ -330,9 +361,9 @@ turns `events.jsonl` into the reports and `cli.py` wires the `test` subcommand.
 | `preflight_check`, `github_preflight`, `_kanban_preflight` | Tools, `gh` auth/permission/quiescence, kanban reachability |
 | `init_sandbox` | One-time seeding of the default branch |
 | `clone_sandbox`, `sandbox_seed_check`, `take_baseline` | Clone, verify seed, snapshot remote heads |
-| `create_harness_issue`, `reconcile_created_issue`, `commit_plan` | Live issue with mirror labels; Plan committed locally |
+| `create_harness_issue`, `_harness_create_request`, `verify_harness_issue`, `create_run_anchor` | Production embedded issue creation and readiness verification; one recoverable empty local anchor |
 | `run_tick`, `recover_tick_registration` | Production `tpo tick` subprocess and its registration |
-| `recover_pinned_registration`, `assert_tick_id_unchanged` | Plan-pinned registration recovered through the production trust boundary; per-tick tick-id re-assertion |
+| `recover_pinned_registration`, `assert_pinned_registration_unchanged`, `assert_tick_id_unchanged` | Embedded registration recovered and revalidated through the production trust boundary; per-tick tick-id re-assertion |
 | `drive_ticks`, `_drive_single_tick`, `_drive_pinned_ticks` | One-tick and bounded multi-tick drives; emit `tick_registered`, `tick_completed`, `tick_stalled` |
 | `poll_pinned_run`, `classify_pinned_run`, `pinned_tick_budget` | Settle a pinned board without completing gates, classify it, bound the tick count |
 | `poll_registered_phases`, `_auto_complete_gate_tasks`, `_ConvergenceMonitor` | Kanban poll loop and convergence halt |
@@ -348,7 +379,7 @@ turns `events.jsonl` into the reports and `cli.py` wires the `test` subcommand.
 - Runs push feature branches only; the default branch is written solely by
   `--init-sandbox`, and never with `--force`.
 - **Never create branches in the sandbox during an active run.** Attribution is
-  by provenance (descent from the run's plan commit). Accepted residual: an
+  by provenance (descent from the run's empty anchor). Accepted residual: an
   operator branch cut from the default branch mid-run and fast-forwarded by the
   agent is indistinguishable from a run branch and would be deleted.
 - Destructive remote cleanup never runs while an agent may still be pushing: on
@@ -367,6 +398,32 @@ turns `events.jsonl` into the reports and `cli.py` wires the `test` subcommand.
   isolated config sets no `slack_channel`, so the send normally goes nowhere and
   failures are swallowed, but a channel resolved from your environment would
   receive a live post. Alerts are deduped per `alert_dedup_hours` (default 24).
+
+## Local verification and recovery
+
+`tests/test_harness_embedded_cli.py::test_real_cli_pins_harness_embedded_plan_across_ticks`
+invokes the real CLI entrypoint for `todos create`,
+`plan validate --todo 42 --require-manifest`, `todos audit`, `doctor`, `tick`, and
+`todos complete`. It controls external GitHub/Hermes, selection, and worker
+responses while retaining production registration, prompt preparation, and
+reconciliation. An independently hand-authored golden Plan checks published
+bytes and the digest delivered through `PlanReference`, including LF/CRLF
+normalization, repeated ticks, review/finish prompts, and completion preserving
+the Plan. It also checks normalization behavior and no tracked Plan files.
+`tests/test_harness_e2e.py` exercises orchestration and cleanup with a local bare
+remote and a mocked tick; it does not independently prove production ticking.
+These are provider-free checks. Live GitHub/Hermes behavior requires a separate
+live harness run and is not established by these tests.
+
+Retained clones carry `.hermes/todo-create-input/<uuid>.json` and, on partial
+creation, `.hermes/todo-create/<uuid>.json`; the production
+`.hermes/todo-create.lock` coordinates retries. The Git directory contains
+`harness-anchor.json` (identity, parent, anchor, and pending/completed state) and
+its lock. Keep these alongside the report and tick log when ownership or cleanup
+is uncertain. Do not infer ownership from the issue title or synthesize another
+anchor after HEAD movement. Roll back this harness change by reverting it; no
+persisted-schema migration is required. Preserve uncertain remote resources and
+recovery workspaces during rollback.
 
 ## Known limitations
 

@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import uuid
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -31,15 +32,18 @@ from .profile_prerequisites import (
     unverified_prerequisite_ids,
     verify_hermes_skill_registry_prerequisite,
 )
-from .result_contract import ResultContractError, load_validated_registration
+from .result_contract import (
+    ResultContractError,
+    ValidatedRegistration,
+    load_validated_registration,
+)
 
 log = logging.getLogger(__name__)
 
 
 _HARNESS_ASSIGNEE = "pipeline"
-_HARNESS_PLAN_PATH = "docs/harness/TODO-1-plan.md"
 _HARNESS_PLAN = """\
-# TODO-1 Mock Name Normalization Plan
+# Mock Name Normalization Plan
 
 1. Add focused tests for `normalize_names` covering whitespace trimming, empty
    values, lowercasing, input order, and an empty input list. Run the focused
@@ -115,9 +119,9 @@ class HarnessTickError(RuntimeError):
     ``registration_invalid`` (``load_validated_registration`` rejected the
     persisted ``registration.json``; ``detail`` is the contract error message),
     ``registration_base_mismatch`` (the run was pinned to a ``base_sha`` other
-    than the harness's Plan commit), ``registration_plan_mismatch`` (the
+    than the harness's run anchor), ``registration_plan_mismatch`` (the
     registered ``plan_hash`` is not the hash of the Plan text the harness
-    committed, as a ``git replace`` forgery in the clone would produce),
+    authored, even if an agent rewrites the pinned artifact and its digest),
     ``unexpected_selection`` (raised by
     :func:`assert_tick_id_unchanged` when a later tick genuinely registered a
     different tick id, or persisted none), and, raised by the multi-tick driver
@@ -425,6 +429,13 @@ def _run_git(
     from .github_issues import gh_bin
 
     verb = _git_verb(args)
+    env = _git_env()
+    if verb == "commit-tree":
+        # Empty anchors use the sandbox clone identity, even inside another
+        # agent's git author/committer environment.
+        for role in ("AUTHOR", "COMMITTER"):
+            for name in ("NAME", "EMAIL", "DATE"):
+                env.pop(f"GIT_{role}_{name}", None)
     prefix = ["-c", f"safe.directory={Path(cwd).resolve()}"]
     if verb in _GIT_NETWORK_VERBS:
         prefix += ["-c", "credential.helper=", "-c", f"credential.helper=!{shlex.quote(gh_bin())} auth git-credential"]
@@ -436,7 +447,7 @@ def _run_git(
             text=True,
             check=False,
             timeout=timeout,
-            env=_git_env(),
+            env=env,
         )
     except subprocess.TimeoutExpired as exc:
         raise HarnessPreflightError("git_error", f"git {verb} timed out after {timeout:g}s") from exc
@@ -860,7 +871,6 @@ _HARNESS_ISSUE_FIELDS: dict[str, str] = {
         'returns `["alice", "bob"]`; `normalize_names([])` returns `[]`; '
         "tests run with `uv run pytest`."
     ),
-    "Plan": _HARNESS_PLAN_PATH,
     "Priority": "P1",
     "Effort": "S",
     "Phase": "4 (Development)",
@@ -873,13 +883,6 @@ _HARNESS_ISSUE_FIELDS: dict[str, str] = {
 _HARNESS_ISSUE_TITLE = "Implement mock name normalization"
 _TODO_ID_RE = re.compile(r"\ATODO-[0-9]+\Z")
 _RUN_TOKEN_RE = re.compile(r"\A[0-9a-z]{8}\Z")
-_HARNESS_PLAN_PATH_RE = re.compile(r"\Adocs/harness/[0-9a-z]{8}-plan\.md\Z")
-_RECONCILE_ATTEMPTS = 5
-_RECONCILE_BACKOFF_SECONDS = 2.0
-# Create failures that provably left no issue behind: re-raise instead of listing.
-_CREATE_CODES_WITHOUT_SIDE_EFFECT = frozenset(
-    {"gh_auth", "gh_missing", "gh_version", "gh_not_found", "gh_rejected"}
-)
 
 
 def _run_token() -> str:
@@ -898,33 +901,71 @@ def _issue_title(run_token: str) -> str:
     return f"{_issue_prefix(run_token)} {_HARNESS_ISSUE_TITLE}"
 
 
-def _issue_fields(*, branch: str, plan_path: str) -> dict[str, str]:
-    """Issue-form fields for a live sandbox issue on *branch* planned at *plan_path*."""
-    return _HARNESS_ISSUE_FIELDS | {"Branch": branch, "Plan": plan_path}
-
-
 def _plan_document(todo_id: str) -> str:
-    """The fixture plan re-addressed to *todo_id* (heading and manifest ``todo_id``)."""
+    """Canonical authored document, with only the manifest bound to the issue."""
     if _TODO_ID_RE.match(todo_id) is None:
         raise ValueError(f"invalid todo id: {todo_id!r}")
-    return _HARNESS_PLAN.replace("TODO-1", todo_id)
+    prose, manifest = _HARNESS_PLAN.split("```json tpo-plan\n", 1)
+    payload = _json.loads(manifest.rsplit("```", 1)[0])
+    payload["todo_id"] = todo_id
+    return prose.rstrip() + "\n\n```json tpo-plan\n" + _json.dumps(payload, indent=2, ensure_ascii=False) + "\n```\n"
 
 
-def _harness_labels() -> list[str]:
-    """Backlog labels plus the decision mirrors derived from the fixture fields."""
-    from .github_issues import READY_LABEL, TODO_LABEL, phase_label
+def _harness_create_request(project_dir: Path, *, run_token: str, transaction_id: str):
+    """Persist the isolated, validated input consumed by production TODO creation."""
+    from .todos_create import (
+        FIELD_NAMES,
+        load_create_request,
+        validate_create_input_path,
+    )
 
-    fields = _HARNESS_ISSUE_FIELDS
-    return [
-        TODO_LABEL,
-        READY_LABEL,
-        f"priority:{fields['Priority']}",
-        f"effort:{fields['Effort']}",
-        phase_label(fields["Phase"]),
-        f"test-coverage:{fields['Test Coverage']}",
-        f"security-review:{fields['Security Review']}",
-        f"ui-review:{fields['UI Review']}",
-    ]
+    prose, manifest = _HARNESS_PLAN.split("```json tpo-plan\n", 1)
+    fields = {name: _HARNESS_ISSUE_FIELDS.get(name, "") for name in FIELD_NAMES}
+    fields.update(Summary=_HARNESS_ISSUE_TITLE, Branch=f"feat/harness-{run_token}")
+    payload = {"schema_version": 1, "transaction_id": transaction_id,
+               "title": _issue_title(run_token), "fields": fields,
+               "plan_markdown": prose.strip(),
+               "tasks": _json.loads(manifest.rsplit("```", 1)[0])["tasks"]}
+    parsed_uuid = uuid.UUID(transaction_id)
+    if parsed_uuid.version != 4 or str(parsed_uuid) != transaction_id:
+        raise ValueError("invalid harness transaction id")
+    directory = project_dir / ".hermes" / "todo-create-input"
+    if (project_dir / ".hermes").is_symlink() or directory.is_symlink():
+        raise HarnessRemoteCleanupError("issue_request_path", "creation input parent is a symlink")
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    path = directory / f"{transaction_id}.json"
+    canonical = _json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if path.exists():
+        if path.read_text(encoding="utf-8") != canonical:
+            raise HarnessRemoteCleanupError("issue_request_drift", "saved creation request changed")
+    else:
+        with path.open("x", encoding="utf-8") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(canonical)
+            handle.flush()
+            os.fsync(handle.fileno())
+    request = load_create_request(path)
+    validate_create_input_path(path, project_dir / ".hermes", transaction_id=transaction_id)
+    return request
+
+
+def verify_harness_issue(project_dir: Path, sandbox: SandboxRepo, issue: HarnessIssue) -> None:
+    """Recheck authored bytes and readiness immediately before exposing the run to tick."""
+    from . import github_issues
+    from .cli import _audit_default_branch, _audit_issue, _audit_phase_options
+    from .todos_create import render_create_body
+
+    request = _harness_create_request(project_dir, run_token=issue.run_token, transaction_id=issue.transaction_id)
+    fresh = github_issues.fetch_issue(project_dir, issue.number, repo=sandbox.repo)
+    findings, _, _ = _audit_issue(project_dir, fresh,
+        phase_options=_audit_phase_options(project_dir),
+        default_branch=_audit_default_branch(project_dir), branch_cache={}, require_todo_label=True)
+    labels = {label.lower() for label in fresh.labels}
+    if (fresh.body != render_create_body(request, issue_number=issue.number)
+            or fresh.title != issue.title or fresh.state != "open" or findings
+            or not {github_issues.TODO_LABEL, github_issues.READY_LABEL} <= labels
+            or labels.intersection(github_issues.TRIAGE_PENDING_LABELS)):
+        raise HarnessRemoteCleanupError("issue_readiness_drift", f"TODO-{issue.number}; creation input retained")
 
 
 @dataclass(frozen=True)
@@ -934,34 +975,14 @@ class HarnessIssue:
     number: int
     todo_id: str
     branch: str
-    plan_path: str
     title: str
     run_token: str
+    transaction_id: str = field(default_factory=lambda: str(uuid.uuid4()))
 
     def __post_init__(self) -> None:
         number = self.number
         if not isinstance(number, int) or isinstance(number, bool) or number <= 0:
             raise ValueError(f"issue number must be a positive int, got {number!r}")
-        # The path is interpolated into git argv and joined onto the clone root.
-        if (
-            self.plan_path.startswith("/")
-            or ".." in self.plan_path.split("/")
-            or _HARNESS_PLAN_PATH_RE.match(self.plan_path) is None
-        ):
-            raise ValueError(f"invalid harness plan path: {self.plan_path!r}")
-
-
-def _issue_matches_run(project_dir: Path, sandbox: SandboxRepo, number: int, title: str) -> bool:
-    """True when issue *number* in *sandbox* is a real issue (not a PR) titled *title*."""
-    from .github_issues import _decode_json, _gh_api
-
-    payload = _decode_json(_gh_api(project_dir, [f"repos/{sandbox.repo}/issues/{number}"]), "api")
-    return (
-        isinstance(payload, Mapping)
-        and "pull_request" not in payload
-        and payload.get("number") == number
-        and payload.get("title") == title
-    )
 
 
 def create_harness_issue(
@@ -970,177 +991,109 @@ def create_harness_issue(
     *,
     run_token: str,
     baseline: RunBaseline,
+    transaction_id: str | None = None,
     sleep: Callable[[float], None] = time.sleep,
 ) -> HarnessIssue:
-    """Create the run's issue in *sandbox*; reconcile against the remote if the create fails.
+    """Create and converge a triaged embedded-Plan issue using production persistence.
 
-    The label vocabulary is ensured first (``ensure_labels`` is idempotent), so
-    the create never fails on a missing mirror label. The number ``gh`` reports
-    is verified by fetching the issue: only a real issue (not a PR) carrying this
-    run's title is adopted. A create that fails locally without proving nothing
-    was created (timeout, malformed output, transport error, rate limit) may
-    still have succeeded remotely, so it is followed by an authoritative listing
-    rather than a blind retry that could duplicate the issue. Failures that
-    provably created nothing (auth, missing/old gh, unknown repo, rejected
-    request) are re-raised as-is.
+    Ownership is the fresh invocation UUID, never a matching title. Partial,
+    conflicting or unverified creation retains recovery state and prevents tick.
     """
-    from .github_issues import (
-        GitHubIssuesError,
-        create_issue,
-        ensure_labels,
-        render_issue_body,
-    )
+    from .github_issues import ensure_labels
+    from .todos_create import execute_create
 
     if _RUN_TOKEN_RE.match(run_token) is None:
         raise ValueError(f"invalid run token: {run_token!r}")
-    branch = f"feat/harness-{run_token}"
-    plan_path = f"docs/harness/{run_token}-plan.md"
-    title = _issue_title(run_token)
-    body = render_issue_body(_issue_fields(branch=branch, plan_path=plan_path), include_empty=False)
-    ensure_labels(project_dir, repo=sandbox.repo)
-    log.info("harness: creating sandbox issue %s in %s", title, sandbox.repo)
-    number: int | None = None
-    cause: Exception | None = None
+    transaction_id = transaction_id or str(uuid.uuid4())
+    request = _harness_create_request(project_dir, run_token=run_token, transaction_id=transaction_id)
     try:
-        reported = create_issue(
-            project_dir, title=title, body=body, labels=_harness_labels(), repo=sandbox.repo
-        )
-    except GitHubIssuesError as exc:
-        if exc.code in _CREATE_CODES_WITHOUT_SIDE_EFFECT:
+        ensure_labels(project_dir, repo=sandbox.repo)
+        number = execute_create(project_dir, project_dir / ".hermes", request, approved_repo=sandbox.repo)
+        issue = HarnessIssue(number=number, todo_id=f"TODO-{number}",
+            branch=request.fields["Branch"], title=request.title,
+            run_token=run_token, transaction_id=transaction_id)
+        verify_harness_issue(project_dir, sandbox, issue)
+        return issue
+    except Exception as exc:
+        if isinstance(exc, HarnessRemoteCleanupError):
             raise
-        cause = exc
-    except OSError as exc:  # body temp file failures may follow a remote success
-        cause = exc
-    if cause is None:
-        # Verify the reported number; any failure here (404, 403, timeout) is
-        # inconclusive, so it falls through to reconciliation like a failed create.
-        try:
-            if _issue_matches_run(project_dir, sandbox, reported, title):
-                number = reported
-            else:
-                cause = RuntimeError(f"issue #{reported} reported by gh is not this run's issue")
-        except Exception as exc:
-            cause = exc
-    if number is None:
-        assert cause is not None
-        number = reconcile_created_issue(
-            project_dir, sandbox, run_token=run_token, baseline=baseline, cause=cause, sleep=sleep
-        )
-    return HarnessIssue(
-        number=number,
-        todo_id=f"TODO-{number}",
-        branch=branch,
-        plan_path=plan_path,
-        title=title,
-        run_token=run_token,
-    )
+        code = getattr(exc, "code", type(exc).__name__)
+        raise HarnessRemoteCleanupError("issue_unverified",
+            f"transaction {transaction_id} in {sandbox.repo}: {code}; creation input retained") from exc
 
 
-def _list_run_issues(
-    project_dir: Path, sandbox: SandboxRepo, *, run_token: str, baseline: RunBaseline
-) -> list[int]:
-    """Numbers of the viewer's issues (not PRs) in *sandbox* titled for *run_token*."""
-    from urllib.parse import quote
+def create_run_anchor(project_dir: Path, issue: HarnessIssue) -> str:
+    """Create one empty, run-owned commit without touching index or worktree.
 
-    from .github_issues import _LIST_TIMEOUT, _decode_json, _flatten_pages, _gh_api
-
-    query = f"state=all&creator={quote(baseline.viewer, safe='')}&per_page=100"
-    stdout = _gh_api(
-        project_dir,
-        ["--paginate", "--slurp", f"repos/{sandbox.repo}/issues?{query}"],
-        timeout=_LIST_TIMEOUT,
-    )
-    prefix = _issue_prefix(run_token)
-    numbers: list[int] = []
-    for payload in _flatten_pages(_decode_json(stdout, "api", empty=[]), "api"):
-        if not isinstance(payload, Mapping) or "pull_request" in payload:
-            continue
-        title = payload.get("title")
-        number = payload.get("number")
-        if (
-            isinstance(title, str)
-            and title.startswith(prefix)
-            and isinstance(number, int)
-            and not isinstance(number, bool)
-            and number > 0
-        ):
-            numbers.append(number)
-    return sorted(numbers)
-
-
-def reconcile_created_issue(
-    project_dir: Path,
-    sandbox: SandboxRepo,
-    *,
-    run_token: str,
-    baseline: RunBaseline,
-    cause: Exception,
-    sleep: Callable[[float], None] = time.sleep,
-) -> int:
-    """Find the issue a failed create may have made, by authoritative listing (not search).
-
-    Lists the viewer's issues and keeps those titled ``[harness <run_token>]…``.
-    Retries (with backoff) only while nothing matches, because GitHub's list
-    index can lag a just-created issue; a listing failure counts as an empty
-    attempt. Exactly one match is adopted as the created issue. None after all
-    attempts means the remote state is unproven (``issue_unverified``). Several
-    means a duplicate the operator must sort out (``issue_ambiguous``); this
-    detection is best-effort: a duplicate that lags the index past the first
-    non-empty listing is not seen, and the earlier match is adopted.
+    The durable record precedes the HEAD compare-and-swap, allowing a retry of
+    an interrupted update without stacking anchors. A changed HEAD or identity
+    cannot be adopted as this run's base.
     """
-    from .github_issues import GitHubIssuesError
+    from .todos_create import create_lock
 
-    numbers: list[int] = []
-    for attempt in range(1, _RECONCILE_ATTEMPTS + 1):
-        try:
-            numbers = _list_run_issues(project_dir, sandbox, run_token=run_token, baseline=baseline)
-        except GitHubIssuesError as exc:
-            log.warning("harness: reconcile listing attempt %d failed: %s", attempt, exc)
-            numbers = []
-        if numbers:
-            break
-        if attempt < _RECONCILE_ATTEMPTS:
-            sleep(_RECONCILE_BACKOFF_SECONDS)
-    prefix = _issue_prefix(run_token)
-    if len(numbers) == 1:
-        log.warning("harness: reconciled issue #%d after create failure (%s)", numbers[0], cause)
-        return numbers[0]
-    if not numbers:
-        raise HarnessRemoteCleanupError(
-            "issue_unverified",
-            f"create failed ({cause}); could not prove no issue titled '{prefix}' exists; "
-            f"check: gh issue list --repo {sandbox.repo} --state all --search '{prefix} in:title'",
-        ) from cause
-    raise HarnessRemoteCleanupError(
-        "issue_ambiguous",
-        f"{', '.join(f'#{number}' for number in numbers)} in {sandbox.repo} for {prefix}; "
-        f"close duplicates: gh issue close <n> --repo {sandbox.repo}",
-    ) from cause
-
-
-def commit_plan(project_dir: Path, issue: HarnessIssue) -> str:
-    """Write the plan for *issue* into the clone and commit only that file; return the HEAD sha.
-
-    Idempotent: when HEAD already tracks an identical plan, nothing is committed.
-    Other staged changes are left staged and untouched. Never pushes: publishing
-    the branch is the pipeline's job, not the harness's.
-    """
-    document = _plan_document(issue.todo_id)
-    target = project_dir / issue.plan_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(document, encoding="utf-8")
-    tracked = _run_git(["cat-file", "-p", f"HEAD:{issue.plan_path}"], cwd=project_dir, check=False)
-    if tracked.returncode == 0 and tracked.stdout == document:
-        return _run_git(["rev-parse", "HEAD"], cwd=project_dir).stdout.strip()
-    _run_git(["add", "-f", "--", issue.plan_path], cwd=project_dir)
-    _run_git(
-        [
-            "-c", "commit.gpgsign=false", "commit", "--no-verify",
-            "-m", f"docs(harness): plan for {issue.todo_id}", "--", issue.plan_path,
-        ],
-        cwd=project_dir,
-    )
-    return _run_git(["rev-parse", "HEAD"], cwd=project_dir).stdout.strip()
+    git_dir = Path(_run_git(["rev-parse", "--absolute-git-dir"], cwd=project_dir).stdout.strip())
+    identity = {"transaction_id": issue.transaction_id, "run_token": issue.run_token,
+                "issue_number": issue.number, "todo_id": issue.todo_id, "branch": issue.branch}
+    message = "chore(harness): empty run anchor\n\ntpo-harness-anchor\n" + _json.dumps(identity, sort_keys=True) + "\n"
+    with create_lock(git_dir / "harness-anchor-lock"):
+        path = git_dir / "harness-anchor.json"
+        head = _run_git(["rev-parse", "--verify", "HEAD^{commit}"], cwd=project_dir, check=False)
+        if head.returncode:
+            raise HarnessPreflightError("anchor_unborn_head")
+        current = head.stdout.strip()
+        if path.is_symlink():
+            raise HarnessPreflightError("anchor_record_invalid")
+        if path.exists():
+            record = _read_json_file(path)
+            if not isinstance(record, dict) or record.get("identity") != identity:
+                raise HarnessPreflightError("anchor_identity_mismatch")
+            parent, anchor = record.get("parent"), record.get("anchor")
+            if not all(isinstance(value, str) and _SHA_RE.fullmatch(value) for value in (parent, anchor)):
+                raise HarnessPreflightError("anchor_record_invalid")
+            if type(record.get("completed")) is not bool:
+                raise HarnessPreflightError("anchor_record_invalid")
+            if current not in (parent, anchor) or (record["completed"] and current != anchor):
+                raise HarnessPreflightError("anchor_head_moved")
+            actual = _run_git(["show", "-s", "--format=%P%n%T%n%B", anchor], cwd=project_dir).stdout
+            tree = _run_git(["rev-parse", f"{parent}^{{tree}}"], cwd=project_dir).stdout.strip()
+            if actual != f"{parent}\n{tree}\n{message}\n":
+                raise HarnessPreflightError("anchor_record_invalid")
+        else:
+            previous_message = _run_git(["log", "-1", "--format=%B"], cwd=project_dir).stdout
+            if "tpo-harness-anchor" in previous_message:
+                raise HarnessPreflightError("anchor_record_missing")
+            parent = current
+            tree = _run_git(["rev-parse", "HEAD^{tree}"], cwd=project_dir).stdout.strip()
+            anchor = _run_git(["-c", "commit.gpgsign=false", "commit-tree", tree, "-p", parent, "-m", message], cwd=project_dir).stdout.strip()
+            record = {"identity": identity, "parent": parent, "anchor": anchor, "completed": False}
+            with path.open("x", encoding="utf-8") as handle:
+                _json.dump(record, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+            directory_fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        if current == parent:
+            update = _run_git(["update-ref", "HEAD", anchor, parent], cwd=project_dir, check=False)
+            if update.returncode:
+                raise HarnessPreflightError("anchor_head_moved")
+        if not record["completed"]:
+            record["completed"] = True
+            with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=git_dir,
+                    prefix="harness-anchor-", suffix=".json", delete=False) as handle:
+                _json.dump(record, handle, sort_keys=True)
+                handle.flush()
+                os.fsync(handle.fileno())
+                completed_path = handle.name
+            os.replace(completed_path, path)
+            directory_fd = os.open(git_dir, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return anchor
 
 
 _RECORDED_BRANCH_RELPATH = Path(".hermes") / "pipeline_branch.txt"
@@ -1405,13 +1358,13 @@ def _branch_provenance_failure(
     *,
     name: str,
     tip_sha: str,
-    plan_sha: str,
+    run_base_sha: str,
     default_branch: str,
     provenance_dir: Path,
 ) -> str | None:
     """Why remote branch *name*@*tip_sha* is NOT provably this run's work, or None when it is.
 
-    Run-scoped provenance (ruling R-8.1): the plan commit *plan_sha* (made by the
+    Run-scoped provenance (ruling R-8.1): the run anchor *run_base_sha* (made by the
     harness itself) must be a non-vacuous ancestor of every commit the branch adds
     over the default branch. Everything is fetched from ``sandbox.url`` into
     a fresh bare repository created under *provenance_dir* for every check and removed
@@ -1419,11 +1372,11 @@ def _branch_provenance_failure(
     ``workspace/artifacts/provenance``), and
     ancestry is computed there with replace refs disabled: the agent-owned clone
     (``git replace --graft``, ``info/grafts``) can forge ancestry and is never
-    consulted. The plan commit must therefore be reachable from the candidate tip
+    consulted. The run anchor must therefore be reachable from the candidate tip
     on the remote; when it is absent after the fetch the branch cannot be the run's.
     Text, author identity, and agent-written files are never consulted either.
     """
-    for label, value in (("tip", tip_sha), ("plan", plan_sha)):
+    for label, value in (("tip", tip_sha), ("plan", run_base_sha)):
         if _SHA_RE.match(value) is None:
             raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"branch {name}: malformed {label} sha {value!r}")
     work: Path | None = None
@@ -1444,18 +1397,18 @@ def _branch_provenance_failure(
         )
         if fetched.returncode != 0 or fetched.stdout.strip() != tip_sha:
             return "tip moved"
-        present = _run_git(["cat-file", "-e", f"{plan_sha}^{{commit}}"], cwd=work, check=False)
+        present = _run_git(["cat-file", "-e", f"{run_base_sha}^{{commit}}"], cwd=work, check=False)
         if present.returncode != 0:
-            return "no run provenance"  # the plan commit was never pushed under this branch
-        if _is_ancestor(work, plan_sha, _DEFAULT_REF):
+            return "no run provenance"  # the run anchor was never pushed under this branch
+        if _is_ancestor(work, run_base_sha, _DEFAULT_REF):
             return "no run provenance"  # vacuous: the plan is already on the default branch
-        if not _is_ancestor(work, plan_sha, tip_sha):
+        if not _is_ancestor(work, run_base_sha, tip_sha):
             return "no run provenance"
         added = _run_git(
             ["-c", "core.useReplaceRefs=false", "rev-list", tip_sha, f"^{_DEFAULT_REF}"], cwd=work
         )
         commits = added.stdout.split()
-        if not commits or not all(_is_ancestor(work, plan_sha, commit) for commit in commits):
+        if not commits or not all(_is_ancestor(work, run_base_sha, commit) for commit in commits):
             return "no run provenance"
     except HarnessPreflightError as exc:
         raise HarnessRemoteCleanupError("pr_discovery_incomplete", f"branch {name}: {_preflight_detail(exc)}") from exc
@@ -1490,22 +1443,22 @@ def branch_has_run_provenance(
     *,
     name: str,
     tip_sha: str,
-    plan_sha: str,
+    run_base_sha: str,
     default_branch: str,
     provenance_dir: Path,
 ) -> bool:
-    """True when every commit branch *name* adds over *default_branch* descends from *plan_sha*.
+    """True when every commit branch *name* adds over *default_branch* descends from *run_base_sha*.
 
     Fetches the branch and the default branch from ``sandbox.url`` into the
     harness-owned *provenance_dir* (never *project_dir*, which the agent controls);
     a fetch failure raises ``pr_discovery_incomplete``. False when the tip no longer
-    equals *tip_sha*, when *plan_sha* is not reachable on the remote, when it is
+    equals *tip_sha*, when *run_base_sha* is not reachable on the remote, when it is
     already reachable from the default branch (vacuous), or when any added commit
-    does not descend from the plan commit.
+    does not descend from the run anchor.
     """
     _reject_nested_provenance_dir(project_dir, provenance_dir)  # ancestry is never computed in the clone
     failure = _branch_provenance_failure(
-        sandbox, name=name, tip_sha=tip_sha, plan_sha=plan_sha, default_branch=default_branch,
+        sandbox, name=name, tip_sha=tip_sha, run_base_sha=run_base_sha, default_branch=default_branch,
         provenance_dir=provenance_dir,
     )
     return failure is _PROVENANCE_OK
@@ -1741,14 +1694,14 @@ def discover_remote_artifacts(
     *,
     issue: HarnessIssue,
     baseline: RunBaseline,
-    plan_sha: str,
+    run_base_sha: str,
     provenance_dir: Path,
 ) -> RemoteArtifacts:
     """Classify the sandbox's post-run PRs and new branches into attributable and leftover.
 
     Heads are enumerated at ``sandbox.url`` (not the clone's ``origin``); each new
-    head's run provenance is checked once against *plan_sha* (the harness's own plan
-    commit, see :func:`commit_plan`) inside *provenance_dir*, a harness-owned
+    head's run provenance is checked once against *run_base_sha* (the harness's own plan
+    commit, see :func:`create_run_anchor`) inside *provenance_dir*, a harness-owned
     directory recreated fresh per check that callers must place outside the clone's
     parent tree (e.g. ``workspace/artifacts/provenance``). PR discovery queries the recorded branch, the
     issue branch, and every provenance head, so it is a superset of what deletion may
@@ -1763,12 +1716,12 @@ def discover_remote_artifacts(
         run-created branch. The sandbox is dedicated; operators must not create
         branches during an active run.
     (b) Once a run's PR is merged into the default branch, the vacuity guard
-        (plan commit reachable from the default branch) disables deletion of that
+        (run anchor reachable from the default branch) disables deletion of that
         run's branch. This fails closed; the operator deletes the branch manually.
     """
     try:
         return _discover_remote_artifacts(
-            project_dir, sandbox, issue=issue, baseline=baseline, plan_sha=plan_sha, provenance_dir=provenance_dir
+            project_dir, sandbox, issue=issue, baseline=baseline, run_base_sha=run_base_sha, provenance_dir=provenance_dir
         )
     except HarnessPreflightError as exc:
         raise HarnessRemoteCleanupError("pr_discovery_incomplete", _preflight_detail(exc)) from exc
@@ -1780,7 +1733,7 @@ def _discover_remote_artifacts(
     *,
     issue: HarnessIssue,
     baseline: RunBaseline,
-    plan_sha: str,
+    run_base_sha: str,
     provenance_dir: Path,
 ) -> RemoteArtifacts:
     _reject_nested_provenance_dir(project_dir, provenance_dir)
@@ -1794,7 +1747,7 @@ def _discover_remote_artifacts(
             failures[name] = "protected"
             continue
         failures[name] = _branch_provenance_failure(
-            sandbox, name=name, tip_sha=sha, plan_sha=plan_sha,
+            sandbox, name=name, tip_sha=sha, run_base_sha=run_base_sha,
             default_branch=baseline.default_branch, provenance_dir=provenance_dir,
         )
     provenance = {name: failure is _PROVENANCE_OK for name, failure in failures.items()}
@@ -2646,6 +2599,7 @@ class TickRegistration:
     base_sha: str | None = None
     run_dir: Path | None = None
     pinned: bool = False
+    authority: ValidatedRegistration | None = None
 
 
 def _read_json_file(path: Path) -> Any:
@@ -2833,7 +2787,7 @@ def recover_pinned_registration(
     *,
     issue: HarnessIssue,
     repo: str,
-    plan_sha: str,
+    run_base_sha: str,
     plan_text: str,
     tick_log: Path | None = None,
     previous_tick_id: str | None = None,
@@ -2848,12 +2802,12 @@ def recover_pinned_registration(
     detail when present) as ``detail``; any other exception escaping the loader
     becomes the same code with the exception's type name as ``detail``, so a
     failure the contract does not model still reaches shutdown with a tick id. The registration must pin *issue*'s
-    number, branch and plan path (``unexpected_registration``, detail naming the
-    field); ``base_sha`` must be *plan_sha*, the commit the harness pushed the
-    Plan in (``registration_base_mismatch``); ``plan_hash`` must equal the
-    SHA-256 of *plan_text*, the Plan the harness committed itself
-    (``registration_plan_mismatch``) -- the contract's own hash check reads the
-    Plan from the agent-controlled clone, where ``git replace`` can forge it;
+    number, branch and embedded source with ``plan_path=None``
+    (``unexpected_registration``); ``base_sha`` must be *run_base_sha*, the
+    empty local run anchor (``registration_base_mismatch``); ``plan_hash`` must
+    equal the SHA-256 of the harness-authored *plan_text*, normalized to LF and
+    exactly one trailing newline (``registration_plan_mismatch``). This separate
+    expectation detects coordinated artifact and digest tampering in agent state;
     and the ``expected-phases.json`` sentinel under the run worktree must list
     exactly the registered ``step_keys`` (``expected_phases_missing`` /
     ``unexpected_registration``, detail capped at ``_ERROR_MESSAGE_MAX``).
@@ -2880,11 +2834,7 @@ def recover_pinned_registration(
         raise HarnessTickError(
             "unexpected_registration", f"issue {validated.issue_number}", tick_id=tick_id
         )
-    if validated.plan_source_kind != "legacy_path":
-        # The harness always authors a `Plan:` path and commits that file, so a
-        # run of its own can only be legacy_path. An embedded plan would carry
-        # plan_path=None and a plan_hash taken over the normalized issue body,
-        # so the checks below would be comparing the wrong things.
+    if validated.plan_source_kind != "embedded":
         raise HarnessTickError(
             "unexpected_registration",
             f"plan_source_kind {validated.plan_source_kind}"[:_ERROR_MESSAGE_MAX],
@@ -2892,7 +2842,7 @@ def recover_pinned_registration(
         )
     for name, actual, wanted in (
         ("branch", validated.branch, issue.branch),
-        ("plan_path", validated.plan_path, issue.plan_path),
+        ("plan_path", validated.plan_path, None),
     ):
         if actual != wanted:
             raise HarnessTickError(
@@ -2900,11 +2850,11 @@ def recover_pinned_registration(
                 f"{name} {actual} != {wanted}"[:_ERROR_MESSAGE_MAX],
                 tick_id=tick_id,
             )
-    if validated.base_sha != plan_sha:
+    if validated.base_sha != run_base_sha:
         raise HarnessTickError(
-            "registration_base_mismatch", f"{validated.base_sha} != {plan_sha}", tick_id=tick_id
+            "registration_base_mismatch", f"{validated.base_sha} != {run_base_sha}", tick_id=tick_id
         )
-    expected_hash = hashlib.sha256(plan_text.encode("utf-8")).hexdigest()
+    expected_hash = hashlib.sha256((plan_text.replace("\r\n", "\n").replace("\r", "\n").rstrip("\n") + "\n").encode("utf-8")).hexdigest()
     if validated.plan_hash != expected_hash:
         raise HarnessTickError(
             "registration_plan_mismatch",
@@ -2929,7 +2879,20 @@ def recover_pinned_registration(
         base_sha=validated.base_sha,
         run_dir=project_state / "runs" / tick_id,
         pinned=True,
+        authority=validated,
     )
+
+
+def assert_pinned_registration_unchanged(
+    project_dir: Path, project_state: Path, *, saved: TickRegistration,
+    issue: HarnessIssue, repo: str, run_base_sha: str, plan_text: str,
+) -> None:
+    """Revalidate the artifact and immutable authority against the first registration."""
+    assert_tick_id_unchanged(project_state, expected=saved.tick_id)
+    current = recover_pinned_registration(project_dir, project_state, issue=issue,
+        repo=repo, run_base_sha=run_base_sha, plan_text=plan_text)
+    if current != saved:
+        raise HarnessTickError("unexpected_registration", "pinned authority changed", tick_id=saved.tick_id)
 
 
 def assert_tick_id_unchanged(project_state: Path, *, expected: str) -> None:
@@ -3252,7 +3215,7 @@ def drive_ticks(
     base_monitor: HarnessMonitor,
     pinned: bool = False,
     repo: str | None = None,
-    plan_sha: str | None = None,
+    run_base_sha: str | None = None,
     plan_text: str | None = None,
 ) -> TickDrive:
     """Run the production ticks of one harness run and report what they did.
@@ -3282,7 +3245,7 @@ def drive_ticks(
     per-tick event: its poller reports no status map, and its single tick is
     already named by ``tick_registered``.
 
-    ``pinned=True`` requires *repo*, *plan_sha* and *plan_text* (``ValueError``),
+    ``pinned=True`` requires *repo*, *run_base_sha* and *plan_text* (``ValueError``),
     and is the only mode that uses *project_dir*: the pinned trust boundary
     resolves ``registration.json`` against the clone. A non-pinned drive recovers
     from *project_state* alone, so *project_dir* is deliberately not forwarded.
@@ -3290,8 +3253,8 @@ def drive_ticks(
     Neither mode raises for a live run: see ``TickDrive.pending_error``.
     """
     if pinned:
-        if repo is None or plan_sha is None or plan_text is None:
-            raise ValueError("drive_ticks(pinned=True) requires repo, plan_sha and plan_text")
+        if repo is None or run_base_sha is None or plan_text is None:
+            raise ValueError("drive_ticks(pinned=True) requires repo, run_base_sha and plan_text")
         return _drive_pinned_ticks(
             project_dir=project_dir,
             project_state=project_state,
@@ -3301,7 +3264,7 @@ def drive_ticks(
             timeout=timeout,
             issue=issue,
             repo=repo,
-            plan_sha=plan_sha,
+            run_base_sha=run_base_sha,
             plan_text=plan_text,
             monitor=monitor,
             detector=detector,
@@ -3438,7 +3401,7 @@ def _drive_pinned_ticks(
     timeout: int,
     issue: HarnessIssue,
     repo: str,
-    plan_sha: str,
+    run_base_sha: str,
     plan_text: str,
     monitor: _ConvergenceMonitor,
     detector: ConvergenceDetector,
@@ -3493,8 +3456,11 @@ def _drive_pinned_ticks(
                 return _partial()
 
             previous_tick_id = read_current_tick_id(project_state)
-            ticks_run += 1
             try:
+                if registration is not None:
+                    assert_pinned_registration_unchanged(project_dir, project_state, saved=registration,
+                        issue=issue, repo=repo, run_base_sha=run_base_sha, plan_text=plan_text)
+                ticks_run += 1
                 try:
                     run_tick(slug, cwd=workspace_dir, log_path=tick_log, timeout=remaining)
                 except Exception as exc:
@@ -3513,7 +3479,7 @@ def _drive_pinned_ticks(
                         project_state,
                         issue=issue,
                         repo=repo,
-                        plan_sha=plan_sha,
+                        run_base_sha=run_base_sha,
                         plan_text=plan_text,
                         tick_log=tick_log,
                         previous_tick_id=previous_tick_id,
@@ -3521,7 +3487,8 @@ def _drive_pinned_ticks(
                     budget = pinned_tick_budget(registration.phase_keys)
                     base_monitor("tick_registered", _tick_registered_payload(registration))
                 else:
-                    assert_tick_id_unchanged(project_state, expected=registration.tick_id)
+                    assert_pinned_registration_unchanged(project_dir, project_state, saved=registration,
+                        issue=issue, repo=repo, run_base_sha=run_base_sha, plan_text=plan_text)
             except HarnessTickError as exc:
                 tick_error = exc
                 failure_code = exc.code
@@ -3574,6 +3541,15 @@ def _drive_pinned_ticks(
 
             status_map = settled.get("map", {})
             observed |= set(status_map)
+            try:
+                assert_pinned_registration_unchanged(project_dir, project_state, saved=registered,
+                    issue=issue, repo=repo, run_base_sha=run_base_sha, plan_text=plan_text)
+            except HarnessTickError as exc:
+                tick_error = exc
+                failure_code = exc.code
+                workers_unaccounted = workers_unaccounted or exc.workers_unaccounted
+                _log_tick_error(exc, tick_log)
+                return _partial()
             base_monitor(
                 "tick_completed", {"tick_no": ticks_run, "status_map": dict(status_map)}
             )
@@ -3796,7 +3772,7 @@ def shutdown_run(
     *,
     issue: HarnessIssue,
     baseline: RunBaseline,
-    plan_sha: str,
+    run_base_sha: str,
     tick_id: str | None,
     expected_phase_keys: tuple[str, ...] | None,
     provenance_dir: Path,
@@ -3971,7 +3947,7 @@ def shutdown_run(
     log.info("harness shutdown: discovering remote artifacts (%s)", pointer)
     try:
         artifacts = discover_remote_artifacts(
-            project_dir, sandbox, issue=issue, baseline=baseline, plan_sha=plan_sha, provenance_dir=provenance_dir,
+            project_dir, sandbox, issue=issue, baseline=baseline, run_base_sha=run_base_sha, provenance_dir=provenance_dir,
         )
         log.info("harness shutdown: cleaning up remote artifacts (%s)", pointer)
         all_ok, leftovers = cleanup_remote(project_dir, sandbox, artifacts, staging_root=staging_root, log=log)
@@ -4062,7 +4038,7 @@ def run_harness(
     """Main orchestration: drive one production run against a live GitHub sandbox.
 
     Preflight (profile, tools, gh, kanban), clone and verify the sandbox, create
-    the run's issue and plan commit, drive the run's ticks
+    the run's issue and run anchor, drive the run's ticks
     (:func:`drive_ticks` — one tick for ``gstack``/``agent-skills``, the pinned
     multi-tick loop for a ``requires_plan`` profile such as ``native-sdd``),
     verify the pull request, then shut down (kanban quiescence, remote
@@ -4094,7 +4070,7 @@ def run_harness(
     phase_profile = load_phase_profile(profile_path)
     all_phases = list(phase_profile.phases)
     # A ``requires_plan`` profile registers once and reconciles across several
-    # ticks, so the drive is pinned to this run's Plan commit; see drive_ticks.
+    # ticks, so the drive is pinned to this run's run anchor; see drive_ticks.
     pinned = phase_profile.requires_plan
     prerequisites = load_profile_prerequisites(profile_name)
     unverified = unverified_prerequisite_ids(prerequisites, prompt_client)
@@ -4146,13 +4122,17 @@ def run_harness(
             project_dir, sandbox, viewer=gh_pre.viewer, default_branch=gh_pre.default_branch
         )
         write_project_contract(project_dir, profile_name)
+        # Until verified creation returns, any interruption may leave a remote
+        # issue whose identity is recorded only in the recovery workspace.
+        cleanup_incomplete = True
         try:
-            issue = create_harness_issue(project_dir, sandbox, run_token=run_token, baseline=baseline)
+            issue = create_harness_issue(project_dir, sandbox, run_token=run_token, baseline=baseline, transaction_id=str(uuid.uuid4()))
         except HarnessRemoteCleanupError:
             # The issue may exist remotely but could not be reconciled: keep the
             # workspace as the only record of the run token for manual cleanup.
             cleanup_incomplete = True
             raise
+        cleanup_incomplete = False
         # From here on the sandbox carries this run's issue: shutdown_run is owed.
 
         pointer = (
@@ -4161,7 +4141,7 @@ def run_harness(
             f" git ls-remote --heads -- {_scrub_url(sandbox.url)}; then: gh issue close {issue.number}"
             f" --repo {sandbox.repo}"
         )
-        plan_sha: str | None = None
+        run_base_sha: str | None = None
         registration: TickRegistration | None = None
         tick_error: HarnessTickError | None = None
         workers_unaccounted = False
@@ -4174,7 +4154,6 @@ def run_harness(
         pending: Exception | None = None
         ticks_run = 0
         try:
-            plan_sha = commit_plan(project_dir, issue)
             with isolate_config(
                 state_dir=state_dir, projects_dir=projects_dir, prompt_client=prompt_client
             ):
@@ -4195,7 +4174,11 @@ def run_harness(
                 # Visibility barrier: GitHub's label-filtered listing lags the create, and the
                 # production tick compiles its candidates from that listing. Wait until exactly
                 # our issue is ready before running the tick (also the quiescence re-check).
+                cleanup_incomplete = True
                 wait_for_issue_visible(project_dir, sandbox, issue_number=issue.number)
+                verify_harness_issue(project_dir, sandbox, issue)
+                run_base_sha = create_run_anchor(project_dir, issue)
+                cleanup_incomplete = False
 
                 drive = drive_ticks(
                     project_dir=project_dir,
@@ -4211,9 +4194,9 @@ def run_harness(
                     base_monitor=base_monitor,
                     pinned=pinned,
                     repo=sandbox.repo if pinned else None,
-                    plan_sha=plan_sha if pinned else None,
-                    # Exactly the Plan document commit_plan just wrote at plan_sha:
-                    # the pinned trust boundary hashes it to detect a forged clone.
+                    run_base_sha=run_base_sha if pinned else None,
+                    # Hash only the authored embedded document, independently of
+                    # the mutable registration and materialized artifact.
                     plan_text=_plan_document(issue.todo_id) if pinned else None,
                 )
                 # The drive reports a live run instead of raising, so its outcome
@@ -4236,7 +4219,7 @@ def run_harness(
                     try:
                         artifacts = discover_remote_artifacts(
                             project_dir, sandbox, issue=issue, baseline=baseline,
-                            plan_sha=plan_sha, provenance_dir=provenance_dir,
+                            run_base_sha=run_base_sha, provenance_dir=provenance_dir,
                         )
                         verified = verify_pull_request(artifacts, default_branch=baseline.default_branch)
                         if pinned and registration is not None:
@@ -4249,6 +4232,8 @@ def run_harness(
                                     f"#{verified.number} -> {verified.head_ref}"
                                     f" (expected {registration.branch})",
                                 )
+                        if dict(artifacts.deletable_branches).get(verified.head_ref) == run_base_sha:
+                            raise PullRequestInvariantError("implementation_missing", "branch contains only the run anchor")
                         pr = verified
                     except PullRequestInvariantError as exc:
                         base_monitor(*pr_invariant_event(exc))
@@ -4261,6 +4246,8 @@ def run_harness(
             pending = exc
         except Exception as exc:
             pending = exc
+            if isinstance(exc, HarnessRemoteCleanupError):
+                cleanup_incomplete = True
         except BaseException:
             # Interrupt (KeyboardInterrupt/SystemExit): no remote operation is safe to
             # start now; retain the workspace and hand the operator the pointers.
@@ -4305,7 +4292,7 @@ def run_harness(
                 sandbox,
                 issue=issue,
                 baseline=baseline,
-                plan_sha=plan_sha or "",
+                run_base_sha=run_base_sha or "",
                 tick_id=shutdown_tick_id,
                 expected_phase_keys=shutdown_keys,
                 provenance_dir=provenance_dir,
