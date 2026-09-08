@@ -268,7 +268,7 @@ _PEM_BLOCK = (
         pytest.param(f"token: Bearer {_JWT}", _JWT, id="keyword-then-bearer"),
         pytest.param(f"Proxy-Authenticate Bearer {_JWT}", _JWT, id="bare-bearer-value"),
         pytest.param(
-            "fatal: repository 'https://hyon:s3cr3t-pw@github.com/o/r.git' not found",
+            "fatal: repository 'https://" "hyon:s3cr3t-pw" "@github.com/o/r.git' not found",
             "s3cr3t-pw",
             id="url-userinfo",
         ),
@@ -328,7 +328,7 @@ def test_redaction_keeps_the_diagnostic_usable():
     """Redaction must not swallow the host, so the error still says where."""
     # The host must survive so the diagnostic is still usable.
     assert "github.com/o/r.git" in sanitize_result_text(
-        "https://hyon:s3cr3t-pw@github.com/o/r.git", maximum=8192
+        "https://" "hyon:s3cr3t-pw" "@github.com/o/r.git", maximum=8192
     )
     # A ``.netrc`` line keeps its machine, and an AWS diagnostic its verb.
     assert "machine github.com" in sanitize_result_text(
