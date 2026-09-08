@@ -336,7 +336,8 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
         (
             "codex",
             'codex exec --sandbox workspace-write '
-            '-c sandbox_workspace_write.network_access=true - < "$PROMPT_FILE"',
+            '-c sandbox_workspace_write.network_access=true '
+            '--add-dir "$TPO_GIT_COMMON_DIR" - < "$PROMPT_FILE"',
             "claude -p",
         ),
         (
@@ -429,7 +430,8 @@ _HOSTILE_PROMPT = (
         (
             "codex",
             'codex exec --sandbox workspace-write '
-            '-c sandbox_workspace_write.network_access=true - < "$PROMPT_FILE"',
+            '-c sandbox_workspace_write.network_access=true '
+            '--add-dir "$TPO_GIT_COMMON_DIR" - < "$PROMPT_FILE"',
         ),
         (
             "claude",
@@ -517,9 +519,10 @@ def test_shell_metacharacters_in_a_phase_prompt_reach_the_card_unchanged(
     assert "Plan's" not in command_line
 
 
+@pytest.mark.parametrize("linked_worktree", [False, True])
 @pytest.mark.parametrize("prompt_client", ["codex", "claude"])
 def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
-    tmp_path, prompt_client
+    tmp_path, prompt_client, linked_worktree
 ):
     """Run the advertised shell sequence with an unset PROMPT_FILE and fake client."""
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
@@ -553,7 +556,7 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
     prompt_file = tmp_path / "prompt-$PAYLOAD-`false`-apostrophe's.txt"
     prompt_file.write_text(payload)
     _, fence, snippet_rest = dispatcher.partition("```sh\n")
-    assert fence, "Dispatcher must provide a safe two-statement launch sequence"
+    assert fence, "Dispatcher must provide a safe launch sequence"
     snippet, _, _ = snippet_rest.partition("```\n")
     snippet = snippet.replace(
         '"/absolute/path/to/already-written-prompt.txt"',
@@ -575,8 +578,23 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
         PATH=f"{fake_bin}:{env['PATH']}",
         CAPTURE_ARGS=str(args_file), CAPTURE_STDIN=str(stdin_file),
     )
+    repository = tmp_path / "repo spaces-$PAYLOAD-`false`-apostrophe's"
+    subprocess.run(["git", "init", str(repository)], check=True, capture_output=True)
+    launch_dir = repository
+    if linked_worktree:
+        subprocess.run(
+            ["git", "-C", str(repository), "-c", "user.name=Test", "-c",
+             "user.email=test@example.com", "-c", "commit.gpgsign=false",
+             "commit", "--allow-empty", "-m", "fixture"],
+            check=True, capture_output=True,
+        )
+        launch_dir = tmp_path / "selected worktree"
+        subprocess.run(
+            ["git", "-C", str(repository), "worktree", "add", "-b", "fixture", str(launch_dir)],
+            check=True, capture_output=True,
+        )
     completed = subprocess.run(
-        ["/bin/sh", "-eu", "-c", snippet], env=env,
+        ["/bin/sh", "-eu", "-c", snippet], env=env, cwd=launch_dir,
         capture_output=True, text=True, timeout=10,
     )
     assert completed.returncode == 0, completed.stderr
@@ -585,11 +603,53 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
     assert "END EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
     expected_args = (
         ["exec", "--sandbox", "workspace-write", "-c",
-         "sandbox_workspace_write.network_access=true", "-"]
+         "sandbox_workspace_write.network_access=true",
+         "--add-dir", str(repository.resolve() / ".git"), "-"]
         if prompt_client == "codex"
         else ["-p", "--permission-mode", "dontAsk", "--allowedTools", "Read,Bash"]
     )
     assert args_file.read_text().splitlines() == expected_args
+
+
+@pytest.mark.parametrize(
+    ("git_output", "git_status"),
+    [("", 1), ("", 0), ("/does-not-exist/tpo-git-metadata", 0), (".", 0)],
+)
+def test_codex_dispatch_refuses_unresolved_git_metadata(tmp_path, git_output, git_status):
+    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
+
+    block = _external_client_delegation_block("codex", timeout=1800, tools="")
+    snippet = block.partition("```sh\n")[2].partition("```\n")[0]
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("Never launch with missing metadata permissions.")
+    snippet = snippet.replace(
+        '"/absolute/path/to/already-written-prompt.txt"', shlex.quote(str(prompt_file))
+    )
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    git = fake_bin / "git"
+    git.write_text(
+        "#!/bin/sh\n"
+        'printf "%s\\n" "$GIT_OUTPUT"\n'
+        'exit "$GIT_STATUS"\n'
+    )
+    git.chmod(0o755)
+    client = fake_bin / "codex"
+    client.write_text('#!/bin/sh\ntouch "$CLIENT_STARTED"\n')
+    client.chmod(0o755)
+    started = tmp_path / "started"
+    env = dict(os.environ)
+    env.update(
+        PATH=f"{fake_bin}:{env['PATH']}", GIT_OUTPUT=git_output,
+        GIT_STATUS=str(git_status), CLIENT_STARTED=str(started),
+        TPO_GIT_COMMON_DIR=str(tmp_path),  # Stale inherited values cannot authorize launch.
+    )
+    completed = subprocess.run(
+        ["/bin/sh", "-c", snippet], cwd=tmp_path, env=env,
+        capture_output=True, text=True, timeout=10,
+    )
+    assert completed.returncode != 0
+    assert not started.exists()
 
 
 def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, mocker):

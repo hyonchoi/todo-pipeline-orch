@@ -164,6 +164,8 @@ def _external_client_delegation_block(
     is asked to execute. Passing ``None`` publishes no template, and the
     dispatcher is told only to carry the same result metadata forward.
     """
+    launch_setup = ""
+    launch_guidance = ""
     if prompt_client == "codex":
         # ``codex exec [PROMPT]``: "If not provided as an argument (or if `-`
         # is used), instructions are read from stdin." ``-`` is given
@@ -171,7 +173,21 @@ def _external_client_delegation_block(
         # append the stdin as a separate ``<stdin>`` block instead.
         command = (
             "codex exec --sandbox workspace-write "
-            "-c sandbox_workspace_write.network_access=true -"
+            "-c sandbox_workspace_write.network_access=true "
+            '--add-dir "$TPO_GIT_COMMON_DIR" -'
+        )
+        launch_setup = (
+            'TPO_GIT_COMMON_DIR="$(git rev-parse --path-format=absolute '
+            '--git-common-dir)" || exit 1\n'
+            'case "$TPO_GIT_COMMON_DIR" in /*) ;; *) exit 1 ;; esac\n'
+            '[ -d "$TPO_GIT_COMMON_DIR" ] || exit 1\n'
+        )
+        launch_guidance = (
+            "Run the entire launch sequence from the selected phase worktree. "
+            "Resolve its absolute Git common directory there immediately before "
+            "launch; stop if resolution fails. Grant only that metadata directory "
+            "with `--add-dir`, retaining workspace-write and the network override. "
+            "Do not grant the parent checkout or broader filesystem access.\n"
         )
     elif prompt_client == "claude":
         tool_names = [tool.strip() for tool in tools.split(",") if tool.strip()]
@@ -237,8 +253,10 @@ def _external_client_delegation_block(
         "surrounding quotes, with that shell-quoted value. The path must be "
         "passed literally, without interpolation or command substitution; "
         "do not just insert a path inside the example's double quotes:\n"
+        f"{launch_guidance}"
         "```sh\n"
         'PROMPT_FILE="/absolute/path/to/already-written-prompt.txt"\n'
+        f"{launch_setup}"
         f'{command} < "$PROMPT_FILE"\n'
         "```\n"
         f'Required external command: `{command} < "$PROMPT_FILE"`\n'
