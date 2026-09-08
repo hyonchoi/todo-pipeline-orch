@@ -43,6 +43,13 @@ prompt variable before redirecting stdin and
 shell-quotes the literal file path. Existing kanban cards retain their original
 instructions, so start a new harness run to exercise these dispatcher fixes.
 
+After a successful external-client run, Hermes collects result metadata using
+the client's reported gate and test evidence and read-only Git inspection. It
+does not rerun tests, builds, or dependency installation during collection,
+because those commands can recreate files such as `uv.lock`. A final clean-tree
+check follows collection; missing evidence or a dirty tree blocks completion.
+The dispatcher does not clean up files or create a commit to resolve that block.
+
 ## One-time sandbox setup
 
 Create a dedicated, disposable repository (empty, or containing only a README /
