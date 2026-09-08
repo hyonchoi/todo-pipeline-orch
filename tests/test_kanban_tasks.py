@@ -3081,18 +3081,16 @@ def test_plan_worker_card_publishes_the_result_metadata_template(tmp_path):
         project_dir=tmp_path,
     )
 
-    expected = render_result_template(
+    # The dispatcher closes the card, so the template it must copy is published
+    # on its side of the boundary -- never inside the delimited client prompt.
+    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
+    assert render_result_template(
         tick_id="01TICK",
         todo_id="TODO-41",
         step_key="plan:task-1",
         acceptance_criteria=("First exact criterion.",),
-    )
-    assert expected in prepared[0].body
-    # The dispatcher closes the card, so it must be pointed at the same object,
-    # and told to supply the one field only it holds.
-    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
+    ) in dispatcher
     assert "metadata.tpo_result" in dispatcher
-    assert "external_session_id" in dispatcher
     # "exactly, never paraphrase" must not override a stated substitution, or a
     # defect-bearing review gets published as clean.
     assert "substitution the template" in dispatcher

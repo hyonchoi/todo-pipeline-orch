@@ -153,9 +153,11 @@ gstack, superpowers, and agent-skills workflows are not part of this profile.
 
 Kanban is authoritative for live state and `metadata.tpo_result`. Local files
 under `.hermes/runs/<tick-id>/` contain immutable registration and crash-recovery
-evidence only. TPO validates identity, commit topology, changed files, TDD
-records, acceptance statuses, and review findings before opening a controller
-gate.
+evidence only. TPO validates identity, commit topology, changed files,
+acceptance statuses, and review findings before opening a controller gate. The
+contract asks only for facts the dispatcher can observe, and its template is
+published in the card's delegation block: the delimited external-agent prompt
+carries the phase profile's or Plan task's own words and nothing else.
 
 ## Data Flow
 

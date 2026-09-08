@@ -344,86 +344,17 @@ def test_reconcile_reviews_forwards_repo_to_registration_loader(tmp_path, mocker
     assert load.call_args.kwargs["repo"] == "acme/repo"
 
 
-def _worker_card_registration(tmp_path):
-    return SimpleNamespace(
-        todo_id="TODO-42",
-        worktree=tmp_path,
-        assignee="implementer",
-        review_assignee="reviewer",
-        prompt_client="codex",
-        manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1"),)),
-    )
+def test_review_prompt_scopes_findings_to_defects_still_present():
+    """Review judgement is work instruction, so it rides with the prompt.
 
+    The template used to carry it, which put it in front of the dispatcher
+    rather than the reviewer. A re-review that re-reports an already-fixed
+    defect never converges.
+    """
+    from hermes_pipeline.review_reconciliation import _review_prompt
 
-def test_review_card_publishes_the_full_result_metadata_template(tmp_path, mocker):
-    from hermes_pipeline.result_contract import render_result_template
+    prompt = _review_prompt("a" * 40)
 
-    create = mocker.patch(
-        "hermes_pipeline.review_reconciliation._create_task",
-        side_effect=["review-id"],
-    )
-    mocker.patch(
-        "hermes_pipeline.review_reconciliation._implementation_head",
-        return_value="a" * 40,
-    )
-
-    _ensure_initial_review(
-        project_dir=tmp_path,
-        tasks={"plan:task-1": _task("worker-1")},
-        registration=_worker_card_registration(tmp_path),
-        tenant="demo", tick_id="01TICK",
-    )
-
-    prompt = create.call_args_list[0].kwargs["prompt"]
-    assert render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-        section="review", pinned_head_sha="a" * 40, allow_no_changes=True,
-    ) in prompt
-
-
-def test_rereview_card_publishes_its_own_step_key_template(tmp_path, mocker):
-    from hermes_pipeline.result_contract import render_result_template
-    from hermes_pipeline.review_reconciliation import _ensure_rereview
-
-    create = mocker.patch(
-        "hermes_pipeline.review_reconciliation._create_task", return_value="rereview-id"
-    )
-
-    _ensure_rereview(
-        project_dir=tmp_path, round_number=2, fix_id="fix-id",
-        head_sha="d" * 40, registration=_worker_card_registration(tmp_path),
-        tenant="demo", tick_id="01TICK", tasks={},
-    )
-    assert create.call_args.kwargs["parent"] == "fix-id"
-
-    assert render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="re-review:2",
-        section="review", pinned_head_sha="d" * 40, allow_no_changes=True,
-    ) in create.call_args.kwargs["prompt"]
-
-
-def test_review_fix_card_publishes_the_committing_worker_template(tmp_path, mocker):
-    from hermes_pipeline.result_contract import render_result_template
-
-    create = mocker.patch(
-        "hermes_pipeline.review_reconciliation._create_task",
-        side_effect=["fix-id"],
-    )
-
-    _ensure_round(
-        project_dir=tmp_path, round_number=1, parent="review-id",
-        registration=_worker_card_registration(tmp_path),
-        tenant="demo", tick_id="01TICK", tasks={},
-        findings=({"priority": "P1", "location": "a.py:1",
-                   "failure_scenario": "x", "recommendation": "y"},),
-    )
-
-    fix_call = next(
-        call for call in create.call_args_list
-        if call.kwargs["key"] == "review-fix:1"
-    )
-    assert render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="review-fix:1",
-    ) in fix_call.kwargs["prompt"]
-    # The fix card is the round's only card.
-    assert len(create.call_args_list) == 1
+    assert "still present in the code you reviewed" in prompt
+    assert "already been fixed" in prompt
+    assert "do not modify the worktree" in prompt

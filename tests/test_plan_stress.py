@@ -33,24 +33,17 @@ def _manifest() -> str:
 
 def _worker_result(number: int, parent: str, head: str) -> dict[str, object]:
     criterion = f"Change {number} is observable."
-    command = f"uv run pytest tests/test_change_{number}.py"
     return {
         "schema_version": 1,
         "tick_id": TICK_ID,
         "todo_id": TODO_ID,
         "step_key": f"plan:task-{number}",
         "verdict": "success",
-        "external_session_id": f"session-{number}",
         "git": {
             "expected_parent_sha": parent,
             "resulting_head_sha": head,
             "task_commit_sha": head,
             "changed_files": [f"change-{number}.txt"],
-        },
-        "tdd": {
-            "red": {"command": command, "exit_code": 1},
-            "green": {"command": command, "exit_code": 0},
-            "refactor": {"command": command, "exit_code": 0},
         },
         "acceptance": [{"criterion": criterion, "status": "passed"}],
     }

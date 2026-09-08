@@ -46,9 +46,7 @@ _TOP_KEYS = {
     "todo_id",
     "step_key",
     "verdict",
-    "external_session_id",
     "git",
-    "tdd",
     "acceptance",
 }
 _OPTIONAL_TOP_KEYS = {"review", "delivery"}
@@ -61,7 +59,6 @@ _GIT_KEYS = {
     "task_commit_sha",
     "changed_files",
 }
-_TDD_KEYS = {"red", "green", "refactor"}
 _COMMAND_KEYS = {"command", "exit_code"}
 _ACCEPTANCE_ENTRY_KEYS = {"criterion", "status"}
 _REVIEW_KEYS = {"verdict", "findings"}
@@ -73,10 +70,6 @@ _FINDING_PRIORITIES = ("P0", "P1", "P2", "P3")
 # card builders key the dispatcher's instruction off it so a card can never
 # promise metadata it did not publish.
 RESULT_TEMPLATE_HEADING = "Required result metadata:"
-# Reported in the mandatory ``tdd`` block by a card the contract verifies as
-# read-only, where no red-green-refactor cycle exists to report.
-READ_ONLY_TDD_COMMAND = "read-only card: no TDD cycle"
-READ_ONLY_TDD_EXIT_CODE = 127
 
 
 class ResultContractError(RuntimeError):
@@ -106,11 +99,7 @@ class WorkerResult:
     tick_id: str
     todo_id: str
     step_key: str
-    external_session_id: str
     git: GitResult
-    red: CommandResult
-    green: CommandResult
-    refactor: CommandResult
     review: ReviewEvidence | None = None
     delivery: DeliveryEvidence | None = None
 
@@ -210,12 +199,14 @@ def _bounded_string(value: object, *, maximum: int, code: str) -> str:
 
 
 def _command(value: object, *, name: str) -> CommandResult:
-    item = _mapping(value, code="invalid_tdd")
-    _exact_keys(item, _COMMAND_KEYS, code="invalid_tdd")
-    command = _bounded_string(item["command"], maximum=MAX_COMMAND_LENGTH, code="invalid_tdd")
+    item = _mapping(value, code="invalid_command")
+    _exact_keys(item, _COMMAND_KEYS, code="invalid_command")
+    command = _bounded_string(
+        item["command"], maximum=MAX_COMMAND_LENGTH, code="invalid_command"
+    )
     exit_code = item["exit_code"]
     if isinstance(exit_code, bool) or not isinstance(exit_code, int):
-        raise ResultContractError("invalid_tdd", name)
+        raise ResultContractError("invalid_command", name)
     return CommandResult(command, exit_code)
 
 
@@ -320,7 +311,6 @@ def parse_worker_result(
     identities = (raw["tick_id"], raw["todo_id"], raw["step_key"])
     if identities != (tick_id, todo_id, step_key):
         raise ResultContractError("identity_mismatch")
-    session = _bounded_string(raw["external_session_id"], maximum=256, code="invalid_session")
 
     git = _mapping(raw["git"], code="invalid_git")
     _exact_keys(git, _GIT_KEYS, code="invalid_git")
@@ -345,14 +335,6 @@ def parse_worker_result(
         if path.is_absolute() or ".." in path.parts or "\\" in filename:
             raise ResultContractError("invalid_git", "unsafe changed file")
     git_result = GitResult(shas[0], shas[1], shas[2], tuple(files))
-
-    tdd = _mapping(raw["tdd"], code="invalid_tdd")
-    _exact_keys(tdd, _TDD_KEYS, code="invalid_tdd")
-    red = _command(tdd["red"], name="red")
-    green = _command(tdd["green"], name="green")
-    refactor = _command(tdd["refactor"], name="refactor")
-    if red.exit_code == 0 or green.exit_code != 0 or refactor.exit_code != 0:
-        raise ResultContractError("invalid_tdd", "red/green/refactor exit codes")
 
     acceptance = raw["acceptance"]
     if not isinstance(acceptance, list) or len(acceptance) != len(acceptance_criteria):
@@ -381,8 +363,7 @@ def parse_worker_result(
     if "delivery" in raw:
         delivery_evidence = _validate_delivery(raw["delivery"])
     return WorkerResult(
-        tick_id, todo_id, step_key, session, git_result, red, green, refactor,
-        review_evidence, delivery_evidence,
+        tick_id, todo_id, step_key, git_result, review_evidence, delivery_evidence,
     )
 
 
@@ -484,11 +465,11 @@ def _template_git(pinned_head_sha: str | None, allow_no_changes: bool) -> dict[s
         )
     return _require_keys(
         {
-            "expected_parent_sha": "<40-hex SHA of HEAD before your commit>",
-            "resulting_head_sha": "<40-hex SHA of HEAD after your commit>",
-            "task_commit_sha": "<40-hex SHA of your commit; same as resulting_head_sha>",
+            "expected_parent_sha": "<40-hex SHA of HEAD before the task commit>",
+            "resulting_head_sha": "<40-hex SHA of HEAD after the task commit>",
+            "task_commit_sha": "<40-hex SHA of the task commit; same as resulting_head_sha>",
             "changed_files": (
-                [] if allow_no_changes else ["<repo-relative path your commit changed>"]
+                [] if allow_no_changes else ["<repo-relative path the task commit changed>"]
             ),
         },
         _GIT_KEYS,
@@ -496,12 +477,10 @@ def _template_git(pinned_head_sha: str | None, allow_no_changes: bool) -> dict[s
     )
 
 
-def _template_command(
-    description: str, exit_code: int, *, literal: str | None = None
-) -> dict[str, object]:
+def _template_command(description: str, exit_code: int) -> dict[str, object]:
     return _require_keys(
         {
-            "command": literal if literal is not None else f"<{description}>",
+            "command": f"<{description}>",
             "exit_code": exit_code,
         },
         _COMMAND_KEYS,
@@ -541,10 +520,10 @@ def _template_delivery(*, pinned_head_sha: str, branch: str) -> dict[str, object
             # the URL's own shape ("<https://github.com/OWNER/REPO/pull/N>")
             # invite a worker to fill the parts in place and keep the
             # brackets, which the contract rejects as an unfilled placeholder.
-            "pr_url": "<URL of the pull request you opened>",
+            "pr_url": "<URL of the pull request the external client opened>",
             "branch": branch,
             "head_sha": pinned_head_sha,
-            "checks": [_template_command("required repository gate you ran", 0)],
+            "checks": [_template_command("required repository gate the client ran", 0)],
         },
         _DELIVERY_KEYS,
         name="delivery",
@@ -562,49 +541,29 @@ def render_result_template(
     branch: str | None = None,
     allow_no_changes: bool = False,
 ) -> str:
-    """Render the ``metadata.tpo_result`` template a worker-facing card publishes.
+    """Render the ``metadata.tpo_result`` template a card's delegation block publishes.
 
-    The template is derived from the same constants ``parse_worker_result``
-    enforces, with every pipeline-known value pre-filled, so the worker only
-    supplies facts that it alone holds. ``section`` names the optional
-    sub-object the card's reconciler requires (``review`` or ``delivery``);
-    ``pinned_head_sha`` pre-fills the Git block for a read-only card.
+    The template is addressed to the Hermes dispatcher, not to the external
+    client: the dispatcher launched the process and closes the card, so it is
+    the only party that can write ``metadata.tpo_result`` at all. It is derived
+    from the same constants ``parse_worker_result`` enforces, with every
+    pipeline-known value pre-filled, so the dispatcher only supplies facts it
+    can observe -- the Git topology of the worktree it owns, and what the client
+    reported. ``section`` names the optional sub-object the card's reconciler
+    requires (``review`` or ``delivery``); ``pinned_head_sha`` pre-fills the Git
+    block for a read-only card.
     """
     if section is not None and section not in _OPTIONAL_TOP_KEYS:
         raise ResultContractError("unknown_result_section", str(section))
     if section == "delivery" and (pinned_head_sha is None or branch is None):
         raise ResultContractError("incomplete_result_section", "delivery")
-    read_only_command = READ_ONLY_TDD_COMMAND if pinned_head_sha is not None else None
     template: dict[str, object] = {
         "schema_version": SCHEMA_VERSION,
         "tick_id": tick_id,
         "todo_id": todo_id,
         "step_key": step_key,
         "verdict": "success",
-        "external_session_id": "<session id of the external client run>",
         "git": _template_git(pinned_head_sha, allow_no_changes),
-        # A pinned card is verified read-only, so it has no TDD cycle to report:
-        # the contract still requires the block, and a fixed sentinel keeps an
-        # honest worker from inventing commands it never ran.
-        "tdd": _require_keys(
-            {
-                "red": _template_command(
-                    "exact failing test command",
-                    # Non-zero satisfies the contract either way; 127 reads as
-                    # "nothing ran" rather than "a test failed".
-                    READ_ONLY_TDD_EXIT_CODE if read_only_command else 1,
-                    literal=read_only_command,
-                ),
-                "green": _template_command(
-                    "exact command that now passes", 0, literal=read_only_command
-                ),
-                "refactor": _template_command(
-                    "exact command after refactoring", 0, literal=read_only_command
-                ),
-            },
-            _TDD_KEYS,
-            name="tdd",
-        ),
         "acceptance": [
             _require_keys(
                 {"criterion": criterion, "status": "passed"},
@@ -623,10 +582,9 @@ def render_result_template(
         )
     lines = [
         RESULT_TEMPLATE_HEADING,
-        "Report metadata.tpo_result as exactly this object at the end of your "
-        "output, replacing every <...> placeholder with the real value; the "
-        "Hermes dispatcher that launched you closes the card with it verbatim. "
-        "Add no other keys, drop none, and keep the pre-filled values verbatim.",
+        "Close this card with metadata.tpo_result set to exactly this object, "
+        "replacing every <...> placeholder with the real value. Add no other "
+        "keys, drop none, and keep the pre-filled values verbatim.",
         "```json",
         json.dumps(template, indent=2, ensure_ascii=False),
         "```",
@@ -636,50 +594,29 @@ def render_result_template(
         # would otherwise close a defect-bearing review as clean, because the
         # main fence carries the clean block.
         lines.append(
-            'The "review" value above is the defect-free case. A review that '
-            "found defects must not use it: replace the whole \"review\" value "
-            f"with the object below (at most {MAX_FINDINGS} findings, each with "
+            'The "review" value above is the defect-free case. Use it only when '
+            "the external client reported no defect. If it reported any, replace "
+            'the whole "review" value with the object below, one entry per '
+            f"reported defect (at most {MAX_FINDINGS} findings, each with "
             f"priority one of {', '.join(_FINDING_PRIORITIES)}), keeping the "
             'top-level "verdict" as "success":'
         )
         lines.append("```json")
         lines.append(json.dumps(_template_review(clean=False), indent=2, ensure_ascii=False))
         lines.append("```")
-        lines.append(
-            "Report a finding only for a defect still present in the code you "
-            "reviewed, never one already fixed there: publish that second "
-            'object as "review" whenever such a defect remains, and the clean '
-            "block only when none does."
-        )
     if section == "delivery":
         lines.append(
-            "checks lists every required gate you ran, not just one, each with "
-            "its exact command and real exit code -- replace the pre-filled 0 "
-            "if a gate exited non-zero, and expect the card to be rejected, "
-            "because delivery requires every gate to pass."
+            "checks lists every required gate the external client reported "
+            "running, not just one, each with its exact command and real exit "
+            "code -- replace the pre-filled 0 if a gate exited non-zero, and "
+            "expect the card to be rejected, because delivery requires every "
+            "gate to pass."
         )
-    if pinned_head_sha is not None:
+    if pinned_head_sha is None and not allow_no_changes:
         lines.append(
-            "This card must not change the worktree: leave changed_files empty "
-            "and every SHA as shown."
+            "changed_files lists every repo-relative path in the commit the "
+            "external client made, deduplicated, and must not be empty."
         )
-    elif not allow_no_changes:
-        lines.append(
-            "changed_files lists every repo-relative path in your commit, "
-            "deduplicated, and must not be empty."
-        )
-    if pinned_head_sha is not None:
-        lines.append(
-            "This card runs no TDD cycle: keep the tdd block exactly as shown."
-        )
-    else:
-        lines.append("red.exit_code must be non-zero and green/refactor must be 0.")
-    lines.append(
-        'The top-level "verdict" accepts only "success", and it is already filled '
-        "in. If you cannot complete the task, do not report a result object at "
-        "all: state the exact reason instead, so the dispatcher can block the "
-        "card."
-    )
     return "\n".join(lines) + "\n"
 
 

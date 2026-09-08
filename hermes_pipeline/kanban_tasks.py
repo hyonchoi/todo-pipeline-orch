@@ -146,13 +146,17 @@ def _external_client_delegation_block(
     prompt_client: PromptClient,
     timeout: int,
     tools: str,
-    expects_result_metadata: bool = False,
+    result_template: str | None = None,
 ) -> str:
     """Return the dispatcher contract prepended to executable phase tasks.
 
-    ``expects_result_metadata`` is set when the card below publishes the
-    ``metadata.tpo_result`` template, so the dispatcher that actually closes the
-    card is told to copy that object instead of writing a prose summary.
+    ``result_template`` is the rendered ``metadata.tpo_result`` template, and it
+    is published here rather than inside the delimited prompt below: the
+    dispatcher is the party that closes the card, so the schema and its
+    instructions are addressed to it. The delimited block stays exactly the
+    phase profile's or Plan task's own words, which is what the external client
+    is asked to execute. Passing ``None`` publishes no template, and the
+    dispatcher is told only to carry the same result metadata forward.
     """
     if prompt_client == "codex":
         command = "codex exec --sandbox workspace-write"
@@ -169,6 +173,18 @@ def _external_client_delegation_block(
             f"prompt_client must be one of ('claude', 'codex'), got {prompt_client!r}"
         )
     agent_product = CLIENT_VOCABULARY[prompt_client]["agent_product"]
+    if result_template is None:
+        closing = "When completing the task, include the same result metadata.\n\n"
+    else:
+        closing = (
+            "When completing the task, set `metadata.tpo_result` to exactly the "
+            f"object in the \"{RESULT_TEMPLATE_HEADING}\" template below, filled "
+            "with the Git facts of the worktree you own and the values the "
+            "external client reported; never summarize or paraphrase it, and "
+            "apply any substitution the template itself states for a section.\n"
+            + result_template
+            + "\n"
+        )
     return (
         "External client delegation:\n"
         "You are the Hermes dispatcher, not the implementation agent.\n"
@@ -195,17 +211,7 @@ def _external_client_delegation_block(
         '`kanban_block(kind="needs_input", reason=<exact reason>)`. '
         "Do not inspect, implement, or commit partial work; you must not inspect "
         "partial changes, and must not implement or commit the phase yourself.\n"
-        + (
-            "When completing the task, set `metadata.tpo_result` to exactly the "
-            f"object in the \"{RESULT_TEMPLATE_HEADING}\" template below, filled "
-            "with the values the external client reported; never summarize or "
-            "paraphrase it, and apply any substitution the template itself "
-            "states for a section. Set `external_session_id` from the external client "
-            "run you launched, which is the same session id you would report "
-            "through `kanban_comment` on failure.\n\n"
-            if expects_result_metadata
-            else "When completing the task, include the same result metadata.\n\n"
-        )
+        + closing
     )
 
 
@@ -809,13 +815,7 @@ def prepare_todo_phases(
                     + "\n\nVerification:\n"
                     + "\n".join(f"- {item}" for item in plan_task.verification)
                     + f"\n\nRequired commit message: {plan_task.commit_message}\n"
-                    "Complete only this task using red-green-refactor TDD.\n\n"
-                    + render_result_template(
-                        tick_id=tick_id,
-                        todo_id=todo_id,
-                        step_key=worker_key,
-                        acceptance_criteria=plan_task.acceptance_criteria,
-                    )
+                    "Complete only this task using red-green-refactor TDD.\n"
                 )
                 rendered_worker = _render_phase_prompt(
                     "",
@@ -847,7 +847,12 @@ def prepare_todo_phases(
                                 timeout=phase.timeout,
                                 tools=phase.tools,
                                 # Manifest workers always publish the template.
-                                expects_result_metadata=True,
+                                result_template=render_result_template(
+                                    tick_id=tick_id,
+                                    todo_id=todo_id,
+                                    step_key=worker_key,
+                                    acceptance_criteria=plan_task.acceptance_criteria,
+                                ),
                             )
                             + _external_agent_prompt_block(rendered_worker)
                         ),
@@ -882,7 +887,7 @@ def prepare_todo_phases(
             tools=phase.tools,
             # Profile phases publish no result template: their results are
             # never parsed, and the prompt comes from overridable YAML.
-            expects_result_metadata=False,
+            result_template=None,
         )
         prepared.append(
             PreparedPhaseTask(

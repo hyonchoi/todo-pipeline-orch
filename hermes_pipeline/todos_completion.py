@@ -561,16 +561,17 @@ def reconcile_todo_completion(
             prompt=(
                 "Run every required repository gate on the clean reviewed head, then "
                 "push the registered branch and create or update its pull request. "
-                f"Do not merge. The expected parent is {head}.\n\n"
-                + render_result_template(
-                    tick_id=tick_id,
-                    todo_id=registration.todo_id,
-                    step_key=FINISH_KEY,
-                    section="delivery",
-                    pinned_head_sha=head,
-                    branch=registration.branch,
-                    allow_no_changes=True,
-                )
+                f"Do not merge. The expected parent is {head}; do not modify the "
+                "worktree or add any commit, so HEAD stays on that SHA."
+            ),
+            result_template=render_result_template(
+                tick_id=tick_id,
+                todo_id=registration.todo_id,
+                step_key=FINISH_KEY,
+                section="delivery",
+                pinned_head_sha=head,
+                branch=registration.branch,
+                allow_no_changes=True,
             ),
             worktree=registration.worktree, assignee=registration.assignee,
             prompt_client=registration.prompt_client,

@@ -54,22 +54,26 @@ def _result(**updates):
         "todo_id": "TODO-42",
         "step_key": "plan:task-1",
         "verdict": "success",
-        "external_session_id": "session-1",
         "git": {
             "expected_parent_sha": "a" * 40,
             "resulting_head_sha": "b" * 40,
             "task_commit_sha": "b" * 40,
             "changed_files": ["src/example.py"],
         },
-        "tdd": {
-            "red": {"command": "uv run pytest tests/test_example.py", "exit_code": 1},
-            "green": {"command": "uv run pytest tests/test_example.py", "exit_code": 0},
-            "refactor": {"command": "uv run pytest tests/test_example.py", "exit_code": 0},
-        },
         "acceptance": [{"criterion": "Observable criterion", "status": "passed"}],
     }
     value.update(updates)
     return value
+
+
+def _delivery(*, command="uv run pytest", **check_extra):
+    """A structurally valid ``delivery`` block, mutable one field at a time."""
+    return {
+        "pr_url": "https://github.com/acme/repo/pull/7",
+        "branch": "todo-42",
+        "head_sha": "b" * 40,
+        "checks": [{"command": command, "exit_code": 0, **check_extra}],
+    }
 
 
 def test_parse_valid_final_successful_run():
@@ -86,7 +90,7 @@ def test_parse_valid_final_successful_run():
         step_key="plan:task-1",
         acceptance_criteria=("Observable criterion",),
     )
-    assert parsed.external_session_id == "session-1"
+    assert parsed.step_key == "plan:task-1"
     assert parsed.git.changed_files == ("src/example.py",)
 
 
@@ -94,19 +98,15 @@ def test_parse_valid_final_successful_run():
     ("mutation", "code"),
     [
         (lambda p: p.update(tick_id="wrong"), "identity_mismatch"),
-        (lambda p: p.update(external_session_id=""), "invalid_session"),
         (lambda p: p["git"].update(task_commit_sha="c" * 40), "invalid_git"),
-        (lambda p: p["tdd"]["red"].update(exit_code=0), "invalid_tdd"),
-        (lambda p: p["tdd"]["green"].update(exit_code=1), "invalid_tdd"),
         (lambda p: p["acceptance"][0].update(status="pending"), "invalid_acceptance"),
-        (lambda p: p["tdd"]["red"].update(command="x" * 501), "size_limit"),
+        (lambda p: p.update(delivery=_delivery(command="x" * 501)), "size_limit"),
         # ``tpo_result`` stays exact-key-checked at every level: that strictness
         # is the whole reason the enclosing envelope need not be key-checked.
         (lambda p: p.update(unexpected="x"), "malformed_result"),
         (lambda p: p.pop("git"), "malformed_result"),
         (lambda p: p["git"].update(unexpected="x"), "invalid_git"),
-        (lambda p: p["tdd"].update(unexpected="x"), "invalid_tdd"),
-        (lambda p: p["tdd"]["red"].update(unexpected="x"), "invalid_tdd"),
+        (lambda p: p.update(delivery=_delivery(unexpected="x")), "invalid_command"),
         (lambda p: p["acceptance"][0].update(unexpected="x"), "invalid_acceptance"),
     ],
 )
@@ -213,7 +213,6 @@ def test_parse_accepts_platform_injected_metadata_siblings():
         "unsafe\x00key": "value",
         # Named like a ``tpo_result`` field on purpose: a sibling must never
         # reach the parse, least of all one that could override a checked field.
-        "external_session_id": "forged",
         # Structurally valid on purpose: an invalid forgery would be caught by
         # the nested key check before either assertion below is reached, so the
         # assertions -- not validator ordering -- are what prove no leak.
@@ -231,7 +230,6 @@ def test_parse_accepts_platform_injected_metadata_siblings():
         step_key="plan:task-1",
         acceptance_criteria=("Observable criterion",),
     )
-    assert parsed.external_session_id == "session-1"
     # Tolerated means unread: no sibling may reach the parsed result.
     assert parsed.git.changed_files == ("src/example.py",)
 
@@ -295,13 +293,8 @@ def test_summary_and_diagnostics_are_sanitized():
             "password=super-secret",
             id="stray-nested-acceptance-key",
         ),
-        # Contract regression guards, not scan coverage: ``_bounded_string``
-        # raises ``unsafe_metadata`` for these two even with the scan removed.
-        pytest.param(
-            ("tdd", "red", "command"),
-            "password=super-secret\x00",
-            id="tdd-command-double-covered",
-        ),
+        # A contract regression guard, not scan coverage: ``_bounded_string``
+        # raises ``unsafe_metadata`` for this one even with the scan removed.
         pytest.param(
             ("delivery", "checks", 0, "command"),
             "password=super-secret\x00",
@@ -383,13 +376,13 @@ def test_acceptance_criteria_are_plan_text_and_are_never_scanned(criterion):
         step_key="plan:task-1",
         acceptance_criteria=(criterion,),
     )
-    assert parsed.external_session_id == "session-1"
+    assert parsed.step_key == "plan:task-1"
 
     for mutation in (
         lambda item: item["git"].update(changed_files=["password=super-secret"]),
         # Belt and braces: this one also rejects via ``_bounded_string`` with
         # the scan removed, so it pins the contract rather than the exemption.
-        lambda item: item["tdd"]["red"].update(command="pytest password=hunter2"),
+        lambda item: item.update(delivery=_delivery(command="pytest password=hunter2")),
     ):
         unsafe = _result(acceptance=[{"criterion": criterion, "status": "passed"}])
         mutation(unsafe)
@@ -1588,15 +1581,11 @@ _JSON_BLOCK_RE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
 # would reject as unfilled.
 
 _TEMPLATE_FILL = {
-    ("external_session_id",): "session-1",
     ("review", "findings", 0, "priority"): "P1",
     ("git", "expected_parent_sha"): "a" * 40,
     ("git", "resulting_head_sha"): "b" * 40,
     ("git", "task_commit_sha"): "b" * 40,
     ("git", "changed_files", 0): "src/example.py",
-    ("tdd", "red", "command"): "uv run pytest tests/test_example.py",
-    ("tdd", "green", "command"): "uv run pytest tests/test_example.py",
-    ("tdd", "refactor", "command"): "uv run pytest tests/test_example.py",
     ("review", "findings", 0, "location"): "src/example.py:12",
     ("review", "findings", 0, "failure_scenario"): "A resumed tick closes the card twice.",
     ("review", "findings", 0, "recommendation"): "Guard the close with the run marker.",
@@ -1647,11 +1636,14 @@ def test_plan_template_round_trips_through_the_parser():
     )
 
     assert parsed.git.changed_files == ("src/example.py",)
-    assert parsed.red.exit_code != 0
-    assert (parsed.green.exit_code, parsed.refactor.exit_code) == (0, 0)
+    assert parsed.step_key == "plan:task-1"
     # The criteria are pipeline-known facts, so the template pre-fills them.
     assert "<" not in json.dumps(template["acceptance"])
-    assert "do not report a result object" in text
+    # The failure path is the dispatcher's ``kanban_block`` protocol, stated
+    # once in the delegation block. The template must not restate it as advice
+    # to whoever is reading -- that instruction is what a card in ``needs_input``
+    # is for.
+    assert "do not report a result object" not in text
 
 
 def test_review_template_round_trips_clean_and_findings_verdicts():
@@ -1736,9 +1728,6 @@ def test_template_publishes_every_key_the_contract_constants_require():
     )
     assert set(plan) == contract._TOP_KEYS
     assert set(plan["git"]) == contract._GIT_KEYS
-    assert set(plan["tdd"]) == contract._TDD_KEYS
-    for phase in contract._TDD_KEYS:
-        assert set(plan["tdd"][phase]) == contract._COMMAND_KEYS
     assert set(plan["acceptance"][0]) == contract._ACCEPTANCE_ENTRY_KEYS
 
     review, findings_variant = _template_blocks(
@@ -1803,14 +1792,10 @@ def _metavariable_slots(described: str) -> list[str]:
 # that pre-filling or dropping one is caught rather than absorbed by a sibling
 # that happens to share a field name.
 _EXPECTED_PLACEHOLDER_PATHS = {
-    ("external_session_id",),
     ("git", "expected_parent_sha"),
     ("git", "resulting_head_sha"),
     ("git", "task_commit_sha"),
     ("git", "changed_files", 0),
-    ("tdd", "red", "command"),
-    ("tdd", "green", "command"),
-    ("tdd", "refactor", "command"),
     # The findings variant is published as a bare "review" object.
     ("findings", 0, "priority"),
     ("findings", 0, "location"),
@@ -1920,8 +1905,7 @@ def test_parser_rejects_unfilled_template_placeholders():
         )
     )
     for path, code in (
-        (("external_session_id",), "invalid_session"),
-        (("tdd", "red", "command"), "invalid_tdd"),
+        (("git", "expected_parent_sha"), "invalid_git"),
         (("git", "changed_files"), "invalid_git"),
     ):
         result = _fill_template(template)
@@ -1945,40 +1929,32 @@ def test_bounded_string_allows_a_real_value_containing_angle_brackets():
     from hermes_pipeline.result_contract import _bounded_string
 
     assert _bounded_string(
-        "uv run pytest -k 'a<b'", maximum=100, code="invalid_tdd"
+        "uv run pytest -k 'a<b'", maximum=100, code="invalid_command"
     ) == "uv run pytest -k 'a<b'"
 
 
-def test_read_only_cards_need_no_invented_tdd_evidence():
-    """A pinned review or finish card is closable by filling the session id alone."""
+def test_read_only_review_template_is_wholly_pre_filled(tmp_path):
+    """A pinned review card leaves the dispatcher nothing to invent.
+
+    Every SHA is a registration fact and the card changes no file, so the whole
+    object is publishable as rendered. Delivery is the one pinned card that
+    still carries placeholders: only the client's PR URL and the gates it ran.
+    """
     from hermes_pipeline.result_contract import render_result_template
 
-    for kwargs, step_key in (
-        ({"section": "review", "pinned_head_sha": "c" * 40}, "review:0"),
-        (
-            {"section": "delivery", "pinned_head_sha": "b" * 40, "branch": "todo-42"},
-            "finish",
-        ),
-    ):
-        text = render_result_template(
-            tick_id="01TICK", todo_id="TODO-42", step_key=step_key,
-            allow_no_changes=True, **kwargs,
-        )
-        template = _template_blocks(text)[0]
-        assert "<" not in json.dumps(template["tdd"])
-        assert "red.exit_code" not in text
-        filled = _fill_template(template)
-        remaining = [
-            value for value in json.dumps(filled).split('"')
-            if value.startswith("<") and value.endswith(">")
-        ]
-        assert remaining == []
-        parsed = parse_worker_result(
-            _template_envelope(filled),
-            tick_id="01TICK", todo_id="TODO-42", step_key=step_key,
-            acceptance_criteria=(), allow_no_changes=True,
-        )
-        assert parsed.external_session_id == _TEMPLATE_FILL[("external_session_id",)]
+    text = render_result_template(
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        section="review", pinned_head_sha="c" * 40, allow_no_changes=True,
+    )
+    template = _template_blocks(text)[0]
+
+    assert "<" not in json.dumps(template)
+    parsed = parse_worker_result(
+        _template_envelope(template),
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        acceptance_criteria=(), allow_no_changes=True,
+    )
+    assert parsed.review is not None and parsed.review.verdict == "clean"
 
 
 def test_delivery_template_requires_the_pipeline_known_branch_and_head():
@@ -2003,15 +1979,9 @@ def test_review_body_states_the_findings_substitution_before_other_instructions(
     substitution = text.index('replace the whole "review" value')
 
     assert main_fence_end < substitution
-    for later in (
-        "must not change the worktree",
-        "runs no TDD cycle",
-        'top-level "verdict"',
-    ):
-        assert substitution < text.index(later), later
     # Both fences must name which review verdict they carry.
-    assert 'publish that second object as "review"' in text
     assert "defect-free" in text
+    assert text.index("defect-free") < substitution
 
 
 @pytest.mark.parametrize(
@@ -2040,7 +2010,7 @@ def test_summary_is_discarded_diagnostics_and_never_rejects_the_result(summary):
         tick_id="01TICK", todo_id="TODO-42", step_key="plan:task-1",
         acceptance_criteria=("Observable criterion",),
     )
-    assert parsed.external_session_id == "session-1"
+    assert parsed.step_key == "plan:task-1"
 
 
 def test_placeholder_rejection_never_swallows_a_real_bracketed_finding():
@@ -2094,19 +2064,6 @@ def test_every_rendered_placeholder_is_caught_by_the_placeholder_rule():
     assert seen >= 10
 
 
-def test_read_only_tdd_exit_code_reads_as_nothing_ran():
-    from hermes_pipeline.result_contract import render_result_template
-
-    template, _variant = _template_blocks(
-        render_result_template(
-            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
-            pinned_head_sha="c" * 40, allow_no_changes=True,
-        )
-    )
-
-    assert template["tdd"]["red"]["exit_code"] == 127
-
-
 def _all_templates():
     from hermes_pipeline.result_contract import render_result_template
 
@@ -2126,16 +2083,26 @@ def _all_templates():
     )
 
 
-def test_template_asks_only_for_what_the_external_client_can_do():
-    """The template is passed verbatim to a client with no Kanban tools."""
-    kanban_only = ("close the card", "closing the card", "kanban_close",
-                   "kanban_block", "kanban_comment")
+def test_template_addresses_the_dispatcher_that_closes_the_card():
+    """The template never reaches the external client, so it speaks to Hermes.
+
+    Only the dispatcher can write ``metadata.tpo_result`` at all, and it is the
+    party that reads this block. Second-person instructions that only an
+    implementation agent could follow are what leaked the schema across the
+    prompt boundary in the first place.
+    """
+    client_only = (
+        "external session",
+        "session id",
+        "your commit",
+        "you launched",
+        "at the end of your output",
+    )
     for text in _all_templates():
         lowered = text.lower()
-        for phrase in kanban_only:
+        assert "close this card" in lowered
+        for phrase in client_only:
             assert phrase not in lowered, phrase
-        # It must still say who closes the card with the reported object.
-        assert "dispatcher" in lowered
 
 
 def test_findings_priority_is_chosen_by_the_reviewer_not_pre_filled():
@@ -2155,8 +2122,9 @@ def test_delivery_body_demands_every_gate_it_ran():
     assert "every required gate" in text
 
 
-def test_review_substitution_is_scoped_to_defects_still_present():
+def test_review_substitution_is_keyed_to_what_the_client_reported():
+    """The dispatcher transcribes the client's verdict; it does not judge."""
     text = _all_templates()[1]
 
-    assert "still present" in text
-    assert "any defect at all" not in text
+    assert "the external client reported no defect" in text
+    assert "one entry per reported defect" in text
