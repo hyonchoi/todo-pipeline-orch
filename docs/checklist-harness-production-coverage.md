@@ -7,7 +7,9 @@ today, verified by reading full function bodies — not signatures, not docs.
 **Scope:** one automated tpo cycle in the kanban-as-scheduler path
 (`kanban_mode == "hermes"`, i.e. `harness.py::poll_registered_phases` and its
 callees; registration itself is performed by the production `tpo tick`
-subprocess, see the bullet under "Not covered"). Multi-project scan, Slack alerts, and preflight startup checks are
+subprocess). The embedded-Plan CLI integration described below additionally
+covers creation, registration, prompt preparation, and reconciliation with
+controlled external responses. Multi-project scan, Slack alerts, and preflight startup checks are
 out of scope — see [docs/gstack design doc TODO-22] "NOT in scope" section for
 rationale.
 
@@ -62,14 +64,37 @@ unchanged and unaffected by this decision.
 
 ---
 
+## Embedded-Plan harness coverage
+
+- `tests/test_harness_embedded_cli.py::test_real_cli_pins_harness_embedded_plan_across_ticks`
+  invokes the real `cli.main` for `todos create`,
+  `plan validate --todo 42 --require-manifest`, `todos audit`, `doctor`, repeated
+  `tick` calls, and `todos complete`. GitHub/Hermes, selection, and worker
+  responses are controlled; registration, prompt preparation, and reconciliation
+  use production code. An independent golden document checks published Plan
+  bytes and the `PlanReference` digest, normalization, stable schema-v3
+  registration with `plan_path=None`, review/finish prompts, and completion
+  preserving the Plan. The issue manifest remains schema-v1; production legacy
+  Plan support and v2/v3 registration readers remain compatible.
+- `tests/test_harness.py` covers harness request retention and fresh UUIDs,
+  creation error boundaries and failed readiness, anchor retries and HEAD
+  conflicts, embedded registration validation and drift, artifact tampering,
+  and cleanup safeguards. Its creation-wrapper tests mock `execute_create`;
+  `tests/test_todos_create.py` covers production transaction persistence and
+  reconciliation, and the real CLI integration above exercises actual creation. The empty run anchor changes no tracked content and
+  supplies `run_base_sha` for provenance. An anchor-only branch may be owned for
+  cleanup but fails delivery with `implementation_missing`.
+- `tests/test_harness_e2e.py` covers orchestration and cleanup using a local bare
+  remote and a mocked tick. It is distinct from the real CLI integration above.
+  Neither suite proves live GitHub/Hermes or provider behavior; that requires a
+  separate live harness run.
+
 ## Not covered by this checklist (see design doc "NOT in scope")
 
 - Multi-project scan coverage
-- `tick.py::TickLock.acquire`, issue selection, and phase registration — the
-  live harness runs the production `tpo tick` as a subprocess (see
-  [howto-live-integration-test-harness.md](howto-live-integration-test-harness.md)),
-  so these fire through the real tick runner rather than through harness-local
-  calls; rows 1-3 remain covered by the production functions' own tests.
+- Live selection-agent/provider behavior. The real CLI integration controls
+  selection; the live harness runs production `tpo tick` as a subprocess (see
+  [howto-live-integration-test-harness.md](howto-live-integration-test-harness.md)).
 - Multi-project scan, Slack alert delivery, preflight startup checks.
 - `_dispatch_phase` / `phases.run` / marker lifecycle (`.hermes/phase_started/`)
   — these only fire in the non-kanban path, out of scope (see design doc
