@@ -41,8 +41,70 @@ def test_native_sdd_docs_describe_compiled_plan_to_kanban_lifecycle():
     assert "cron" in combined and "TPO" in combined and "Kanban" in combined
     assert "registration.json" in combined
     assert "review-fix" in combined
-    assert "five" in combined.lower() and "needs_input" in combined
+    # Review is binary and the profile owns it: the reviewer commits its own
+    # fixes, so the docs must describe the card's own status as the outcome and
+    # must not resurrect the bounded remediation rounds that contradicted the
+    # profile.
+    assert "phase_5_review" in combined
+    assert "blocked" in combined and "accepted-review-head" in combined
+    assert "re-review" not in combined
+    assert "fix-validation" not in combined
     assert "never resets" in combined.lower()
+    # No card has ever existed for a gate phase, in any profile: both card-
+    # creating loops in ``kanban_tasks`` (``_register_todo_phases`` and
+    # ``planned_phase_keys``) ``continue`` unconditionally on ``phase.gate``,
+    # ``phase_9_human_review`` is ``gate: true``, and no code anywhere issues a
+    # ``hermes kanban block`` -- the only ``needs_input`` string in the package
+    # is inside the worker-facing prompt telling the DISPATCHER to block itself.
+    # These docs described the terminal boundary as a ``human-gate`` card
+    # sitting in ``needs_input``, which sent operators looking for a card that
+    # cannot exist, so the false phrasings are forbidden rather than merely
+    # corrected.
+    assert "human-gate" not in combined
+    assert "sticky `needs_input`" not in combined
+    gate_block_lines = [
+        line
+        for line in combined.splitlines()
+        if "needs_input" in line.lower() and "gate" in line.lower()
+    ]
+    assert gate_block_lines == [], gate_block_lines
+    # The replacement wording, so a correction cannot be undone by deletion.
+    assert "human merge decision" in combined
+
+
+def test_pending_review_create_row_names_the_real_recovery_path():
+    """The marker recovers nothing, and the run-evidence row must not imply it does.
+
+    ``_persist_pending_create`` writes ``pending-review-create.json`` and
+    ``_clear_pending_create`` deletes it; no reader exists anywhere. The pending
+    marker ``reconcile_pending_task_create`` really reads is
+    ``pending-task-create.json``, a different file in a different module. What
+    actually recovers an ambiguous dynamic-card create is
+    ``_find_task_id_in_snapshot`` -- re-run before every create attempt, against
+    an idempotency-keyed create -- plus ``RetryableReviewRegistration``, which
+    both reconcilers turn into a retry on the next tick. A row that presents the
+    marker as the recovery input sends an operator to a file that cannot answer
+    the question.
+    """
+    root = Path(__file__).resolve().parents[1]
+    guide = (root / "docs" / "howto-native-sdd-profile.md").read_text()
+    (row,) = [
+        line
+        for line in guide.splitlines()
+        if line.startswith("| `pending-review-create.json`")
+    ]
+    assert "nothing reads it back" in row, row
+    assert "_find_task_id_in_snapshot" in row, row
+    assert "RetryableReviewRegistration" in row, row
+    assert "pending-task-create.json" in row, row
+
+    # The row's claim has to stay true of the code: one writer module, no reader.
+    naming = sorted(
+        path.name
+        for path in (root / "hermes_pipeline").rglob("*.py")
+        if "pending-review-create.json" in path.read_text()
+    )
+    assert naming == ["review_reconciliation.py"], naming
 
 
 def test_current_runtime_docs_do_not_describe_deleted_review_phase_module():

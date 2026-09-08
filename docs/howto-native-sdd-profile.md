@@ -53,7 +53,7 @@ block still runs as exactly one development card. `tpo plan validate` and
 `tpo doctor` warn because its internal steps cannot be exposed as separate
 Kanban cards; pass `--require-manifest` to turn that warning into a failure. On
 retries, TPO validates its pinned base authority and then leaves the existing
-static development, review, finish, and human-gate chain to the legacy
+static development, review, and finish chain to the legacy
 lifecycle; manifest-only result, dynamic review, and closeout reconciliation do
 not intercept that chain.
 
@@ -118,8 +118,9 @@ Migrate one project explicitly:
 
 Client-side gstack work has no equivalent here: the Phase 8 `/ship` and
 `$ship` prompts, `tpo approve`, and the `/review`, `/cso`, `/qa` skills are not
-part of this profile. PR creation, review, closeout, and the human merge gate
-are reconciled from Kanban results instead.
+part of this profile. PR creation, review, and closeout are reconciled from
+Kanban results instead; the run's terminal boundary is the open, unmerged pull
+request and its human merge decision, which no card represents.
 
 ## Compiled sequence
 
@@ -136,12 +137,16 @@ are reconciled from Kanban results instead.
    worker. The worker reports bounded `metadata.tpo_result`; TPO validates that
    metadata and the Git topology on the next tick, and the run stops advancing
    until it does. No card waits for a human between Plan tasks.
-3. A fresh review session reports `clean` or structured P0-P3 findings. Findings
-   create stable `review-fix`, fix-validation, and re-review cards. After five
-   unsuccessful rounds the review gate stays `needs_input`; automation stops.
-4. Clean review enables finish, deterministic issue closeout (the `tpo:todo`
+3. A fresh review session runs the profile's own `phase_5_review` prompt: it
+   applies every valid finding and commits the fixes as one review-fix commit.
+   The card reaching `done` IS the pass; the card reaching `blocked` is the
+   profile's own nonzero exit and automation stops. There are no remediation
+   rounds and no cards fanned out from findings.
+4. An accepted review enables finish, deterministic issue closeout (the `tpo:todo`
    issue is closed via `gh` after the merge), remote-head/check verification,
-   and the human merge gate.
+   and the open, unmerged pull request and its human merge decision. That
+   boundary is not a card: `phase_9_human_review` is a gate phase, and
+   registration creates no card for a gate phase.
 
 Exactly one run is active per project. Retries reconcile the same keys. Drifted
 authority, branch, worktree, PR, or remote head is preserved and blocked for
@@ -158,8 +163,8 @@ evidence, never a second workflow database:
 | `registration.json` | the run is registered: immutable pinned authority |
 | `plan.md` | the Plan is embedded: the hash-verified Plan artifact |
 | `result-validation-blocked` | a Plan result fails validation, or the card chain is not wired; names the stalled `step_key` and `code`, blocks nothing, and is removed once every result validates |
-| `pending-review-create.json` | a review card create has an ambiguous outcome |
-| `accepted-review-head` | a clean review is accepted, pinning the reviewed head |
+| `pending-review-create.json` | a dynamic card create (`review:0` or `finish`) is about to run; removed once that create reports an id. Diagnostic residue only — `_persist_pending_create` writes it and `_clear_pending_create` deletes it, and nothing reads it back, so a copy left on disk means a create was in flight and never confirmed. It is not what recovers the card: `_create_task` re-derives the id with `_find_task_id_in_snapshot` before every attempt (the create itself is keyed `--idempotency-key <tick>:<step>`), and an outcome it still cannot resolve raises `RetryableReviewRegistration`, which both reconcilers turn into a plain "retry next tick". Do not confuse it with `pending-task-create.json`, the registration marker `reconcile_pending_task_create` really does read |
+| `accepted-review-head` | a review is accepted, pinning the head the review left behind (its own fix commit included) |
 | `finish-verified` | the PR handoff is verified: the proof of delivery |
 | `issue-close-started` / `issue-commented` / `issue-closed` | issue closeout progresses |
 

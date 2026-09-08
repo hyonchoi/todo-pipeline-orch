@@ -111,8 +111,9 @@ is deprecated but still bundled and supported. It runs the compiled workflow:
 Hermes cron invokes TPO, TPO selects an eligible TODO and pins its embedded Plan
 from the issue snapshot in a linked worktree, then Hermes Kanban dispatches
 workers. A `tpo-plan` manifest produces one visible worker card and controller
-gate per ordered task. Independent review, bounded review-fix rounds, PR
-closeout, and the human merge gate remain visible on the board. It does not
+gate per ordered task. Independent review that applies its own findings and PR
+closeout remain visible on the board; the run's terminal boundary is the open,
+unmerged pull request and its human merge decision, which no card represents. It does not
 require gstack, superpowers, or client-side workflow skills.
 
 Because the profile is plan-gated, an embedded Plan must carry a `json tpo-plan`

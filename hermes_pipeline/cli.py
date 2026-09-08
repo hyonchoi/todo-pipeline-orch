@@ -1292,6 +1292,45 @@ def _rotate_projects(
     return projects[offset:] + projects[:offset]
 
 
+_TICK_TRACEBACK_LINES = 40
+_TICK_TRACEBACK_MAX = 6000
+
+
+def _safe_error_type(exc: BaseException) -> str:
+    """The exception's class name, or a placeholder if even that cannot render.
+
+    ``type(exc).__name__`` is an attribute lookup on the class, so a metaclass
+    can make it raise. It is the last diagnostic left once the message and the
+    traceback have been withheld, so it gets its own guard rather than being
+    the one unguarded call in the handler.
+    """
+    try:
+        return type(exc).__name__
+    except BaseException:  # a name that cannot render is not fatal
+        return "<unrenderable>"
+
+
+def _sanitized_traceback(exc: BaseException) -> str:
+    """The exception's traceback, one sanitized line per frame, tail-capped.
+
+    Every line goes through ``sanitize_result_text``, which is why the lines are
+    split first: the sanitizer collapses line breaks, so handing it the whole
+    traceback would flatten it into one unreadable run.
+    """
+    import traceback
+
+    from .result_contract import sanitize_result_text
+
+    rendered = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    ).splitlines()
+    lines = [
+        sanitize_result_text(line, maximum=500)
+        for line in rendered[-_TICK_TRACEBACK_LINES:]
+    ]
+    return "\n".join(lines)[:_TICK_TRACEBACK_MAX]
+
+
 def _cmd_tick(args, config: Config) -> int:
     """Handle 'tick' subcommand — kanban-as-scheduler pipeline scan tick.
 
@@ -1383,6 +1422,10 @@ def _cmd_tick(args, config: Config) -> int:
     # --- Step 3: Fairness rotation, then per-project tick ---
     projects = _rotate_projects(projects, state_dir)
 
+    # Projects whose tick raised. Isolation keeps the scan going (below); this
+    # list is what turns the scan's exit code honest afterwards.
+    crashed: list[str] = []
+
     for project_dir, project_toml in projects:
         project_slug = project_dir.name
         project_state = _get_project_state_dir(project_dir)
@@ -1410,14 +1453,66 @@ def _cmd_tick(args, config: Config) -> int:
                 "project %s: tick already in flight (lock held), skipping", project_slug
             )
         except Exception as e:
-            log.error(
-                "project %s: tick failed: error_type=%s",
-                project_slug,
-                type(e).__name__,
-            )
-            # Continue to next project
+            from .result_contract import sanitize_result_text
+
+            crashed.append(project_slug)
+            # error_type alone is not a diagnosis: a bare
+            # ``error_type=FileNotFoundError`` names neither the missing path
+            # nor the frame that asked for it.
+            #
+            # The traceback is formatted and sanitized here rather than handed
+            # to ``exc_info=True``: logging's own renderer would emit the
+            # chained cause verbatim, and a cause can quote agent output or a
+            # token. Sanitizing line by line keeps the frames readable while
+            # ``SECRET_RE`` still redacts credential material.
+            #
+            # Both renderings happen under a guard because both call back into
+            # the exception: ``sanitize_result_text`` does ``str(value)`` and
+            # ``format_exception`` renders the message line and every chained
+            # cause. An exception whose ``__str__`` or ``__repr__`` itself raises
+            # would therefore escape this handler and, since ``main`` calls
+            # ``args.func`` bare, abort the whole scan -- the remaining projects
+            # never tick, ``crashed`` is discarded, and the interpreter writes
+            # its own UNSANITIZED traceback to stderr, which is exactly the text
+            # this handler exists to sanitize. ``BaseException`` and not
+            # ``Exception``: a ``__str__`` is free to raise ``SystemExit``, and
+            # no failure of a diagnostic renderer may end the scan. The cost is
+            # that a ``KeyboardInterrupt`` landing inside this narrow rendering
+            # window is swallowed once; the next one is not.
+            try:
+                message = sanitize_result_text(e, maximum=1000)
+                traceback_text = _sanitized_traceback(e)
+            except BaseException:  # see the comment above
+                log.error(
+                    "project %s: tick failed: error_type=%s; diagnostics "
+                    "withheld: rendering the exception itself raised",
+                    project_slug,
+                    _safe_error_type(e),
+                )
+            else:
+                log.error(
+                    "project %s: tick failed: error_type=%s: %s\n%s",
+                    project_slug,
+                    _safe_error_type(e),
+                    message,
+                    traceback_text,
+                )
+            # Continue to next project: cross-project isolation is deliberate,
+            # one project's crash must not abort the others.
 
     vlog.info("scan complete: scan_id=%s", scan_id)
+    if crashed:
+        # Isolation is not silence. Returning 0 here made a crashed tick
+        # indistinguishable from a clean one, so the harness driver read an
+        # unchanged board as a stalled run instead of a failed tick.
+        log.error(
+            "scan %s: %d of %d project tick(s) failed: %s",
+            scan_id,
+            len(crashed),
+            len(projects),
+            ", ".join(crashed),
+        )
+        return 1
     return 0
 
 

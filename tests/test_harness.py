@@ -381,6 +381,11 @@ class TestRunTick:
     def test_appends_output_and_header_to_log(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
+        """A non-zero rc still logs everything -- and no longer returns quietly.
+
+        ``tpo tick`` exits non-zero only when a project's tick raised, so the
+        log has to survive the raise: it is the sole evidence of what crashed.
+        """
         def fake(argv, **kwargs):
             return subprocess.CompletedProcess(argv, 3, stdout="out line\n", stderr="err line\n")
 
@@ -389,9 +394,10 @@ class TestRunTick:
         log_path.parent.mkdir()
         log_path.write_text("previous\n")
 
-        rc = run_tick("sandbox", cwd=tmp_path, log_path=log_path, timeout=5.0)
+        with pytest.raises(HarnessTickError) as excinfo:
+            run_tick("sandbox", cwd=tmp_path, log_path=log_path, timeout=5.0)
 
-        assert rc == 3
+        assert excinfo.value.code == "tick_crashed"
         text = log_path.read_text()
         assert text.startswith("previous\n")
         header = text.splitlines()[1]
@@ -399,6 +405,62 @@ class TestRunTick:
         assert header.endswith("+00:00")
         assert "out line\n" in text
         assert "err line\n" in text
+
+    def test_nonzero_rc_raises_with_the_log_tail_as_detail(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A crashed tick must not reach the driver as a successful tick.
+
+        ``tpo tick`` isolates per-project failures, so the scan keeps going and
+        the subprocess exits cleanly; only its exit code says a tick raised. If
+        that is dropped the driver sees a fine tick, an unchanged board, and
+        reports ``tick_stalled`` -- the wrong diagnosis, with no diagnostics.
+        """
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout="",
+                stderr=(
+                    "project sandbox: tick failed: error_type=FileNotFoundError: "
+                    "[Errno 2] No such file or directory: '/gone/plan.md'\n"
+                ),
+            )
+
+        monkeypatch.setattr(harness_mod, "_tick_runner", fake)
+        log_path = tmp_path / "tick.log"
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            run_tick("sandbox", cwd=tmp_path, log_path=log_path, timeout=5.0)
+
+        exc = excinfo.value
+        assert exc.code == "tick_crashed"
+        assert exc.code != "tick_timeout"
+        # The detail is what an operator reads first, so it must carry the
+        # crash itself, not just "rc=1".
+        assert "rc=1" in exc.detail
+        assert "/gone/plan.md" in exc.detail
+        # The subprocess exited on its own, so nothing here proves workers are
+        # unaccounted for; ``_tick_failure`` decides that from the persisted
+        # tick id.
+        assert exc.workers_unaccounted is False
+        assert "/gone/plan.md" in log_path.read_text(encoding="utf-8")
+
+    def test_nonzero_rc_detail_is_bounded(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """The tail is a diagnostic, not a log dump: it stays bounded."""
+        def fake(argv, **kwargs):
+            return subprocess.CompletedProcess(
+                argv, 1, stdout="x" * 20000, stderr=""
+            )
+
+        monkeypatch.setattr(harness_mod, "_tick_runner", fake)
+
+        with pytest.raises(HarnessTickError) as excinfo:
+            run_tick("sandbox", cwd=tmp_path, log_path=tmp_path / "tick.log", timeout=5.0)
+
+        assert len(excinfo.value.detail) <= harness_mod._ERROR_MESSAGE_MAX
 
     @pytest.mark.parametrize(
         ("output", "stderr"),
@@ -1468,7 +1530,7 @@ class TestRunHarness:
         The cards actually observed are the honest completeness set.
         """
         stuck = {"plan:task-1": "done", "review:0": "running"}
-        live.pin([dict(stuck), dict(stuck)])
+        live.pin([dict(stuck), dict(stuck), dict(stuck)])
 
         result = live.run(profile_name="native-sdd")
 
@@ -1494,6 +1556,59 @@ class TestRunHarness:
         assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
         assert live.kwargs["shutdown_run"]["expected_phase_keys"] is None
         assert "poll_pinned_run" not in live.order
+
+    @pytest.mark.parametrize(
+        ("code", "expected"),
+        [
+            pytest.param(
+                "tick_crashed", ("plan:task-1", "review:0"), id="crash-requires-cards",
+            ),
+            pytest.param("tick_timeout", None, id="timeout-still-forfeits"),
+        ],
+    )
+    def test_a_crash_requires_its_observed_cards_but_a_timeout_forfeits(
+        self, live, monkeypatch, code, expected
+    ):
+        """``tick_crashed`` groups with ``tick_stalled``, not with ``tick_timeout``.
+
+        ``tick_timeout`` is a ``TimeoutExpired``: the subprocess was SIGKILLed
+        and can have died halfway through a ``hermes kanban create``, so nothing
+        about the board is knowable and the completeness check is forfeited.
+        ``tick_crashed`` is raised only from a subprocess that RETURNED a
+        non-zero rc, having finished its project loop, so the cards it observed
+        really are the honest set.
+
+        Forfeiting is not the conservative choice: ``shutdown_keys`` starts as
+        the registered ``phase_keys`` and ``_wait_for_kanban_quiescence`` gates
+        its membership test on ``expected_phase_keys is not None``, so ``None``
+        skips that test and proves quiescence from whatever the snapshot lists.
+        The ``timeout-still-forfeits`` row is the discriminator: without it,
+        adding every tick error to the set would pass.
+        """
+        from hermes_pipeline.harness import TickDrive
+
+        live._stub(
+            monkeypatch,
+            "drive_ticks",
+            lambda **_k: TickDrive(
+                registration=live.pinned_registration,
+                success=False,
+                timed_out=False,
+                result_box={},
+                observed_keys=frozenset({"plan:task-1", "review:0"}),
+                failure_code=code,
+                tick_error=HarnessTickError(code, "rc=1: boom"),
+                workers_unaccounted=False,
+                ticks_run=1,
+                pending_error=None,
+            ),
+        )
+
+        result = live.run(profile_name="native-sdd")
+
+        assert result.exit_code == 1
+        assert result.summary.startswith(f"[{code}] ")
+        assert live.kwargs["shutdown_run"]["expected_phase_keys"] == expected
 
     def test_pending_drive_error_starts_no_pr_discovery(self, live, monkeypatch):
         """Fail-closed: a drive reporting an error starts no new remote work.
@@ -6372,31 +6487,45 @@ _PINNED_BRANCH = "feat/pinned-run"
 _PINNED_STEPS = ("plan:task-1", "plan:task-2")
 
 
-def _delivered_path_boards() -> tuple[dict[str, str], ...]:
-    """The boards a delivered plan-pinned run settles on, one per tick.
+def _plan_step_keys(count: int) -> tuple[str, ...]:
+    """The ``count`` registered step keys of a pinned run.
+
+    A ``requires_plan`` registration creates one ``plan:<task>`` card per plan
+    task and nothing else, so this is the whole step-key set. ``count=2``
+    reproduces ``_PINNED_STEPS`` exactly (asserted by
+    ``test_plan_step_keys_matches_the_pinned_fixture``), which is what lets the
+    board fixtures below be parametrized without forking the pinned fixture.
+    """
+    return tuple(f"plan:task-{index}" for index in range(1, count + 1))
+
+
+def _delivered_path_boards(count: int = 2) -> tuple[dict[str, str], ...]:
+    """The boards a delivered plan-pinned run walks, one per tick, for *count* tasks.
+
+    Parametrized by task count on purpose: the plan cards are the part of the
+    board that grows with the plan, so a fixture hardcoded to two tasks made
+    every bound derived from it a constant that no ``count`` parametrization
+    could move.
+
+    The number of boards does not grow with *count*, and that is the finding
+    rather than an oversight: the plan cards are chained ``--parent`` to one
+    another and created in a single tick, so one poll settles the whole chain no
+    matter how long it is.
 
     Shared between ``test_native_sdd_reaches_delivered_after_four_ticks``, which
-    pins the tick count, and ``TestPinnedTickBudget``, which needs a bound that
-    moves with the drive instead of a literal: if the delivered path ever needs
-    another tick, the budget's lower bound tightens with it.
+    pins the tick count, and ``TestPinnedTickBudget``, which needs the delivered
+    path's own length instead of a literal: if the delivered path ever needs
+    another board, the budget's lower bound tightens with it.
     """
     from hermes_pipeline.todos_completion import FINISH_KEY
 
+    plan_done = {key: "done" for key in _plan_step_keys(count)}
+    reviewed = {**plan_done, "review:0": "done"}
     return (
-        {"plan:task-1": "done", "plan:task-2": "done"},
-        {"plan:task-1": "done", "plan:task-2": "done", "review:0": "done"},
-        {
-            "plan:task-1": "done",
-            "plan:task-2": "done",
-            "review:0": "done",
-            FINISH_KEY: "running",
-        },
-        {
-            "plan:task-1": "done",
-            "plan:task-2": "done",
-            "review:0": "done",
-            FINISH_KEY: "done",
-        },
+        dict(plan_done),
+        dict(reviewed),
+        {**reviewed, FINISH_KEY: "running"},
+        {**reviewed, FINISH_KEY: "done"},
     )
 
 
@@ -6745,6 +6874,58 @@ class TestRecoverPinnedRegistration:
         assert excinfo.value.code == "picked_none"
 
 
+class TestLogTickError:
+    """The operator-facing line must not misdescribe what happened."""
+
+    @staticmethod
+    def _log(code: str, caplog) -> tuple[str, str]:
+        from hermes_pipeline.harness import HarnessTickError, _log_tick_error
+
+        caplog.clear()
+        with caplog.at_level(logging.DEBUG, logger="hermes_pipeline.harness"):
+            _log_tick_error(
+                HarnessTickError(code, "TOOL OUTPUT THAT MAY BE SENSITIVE"),
+                Path("/runs/artifacts/tick.log"),
+            )
+        errors = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelname == "ERROR"
+        )
+        debugs = "\n".join(
+            r.getMessage() for r in caplog.records if r.levelname == "DEBUG"
+        )
+        return errors, debugs
+
+    def test_a_crash_is_reported_as_a_failure_not_as_a_missing_registration(
+        self, caplog
+    ):
+        """``tick_crashed`` usually means the run WAS registered and then raised.
+
+        ``run_tick`` raises it from a subprocess that returned a non-zero rc, so
+        a reconciler or a verifier failed after the tick registered. Calling that
+        "did not register a runnable run" -- true only for
+        ``tick_not_persisted`` -- sent the operator looking for a registration
+        problem that is not there.
+        """
+        errors, debugs = self._log("tick_crashed", caplog)
+
+        assert "did not register a runnable run" not in errors
+        assert "tick_crashed" in errors
+        # The detail is the tick log tail and can carry tool output, so the
+        # error line names the log instead of quoting it.
+        assert "/runs/artifacts/tick.log" in errors
+        assert "TOOL OUTPUT THAT MAY BE SENSITIVE" not in errors
+        assert "TOOL OUTPUT THAT MAY BE SENSITIVE" in debugs
+
+    def test_a_tick_that_never_persisted_still_says_so(self, caplog):
+        """The discriminator: the original wording is correct for this code."""
+        errors, debugs = self._log("tick_not_persisted", caplog)
+
+        assert "did not register a runnable run" in errors
+        assert "/runs/artifacts/tick.log" in errors
+        assert "TOOL OUTPUT THAT MAY BE SENSITIVE" not in errors
+        assert "TOOL OUTPUT THAT MAY BE SENSITIVE" in debugs
+
+
 class TestAssertTickIdUnchanged:
     def test_unchanged_is_ok(self, tmp_path: Path):
         (tmp_path / "current_tick_id.txt").write_text("01TICK\n")
@@ -6901,43 +7082,92 @@ class TestClassifyPinnedRun:
         assert classify_pinned_run({}) == "in_progress"
 
 
+#: Ticks the delivered path costs, whatever the plan-task count is. Read off
+#: the drive: (1) the registration tick, which reconciles nothing -- the
+#: reconcilers run against the *prior* tick -- and whose poll settles the whole
+#: ``--parent``-chained plan chain; (2) the tick that reconciles the plan
+#: results, creates ``review:0`` and settles it; (3) the tick that accepts the
+#: review, creates ``finish`` and settles it, at which point
+#: ``classify_pinned_run`` reads ``delivered``.
+_DELIVERED_PATH_TICKS = 3
+
+#: Ticks a pinned run can spend having reconciled nothing, which *only* the
+#: budget bounds. Both are the same shape: ``_create_task``'s
+#: ``hermes kanban create`` returns an ambiguous outcome (subprocess timeout,
+#: unparseable id) after the card actually landed, so
+#: ``RetryableReviewRegistration`` is raised, the reconciler returns without
+#: reconciling, and the next poll settles a board that now carries the new card.
+#: One for ``review:0`` (``_ensure_initial_review``), one for ``finish``
+#: (``reconcile_todo_completion``).
+#:
+#: Every *other* retryable stall -- a ``result-validation-blocked`` tick, a
+#: review whose reported topology fails verification, a ``_blocked`` delivery,
+#: or an ambiguous create whose card did not land -- returns early without
+#: touching the board, so it is counted by ``_TOLERATED_BOARD_INVARIANT_TICKS``
+#: below instead.
+_RETRYABLE_BOARD_CHANGING_TICKS = 2
+
+#: Ticks a pinned run can spend on a board-*invariant* retryable stall. The
+#: stall detector counts consecutive identical settled boards and fails at
+#: ``_MAX_IDENTICAL_SETTLED_BOARDS``, so it tolerates one repeat per stall
+#: episode -- and that tolerated tick is a budget consumer that did not exist
+#: while the detector compared only against the immediately previous map, when
+#: ``tick_stalled`` decided every such stall on the very next tick.
+_TOLERATED_BOARD_INVARIANT_TICKS = 1
+
+
 class TestPinnedTickBudget:
     """pinned_tick_budget(): how many ticks a pinned run may consume."""
 
-    @staticmethod
-    def _rounds():
-        from hermes_pipeline.review_reconciliation import MAX_REVIEW_ROUNDS
-
-        return MAX_REVIEW_ROUNDS
+    def test_plan_step_keys_matches_the_pinned_fixture(self):
+        """The parametrized keys must be the fixture's keys, or the bounds below
+        would be measured against a board the drive tests never drive."""
+        assert _plan_step_keys(2) == _PINNED_STEPS
 
     @pytest.mark.parametrize("count", [1, 2, 3, 4, 9, 20])
-    def test_budget_outlasts_the_delivered_path_and_never_shrinks(self, count):
-        """A budget too small to reach the handoff fails every run before it.
+    def test_budget_outlasts_the_delivered_path_and_every_retryable_hop(self, count):
+        """The bound is the enumerated cost of the run, not a restated formula.
 
-        Restating the formula here could only detect a *changed* formula, never
-        a wrong one. The bound with force is the delivered path's own script:
-        one tick per board it settles, plus the two ticks every review round the
-        reconciler may add. Grow that script and this lower bound grows with it.
+        Restating ``len + 6`` could only ever detect a *changed* formula, never a
+        wrong one. What has force is the tick-by-tick cost: the delivered path's
+        own boards, plus every retry path that spends a tick without reaching a
+        verdict -- the board-changing ones the stall detector never sees twice,
+        and the one board-invariant repeat it tolerates.
         """
         from hermes_pipeline.harness import pinned_tick_budget
 
-        step_keys = tuple(f"plan:task-{i}" for i in range(count))
-        delivered_ticks = len(_delivered_path_boards())
+        step_keys = _plan_step_keys(count)
+        boards = _delivered_path_boards(count)
+        # The fixture must cover at least the enumerated delivered path, so
+        # lengthening the drive's script can only tighten this bound.
+        assert len({tuple(sorted(board.items())) for board in boards}) >= (
+            _DELIVERED_PATH_TICKS
+        )
+        required = (
+            _DELIVERED_PATH_TICKS
+            + _RETRYABLE_BOARD_CHANGING_TICKS
+            + _TOLERATED_BOARD_INVARIANT_TICKS
+        )
 
         budget = pinned_tick_budget(step_keys)
 
-        assert budget >= delivered_ticks + 2 * self._rounds()
+        assert budget >= required, (
+            f"budget {budget} for {count} plan task(s) starves the pinned run. "
+            f"The delivered path alone costs {_DELIVERED_PATH_TICKS} ticks "
+            "(registration + plan chain, review:0, finish), and "
+            f"{_RETRYABLE_BOARD_CHANGING_TICKS} more can go to a dynamic-card "
+            "create whose `hermes kanban create` outcome was ambiguous but "
+            "whose card landed -- `_ensure_initial_review` for review:0 and the "
+            "finish create in `reconcile_todo_completion`. Those two reconcile "
+            "nothing and still change the board, so `tick_stalled` does not "
+            f"catch them; and {_TOLERATED_BOARD_INVARIANT_TICKS} more goes to "
+            "the no-progress tick the stall detector now tolerates, which "
+            "leaves the board unchanged and so reaches this budget at all only "
+            f"because the detector counts consecutive boards: {required} ticks "
+            "minimum."
+        )
         # More tasks can never buy fewer ticks.
         assert budget >= pinned_tick_budget(step_keys[:-1])
-
-    def test_tracks_max_review_rounds_rather_than_a_literal(self):
-        from hermes_pipeline import harness as mod
-        from hermes_pipeline.harness import pinned_tick_budget
-
-        base = pinned_tick_budget(("a", "b"))
-
-        with patch("hermes_pipeline.review_reconciliation.MAX_REVIEW_ROUNDS", self._rounds() + 1):
-            assert mod.pinned_tick_budget(("a", "b")) == base + 2
 
     def test_budget_grows_one_tick_per_plan_task(self):
         """Plan tasks no longer come in worker/gate pairs.
@@ -6947,14 +7177,42 @@ class TestPinnedTickBudget:
         """
         from hermes_pipeline.harness import pinned_tick_budget
 
-        keys = tuple(f"plan:task-{index}" for index in range(1, 5))
+        keys = _plan_step_keys(4)
 
         assert pinned_tick_budget(keys) - pinned_tick_budget(keys[:1]) == 3
 
-    def test_accepts_any_iterable(self):
+    def test_the_shipped_budget_keeps_one_tick_of_spare_headroom(self):
+        """A concrete number, because every other bound here self-adjusts.
+
+        ``test_budget_outlasts_the_delivered_path_and_every_retryable_hop``
+        asserts only ``budget >= 6`` and ``test_native_sdd_budget_exhaustion``
+        recomputes the budget from the function under test, so the shipped
+        ``+ 6`` was unpinned in exactly the direction that matters: at ``+ 5`` a
+        single-task run's enumerated path consumes the WHOLE budget and a second
+        stall episode reports ``tick_budget_exhausted`` for a run that never ran
+        out of legitimate work -- and every test still passed. Only ``+ 4`` was
+        caught. The docstring on ``pinned_tick_budget`` states this spare tick
+        as the reason the constant grew from 5, so it is pinned here.
+        """
         from hermes_pipeline.harness import pinned_tick_budget
 
-        assert pinned_tick_budget(iter(["a", "b", "c"])) == 3 + 5 + 2 * self._rounds()
+        enumerated = (
+            _DELIVERED_PATH_TICKS
+            + _RETRYABLE_BOARD_CHANGING_TICKS
+            + _TOLERATED_BOARD_INVARIANT_TICKS
+        )
+        assert pinned_tick_budget(("a",)) == 7
+        assert pinned_tick_budget(("a",)) == enumerated + 1
+        assert pinned_tick_budget(_PINNED_STEPS) == 8
+
+    def test_consumes_a_one_shot_iterable_exactly_once(self):
+        """``step_keys`` is typed ``Iterable``, and the drive passes a tuple, but
+        a generator must not be counted as zero (or counted twice)."""
+        from hermes_pipeline.harness import pinned_tick_budget
+
+        keys = _plan_step_keys(3)
+
+        assert pinned_tick_budget(iter(keys)) == pinned_tick_budget(keys)
 
 
 class TestDriveTicks:
@@ -7338,24 +7596,82 @@ class TestDriveTicks:
         # A plain card failure is not a tick error: success already reports it.
         assert drive.failure_code is None
 
-    def test_native_sdd_identical_settled_maps_stall(self, tmp_path: Path, mocker):
+    def test_native_sdd_tolerates_one_no_progress_tick_and_still_delivers(
+        self, tmp_path: Path, mocker, caplog
+    ):
+        """One repeated board is a retry, not a stall.
+
+        Several legitimate reconciler outcomes leave the board untouched and
+        need one more tick: a ``result-validation-blocked`` result set, a review
+        whose reported topology fails verification, a ``_blocked`` delivery, and
+        an ambiguous ``hermes kanban create`` whose card did not land. Failing
+        the run on the first repeat gives all of them zero retries.
+        """
+        from hermes_pipeline.harness import drive_ticks
+
+        caplog.set_level("WARNING", logger="hermes_pipeline.harness")
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        stuck = {"plan:task-1": "done", "plan:task-2": "running"}
+        delivered = _delivered_board(keys=_PINNED_STEPS, extra=())
+        registration, _run, poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK] * 3,
+            maps=[dict(stuck), dict(stuck), dict(delivered)],
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.success is True
+        assert drive.failure_code is None
+        assert drive.tick_error is None
+        assert drive.ticks_run == 3
+        assert len(poll.calls) == 3
+        assert drive.registration is registration
+        # The tolerated tick is not a run failure, so it emits no
+        # ``tick_stalled`` event -- but it is logged, or a run that spent a
+        # tick on nothing would leave no trace at all.
+        events = [
+            json.loads(line)
+            for line in (tmp_path / "events.jsonl").read_text().splitlines()
+        ]
+        assert [e for e in events if e["event_type"] == "tick_stalled"] == []
+        assert any(
+            "identical" in record.message.lower() for record in caplog.records
+        ), [record.message for record in caplog.records]
+
+    def test_native_sdd_two_consecutive_no_progress_ticks_stall(
+        self, tmp_path: Path, mocker
+    ):
+        """The tolerance is exactly one tick: the second repeat ends the run.
+
+        Three identical settled boards means two ticks that changed nothing in
+        a row, which no reconciler path explains. The detail carries the count
+        so an operator can tell a tolerated transient from this.
+        """
         from hermes_pipeline.harness import drive_ticks
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
         stuck = {"plan:task-1": "done", "plan:task-2": "running"}
-        registration, _run, _poll = self._pinned_patches(
-            mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
+        registration, _run, poll = self._pinned_patches(
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK] * 3,
+            maps=[dict(stuck), dict(stuck), dict(stuck)],
         )
 
         drive = drive_ticks(**kwargs)
 
         assert drive.success is False
-        assert drive.ticks_run == 2
+        assert drive.ticks_run == 3
+        assert len(poll.calls) == 3
         assert drive.failure_code == "tick_stalled"
         assert drive.tick_error is not None
         assert drive.tick_error.code == "tick_stalled"
         assert drive.tick_error.tick_id == _PINNED_TICK
+        assert "3 consecutive" in drive.tick_error.detail, drive.tick_error.detail
         assert drive.registration is registration
 
     def test_native_sdd_reports_every_settled_board(self, tmp_path: Path, mocker):
@@ -7378,13 +7694,22 @@ class TestDriveTicks:
         assert [(e["tick_no"], e["status_map"]) for e in completed] == [(1, first), (2, second)]
 
     def test_native_sdd_stall_is_reported_as_an_event(self, tmp_path: Path, mocker):
+        """One event, on the tick that failed the run -- not on the tolerated one.
+
+        ``tick_stalled`` is the run's failure signal; emitting it for the
+        tolerated repeat too would make a run that recovered look like a run
+        that died.
+        """
         from hermes_pipeline.harness import drive_ticks
 
         kwargs = self._pinned_kwargs(tmp_path)
         state = kwargs["project_state"]
         stuck = {"plan:task-1": "done", "plan:task-2": "running"}
         self._pinned_patches(
-            mocker, state, tick_ids=[_PINNED_TICK] * 2, maps=[dict(stuck), dict(stuck)]
+            mocker,
+            state,
+            tick_ids=[_PINNED_TICK] * 3,
+            maps=[dict(stuck), dict(stuck), dict(stuck)],
         )
 
         drive = drive_ticks(**kwargs)
@@ -7392,7 +7717,7 @@ class TestDriveTicks:
         assert drive.failure_code == "tick_stalled"
         events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]
         stalled = [e for e in events if e["event_type"] == "tick_stalled"]
-        assert [(e["tick_no"], e["status_map"]) for e in stalled] == [(2, stuck)]
+        assert [(e["tick_no"], e["status_map"]) for e in stalled] == [(3, stuck)]
 
     def test_native_sdd_unexpected_failure_leaves_workers_unaccounted(
         self, tmp_path: Path, mocker
@@ -7451,10 +7776,12 @@ class TestDriveTicks:
     def test_native_sdd_stall_compares_the_immediately_previous_tick(
         self, tmp_path: Path, mocker
     ):
-        """S2: the stall test is against the *previous* tick, not the first one.
+        """S2: the run of identical boards is consecutive, and it resets.
 
-        ``A, B, C, C`` stalls on tick 4; a driver comparing every map to tick 1's
-        would never see a repeat.
+        ``A, B, C, C, C`` stalls on tick 5: the counter must count *consecutive*
+        repeats and start over whenever the board moves. A driver that compared
+        every map to tick 1's would never see a repeat at all, and one that
+        never reset would have failed on ``A, B, C, C`` before C repeated twice.
         """
         from hermes_pipeline.harness import drive_ticks
 
@@ -7465,16 +7792,17 @@ class TestDriveTicks:
             {"plan:task-1": "done", "plan:task-2": "ready"},
             {"plan:task-1": "done", "plan:task-2": "running"},
             {"plan:task-1": "done", "plan:task-2": "running"},
+            {"plan:task-1": "done", "plan:task-2": "running"},
         ]
         registration, _run, poll = self._pinned_patches(
-            mocker, state, tick_ids=[_PINNED_TICK] * 4, maps=maps
+            mocker, state, tick_ids=[_PINNED_TICK] * 5, maps=maps
         )
 
         drive = drive_ticks(**kwargs)
 
         assert drive.failure_code == "tick_stalled"
-        assert drive.ticks_run == 4
-        assert len(poll.calls) == 4
+        assert drive.ticks_run == 5
+        assert len(poll.calls) == 5
         assert drive.tick_error is not None
         assert drive.tick_error.code == "tick_stalled"
 
@@ -7769,6 +8097,11 @@ class TestDriveTicks:
         drive = drive_ticks(**kwargs)
 
         assert drive.success is False
+        # Concrete, not just ``== budget``: recomputing the bound from the
+        # function under test makes this test self-adjust, which is how ``+ 6``
+        # -> ``+ 5`` survived. ``len(_PINNED_STEPS) + 6``.
+        assert budget == 8
+        assert drive.ticks_run == 8
         assert drive.ticks_run == budget
         assert len(poll.calls) == budget
         assert drive.failure_code == "tick_budget_exhausted"
@@ -7868,6 +8201,132 @@ class TestDriveTicks:
         # The tick id is pinned and already recovered, so shutdown can quiesce it.
         assert drive.workers_unaccounted is False
         assert drive.tick_error is not None and drive.tick_error.tick_id == _PINNED_TICK
+
+    def test_native_sdd_crashed_tick_is_not_reported_as_a_stall(
+        self, tmp_path: Path, mocker
+    ):
+        """Live run 3's misdiagnosis, pinned.
+
+        A tick that raised leaves the board exactly as it was, so the board is
+        identical on the next tick and the stall test would claim the run stopped
+        moving. The crash has to win: it is the cause, the stall is the symptom.
+        """
+        from hermes_pipeline.harness import HarnessTickError, drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration = self._registration(state)
+        registration.run_dir.mkdir(parents=True, exist_ok=True)
+        ticks = {"n": 0}
+        board = {"plan:task-1": "done", "plan:task-2": "done"}
+
+        def _run(slug, *, cwd, log_path, timeout):
+            ticks["n"] += 1
+            (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+            if ticks["n"] == 1:
+                return 0
+            raise HarnessTickError(
+                "tick_crashed",
+                "rc=1: project sandbox: tick failed: error_type=FileNotFoundError: "
+                "[Errno 2] No such file or directory: '/gone/plan.md'",
+            )
+
+        mocker.patch("hermes_pipeline.harness.run_tick", side_effect=_run)
+        mocker.patch(
+            "hermes_pipeline.harness.recover_pinned_registration", return_value=registration
+        )
+        mocker.patch("hermes_pipeline.harness.poll_pinned_run", return_value=dict(board))
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "tick_crashed", (
+            "a crashed tick must be reported as a crash, not as tick_stalled"
+        )
+        assert drive.tick_error is not None
+        assert "/gone/plan.md" in drive.tick_error.detail, (
+            "the crash detail is the only diagnostic the harness ever surfaces"
+        )
+        assert drive.ticks_run == 2
+        assert drive.success is False
+        # The subprocess exited on its own and re-asserted the pinned tick id,
+        # so shutdown can cancel that tick's cards: forfeiting cleanup here
+        # would strand the sandbox branch and PR for nothing.
+        assert drive.workers_unaccounted is False
+        assert drive.tick_error.tick_id == _PINNED_TICK
+
+    def test_native_sdd_real_run_tick_surfaces_a_crashed_subprocess(
+        self, tmp_path: Path, mocker, monkeypatch: pytest.MonkeyPatch
+    ):
+        """End to end through the real ``run_tick``: rc != 0 must fail the run.
+
+        The only stub is the ``tpo tick`` subprocess itself. With the exit code
+        dropped this drive reports ``tick_stalled`` on an unchanged board and
+        the crash never appears anywhere.
+        """
+        from hermes_pipeline.harness import drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+        state = kwargs["project_state"]
+        registration = self._registration(state)
+        registration.run_dir.mkdir(parents=True, exist_ok=True)
+        ticks = {"n": 0}
+
+        def _runner(argv, **_kwargs):
+            ticks["n"] += 1
+            (state / "current_tick_id.txt").write_text(_PINNED_TICK + "\n")
+            if ticks["n"] == 1:
+                return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+            return subprocess.CompletedProcess(
+                argv,
+                1,
+                stdout="",
+                stderr=(
+                    "project sandbox: tick failed: error_type=FileNotFoundError: "
+                    "[Errno 2] No such file or directory: '/gone/plan.md'\n"
+                ),
+            )
+
+        monkeypatch.setattr(harness_mod, "_tick_runner", _runner)
+        mocker.patch(
+            "hermes_pipeline.harness.recover_pinned_registration", return_value=registration
+        )
+        mocker.patch(
+            "hermes_pipeline.harness.poll_pinned_run",
+            return_value={"plan:task-1": "done", "plan:task-2": "done"},
+        )
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "tick_crashed", (
+            "rc != 0 from tpo tick must fail the run; dropping it reports "
+            "tick_stalled and loses the crash entirely"
+        )
+        assert "/gone/plan.md" in (drive.tick_error.detail if drive.tick_error else "")
+
+    def test_native_sdd_crash_on_the_first_tick_leaves_workers_unaccounted(
+        self, tmp_path: Path, mocker
+    ):
+        """No tick id persisted means no id shutdown can cancel.
+
+        The crash exits cleanly, but a tick that crashed before writing
+        ``current_tick_id.txt`` may still have spawned cards, so nothing here
+        proves the sandbox idle. ``_tick_failure`` decides this from the
+        persisted id, which is why ``run_tick`` must not assert the flag itself.
+        """
+        from hermes_pipeline.harness import HarnessTickError, drive_ticks
+
+        kwargs = self._pinned_kwargs(tmp_path)
+
+        def _run(slug, *, cwd, log_path, timeout):
+            raise HarnessTickError("tick_crashed", "rc=1: boom")
+
+        mocker.patch("hermes_pipeline.harness.run_tick", side_effect=_run)
+
+        drive = drive_ticks(**kwargs)
+
+        assert drive.failure_code == "tick_crashed"
+        assert drive.workers_unaccounted is True
+        assert drive.registration is None
 
     def test_native_sdd_run_tick_timeout_uses_remaining_budget(self, tmp_path: Path, mocker):
         from hermes_pipeline.harness import drive_ticks

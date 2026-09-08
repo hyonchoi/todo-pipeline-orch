@@ -21,13 +21,12 @@ from hermes_pipeline.github_issues import (
     snapshot_hash,
 )
 from hermes_pipeline.result_contract import (
-    _FINDING_PRIORITIES,
     _PLACEHOLDER_RE,
     ResultContractError,
     load_validated_registration,
     parse_worker_result,
     sanitize_result_text,
-    verify_read_only_review,
+    verify_optional_single_commit,
     verify_worker_git_result,
     verify_worker_git_topology,
 )
@@ -243,6 +242,99 @@ def test_summary_and_diagnostics_are_sanitized():
     assert sanitize_result_text("a\u2028b\u2029c\u202ed\u2066e\r\n\tf", maximum=100) == "a b cde f"
 
 
+# Every credential shape below is assembled from fragments so no literal
+# credential-shaped string appears in this source file: the repository's
+# secret guardrails match the shape, not the value.
+_JWT = "eyJhbGciOiJIUzI1NiJ9.payload.sig"
+_FINE_GRAINED_PAT = "github" + "_pat_" + "11ABCDEFG0123456789abcdefghijklmnop"
+_ANTHROPIC_KEY = "sk-" + "ant-api03-" + "SECRETVALUE1234567890"
+_AWS_KEY_ID = "AKIA" + "IOSFODNN7EXAMPLE"
+_PEM_BODY = "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAA"
+_PEM_BLOCK = (
+    "-----BEGIN " + "OPENSSH PRIVATE KEY-----\n"
+    + _PEM_BODY
+    + "\n-----END " + "OPENSSH PRIVATE KEY-----"
+)
+
+
+# One row per alternative of ``SECRET_RE``: deleting any single alternative
+# must fail exactly the row named for it. Rows are not interchangeable
+# documentation -- each is a shape a real crashed tick carries.
+@pytest.mark.parametrize(
+    ("text", "leaked"),
+    [
+        pytest.param(f"Authorization: Bearer {_JWT}", _JWT, id="auth-header-bearer"),
+        pytest.param(f"token: Bearer {_JWT}", _JWT, id="keyword-then-bearer"),
+        pytest.param(f"Proxy-Authenticate Bearer {_JWT}", _JWT, id="bare-bearer-value"),
+        pytest.param(
+            "fatal: repository 'https://hyon:s3cr3t-pw@github.com/o/r.git' not found",
+            "s3cr3t-pw",
+            id="url-userinfo",
+        ),
+        pytest.param("api_key=abcdefghijklmnop", "abcdefghijklmnop", id="api-key"),
+        pytest.param("apikey = abcdefghijklmnop", "abcdefghijklmnop", id="apikey-spaced"),
+        pytest.param(
+            "access_token=abcdefghijklmnop", "abcdefghijklmnop", id="access-token",
+        ),
+        # ``gh auth login`` issues fine-grained PATs by default and this repo
+        # drives ``gh`` and ``git`` throughout, so this is the shape a real
+        # subprocess error is most likely to echo. ``gh[pousr]_`` misses it.
+        pytest.param(
+            f"fatal: unable to access the repository as {_FINE_GRAINED_PAT}",
+            _FINE_GRAINED_PAT,
+            id="github-fine-grained-pat",
+        ),
+        # A bare Anthropic key carries no keyword and no ``[:=]`` before it.
+        pytest.param(
+            f"anthropic call failed with {_ANTHROPIC_KEY}",
+            _ANTHROPIC_KEY,
+            id="anthropic-key-bare",
+        ),
+        pytest.param(
+            f"botocore.exceptions: {_AWS_KEY_ID} is not authorized",
+            _AWS_KEY_ID,
+            id="aws-access-key-id",
+        ),
+        # ``.netrc`` is space-separated, so the ``[:=]`` requirement misses it.
+        pytest.param(
+            "machine github.com login alice password s3cr3tpw",
+            "s3cr3tpw",
+            id="netrc-space-separated",
+        ),
+        # The whole block must go, not just the header: the base64 body is the
+        # key. ``sanitize_result_text`` collapses the newlines before the
+        # substitution runs, so the block arrives as one line.
+        pytest.param(_PEM_BLOCK, _PEM_BODY, id="pem-private-key-block"),
+    ],
+)
+def test_credentials_the_tick_traceback_can_carry_are_redacted(text, leaked):
+    r"""Shapes a crashed tick's traceback really carries must not reach the log.
+
+    The per-project catch-all now logs a full traceback, so a subprocess error
+    echoing a remote URL or an auth header is a new exposure. Each case here is
+    a real leak some earlier revision of the pattern passed through: ``\S+``
+    stopped at the space after ``Bearer``, userinfo carries no keyword at all,
+    the keyword list omitted ``api_key``, ``gh[pousr]_`` does not match
+    ``github_pat_``, and a bare vendor key or a ``.netrc`` line carries no
+    ``[:=]`` delimiter for the keyword branch to anchor on.
+    """
+    sanitized = sanitize_result_text(text, maximum=8192)
+    assert leaked not in sanitized, text
+    assert "[REDACTED]" in sanitized, text
+
+
+def test_redaction_keeps_the_diagnostic_usable():
+    """Redaction must not swallow the host, so the error still says where."""
+    # The host must survive so the diagnostic is still usable.
+    assert "github.com/o/r.git" in sanitize_result_text(
+        "https://hyon:s3cr3t-pw@github.com/o/r.git", maximum=8192
+    )
+    # A ``.netrc`` line keeps its machine, and an AWS diagnostic its verb.
+    assert "machine github.com" in sanitize_result_text(
+        "machine github.com login alice password s3cr3tpw", maximum=8192
+    )
+
+
 @pytest.mark.parametrize(
     ("path", "value"),
     [
@@ -250,7 +342,7 @@ def test_summary_and_diagnostics_are_sanitized():
         # scan alone guards: nothing validates their content, so with the scan
         # removed each of these payloads parses clean. Secret and control are
         # separated on purpose -- a value tripping both at once cannot tell
-        # ``_SECRET_RE`` and ``_CONTROL_RE`` apart, so dropping either half of
+        # ``SECRET_RE`` and ``_CONTROL_RE`` apart, so dropping either half of
         # the scan's condition would survive.
         pytest.param(
             ("git", "changed_files", 0), "password=super-secret", id="secret-in-list",
@@ -258,23 +350,6 @@ def test_summary_and_diagnostics_are_sanitized():
         pytest.param(("git", "changed_files", 0), "bad\x00name", id="c0-control-in-list"),
         pytest.param(
             ("git", "changed_files", 0), "bad\u202ename", id="bidi-override-in-list",
-        ),
-        # ``review.findings`` is the list-of-dicts shape: it pins that the scan
-        # recurses through a list *into* a dict. It replaces the former
-        # ``acceptance[0].criterion`` param, which had the same shape and is now
-        # exempt. ``priority`` rather than ``location``: a bad ``location`` is
-        # rejected by ``_bounded_string`` with the same code either way, whereas
-        # a bad ``priority`` falls through to ``invalid_review`` the moment the
-        # scan stops reaching it.
-        pytest.param(
-            ("review", "findings", 0, "priority"),
-            "password=super-secret",
-            id="secret-in-list-of-dicts",
-        ),
-        pytest.param(
-            ("review", "findings", 0, "priority"),
-            "P1\x00",
-            id="control-in-list-of-dicts",
         ),
         # The scan reaches dict KEYS, and it runs before the ``_TOP_KEYS``
         # check, so this is observable at the public boundary -- but only
@@ -293,8 +368,13 @@ def test_summary_and_diagnostics_are_sanitized():
             "password=super-secret",
             id="stray-nested-acceptance-key",
         ),
-        # A contract regression guard, not scan coverage: ``_bounded_string``
-        # raises ``unsafe_metadata`` for this one even with the scan removed.
+        # The list-of-dicts shape: it pins that the scan recurses through a
+        # list *into* a dict. It used to be pinned by ``review.findings[].
+        # priority``, whose bad value fell through to ``invalid_review`` once
+        # the scan stopped reaching it; no such field survives now that the
+        # review section is gone, so this is the only remaining case for that
+        # shape -- and ``_bounded_string`` raises ``unsafe_metadata`` for it
+        # even with the scan removed, so it no longer isolates the scan.
         pytest.param(
             ("delivery", "checks", 0, "command"),
             "password=super-secret\x00",
@@ -309,17 +389,6 @@ def test_parse_rejects_secrets_and_controls_at_any_metadata_depth(path, value):
     ``test_acceptance_criteria_are_plan_text_and_are_never_scanned``.
     """
     result = _result()
-    result["review"] = {
-        "verdict": "findings",
-        "findings": [
-            {
-                "priority": "P1",
-                "location": "src/example.py:1",
-                "failure_scenario": "It breaks.",
-                "recommendation": "Fix it.",
-            }
-        ],
-    }
     result["delivery"] = {
         "pr_url": "https://github.com/example/repo/pull/1",
         "branch": "todo-42",
@@ -340,7 +409,7 @@ def test_parse_rejects_secrets_and_controls_at_any_metadata_depth(path, value):
         )
 
 
-# Four of these trip only ``_SECRET_RE`` and the fifth trips no guard at all, so
+# Four of these trip only ``SECRET_RE`` and the fifth trips no guard at all, so
 # they are documentation of the reported field failures, not five independent
 # cases. The coverage in this test comes from the negative half below.
 @pytest.mark.parametrize(
@@ -411,112 +480,6 @@ def test_acceptance_criteria_must_still_echo_the_plan_exactly():
             step_key="plan:task-1",
             acceptance_criteria=("Observable criterion",),
         )
-
-
-def _parse_review(review):
-    result = _result(
-        step_key="review:initial",
-        git={
-            "expected_parent_sha": "a" * 40,
-            "resulting_head_sha": "a" * 40,
-            "task_commit_sha": "a" * 40,
-            "changed_files": [],
-        },
-        acceptance=[],
-        review=review,
-    )
-    return parse_worker_result(
-        {"runs": [{"status": "succeeded", "metadata": {"tpo_result": result}}]},
-        tick_id="01TICK",
-        todo_id="TODO-42",
-        step_key="review:initial",
-        acceptance_criteria=(),
-        allow_no_changes=True,
-    )
-
-
-def test_review_evidence_preserves_bounded_structured_findings():
-    finding = {
-        "priority": "P2",
-        "location": "src/example.py:12",
-        "failure_scenario": "The invalid input reaches the unsafe branch.",
-        "recommendation": "Validate the input before dispatch.",
-    }
-    parsed = _parse_review({"verdict": "findings", "findings": [finding]})
-    assert parsed.review.verdict == "findings"
-    assert parsed.review.findings == (finding,)
-
-
-@pytest.mark.parametrize(
-    "review",
-    [
-        pytest.param([], id="not-object"),
-        pytest.param({"verdict": "clean", "findings": [], "extra": True}, id="unknown-key"),
-        pytest.param({"verdict": "maybe", "findings": []}, id="bad-verdict"),
-        pytest.param({"verdict": "clean", "findings": [{}]}, id="clean-with-finding"),
-        pytest.param({"verdict": "findings", "findings": []}, id="findings-empty"),
-        pytest.param(
-            {
-                "verdict": "findings",
-                "findings": [
-                    {
-                        "priority": "P4",
-                        "location": "file.py:1",
-                        "failure_scenario": "failure",
-                        "recommendation": "fix",
-                    }
-                ],
-            },
-            id="bad-priority",
-        ),
-        pytest.param(
-            {
-                "verdict": "findings",
-                "findings": [
-                    {
-                        "priority": "P1",
-                        "location": "file.py:1",
-                        "failure_scenario": "failure",
-                        "recommendation": "fix",
-                        "unexpected": "x",
-                    }
-                ],
-            },
-            id="finding-unknown-key",
-        ),
-    ],
-)
-def test_review_evidence_rejects_ambiguous_or_unbounded_shapes(review):
-    with pytest.raises(ResultContractError, match="invalid_review"):
-        _parse_review(review)
-
-
-def test_read_only_review_requires_evidence_pinned_head_and_clean_worktree(
-    tmp_path, mocker
-):
-    clean = _parse_review({"verdict": "clean", "findings": []})
-    mocker.patch(
-        "hermes_pipeline.result_contract.subprocess.run",
-        return_value=SimpleNamespace(returncode=0, stdout=""),
-    )
-    verify_read_only_review(tmp_path, clean, head_sha="a" * 40)
-
-    dirty = mocker.patch("hermes_pipeline.result_contract.subprocess.run")
-    dirty.return_value = SimpleNamespace(returncode=0, stdout="?? untracked.txt\n")
-    with pytest.raises(ResultContractError, match="review_dirty_worktree"):
-        verify_read_only_review(tmp_path, clean, head_sha="a" * 40)
-
-    changed = SimpleNamespace(
-        review=clean.review,
-        git=SimpleNamespace(
-            expected_parent_sha="a" * 40,
-            resulting_head_sha="a" * 40,
-            task_commit_sha="a" * 40,
-            changed_files=("src/example.py",),
-        ),
-    )
-    with pytest.raises(ResultContractError, match="review_changed_head"):
-        verify_read_only_review(tmp_path, changed, head_sha="a" * 40)
 
 
 def test_delivery_evidence_accepts_only_successful_checks_and_exact_pr_identity():
@@ -612,6 +575,109 @@ def test_verify_git_requires_exactly_one_commit_and_matching_changed_files(tmp_p
     (repo / "untracked.txt").write_text("keep")
     with pytest.raises(ResultContractError, match="worktree_dirty"):
         verify_worker_git_result(repo, parsed.git, expected_parent_sha=parent)
+
+
+def _repo(tmp_path, name):
+    repo = tmp_path / name
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    (repo / "base.txt").write_text("base")
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", "base")
+    return repo
+
+
+def _add_commit(repo, name):
+    (repo / name).write_text(name)
+    _git(repo, "add", ".")
+    _git(repo, "commit", "-qm", name)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _git_block(parent, head, changed):
+    from hermes_pipeline.result_contract import GitResult
+
+    return GitResult(parent, head, head, tuple(changed))
+
+
+def test_optional_single_commit_accepts_no_commit_and_exactly_one(tmp_path):
+    """``phase_5_review`` and ``phase_8_finish_branch`` may each add one commit.
+
+    Or none: a review with no valid finding and a finish with no required
+    metadata change are both legitimate, so the anchor bound is 0-or-1, not the
+    exactly-one a Plan task owes.
+    """
+    repo = _repo(tmp_path, "optional-one")
+    anchor = _git(repo, "rev-parse", "HEAD")
+
+    verify_optional_single_commit(
+        repo, _git_block(anchor, anchor, ()), expected_parent_sha=anchor
+    )
+
+    head = _add_commit(repo, "metadata.txt")
+    verify_optional_single_commit(
+        repo, _git_block(anchor, head, ("metadata.txt",)), expected_parent_sha=anchor
+    )
+
+
+def test_optional_single_commit_rejects_a_second_commit(tmp_path):
+    """One commit is the whole allowance; two is unreviewed work riding along."""
+    repo = _repo(tmp_path, "optional-two")
+    anchor = _git(repo, "rev-parse", "HEAD")
+    _add_commit(repo, "first.txt")
+    head = _add_commit(repo, "second.txt")
+
+    with pytest.raises(ResultContractError, match="commit_count_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_block(anchor, head, ("first.txt", "second.txt")),
+            expected_parent_sha=anchor,
+        )
+
+
+def test_optional_single_commit_rejects_a_head_off_the_anchor(tmp_path):
+    """A head that does not descend from the anchor is a forged history."""
+    repo = _repo(tmp_path, "optional-forked")
+    anchor = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "checkout", "-q", "-b", "sidetrack", anchor + "^{commit}")
+    _git(repo, "checkout", "-q", "--orphan", "elsewhere")
+    _git(repo, "rm", "-q", "-rf", ".")
+    foreign = _add_commit(repo, "foreign.txt")
+
+    with pytest.raises(ResultContractError, match="parent_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_block(anchor, foreign, ("foreign.txt",)),
+            expected_parent_sha=anchor,
+        )
+
+
+def test_optional_single_commit_rejects_a_claimed_commit_it_did_not_make(tmp_path):
+    """The reported changed files must be the commit's real diff."""
+    repo = _repo(tmp_path, "optional-lying")
+    anchor = _git(repo, "rev-parse", "HEAD")
+    head = _add_commit(repo, "real.txt")
+
+    with pytest.raises(ResultContractError, match="changed_files_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_block(anchor, head, ("claimed.txt",)),
+            expected_parent_sha=anchor,
+        )
+    # And a "changed nothing" claim cannot sit on an advanced head.
+    with pytest.raises(ResultContractError, match="changed_files_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_block(anchor, head, ()), expected_parent_sha=anchor
+        )
+    # The mirror image, and the untested half of the zero-commit branch's
+    # ``git.resulting_head_sha != expected_parent_sha or git.changed_files``:
+    # the head really IS the anchor, so no commit was made, but the report
+    # claims a file changed anyway. Every other zero-commit case passes an empty
+    # list, so dropping ``or git.changed_files`` survived them all.
+    with pytest.raises(ResultContractError, match="changed_files_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_block(anchor, anchor, ("invented.py",)),
+            expected_parent_sha=anchor,
+        )
 
 
 def test_historical_git_topology_remains_valid_after_later_fix_commit(tmp_path):
@@ -1581,15 +1647,12 @@ _JSON_BLOCK_RE = re.compile(r"```json\n(.*?)\n```", re.DOTALL)
 # would reject as unfilled.
 
 _TEMPLATE_FILL = {
-    ("review", "findings", 0, "priority"): "P1",
     ("git", "expected_parent_sha"): "a" * 40,
     ("git", "resulting_head_sha"): "b" * 40,
     ("git", "task_commit_sha"): "b" * 40,
     ("git", "changed_files", 0): "src/example.py",
-    ("review", "findings", 0, "location"): "src/example.py:12",
-    ("review", "findings", 0, "failure_scenario"): "A resumed tick closes the card twice.",
-    ("review", "findings", 0, "recommendation"): "Guard the close with the run marker.",
     ("delivery", "pr_url"): "https://github.com/acme/repo/pull/7",
+    ("delivery", "head_sha"): "b" * 40,
     ("delivery", "checks", 0, "command"): "uv run pytest",
 }
 
@@ -1646,55 +1709,14 @@ def test_plan_template_round_trips_through_the_parser():
     assert "do not report a result object" not in text
 
 
-def test_review_template_round_trips_clean_and_findings_verdicts():
-    from hermes_pipeline.result_contract import (
-        render_result_template,
-        verify_read_only_review,
-    )
-
-    head = "c" * 40
-    text = render_result_template(
-        tick_id="01TICK",
-        todo_id="TODO-42",
-        step_key="review:0",
-        section="review",
-        pinned_head_sha=head,
-        allow_no_changes=True,
-    )
-    template, findings_variant = _template_blocks(text)
-
-    clean = parse_worker_result(
-        _template_envelope(_fill_template(template)),
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-        acceptance_criteria=(), allow_no_changes=True,
-    )
-    assert clean.review is not None and clean.review.verdict == "clean"
-    verify_read_only_review(
-        Path("."), clean, head_sha=head, require_current=False
-    )
-
-    spliced = dict(template)
-    spliced["review"] = findings_variant
-    reported = parse_worker_result(
-        _template_envelope(_fill_template(spliced)),
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-        acceptance_criteria=(), allow_no_changes=True,
-    )
-    assert reported.review is not None
-    assert reported.review.verdict == "findings"
-    assert reported.review.findings[0]["priority"] in _FINDING_PRIORITIES
-
-
 def test_delivery_template_round_trips_through_the_parser():
     from hermes_pipeline.result_contract import render_result_template
 
-    head = "b" * 40
     text = render_result_template(
         tick_id="01TICK",
         todo_id="TODO-42",
         step_key="finish",
         section="delivery",
-        pinned_head_sha=head,
         branch="todo-42",
         allow_no_changes=True,
     )
@@ -1711,10 +1733,20 @@ def test_delivery_template_round_trips_through_the_parser():
     # once the worker replaces the whole token with the URL it opened.
     assert _PLACEHOLDER_RE.fullmatch(template["delivery"]["pr_url"])
     assert parsed.delivery.pr_url == "https://github.com/acme/repo/pull/7"
-    # Delivery reconciliation demands the branch and the reviewed head verbatim.
+    # Delivery reconciliation demands the registered branch verbatim, and the
+    # pushed head must be the head the worker's own git block reports. The head
+    # is no longer pre-filled: ``phase_8_finish_branch`` may add one metadata
+    # commit, so the delivered SHA is not knowable when the card is written.
     assert parsed.delivery.branch == "todo-42"
-    assert parsed.delivery.head_sha == parsed.git.resulting_head_sha == head
-    assert parsed.git.changed_files == ()
+    assert _PLACEHOLDER_RE.fullmatch(template["delivery"]["head_sha"])
+    assert parsed.delivery.head_sha == parsed.git.resulting_head_sha == "b" * 40
+    # ``changed_files`` is a placeholder, never a pre-filled ``[]``. The card
+    # instructs the worker to keep pre-filled values verbatim, and the profile
+    # MANDATES a commit from ``phase_8_finish_branch``, so a pre-filled empty
+    # list is a value an obedient worker keeps and a real diff then
+    # contradicts. Filling the slot is what a compliant worker does.
+    assert _PLACEHOLDER_RE.fullmatch(template["git"]["changed_files"][0])
+    assert parsed.git.changed_files == ("src/example.py",)
 
 
 def test_template_publishes_every_key_the_contract_constants_require():
@@ -1730,22 +1762,22 @@ def test_template_publishes_every_key_the_contract_constants_require():
     assert set(plan["git"]) == contract._GIT_KEYS
     assert set(plan["acceptance"][0]) == contract._ACCEPTANCE_ENTRY_KEYS
 
-    review, findings_variant = _template_blocks(
+    # A review card publishes one block and no optional section: with the
+    # review-round machinery gone, nothing reads a verdict or findings object,
+    # so the contract carries none to be filled in or misread.
+    review, = _template_blocks(
         contract.render_result_template(
             tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-            section="review", pinned_head_sha="c" * 40, allow_no_changes=True,
+            allow_no_changes=True,
         )
     )
-    assert set(review) == contract._TOP_KEYS | {"review"}
-    assert set(review["review"]) == contract._REVIEW_KEYS
-    assert set(findings_variant) == contract._REVIEW_KEYS
-    assert set(findings_variant["findings"][0]) == contract._FINDING_KEYS
+    assert set(review) == contract._TOP_KEYS
+    assert set(review["git"]) == contract._GIT_KEYS
 
     delivery, = _template_blocks(
         contract.render_result_template(
             tick_id="01TICK", todo_id="TODO-42", step_key="finish",
-            section="delivery", pinned_head_sha="b" * 40, branch="todo-42",
-            allow_no_changes=True,
+            section="delivery", branch="todo-42", allow_no_changes=True,
         )
     )
     assert set(delivery) == contract._TOP_KEYS | {"delivery"}
@@ -1796,12 +1828,10 @@ _EXPECTED_PLACEHOLDER_PATHS = {
     ("git", "resulting_head_sha"),
     ("git", "task_commit_sha"),
     ("git", "changed_files", 0),
-    # The findings variant is published as a bare "review" object.
-    ("findings", 0, "priority"),
-    ("findings", 0, "location"),
-    ("findings", 0, "failure_scenario"),
-    ("findings", 0, "recommendation"),
     ("delivery", "pr_url"),
+    # Not pre-filled: ``phase_8_finish_branch`` may add one metadata commit, so
+    # the pushed head is not knowable when the card is written.
+    ("delivery", "head_sha"),
     ("delivery", "checks", 0, "command"),
 }
 
@@ -1830,14 +1860,13 @@ def test_template_placeholders_describe_the_value_instead_of_wrapping_it():
         *_template_blocks(
             contract.render_result_template(
                 tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-                section="review", pinned_head_sha="c" * 40, allow_no_changes=True,
+                allow_no_changes=True,
             )
         ),
         *_template_blocks(
             contract.render_result_template(
                 tick_id="01TICK", todo_id="TODO-42", step_key="finish",
-                section="delivery", pinned_head_sha="b" * 40, branch="todo-42",
-                allow_no_changes=True,
+                section="delivery", branch="todo-42", allow_no_changes=True,
             )
         ),
     ]
@@ -1866,33 +1895,6 @@ def test_template_rejects_an_unknown_optional_section():
         render_result_template(
             tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="nope",
         )
-
-
-def test_review_body_never_reads_as_constraining_the_review_verdict():
-    """The stall this template exists to prevent must not be re-encoded in prose."""
-    from hermes_pipeline.result_contract import render_result_template
-
-    head = "c" * 40
-    text = render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
-        pinned_head_sha=head, allow_no_changes=True,
-    )
-    template, findings_variant = _template_blocks(text)
-
-    # A reviewer that reads an unqualified verdict sentence as covering the
-    # review sub-object stalls the run exactly as the live incident did.
-    misread = _fill_template(template)
-    misread["review"] = dict(findings_variant, verdict="success")
-    with pytest.raises(ResultContractError, match="invalid_review"):
-        parse_worker_result(
-            _template_envelope(_fill_template(misread)),
-            tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-            acceptance_criteria=(), allow_no_changes=True,
-        )
-
-    for sentence in text.split(". "):
-        if '"verdict" accepts only' in sentence:
-            assert "top-level" in sentence, sentence
 
 
 def test_parser_rejects_unfilled_template_placeholders():
@@ -1933,30 +1935,6 @@ def test_bounded_string_allows_a_real_value_containing_angle_brackets():
     ) == "uv run pytest -k 'a<b'"
 
 
-def test_read_only_review_template_is_wholly_pre_filled(tmp_path):
-    """A pinned review card leaves the dispatcher nothing to invent.
-
-    Every SHA is a registration fact and the card changes no file, so the whole
-    object is publishable as rendered. Delivery is the one pinned card that
-    still carries placeholders: only the client's PR URL and the gates it ran.
-    """
-    from hermes_pipeline.result_contract import render_result_template
-
-    text = render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-        section="review", pinned_head_sha="c" * 40, allow_no_changes=True,
-    )
-    template = _template_blocks(text)[0]
-
-    assert "<" not in json.dumps(template)
-    parsed = parse_worker_result(
-        _template_envelope(template),
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-        acceptance_criteria=(), allow_no_changes=True,
-    )
-    assert parsed.review is not None and parsed.review.verdict == "clean"
-
-
 def test_delivery_template_requires_the_pipeline_known_branch_and_head():
     from hermes_pipeline.result_contract import render_result_template
 
@@ -1965,23 +1943,6 @@ def test_delivery_template_requires_the_pipeline_known_branch_and_head():
             tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
             allow_no_changes=True,
         )
-
-
-def test_review_body_states_the_findings_substitution_before_other_instructions():
-    """A dispatcher obeying "exactly, never paraphrase" must not publish clean."""
-    from hermes_pipeline.result_contract import render_result_template
-
-    text = render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
-        pinned_head_sha="c" * 40, allow_no_changes=True,
-    )
-    main_fence_end = text.index("```", text.index("```json") + len("```json"))
-    substitution = text.index('replace the whole "review" value')
-
-    assert main_fence_end < substitution
-    # Both fences must name which review verdict they carry.
-    assert "defect-free" in text
-    assert text.index("defect-free") < substitution
 
 
 @pytest.mark.parametrize(
@@ -2013,31 +1974,6 @@ def test_summary_is_discarded_diagnostics_and_never_rejects_the_result(summary):
     assert parsed.step_key == "plan:task-1"
 
 
-def test_placeholder_rejection_never_swallows_a_real_bracketed_finding():
-    from hermes_pipeline.result_contract import render_result_template
-
-    text = render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
-        pinned_head_sha="c" * 40, allow_no_changes=True,
-    )
-    template, findings_variant = _template_blocks(text)
-    reported = dict(template)
-    reported["review"] = findings_variant
-    filled = _fill_template(reported)
-    filled["review"]["findings"][0]["failure_scenario"] = (
-        "<script> tags render unescaped, e.g. <img onerror=x>"
-    )
-
-    parsed = parse_worker_result(
-        _template_envelope(filled),
-        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-        acceptance_criteria=(), allow_no_changes=True,
-    )
-
-    assert parsed.review is not None
-    assert parsed.review.findings[0]["failure_scenario"].startswith("<script>")
-
-
 def test_every_rendered_placeholder_is_caught_by_the_placeholder_rule():
     from hermes_pipeline.result_contract import _PLACEHOLDER_RE, render_result_template
 
@@ -2047,12 +1983,8 @@ def test_every_rendered_placeholder_is_caught_by_the_placeholder_rule():
             acceptance_criteria=("Observable criterion",),
         ),
         render_result_template(
-            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
-            pinned_head_sha="c" * 40, allow_no_changes=True,
-        ),
-        render_result_template(
             tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
-            pinned_head_sha="b" * 40, branch="todo-42", allow_no_changes=True,
+            branch="todo-42", allow_no_changes=True,
         ),
     )
     seen = 0
@@ -2073,12 +2005,8 @@ def _all_templates():
             acceptance_criteria=("Observable criterion",),
         ),
         render_result_template(
-            tick_id="01TICK", todo_id="TODO-42", step_key="review:0", section="review",
-            pinned_head_sha="c" * 40, allow_no_changes=True,
-        ),
-        render_result_template(
             tick_id="01TICK", todo_id="TODO-42", step_key="finish", section="delivery",
-            pinned_head_sha="b" * 40, branch="todo-42", allow_no_changes=True,
+            branch="todo-42", allow_no_changes=True,
         ),
     )
 
@@ -2105,26 +2033,589 @@ def test_template_addresses_the_dispatcher_that_closes_the_card():
             assert phrase not in lowered, phrase
 
 
-def test_findings_priority_is_chosen_by_the_reviewer_not_pre_filled():
-    from hermes_pipeline.result_contract import _FINDING_PRIORITIES
-
-    _template, findings_variant = _template_blocks(_all_templates()[1])
-    priority = findings_variant["findings"][0]["priority"]
-
-    assert priority.startswith("<") and priority.endswith(">")
-    for allowed in _FINDING_PRIORITIES:
-        assert allowed in priority
-
-
 def test_delivery_body_demands_every_gate_it_ran():
-    text = _all_templates()[2]
+    text = _all_templates()[1]
 
     assert "every required gate" in text
 
 
-def test_review_substitution_is_keyed_to_what_the_client_reported():
-    """The dispatcher transcribes the client's verdict; it does not judge."""
-    text = _all_templates()[1]
 
-    assert "the external client reported no defect" in text
-    assert "one entry per reported defect" in text
+# --- remediation wave: the checks a mutation pass found unpinned ------------
+
+
+def _scratch_repo(tmp_path, name):
+    repo = tmp_path / name
+    repo.mkdir()
+    for args in (
+        ("init", "-q", "-b", "main"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def _scratch_commit(repo, *paths, message="c"):
+    for path in paths:
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(path))
+    subprocess.run(["git", "add", "-A"], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", message], cwd=repo, check=True, capture_output=True
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _git_result(parent, head, changed=()):
+    from hermes_pipeline.result_contract import GitResult
+
+    return GitResult(parent, head, head, tuple(changed))
+
+
+def _merge_with_parents(repo, tree_of, first, second, message):
+    """A real merge commit whose parent ORDER is chosen, via ``commit-tree``."""
+    tree = subprocess.run(
+        ["git", "rev-parse", f"{tree_of}^{{tree}}"], cwd=repo, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    return subprocess.run(
+        ["git", "commit-tree", tree, "-p", first, "-p", second, "-m", message],
+        cwd=repo, check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [
+        pytest.param("optional-single", id="verify_optional_single_commit"),
+        pytest.param("topology", id="verify_worker_git_topology"),
+    ],
+)
+def test_a_merge_hiding_the_anchor_as_its_second_parent_is_rejected(tmp_path, verifier):
+    """``rev-parse <sha>^`` is the ONLY guard against a forged merge.
+
+    A merge commit that lists the anchor as its SECOND parent smuggles in a tree
+    the anchor never produced while satisfying everything else: the anchor is a
+    real ancestor of it, exactly one commit separates them, and -- as the premise
+    below asserts -- ``_on_first_parent_mainline`` answers True, because it walks
+    from HEAD and HEAD *is* the forged merge. So this check is load-bearing and
+    alone, and no test killed its mutation.
+
+    The accepted control is the same tree with the parents in the honest order,
+    which proves the rejection is about parent ORDER and not about merges.
+    """
+    repo = _scratch_repo(tmp_path, "forged-merge")
+    base = _scratch_commit(repo, "base.txt")
+    anchor = _scratch_commit(repo, "impl.py")
+    # A side tree the anchor never produced: it drops impl.py and adds a
+    # backdoor. Its commit is never a parent of either merge -- only its tree is
+    # reused -- so both merges sit exactly one commit past the anchor.
+    subprocess.run(["git", "checkout", "-q", "-b", "side", base], cwd=repo,
+                   check=True, capture_output=True)
+    side = _scratch_commit(repo, "backdoor.py")
+    subprocess.run(["git", "checkout", "-q", "main"], cwd=repo, check=True,
+                   capture_output=True)
+
+    forged = _merge_with_parents(repo, side, base, anchor, "anchor as 2nd parent")
+    honest = _merge_with_parents(repo, side, anchor, base, "anchor as 1st parent")
+    reported = ("backdoor.py", "impl.py")
+
+    def check(head):
+        report = _git_result(anchor, head, reported)
+        if verifier == "optional-single":
+            verify_optional_single_commit(
+                repo, report, expected_parent_sha=anchor, require_current=False,
+            )
+        else:
+            verify_worker_git_topology(repo, report, expected_parent_sha=anchor)
+
+    subprocess.run(["git", "reset", "--hard", "-q", forged], cwd=repo, check=True,
+                   capture_output=True)
+    # Premise 1: the anchor really is an ancestor, so ancestry proves nothing.
+    assert subprocess.run(
+        ["git", "merge-base", "--is-ancestor", anchor, forged], cwd=repo,
+        capture_output=True,
+    ).returncode == 0
+    # Premise 2: exactly one commit separates them, so the count proves nothing.
+    assert subprocess.run(
+        ["git", "rev-list", "--count", f"{anchor}..{forged}"], cwd=repo,
+        check=True, capture_output=True, text=True,
+    ).stdout.strip() == "1"
+    # Premise 3: and the mainline predicate says YES to the forged input.
+    from hermes_pipeline.result_contract import _on_first_parent_mainline
+
+    assert _on_first_parent_mainline(repo, anchor, forged) is True
+
+    with pytest.raises(ResultContractError) as exc_info:
+        check(forged)
+    assert exc_info.value.code == "parent_mismatch"
+
+    # The control: identical tree, honest parent order, accepted.
+    subprocess.run(["git", "reset", "--hard", "-q", honest], cwd=repo, check=True,
+                   capture_output=True)
+    check(honest)
+
+
+def test_a_compliant_finish_worker_filling_only_the_template_slots_verifies(tmp_path):
+    """A worker that did exactly what the profile mandates must be accepted.
+
+    The profile orders ``phase_8_finish_branch`` to "commit those as one
+    separate atomic commit", so a compliant finish worker's diff is never
+    empty. This builds its report by filling ONLY the ``<...>`` slots of the
+    template the card really publishes -- keeping every pre-filled value
+    verbatim, exactly as the template instructs -- and then verifies it against
+    a real repository. A pre-filled ``"changed_files": []`` made this
+    impossible: it is a pre-filled value, so an obedient worker keeps it, and
+    ``verify_optional_single_commit`` then raises ``changed_files_mismatch`` and
+    delivery can never complete.
+    """
+    from hermes_pipeline.result_contract import render_result_template
+
+    repo = _scratch_repo(tmp_path, "compliant-finish")
+    accepted = _scratch_commit(repo, "impl.py")
+    head = _scratch_commit(repo, "CHANGELOG.md")
+
+    template, = _template_blocks(
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish",
+            section="delivery", branch="todo-42", allow_no_changes=True,
+        )
+    )
+    report = _fill_template(
+        template,
+    )
+    # The only worker-supplied facts, substituted into the template's own slots.
+    report["git"]["expected_parent_sha"] = accepted
+    report["git"]["resulting_head_sha"] = head
+    report["git"]["task_commit_sha"] = head
+    report["git"]["changed_files"] = ["CHANGELOG.md"]
+    report["delivery"]["head_sha"] = head
+
+    parsed = parse_worker_result(
+        _template_envelope(report), tick_id="01TICK", todo_id="TODO-42",
+        step_key="finish", acceptance_criteria=(), allow_no_changes=True,
+    )
+    verify_optional_single_commit(
+        repo, parsed.git, expected_parent_sha=accepted, require_current=True
+    )
+
+
+def test_changed_files_guidance_is_published_in_both_template_modes():
+    """The one conditional field must never be the one field with no prose."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    for allow_no_changes in (False, True):
+        text = render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="finish",
+            allow_no_changes=allow_no_changes,
+        )
+        prose = text.split("```")[-1]
+        assert "changed_files lists every repo-relative path" in prose
+        assert "[] only when no commit was made" in prose
+
+
+def test_an_in_flight_card_still_reporting_review_is_parsed_and_ignored():
+    """A card opened before the review section was removed must still land.
+
+    Its 2400s timeout outlives an upgrade, so the card is already published
+    with a ``review`` key. Rejecting that key as ``malformed_result`` leaves a
+    card whose closing metadata TPO can never accept: ``reconcile_reviews``
+    returns False every tick forever with nothing blocked. The value is not
+    validated and not read -- including no unsafe-string scan, because findings
+    prose naming a token would then reject the very card the tolerance exists
+    to admit.
+    """
+    payload = {
+        **_result(step_key="review:0"),
+        "review": {
+            "verdict": "pass",
+            "findings": [{"severity": "high", "detail": "authorization: Bearer x"}],
+        },
+    }
+    payload["acceptance"] = []
+    parsed = parse_worker_result(
+        _template_envelope(payload), tick_id="01TICK", todo_id="TODO-42",
+        step_key="review:0", acceptance_criteria=(), allow_no_changes=True,
+    )
+
+    assert not hasattr(parsed, "review")
+    assert parsed.step_key == "review:0"
+
+
+def test_review_is_not_a_section_the_template_can_publish():
+    """Tolerating the key on the way in must not resurrect it on the way out."""
+    from hermes_pipeline.result_contract import render_result_template
+
+    with pytest.raises(ResultContractError, match="unknown_result_section"):
+        render_result_template(
+            tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+            section="review",
+        )
+
+
+def test_a_side_merge_parent_is_not_on_the_branch_mainline(tmp_path):
+    """``merge-base --is-ancestor`` is satisfied by a merge's SECOND parent.
+
+    Anchor ``A``, a legitimate commit ``R1``, and a forged commit ``X`` built
+    off ``A`` with arbitrary content; ``HEAD`` is the merge of ``(R1, X)``. ``X``
+    is honestly reported, has ``A`` as its real parent, and sits one commit past
+    the anchor, so every other check passes -- and ancestry from HEAD passes
+    too, even though ``X`` was never on the mainline the run delivers. Only a
+    first-parent walk excludes it.
+    """
+    repo = _scratch_repo(tmp_path, "side-merge")
+    anchor = _scratch_commit(repo, "impl.py")
+    subprocess.run(["git", "checkout", "-q", "-b", "legit"], cwd=repo, check=True)
+    legit = _scratch_commit(repo, "review-fix.py")
+    subprocess.run(["git", "checkout", "-q", "-b", "forged", anchor], cwd=repo, check=True)
+    forged = _scratch_commit(repo, "backdoor.py")
+    subprocess.run(["git", "checkout", "-q", "legit"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "merge", "-q", "--no-ff", "forged", "-m", "merge"],
+        cwd=repo, check=True, capture_output=True,
+    )
+
+    # The premise: git really does call the side parent an ancestor of HEAD.
+    assert subprocess.run(
+        ["git", "merge-base", "--is-ancestor", forged, "HEAD"], cwd=repo,
+        capture_output=True,
+    ).returncode == 0
+
+    with pytest.raises(ResultContractError, match="unreachable_commit"):
+        verify_optional_single_commit(
+            repo, _git_result(anchor, forged, ("backdoor.py",)),
+            expected_parent_sha=anchor, require_current=False,
+        )
+    # The mainline commit at the same distance is still accepted.
+    verify_optional_single_commit(
+        repo, _git_result(anchor, legit, ("review-fix.py",)),
+        expected_parent_sha=anchor, require_current=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "verifier",
+    [
+        pytest.param("optional-single", id="verify_optional_single_commit"),
+        pytest.param("topology", id="verify_worker_git_topology"),
+    ],
+)
+@pytest.mark.parametrize(
+    "kind",
+    [
+        pytest.param("invented", id="sha-never-existed"),
+        pytest.param("tree", id="real-object-of-the-wrong-type"),
+    ],
+)
+def test_a_reported_sha_that_is_no_commit_is_a_worker_fault(tmp_path, verifier, kind):
+    """A valid-shaped SHA naming no commit is a bad report, not broken git.
+
+    Every topology query -- ``merge-base``, ``rev-parse <sha>^`` -- exits 128 on
+    an unknown object, and every git-failure helper here collapses that into
+    ``git_verification_failed``, whose whole meaning is "git could not answer".
+    ``_verify_finish`` deliberately passes that code through so an operator
+    reads a broken worktree as broken, so a worker that simply invented its SHA
+    was attributed to broken infrastructure. The old string comparison called it
+    ``finish_review_head_mismatch``, so this is an attribution regression.
+
+    The ``real-object-of-the-wrong-type`` row is why the check is
+    ``rev-parse --verify <sha>^{{commit}}`` and not ``cat-file -e <sha>``: a
+    tree's own SHA is a perfectly valid object, so ``cat-file -e`` answers yes
+    for it while no commit by that name exists.
+    """
+    repo = _scratch_repo(tmp_path, "no-such-commit")
+    anchor_sha = _scratch_commit(repo, "impl.py")
+    if kind == "invented":
+        bogus = "9" * 40
+    else:
+        bogus = subprocess.run(
+            ["git", "rev-parse", "HEAD^{tree}"], cwd=repo, check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        # The premise for this row: it really is an object git knows.
+        assert subprocess.run(
+            ["git", "cat-file", "-e", bogus], cwd=repo, capture_output=True
+        ).returncode == 0
+
+    report = _git_result(anchor_sha, bogus, ("invented.py",))
+    with pytest.raises(ResultContractError) as exc_info:
+        if verifier == "optional-single":
+            verify_optional_single_commit(
+                repo, report, expected_parent_sha=anchor_sha, require_current=False,
+            )
+        else:
+            verify_worker_git_topology(
+                repo, report, expected_parent_sha=anchor_sha,
+            )
+    assert exc_info.value.code == "unknown_commit"
+
+
+def test_a_commit_discarded_by_git_reset_hard_is_unreachable(tmp_path):
+    """The one fact that survives a discarded commit is mainline membership.
+
+    Parentage, commit count and the real diff all keep holding for a commit
+    ``git reset --hard`` threw away -- the object is still in the repository.
+    So this rejection is the whole value of the reachability check, and it is
+    exercised with a real reset rather than a fabricated SHA.
+    """
+    repo = _scratch_repo(tmp_path, "reset-hard")
+    anchor = _scratch_commit(repo, "impl.py")
+    discarded = _scratch_commit(repo, "review-fix.py")
+
+    verify_optional_single_commit(
+        repo, _git_result(anchor, discarded, ("review-fix.py",)),
+        expected_parent_sha=anchor, require_current=False,
+    )
+
+    subprocess.run(
+        ["git", "reset", "--hard", "-q", anchor], cwd=repo, check=True,
+        capture_output=True,
+    )
+    # Still a real object with the right parent, count and diff...
+    assert subprocess.run(
+        ["git", "cat-file", "-e", discarded], cwd=repo, capture_output=True
+    ).returncode == 0
+
+    with pytest.raises(ResultContractError, match="unreachable_commit"):
+        verify_optional_single_commit(
+            repo, _git_result(anchor, discarded, ("review-fix.py",)),
+            expected_parent_sha=anchor, require_current=False,
+        )
+
+
+def test_require_current_demands_the_live_head_equals_the_reported_head(tmp_path):
+    """The first verification measures the live branch, not just the report.
+
+    ``verify_read_only_review`` used to prove this and was deleted with nothing
+    replacing it. Without it a report can name any mainline commit while HEAD
+    has already moved on.
+    """
+    repo = _scratch_repo(tmp_path, "live-head")
+    anchor = _scratch_commit(repo, "impl.py")
+    reviewed = _scratch_commit(repo, "review-fix.py")
+    _scratch_commit(repo, "later.py")
+
+    with pytest.raises(ResultContractError, match="head_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_result(anchor, reviewed, ("review-fix.py",)),
+            expected_parent_sha=anchor, require_current=True,
+        )
+    # Relaxed on a later tick, the same report is accepted.
+    verify_optional_single_commit(
+        repo, _git_result(anchor, reviewed, ("review-fix.py",)),
+        expected_parent_sha=anchor, require_current=False,
+    )
+
+
+def test_require_current_demands_a_clean_worktree(tmp_path):
+    """Uncommitted work at the reviewed head is work no report accounts for.
+
+    The other half of the deleted read-only-review check: an untracked file is
+    enough, because ``--untracked-files=all`` is what makes "clean" mean it.
+    """
+    repo = _scratch_repo(tmp_path, "dirty-worktree")
+    anchor = _scratch_commit(repo, "impl.py")
+    reviewed = _scratch_commit(repo, "review-fix.py")
+
+    verify_optional_single_commit(
+        repo, _git_result(anchor, reviewed, ("review-fix.py",)),
+        expected_parent_sha=anchor, require_current=True,
+    )
+
+    (repo / "unstaged.py").write_text("left behind")
+    with pytest.raises(ResultContractError, match="worktree_dirty"):
+        verify_optional_single_commit(
+            repo, _git_result(anchor, reviewed, ("review-fix.py",)),
+            expected_parent_sha=anchor, require_current=True,
+        )
+
+
+def test_a_commit_touching_a_non_ascii_path_can_be_reported_at_all(tmp_path):
+    """``core.quotePath`` defaults true, which made such a commit unreportable.
+
+    ``git diff --name-only`` renders ``docs/한글.md`` as
+    ``"docs/\\355\\225\\234\\352\\270\\200.md"``, and ``parse_worker_result``
+    rejects any reported path containing a backslash -- so neither the real name
+    nor the quoted name could ever match, and any commit touching such a path
+    wedged the run permanently.
+    """
+    repo = _scratch_repo(tmp_path, "non-ascii")
+    anchor = _scratch_commit(repo, "impl.py")
+    head = _scratch_commit(repo, "docs/한글-파일.md", "café.txt")
+
+    # The premise: the default rendering is C-quoted and unreportable.
+    quoted = subprocess.run(
+        ["git", "diff", "--name-only", anchor, head], cwd=repo, check=True,
+        capture_output=True, text=True,
+    ).stdout
+    assert "\\" in quoted
+
+    reported = ("docs/한글-파일.md", "café.txt")
+    verify_optional_single_commit(
+        repo, _git_result(anchor, head, reported),
+        expected_parent_sha=anchor, require_current=True,
+    )
+    verify_worker_git_topology(
+        repo, _git_result(anchor, head, reported), expected_parent_sha=anchor
+    )
+    # A wrong report on the same commit still fails, so the pass above is not
+    # the checker having stopped looking.
+    with pytest.raises(ResultContractError, match="changed_files_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_result(anchor, head, ("docs/한글-파일.md",)),
+            expected_parent_sha=anchor, require_current=True,
+        )
+
+
+def test_a_commit_touching_a_path_with_a_control_character_can_be_reported(tmp_path):
+    r"""``-z`` alone carries this case; ``core.quotePath`` does not govern it.
+
+    ``core.quotePath`` governs non-ASCII bytes and nothing else, so this is not
+    the non-ASCII test wearing a different hat: git C-quotes a path holding a
+    control character no matter what that setting says, which the first premise
+    below asserts against real git. Meanwhile such a path IS reportable --
+    ``_CONTROL_RE`` matches none of ``\n``, ``\r``, ``\t`` and the
+    ``changed_files`` validator rejects only a backslash, an absolute path and
+    ``..`` -- which the second premise asserts through the public parser. So
+    without ``-z`` any commit touching such a path is a permanent
+    ``changed_files_mismatch`` with no reportable alternative.
+    """
+    repo = _scratch_repo(tmp_path, "control-char")
+    anchor = _scratch_commit(repo, "impl.py")
+    newline_path = "docs/two\nline.md"
+    head = _scratch_commit(repo, newline_path)
+
+    # Premise 1: C-quoted with AND without quotePath disabled, so disabling
+    # quotePath cannot stand in for ``-z`` here.
+    for extra in ([], ["-c", "core.quotePath=false"]):
+        listed = subprocess.run(
+            ["git", *extra, "diff", "--name-only", anchor, head], cwd=repo,
+            check=True, capture_output=True, text=True,
+        ).stdout
+        assert "\\n" in listed, extra
+        assert newline_path not in listed, extra
+
+    # Premise 2: the real name survives the public parser, so the worker really
+    # can report it and a mismatch here is TPO's fault, not the path's.
+    parsed = parse_worker_result(
+        {"runs": [{
+            "status": "succeeded",
+            "summary": "done",
+            "metadata": {"tpo_result": _result(git={
+                "expected_parent_sha": anchor,
+                "resulting_head_sha": head,
+                "task_commit_sha": head,
+                "changed_files": [newline_path],
+            })},
+        }]},
+        tick_id="01TICK",
+        todo_id="TODO-42",
+        step_key="plan:task-1",
+        acceptance_criteria=("Observable criterion",),
+    )
+    assert parsed.git.changed_files == (newline_path,)
+
+    reported = (newline_path,)
+    verify_optional_single_commit(
+        repo, _git_result(anchor, head, reported),
+        expected_parent_sha=anchor, require_current=True,
+    )
+    verify_worker_git_topology(
+        repo, _git_result(anchor, head, reported), expected_parent_sha=anchor
+    )
+    # Negative control: the same commit with the control character flattened to
+    # a space still fails, so the pass above is not the checker giving up.
+    with pytest.raises(ResultContractError, match="changed_files_mismatch"):
+        verify_optional_single_commit(
+            repo, _git_result(anchor, head, ("docs/two line.md",)),
+            expected_parent_sha=anchor, require_current=True,
+        )
+
+
+def test_reject_unsafe_strings_recurses_through_a_list_of_dicts():
+    """Directly, because no other test isolates the scan any more.
+
+    The surviving ``delivery.checks[0].command`` case is caught downstream by
+    ``_bounded_string``, so it no longer proves the recursive walk reaches a
+    dict nested inside a list.
+    """
+    from hermes_pipeline.result_contract import _reject_unsafe_strings
+
+    with pytest.raises(ResultContractError, match="unsafe_metadata"):
+        _reject_unsafe_strings({"x": [{"y": "password=s\x00"}]})
+    with pytest.raises(ResultContractError, match="unsafe_metadata"):
+        _reject_unsafe_strings([[{"deep": "‮txt.exe"}]])
+    with pytest.raises(ResultContractError, match="unsafe_metadata"):
+        _reject_unsafe_strings({"token=abc": "harmless"})
+    # A safe nest of the same shape is not rejected.
+    _reject_unsafe_strings({"x": [{"y": "src/example.py"}], "n": [1, None, True]})
+
+
+def test_a_broken_git_during_the_worktree_check_reports_a_git_failure(tmp_path, mocker):
+    """``_git_bytes`` is a git-failure helper, so its code says so.
+
+    It used to raise ``registration_invalid``, which blamed the registration
+    for a git that could not answer -- and, wrapped by ``_verify_finish``,
+    produced ``finish_review_head_mismatch: registration_invalid``, blaming the
+    worker too. Both wrong.
+    """
+    from hermes_pipeline.result_contract import _git_bytes
+
+    with pytest.raises(ResultContractError) as exc_info:
+        _git_bytes(tmp_path, "status", "--porcelain=v1")
+    assert exc_info.value.code == "git_verification_failed"
+
+    repo = _scratch_repo(tmp_path, "broken-status")
+    anchor = _scratch_commit(repo, "impl.py")
+    reviewed = _scratch_commit(repo, "review-fix.py")
+    real_run = subprocess.run
+
+    def fail_status(cmd, *args, **kwargs):
+        if "status" in cmd:
+            return SimpleNamespace(returncode=128, stdout=b"", stderr=b"fatal")
+        return real_run(cmd, *args, **kwargs)
+
+    mocker.patch(
+        "hermes_pipeline.result_contract.subprocess.run", side_effect=fail_status
+    )
+    with pytest.raises(ResultContractError) as exc_info:
+        verify_optional_single_commit(
+            repo, _git_result(anchor, reviewed, ("review-fix.py",)),
+            expected_parent_sha=anchor, require_current=True,
+        )
+    assert exc_info.value.code == "git_verification_failed"
+
+
+def test_a_registration_profile_cannot_walk_out_of_the_bundled_data_directory(tmp_path):
+    """``profile`` selects a bundled directory, so it must stay a plain name."""
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+
+    for hostile in ("../../etc", "..", "a/b", "/abs", "Native-SDD", ""):
+        _rewrite_registration(
+            state, lambda payload, value=hostile: payload.__setitem__("profile", value)
+        )
+        with pytest.raises(ResultContractError, match="registration_invalid"):
+            load_validated_registration(repo, state, "01TICK")
+
+
+def test_a_plan_path_the_base_commit_does_not_carry_is_a_registration_error(tmp_path):
+    """Here a git failure really is the registration's claim being false.
+
+    ``_git_bytes`` raises ``git_verification_failed`` for every other caller,
+    because a git that cannot answer is not the same claim as a fact being
+    wrong. This one call site is the exception: ``git show <base>:<plan>``
+    failing means the registration names a Plan path the pinned base commit
+    does not carry, so the code must stay ``registration_invalid``.
+    """
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+    _rewrite_registration(
+        state, lambda payload: payload.__setitem__("plan_path", "never-committed.md")
+    )
+
+    with pytest.raises(ResultContractError) as exc_info:
+        load_validated_registration(repo, state, "01TICK")
+    assert exc_info.value.code == "registration_invalid"

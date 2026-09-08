@@ -134,19 +134,29 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    the board *settles* (gates are never auto-completed — the production
    reconcilers own them), classify the settled board, then run another
    `tpo tick` under the same tick id. Each settled board emits
-   `tick_completed` `{tick_no, status_map}`; a board identical to the previous
-   tick's also emits `tick_stalled` `{tick_no, status_map}` and fails the run
-   with `tick_stalled`. Every tick re-asserts that `current_tick_id.txt` still
-   names the run: a tick that registered a different run fails with
+   `tick_completed` `{tick_no, status_map}`. A board identical to the previous
+   tick's is *tolerated* once — one reconciler hop can legitimately change
+   nothing and need the next tick — and only logged at warning level; the third
+   consecutive identical board emits `tick_stalled` `{tick_no, status_map}` and
+   fails the run with `tick_stalled`. The count is consecutive and resets
+   whenever the board moves. Every tick re-asserts that `current_tick_id.txt`
+   still names the run: a tick that registered a different run fails with
    `unexpected_selection`, while one that merely selected nothing counts as no
    progress and reports `tick_stalled`. The loop is bounded by
-   `pinned_tick_budget(step_keys)` = `len(step_keys) // 2 + 5 + 2 *
-   MAX_REVIEW_ROUNDS`; exhausting it fails with `tick_budget_exhausted`, which
-   means the run is stuck rather than out of legitimate work. The run is
-   `delivered` when the `finish` card is `done`, the `human-gate` card is
-   `blocked` (a `done` human gate means someone merged the PR and is reported as
-   a failure), and closeout wrote its `finish-verified` marker into the run
-   directory.
+   `pinned_tick_budget(step_keys)` = `len(step_keys) + 6`; exhausting it fails
+   with `tick_budget_exhausted`, which
+   means the run is stuck rather than out of legitimate work. A tick whose
+   subprocess exits non-zero — `tpo tick` isolates a project's crash but reports
+   it — fails the run with `tick_crashed`, whose detail is the tail of
+   `artifacts/tick.log`. The run is `delivered` when the `finish` card is `done`
+   **and every card on the board is `done`**; any card that is `blocked`,
+   `failed` or `archived` classifies the run as failed instead. There is no
+   `human-gate` card: a `requires_plan` run defers `phase_9_human_review` and
+   registers no card for it, so a board matching the older "finish done,
+   human-gate blocked" description would be classified as *failed*, never
+   delivered. `classify_pinned_run` reads card statuses only — the
+   `finish-verified` marker is written by the production delivery reconciler and
+   is not part of the harness's verdict.
 6. **PR invariant** — exactly one open, unmerged pull request attributable to
    this run must exist and target the default branch (a `pr_invariant_failed`
    event with `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, or
@@ -179,7 +189,7 @@ for a non-plan profile, one per reconciler hop for a plan-gated one.
 | Code | Meaning |
 |------|---------|
 | 0 | Every phase passed, the PR invariant held, and cleanup completed |
-| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (`pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head`), `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`, plus the plan-pinned drive's `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown. |
+| 1 | Phase failure, overall timeout, convergence halt, PR invariant failure (`pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head`), `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_crashed`, `tick_failed`, plus the plan-pinned drive's `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown. |
 | 2 | Profile, preflight, or cleanup error (`cleanup_incomplete`, including when the shutdown discovery fails as well) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory). A `HarnessCleanupError` message prints the retained path; `cleanup_incomplete` prints the remote leftovers with their manual commands. |
 
 ## `--keep` and manual cleanup
@@ -220,7 +230,7 @@ harness-xxxxxxxx/
 
 The workspace is retained **only** on a cleanup or quiescence failure, an
 interrupt, an unreconciled issue creation, or `--keep`. Ordinary exit-1 failures
-(`picked_none`, `failed_to_spawn`, `tick_timeout`/`tick_failed`, phase failure,
+(`picked_none`, `failed_to_spawn`, `tick_timeout`/`tick_crashed`/`tick_failed`, phase failure,
 PR invariant) delete it after a clean shutdown — re-run with `--keep` to
 inspect `artifacts/tick.log` or the reports. There is **no automatic reaping**
 of retained `harness-*` directories; remove them yourself once the leftovers
@@ -242,9 +252,12 @@ and PR numbers, and no leftovers.
 For a plan-gated run, `events.jsonl` additionally carries one `tick_registered`
 (with `pinned`, `worktree` and `branch`) and one `tick_completed`
 `{tick_no, status_map}` per settled board; a `tick_stalled` event marks the
-repeated board that failed the run. A delivered run's final board has the
-`finish` card `done` and the `human-gate` card `blocked` — the human merge gate
-is where the run is supposed to stop.
+third consecutive identical board that failed the run — the tolerated repeat
+before it is a warning log line, not an event. A delivered run's final board has the
+`finish` card `done` and every other card `done` too — the open, unmerged pull
+request the finish card leaves behind is where the run is supposed to stop, and
+the post-run PR invariant is what checks it. No card is expected to be
+`blocked`: a blocked card classifies the run as failed.
 
 ## Troubleshooting
 
@@ -269,11 +282,12 @@ is where the run is supposed to stop.
 | `unsafe_terminal` | Profile is not on the live-safe allow-list (`native-sdd`, `agent-skills`, `gstack`); a locally added profile is rejected before anything remote is touched |
 | `picked_none` | The tick selected no issue; re-run with `--keep`, then read `artifacts/tick.log` and check the issue labels |
 | `failed_to_spawn`, `tick_timeout`, `tick_failed` | Production tick problems; re-run with `--keep`, then read `artifacts/tick.log` |
+| `tick_crashed` | `tpo tick` exited non-zero: at least one project's tick raised. The scan still ticked every project (crashes are isolated), and the detail is `rc=<n>` plus the tail of `artifacts/tick.log`, which carries the failing project's `tick failed: error_type=… : …` line and its traceback. Before this code existed the crash was invisible and the run was misreported as `tick_stalled` |
 | `registration_invalid` | The run's `registration.json` was rejected by the production contract loader; the detail is the contract error |
 | `registration_base_mismatch` | The run pinned a `base_sha` other than the harness's Plan commit |
 | `registration_plan_mismatch` | The registered `plan_hash` is not the hash of the Plan text the harness committed (what a `git replace` forgery in the clone would produce) |
 | `unexpected_selection` | A later tick registered a *different* run in `current_tick_id.txt`, or persisted none; the harness refuses to keep driving another run's cards, and because that run's workers are unaccounted for it closes the issue but skips branch and PR cleanup. A later tick that merely selected nothing (`picked_none`) is treated as no progress and reported as `tick_stalled` instead |
-| `tick_stalled` | Two consecutive ticks settled on an identical, undelivered board — no card progressed. Re-run with `--keep` and read `artifacts/tick.log` plus the last `tick_stalled` event's `status_map` |
+| `tick_stalled` | Three consecutive ticks settled on an identical, undelivered board — one no-progress tick is tolerated (several reconciler hops legitimately change nothing and need the next tick), a second in a row is a stall. The detail names the consecutive count. Re-run with `--keep` and read `artifacts/tick.log` plus the last `tick_stalled` event's `status_map` |
 | `tick_budget_exhausted` | The plan-pinned run consumed `pinned_tick_budget(step_keys)` ticks without reaching a verdict; the budget is deliberately generous, so this means the run is stuck |
 | `pr_missing`, `pr_ambiguous`, `pr_closed`, `pr_merged`, `pr_wrong_base`, `pr_wrong_head` | PR invariant failed (none, several, a non-open attributable PR, a PR whose base is not the default branch, or — plan-pinned only — a PR raised from a head other than the registered branch; a wrong-base PR is still cleaned up) |
 | `pr_discovery_incomplete` | Provenance could not classify every branch/PR at the post-run check (exit 1; the workspace is removed after a clean shutdown). If the shutdown discovery fails too, cleanup is skipped for safety, the run ends with `cleanup_incomplete` (exit 2) and the leftovers list the manual commands |

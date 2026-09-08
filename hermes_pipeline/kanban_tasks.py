@@ -795,8 +795,13 @@ def prepare_todo_phases(
             "phase_8_finish_branch",
             "phase_9_human_review",
         }:
-            # Native manifest runs add these cards only after their
-            # prerequisites have been reconciled by the tick reconcilers.
+            # Native manifest runs defer these cards, not their prompts: the
+            # review card cannot exist until the Plan tasks are done and the
+            # finish card until the review is accepted. The reconcilers that
+            # create them render THIS profile's ``phase_5_review`` and
+            # ``phase_8_finish_branch`` prompts (see
+            # ``review_reconciliation.render_profile_prompt``), so deferring
+            # creation never substitutes a TPO-authored instruction.
             continue
         if phase.gate:
             # A gate phase dispatches no worker, so it gets no kanban card.
@@ -1515,15 +1520,17 @@ def reconcile_plan_task_results(
     # verification failure. ``verify_worker_git_result`` adds "this commit is
     # the current HEAD and the worktree is clean" to the immutable topology
     # facts, so it can only hold for the chain tip. The initial review is the
-    # first card built on top of the last Plan commit; once it exists, review
-    # fixes may have advanced HEAD and the tip check no longer applies either.
+    # first card built on top of the last Plan commit; once it exists, the
+    # profile's reviewer may have advanced HEAD with its own review-fix commit
+    # and the tip check no longer applies either.
     #
     # Accepted trade-off: worker N+1 starts the moment worker N closes, so a
     # dirty worktree between two Plan tasks is not observable by construction --
     # a per-task current-HEAD check would race the next worker instead of
     # catching anything. Cleanliness is re-proved downstream, by
-    # ``verify_read_only_review`` when the review runs and by the delivery
-    # reconciler's finish verification. The floor that does hold for every task
+    # ``verify_optional_single_commit`` when the review is reconciled and by
+    # the delivery reconciler's finish verification. The floor that does hold
+    # for every task
     # is inside ``verify_worker_git_topology``: the reported commit must be an
     # ancestor of the run branch's HEAD, so a discarded or off-branch commit is
     # rejected however the board looks.
@@ -2136,13 +2143,28 @@ def observe_outcomes(
                         sort_keys=True,
                     )
                 )
-        elif status == "archived":
+        elif status in ("archived", BLOCKED):
+            # ``blocked`` is a terminal, sticky state: Hermes sets it when a
+            # phase exits non-zero in a way it cannot retry, and
+            # ``all_phases_complete`` deliberately accepts it as complete so the
+            # tick does not spin on it forever. That combination used to make
+            # the abandonment SILENT -- the prior tick read as finished, the
+            # project lock was released and the scan moved on, while this
+            # function wrote no line at all and the ``all_phases_complete``
+            # sentinel below is gated on the narrower ``COMPLETION_STATUSES``.
+            # The circuit breaker and the decision store were therefore left
+            # with neither a success nor a failure for a run that abandoned its
+            # branch, worktree and unmerged work. A run must never report a
+            # success it did not earn, so a block is recorded in exactly the
+            # vocabulary ``failed`` uses, with the phase key naming where the
+            # run stopped. The completion semantics are not the defect and are
+            # left alone.
             if phase_key not in existing:
                 new_outcomes.append(
                     json.dumps(
                         {
                             "outcome": "failed_at_phase_" + phase_key,
-                            "detail": {"kanban_status": "archived"},
+                            "detail": {"kanban_status": status},
                         },
                         sort_keys=True,
                     )

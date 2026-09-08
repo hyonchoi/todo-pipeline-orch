@@ -307,7 +307,11 @@ class TestTickPicked:
             assert state.get("consecutive_no_progress") == 0
 
     def test_kanban_registration_failure_logs_error(self, tmp_path, mocker):
-        """Kanban registration failure is caught and logged — tick continues."""
+        """Kanban registration failure is caught and logged — the scan continues.
+
+        "Continues" means the loop reaches the remaining projects, not that the
+        scan claims success.
+        """
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
         from hermes_pipeline.decision.schema import HermesSelectionDecision
@@ -337,8 +341,9 @@ class TestTickPicked:
 
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
         result = _cmd_tick(FakeArgs(), config)
-        # Per-project error is caught, tick returns 0
-        assert result == 0
+        # Per-project error is caught -- the scan is not aborted -- and then
+        # reported: rc 1, so a caller cannot read the crash as a clean tick.
+        assert result == 1
 
     def test_kanban_registration_failure_writes_outcome(self, tmp_path, mocker):
         """Kanban registration failure writes failed_to_spawn outcome.
@@ -346,7 +351,8 @@ class TestTickPicked:
         When create_prepared_todo_phases raises RuntimeError, _tick_project catches it,
         writes a ``failed_to_spawn`` outcome sidecar via append_outcome, then
         re-raises. The re-raise is caught at the _cmd_tick level (error
-        isolation), but the outcome persists for the circuit breaker.
+        isolation, so later projects still tick) and turns the scan's exit code
+        non-zero, and the outcome persists for the circuit breaker.
         """
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
@@ -381,9 +387,9 @@ class TestTickPicked:
         config = Config(projects_dir=projects_dir, state_dir=state_dir)
         result = _cmd_tick(FakeArgs(), config)
 
-        # Scan returns 0 (error isolation — one project's failure doesn't
-        # affect the exit code), but the failed_to_spawn outcome was written.
-        assert result == 0
+        # The scan keeps going (error isolation) but reports the crash, and the
+        # failed_to_spawn outcome is still written for the circuit breaker.
+        assert result == 1
         mock_append.assert_called_once()
         call_kwargs = mock_append.call_args
         assert call_kwargs.kwargs.get("outcome", call_kwargs[0][2] if len(call_kwargs[0]) > 2 else None) == "failed_to_spawn"

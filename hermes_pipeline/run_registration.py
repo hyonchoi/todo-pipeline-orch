@@ -26,6 +26,7 @@ from .github_issues import (
     snapshot_hash,
 )
 from .plan_manifest import PlanSource
+from .state import _atomic_write_text
 
 log = logging.getLogger(__name__)
 _SLUG_UNSAFE_RE = re.compile(r"[^a-z0-9]+")
@@ -410,6 +411,77 @@ def _json_payload(registration: RunRegistration) -> dict[str, object]:
     return payload
 
 
+_WORKTREE_BRANCH_RELPATH = Path(".hermes") / "pipeline_branch.txt"
+
+
+def _record_worktree_branch(registration: RunRegistration) -> None:
+    """Write the registered branch to ``<worktree>/.hermes/pipeline_branch.txt``.
+
+    The phase profile's ``phase_8_finish_branch`` opens with "Verify that the
+    current branch matches .hermes/pipeline_branch.txt". That path is relative
+    to the worker's cwd, which is the worktree. Under a plan manifest the only
+    profile phase that would have written it (``phase_4_development``) has its
+    prompt replaced by per-task prompts, ``.hermes`` is gitignored, and
+    ``git worktree add`` makes a fresh checkout -- so the file could not exist,
+    and the profile's own convention is to exit nonzero when a stated check
+    cannot be verified. That leaves the finish card either blocking or, if the
+    worker is lenient and falls back to the header's ``branch`` fact,
+    proceeding: nondeterministic, which is the worst property for the harness
+    this profile exists to exercise. TPO creates both the branch and the
+    worktree, so TPO is the only party that can satisfy the profile here.
+
+    Not the project-level ``<project>/.hermes/pipeline_branch.txt``: that is a
+    different file with its own readers and its own lifecycle (the CLI deletes
+    it when clearing a PR handoff, and treats its presence as pending-handoff
+    state). Nothing reads the worktree copy; it exists solely to answer the
+    profile's check.
+
+    The self-ignoring ``.hermes/.gitignore`` written alongside it is not
+    tidiness. Only the target repository's own ``.gitignore`` would otherwise
+    decide whether this file is visible to git, and a repository that does not
+    ignore ``.hermes/`` would see it as an untracked change -- which
+    ``_validate_or_create_worktree`` reads as ``worktree_dirty`` on the next
+    registration, ``verify_optional_single_commit`` reads as ``worktree_dirty``
+    when it checks the review card, and the finish worker itself reads as a
+    dirty worktree when the profile tells it to verify the worktree is clean.
+    A ``*`` pattern inside the directory ignores every path under it including
+    the pattern file itself (verified: ``git status --untracked-files=all``
+    reports nothing and ``check-ignore`` names the rule), so git, TPO and the
+    worker all agree without touching the repository's own ignore rules or the
+    shared ``$GIT_COMMON_DIR/info/exclude``. A per-worktree
+    ``$GIT_DIR/info/exclude`` is not an option: git reads the common dir's
+    copy, not the linked worktree's (also verified).
+
+    Idempotent, and deliberately best-effort: registration must not fail
+    because a profile convenience file could not be written.
+    """
+    hermes_dir = registration.worktree / _WORKTREE_BRANCH_RELPATH.parent
+    path = registration.worktree / _WORKTREE_BRANCH_RELPATH
+    payload = registration.branch + "\n"
+    try:
+        hermes_dir.mkdir(parents=True, exist_ok=True)
+        marker = hermes_dir / ".gitignore"
+        if not marker.exists():
+            _atomic_write_text(marker, "*\n")
+        if not (path.exists() and path.read_text(encoding="utf-8") == payload):
+            _atomic_write_text(path, payload)
+    except (OSError, UnicodeError) as exc:
+        log.warning(
+            "could not record %s in %s: %s",
+            _WORKTREE_BRANCH_RELPATH, registration.worktree, exc,
+        )
+        return
+    if _git(
+        registration.worktree, "check-ignore", "-q",
+        str(_WORKTREE_BRANCH_RELPATH), check=False,
+    ).returncode != 0:
+        log.warning(
+            "%s is visible to git in %s; TPO's worktree-clean checks will read "
+            "it as an untracked change",
+            _WORKTREE_BRANCH_RELPATH, registration.worktree,
+        )
+
+
 def _validate_or_create_worktree(registration: RunRegistration) -> None:
     target = registration.worktree
     if target.exists():
@@ -545,6 +617,9 @@ def register_pinned_run(
     finally:
         os.close(run_fd)
     _validate_or_create_worktree(registration)
+    # After the worktree's clean check, never before it: this file is the one
+    # thing TPO writes into the checkout.
+    _record_worktree_branch(registration)
     return registration
 
 

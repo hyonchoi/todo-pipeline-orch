@@ -42,6 +42,13 @@ read from each project's GitHub Issues. Per-project locks isolate failures — o
 project's held lock does not block others. Scan order rotates each tick for
 fairness.
 
+**Exit codes:**
+| Code | Meaning |
+|------|---------|
+| 0 | Every project ticked without raising (a tick that selected nothing, skipped an in-flight run, or held its lock is a normal 0) |
+| 1 | At least one project's tick raised. Isolation is unchanged — the scan still ticks every remaining project — but the exit code reports it, and the per-project log line carries the exception message and a sanitized traceback. Returning 0 here used to make a crashed tick indistinguishable from a clean one, so `tpo test` read the unchanged board as `tick_stalled` |
+| 2 | Configuration error: unknown, disabled, or non-GitHub project, or a missing `projects_dir` |
+
 ---
 
 ### `approve`
@@ -451,7 +458,7 @@ tpo test --repo OWNER/NAME --keep --loop
 | Code | Meaning |
 |------|---------|
 | 0 | All phases passed, the PR invariant held, and cleanup completed |
-| 1 | Phase failure, convergence halt, overall timeout, PR invariant failure (`pr_missing`/`pr_ambiguous`/`pr_closed`/`pr_merged`/`pr_wrong_base`/`pr_wrong_head`) or `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_failed`, and for a plan-gated profile `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown; re-run with `--keep` to inspect it. |
+| 1 | Phase failure, convergence halt, overall timeout, PR invariant failure (`pr_missing`/`pr_ambiguous`/`pr_closed`/`pr_merged`/`pr_wrong_base`/`pr_wrong_head`) or `pr_discovery_incomplete` at the post-run check, or tick failure (`picked_none`, `failed_to_spawn`, `tick_timeout`, `tick_crashed`, `tick_failed`, and for a plan-gated profile `registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`, `unexpected_selection`, `tick_stalled`, `tick_budget_exhausted`). The workspace is deleted after a clean shutdown; re-run with `--keep` to inspect it. |
 | 2 | Profile or preflight error (`unsafe_terminal`, `Unverified` prerequisites, missing dependency, `repo_missing`, `invalid_repo`, `invalid_slug`, `gh_permission`, `gh_override_forbidden`, `sandbox_not_seeded`, `sandbox_not_quiescent`, `issue_not_visible`, unknown fixture) or `cleanup_incomplete` (also when the shutdown discovery fails after `pr_discovery_incomplete`) — the workspace is retained under `~/.hermes/tmp/harness-*` (newest directory); `HarnessCleanupError` messages and the `cleanup_incomplete` detail print the path, `cleanup_incomplete` also prints the remote leftovers |
 
 **Preflight and run behavior:**

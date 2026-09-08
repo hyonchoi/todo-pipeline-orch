@@ -17,10 +17,10 @@ Tick Loop (Hermes cron or manual)
 [Compile pinned Plan source] --> worker --> next worker --> next worker
     |
     v
-[Independent review] --> review-fix --> validation --> re-review (bounded)
+[Independent review: applies its own findings in one review-fix commit]
     |
     v
-[Finish + TODO closeout] --> human merge gate
+[Finish + TODO closeout] --> open, unmerged PR + human merge decision
 ```
 
 ## Lane Structure
@@ -51,8 +51,7 @@ hermes_pipeline/
 
 ### Lane C: Kanban Integration
 `kanban.py`, `kanban_tasks.py` — Phases as kanban tasks with `--parent`
-dependency chains; human gates stay in the chain but have no assignee or goal
-and receive a sticky `needs_input` block. Registration creates the phase chain
+dependency chains. A gate phase dispatches no worker, so registration skips it entirely: no card is created for it and no block is ever applied. Registration creates the phase chain
 behind a non-spawnable barrier
 and releases it only after every task and the expected-phase sentinel are
 durable. Kanban status queries drive the tick loop.
@@ -118,7 +117,7 @@ cli._tick_project(config, contract)
             +-- create unassigned registration barrier
             +-- create every prepared phase behind the barrier
             |       +-- every phase follows the previous phase with --parent
-            |       `-- gate tasks receive no goal and a sticky needs_input block
+            |       `-- a gate phase is skipped: no card is created for it
             +-- persist expected-phases sentinel
             `-- complete barrier, making the first executable runnable
 ```
@@ -145,9 +144,12 @@ stops the run for human input between Plan tasks. A manifest-free embedded
 Plan is not selectable under a plan-gated profile: eligibility blocks the issue
 as `plan_invalid:manifest_required`. A manifest-free `Plan:` path stays
 selectable and compiles to a single development card. Independent review uses
-a distinct session; findings compile into at most five `review-fix` /
-fix-validation / re-review rounds. A clean result enables verified PR creation,
-deterministic TODO closeout, and an unassigned terminal human-review gate.
+a distinct session and applies every valid finding itself, committing them as
+one review-fix commit; the card reaching `done` is the pass and `blocked` is the
+profile's own nonzero exit. An accepted review enables verified PR creation,
+deterministic TODO closeout, and the open, unmerged pull request and its human
+merge decision as the run's terminal boundary; `phase_9_human_review` is a gate
+phase, so no card is ever registered for it.
 Only the Hermes `ai-coding-agents` dispatcher skill is required; client-side
 gstack, superpowers, and agent-skills workflows are not part of this profile.
 
@@ -191,6 +193,16 @@ All pipeline state lives under `<project>/.hermes/`:
 | `done` | `phase_complete` |
 | `failed` | `failed_at_phase_<key>` |
 | `archived` | `failed_at_phase_<key>` with `kanban_status: "archived"` |
+| `blocked` | `failed_at_phase_<key>` with `kanban_status: "blocked"` |
+
+A `blocked` card is terminal and sticky, and `all_phases_complete` deliberately
+counts it as complete so a tick cannot spin on it. That combination used to make
+the abandonment silent: the prior tick read as finished, the project lock was
+released and the scan selected the next TODO while no outcome line was written
+at all, so the decision store held neither a success nor a failure for a run
+that abandoned its branch and worktree. The failure line is now written. Unlike
+`failed`, a blocked run never gets the `all_phases_complete` sentinel, because
+`blocked` is not in `COMPLETION_STATUSES`.
 
 ## Circuit Breaker
 
@@ -203,12 +215,14 @@ All pipeline state lives under `<project>/.hermes/`:
 
 1. **Kanban as scheduler** — Executable phases are kanban tasks with `--parent`
    chains. A non-spawnable registration barrier prevents partial chains from
-   running; it is completed only after the complete chain is durable. Profiles
-   may define manual gates with sticky `needs_input` blocks; the deprecated
+   running; it is completed only after the complete chain is durable. A profile
+   may declare gate phases, which dispatch no worker and so are registered as no
+   card at all; the deprecated
    `gstack` profile ends at Phase 8 PR handoff. `native-sdd`, the default
    profile ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)),
-   keeps the same merge-aware Phase 8 handoff key and follows it with a terminal
-   human gate.
+   keeps the same merge-aware Phase 8 handoff key and follows it with the open,
+   unmerged pull request and its human merge decision as the terminal boundary;
+   `phase_9_human_review` is a gate phase, so no card is registered for it.
 2. **Atomic state writes** — All state files use tmp+rename to prevent partial reads.
 3. **Review reconciliation is metadata-driven** — TPO validates the independent
    review card's bounded result and Git facts; it does not run a local

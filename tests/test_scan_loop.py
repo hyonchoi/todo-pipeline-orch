@@ -106,7 +106,12 @@ def test_tick_skips_disabled_projects(tmp_path: Path):
 
 
 def test_tick_error_isolation(tmp_path: Path):
-    """A project error should be logged and not block other projects."""
+    """A project error should be logged, not block other projects, and be reported.
+
+    Isolation is about the *scan* continuing, never about the exit code: a
+    swallowed crash reported as success is what let a crashed tick reach the
+    harness driver as a quiet success.
+    """
     projects_dir = tmp_path / "projects"
     projects_dir.mkdir()
 
@@ -132,8 +137,8 @@ def test_tick_error_isolation(tmp_path: Path):
     with patch("hermes_pipeline.cli.run_selection", mock_selection):
         exit_code = _cmd_tick(args, config)
 
-    assert exit_code == 0
-    assert "project-b" in selection_calls
+    assert "project-b" in selection_calls, "project-a's error must not abort the scan"
+    assert exit_code == 1, "a project whose tick raised must fail the scan"
 
 
 def test_tick_uses_per_project_state_dir(tmp_path: Path):

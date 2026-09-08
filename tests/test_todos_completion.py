@@ -184,6 +184,15 @@ def test_delivery_authority_must_match_the_project_repo(tmp_path, mocker):
         _delivery_authority(tmp_path, "01TICK", tmp_path, repo="acme/repo")
 
 
+def _delivery_registration(tmp_path):
+    return SimpleNamespace(
+        todo_id="TODO-1", worktree=tmp_path, branch="feat/native",
+        assignee="worker", prompt_client="codex", profile="native-sdd",
+        plan_hash="f" * 64,
+        plan_reference=SimpleNamespace(value="docs/plan.md"),
+    )
+
+
 def test_delivery_waits_for_the_accepted_review_head(tmp_path, mocker):
     """No accepted head on disk means the review is not clean yet."""
     state = tmp_path / ".hermes"
@@ -209,13 +218,9 @@ def test_delivery_creates_finish_only_after_clean_review(tmp_path, mocker):
     (state / "runs" / "01TICK").mkdir(parents=True)
     (state / "runs" / "01TICK" / "registration.json").write_text("{}")
     (state / "runs" / "01TICK" / "accepted-review-head").write_text("a" * 40)
-    registration = SimpleNamespace(
-        todo_id="TODO-1", worktree=tmp_path, branch="feat/native",
-        assignee="worker", prompt_client="codex",
-    )
     mocker.patch(
         "hermes_pipeline.todos_completion.load_validated_registration",
-        return_value=registration,
+        return_value=_delivery_registration(tmp_path),
     )
     mocker.patch(
         "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
@@ -233,27 +238,190 @@ def test_delivery_creates_finish_only_after_clean_review(tmp_path, mocker):
     assert create.call_args.kwargs["key"] == "finish"
     # No parent: TPO creates the card exactly when its prerequisite is proven.
     assert "parent" not in create.call_args.kwargs
-    assert "Do not merge" in create.call_args.kwargs["prompt"]
+    assert "Do not merge the pull request" in create.call_args.kwargs["prompt"]
 
 
-def test_finish_must_remain_on_exact_accepted_review_head(tmp_path, mocker):
-    accepted = "a" * 40
-    result = SimpleNamespace(git=SimpleNamespace(
-        expected_parent_sha=accepted, resulting_head_sha="b" * 40,
-        task_commit_sha="b" * 40, changed_files=("release.md",),
+def test_finish_card_renders_the_profile_phase_verbatim_with_its_limits(
+    tmp_path, mocker
+):
+    """``phase_8_finish_branch`` is the specification for the delivery card.
+
+    Its prompt, tools, turn budget and timeout all come from the profile: the
+    prompt TPO used to author here told the worker to add no commit at all,
+    which contradicts the profile's own "commit those as one separate atomic
+    commit" and made the live harness untestable against the profile.
+    """
+    from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+    phase = next(
+        p for p in load_phases(resolve_profile_phases_path("native-sdd"))
+        if p.phase_key == "phase_8_finish_branch"
+    )
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text("{}")
+    (state / "runs" / "01TICK" / "accepted-review-head").write_text("a" * 40)
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=_delivery_registration(tmp_path),
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
+        return_value={"review:0": SimpleNamespace(task_id="review-id", status="done")},
+    )
+    mocker.patch("hermes_pipeline.todos_completion._git", return_value="a" * 40)
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("acme/repo", "main"),
+    )
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
+
+    assert reconcile_todo_completion(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+        repo="acme/repo",
+    )
+
+    kwargs = create.call_args.kwargs
+    assert kwargs["tools"] == phase.tools == "Read,Write,Edit,Bash"
+    assert kwargs["turns"] == phase.turns == 30
+    assert kwargs["timeout"] == phase.timeout == 2400
+    assert kwargs["title"] == phase.name
+    body = phase.prompt.format(
+        todo_id="TODO-1", tick_id="01TICK", project_slug="demo",
+        plan_path="docs/plan.md", agent_product="Codex", skill_prefix="$",
+        superpowers_skill_prefix="$superpowers:",
+    )
+    assert kwargs["prompt"].endswith(body)
+    header = kwargs["prompt"].removesuffix(body)
+    assert f"- accepted_review_head_sha: {'a' * 40}\n" in header
+    assert "- branch: feat/native\n" in header
+    # The instruction TPO used to author in place of the profile's is gone.
+    assert "do not modify the worktree or add any commit" not in kwargs["prompt"]
+
+
+def _finish_repo(tmp_path, name):
+    repo = tmp_path / name
+    repo.mkdir()
+    for args in (
+        ("init", "-q"),
+        ("config", "user.email", "test@example.com"),
+        ("config", "user.name", "Test"),
+    ):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    return repo
+
+
+def _finish_commit(repo, name):
+    (repo / name).write_text(name)
+    subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-qm", name], cwd=repo, check=True, capture_output=True
+    )
+    return subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, check=True, capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _finish_result(parent, head, changed=()):
+    return SimpleNamespace(git=SimpleNamespace(
+        expected_parent_sha=parent, resulting_head_sha=head,
+        task_commit_sha=head, changed_files=tuple(changed),
     ))
-    mocker.patch("hermes_pipeline.todos_completion._git", return_value=accepted)
-    with pytest.raises(ResultContractError, match="finish_review_head_mismatch"):
-        _verify_finish(tmp_path, result, accepted, require_current=True)
+
+
+def test_finish_accepts_the_one_metadata_commit_the_profile_mandates(tmp_path):
+    """The profile requires this commit, so verification must not reject it."""
+    repo = _finish_repo(tmp_path, "one-commit")
+    accepted = _finish_commit(repo, "reviewed.txt")
+    head = _finish_commit(repo, "CHANGELOG.md")
+
+    _verify_finish(
+        repo, _finish_result(accepted, head, ("CHANGELOG.md",)), accepted,
+        require_current=True,
+    )
+
+
+def test_finish_rejects_two_commits_past_the_accepted_head(tmp_path):
+    """One commit is the allowance; a second is work no review ever saw."""
+    repo = _finish_repo(tmp_path, "two-commits")
+    accepted = _finish_commit(repo, "reviewed.txt")
+    _finish_commit(repo, "CHANGELOG.md")
+    head = _finish_commit(repo, "sneaky.py")
+
+    # Asserted on the FULL detail, not ``match="finish_review_head_mismatch"``:
+    # that is the wrapper code ``_verify_finish`` emits for every inner failure,
+    # so a ``re.search`` for it cannot tell ``commit_count_mismatch`` from
+    # ``parent_mismatch`` -- widening the accepted count bound to
+    # ``("0", "1", "2")`` did not kill this test. Same discipline as
+    # ``test_finish_reports_a_broken_git_as_broken_not_as_a_head_mismatch``.
+    with pytest.raises(ResultContractError) as exc_info:
+        _verify_finish(
+            repo, _finish_result(accepted, head, ("CHANGELOG.md", "sneaky.py")),
+            accepted, require_current=True,
+        )
+    assert str(exc_info.value) == "finish_review_head_mismatch: commit_count_mismatch"
+
+
+def test_finish_rejects_a_head_that_does_not_descend_from_the_accepted_head(tmp_path):
+    """The anchor is what stands between a forged history and a blessed delivery."""
+    repo = _finish_repo(tmp_path, "forged")
+    accepted = _finish_commit(repo, "reviewed.txt")
+    subprocess.run(
+        ["git", "checkout", "-q", "--orphan", "forged"], cwd=repo, check=True,
+        capture_output=True,
+    )
+    subprocess.run(["git", "rm", "-q", "-rf", "."], cwd=repo, check=True,
+                   capture_output=True)
+    head = _finish_commit(repo, "rewritten.txt")
+
+    # Full detail, for the reason recorded on the two-commit test above: the
+    # wrapper code alone is emitted by every inner failure and pins nothing.
+    with pytest.raises(ResultContractError) as exc_info:
+        _verify_finish(
+            repo, _finish_result(accepted, head, ("rewritten.txt",)), accepted,
+            require_current=True,
+        )
+    assert str(exc_info.value) == "finish_review_head_mismatch: parent_mismatch"
+
+
+def test_finish_reports_a_fabricated_sha_as_a_bad_report_not_as_broken_git(tmp_path):
+    """An invented SHA is the worker's fault, and must be attributed to it.
+
+    An unknown object makes every topology query exit 128, which every
+    git-failure helper in ``result_contract`` collapses into
+    ``git_verification_failed`` -- and ``_verify_finish`` passes that code
+    straight through on purpose, so an operator reads a broken worktree as
+    broken. A worker that simply made its 40-hex SHA up was therefore reported
+    as broken infrastructure. The old string comparison said
+    ``finish_review_head_mismatch``, so this was an attribution regression.
+    """
+    repo = _finish_repo(tmp_path, "fabricated-sha")
+    accepted = _finish_commit(repo, "reviewed.txt")
+
+    with pytest.raises(ResultContractError) as exc_info:
+        _verify_finish(
+            repo, _finish_result(accepted, "9" * 40, ("CHANGELOG.md",)), accepted,
+            require_current=True,
+        )
+    assert str(exc_info.value) == "finish_review_head_mismatch: unknown_commit"
 
 
 def test_finish_evidence_is_not_rechecked_against_live_head_once_verified(tmp_path):
-    accepted = "a" * 40
-    result = SimpleNamespace(git=SimpleNamespace(
-        expected_parent_sha=accepted, resulting_head_sha=accepted,
-        task_commit_sha=accepted, changed_files=(),
-    ))
-    _verify_finish(tmp_path, result, accepted, require_current=False)
+    """A resumed tick re-reads the report without demanding the live worktree.
+
+    The topology facts still hold -- they survive a later commit -- so only the
+    current-HEAD and cleanliness checks are dropped.
+    """
+    repo = _finish_repo(tmp_path, "already-verified")
+    accepted = _finish_commit(repo, "reviewed.txt")
+    head = _finish_commit(repo, "CHANGELOG.md")
+    _finish_commit(repo, "later.txt")
+
+    _verify_finish(
+        repo, _finish_result(accepted, head, ("CHANGELOG.md",)), accepted,
+        require_current=False,
+    )
 
 
 CHECKS_PR_URL = "https://github.com/acme/repo/pull/1"
@@ -1783,3 +1951,217 @@ def test_flag_issue_drift_without_cards_survives_existing_decisions(tmp_path, mo
         ) is False
     assert (state / "decisions" / "01TICK-issue-drift.json").read_text() == "{}"
     assert any(r.levelname == "DEBUG" and "already" in r.getMessage() for r in caplog.records)
+
+
+def test_finish_reports_a_broken_git_as_broken_not_as_a_head_mismatch(tmp_path, mocker):
+    """A git exit code >= 2 is not an answer, and must not read as one.
+
+    Collapsing it into ``finish_review_head_mismatch`` would tell the operator
+    the worker delivered the wrong history when in fact git could not be asked.
+
+    Asserted on ``exc.code``, not with ``pytest.raises(match=...)``:
+    ``match`` is a ``re.search``, and the wrapped message
+    ``"finish_review_head_mismatch: git_verification_failed"`` contains the
+    string it looks for -- so a ``match`` on the inner code passes whether or
+    not the pass-through re-raise exists, and pins nothing.
+    """
+    repo = _finish_repo(tmp_path, "broken-git")
+    accepted = _finish_commit(repo, "reviewed.txt")
+    head = _finish_commit(repo, "CHANGELOG.md")
+    mocker.patch(
+        "hermes_pipeline.result_contract.subprocess.run",
+        return_value=SimpleNamespace(returncode=128, stdout="", stderr="fatal"),
+    )
+
+    with pytest.raises(ResultContractError) as exc_info:
+        _verify_finish(
+            repo, _finish_result(accepted, head, ("CHANGELOG.md",)), accepted,
+            require_current=True,
+        )
+    assert exc_info.value.code == "git_verification_failed"
+
+
+def test_a_failed_delivery_tick_does_not_grant_the_next_one_the_relaxation(
+    tmp_path, mocker, caplog
+):
+    """``finish-verified`` is written last, after every delivery check passed.
+
+    The marker's only job is to relax ``require_current`` on the next tick. It
+    used to be written straight after ``_verify_finish``, before
+    ``delivery_head_mismatch``, ``delivery_authority_drift`` and
+    ``pr_identity_mismatch`` were checked -- so a tick that FAILED delivery
+    still handed the weaker verification to its successor.
+    """
+    import hermes_pipeline.todos_completion as module
+
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view())
+    marker = state / "runs" / "01TICK" / "finish-verified"
+    # A delivery check that fails strictly after ``_verify_finish``.
+    module.parse_worker_result.return_value.delivery.head_sha = "b" * 40
+
+    with caplog.at_level("ERROR", logger="hermes_pipeline.todos_completion"):
+        assert _reconcile(tmp_path, state) is False
+    assert "delivery_head_mismatch" in caplog.text
+    assert not marker.exists()
+
+    # The next tick therefore still runs the strict check.
+    assert module._verify_finish.call_args.kwargs["require_current"] is True
+    assert _reconcile(tmp_path, state) is False
+    assert module._verify_finish.call_args.kwargs["require_current"] is True
+
+
+def test_a_broken_git_in_the_worktree_check_does_not_blame_the_registration(
+    tmp_path, mocker
+):
+    """The worktree-clean check goes through ``_git_bytes``.
+
+    That helper raised ``registration_invalid``, which ``_verify_finish``'s
+    pass-through guard does not cover, so a git that could not answer surfaced
+    as ``finish_review_head_mismatch: registration_invalid`` -- blaming the
+    worker for the history AND the registration for being corrupt, neither of
+    which had happened.
+    """
+    repo = _finish_repo(tmp_path, "broken-status")
+    accepted = _finish_commit(repo, "reviewed.txt")
+    head = _finish_commit(repo, "CHANGELOG.md")
+    real_run = subprocess.run
+
+    def fail_status(cmd, *args, **kwargs):
+        if "status" in cmd:
+            return SimpleNamespace(returncode=128, stdout=b"", stderr=b"fatal")
+        return real_run(cmd, *args, **kwargs)
+
+    mocker.patch(
+        "hermes_pipeline.result_contract.subprocess.run", side_effect=fail_status
+    )
+
+    with pytest.raises(ResultContractError) as exc_info:
+        _verify_finish(
+            repo, _finish_result(accepted, head, ("CHANGELOG.md",)), accepted,
+            require_current=True,
+        )
+    assert exc_info.value.code == "git_verification_failed"
+    assert "registration_invalid" not in str(exc_info.value)
+
+
+def test_the_finish_card_writes_its_pending_marker_under_the_clone(tmp_path, mocker):
+    """The clone's run directory is the only one that exists.
+
+    ``_create_task`` used to default ``project_dir`` to the worktree, so the
+    finish card's pending-create marker was written to
+    ``<worktree>/.hermes/runs/<tick>/`` -- a directory a fresh
+    ``git worktree add`` never has and gitignored ``.hermes`` never gains. The
+    write raised ``FileNotFoundError`` and the finish card could not be created
+    at all, which is how a live run died before reaching delivery. The review
+    card already passed the clone; the finish card did not.
+    """
+    from hermes_pipeline.todos_completion import reconcile_todo_completion
+
+    state, run_dir = _run_dir(tmp_path)
+    (run_dir / "registration.json").write_text("{}")
+    (run_dir / "accepted-review-head").write_text("a" * 40)
+    worktree = tmp_path / ".worktrees" / "todo-3-x"
+    worktree.mkdir(parents=True)
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(
+            todo_id="TODO-3", worktree=worktree, branch="feat/native",
+            assignee="worker", prompt_client="codex", profile="native-sdd",
+            plan_hash="f" * 64, manifest=SimpleNamespace(tasks=()),
+            plan_reference=SimpleNamespace(value="docs/plan.md"),
+        ),
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
+        return_value={"review:0": SimpleNamespace(task_id="review", status="done")},
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("acme/repo", "main"),
+    )
+    # The real ``_create_task`` runs, so the marker write is the real one.
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation._find_task_id_in_snapshot",
+        return_value=None,
+    )
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout='{"id": "t_12345678"}'),
+    )
+
+    assert reconcile_todo_completion(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+        repo="acme/repo",
+    )
+
+    # Written and then cleared, under the clone -- never under the worktree.
+    assert not (worktree / ".hermes").exists()
+    assert not (run_dir / "pending-review-create.json").exists()
+
+
+def test_an_ambiguous_finish_create_stays_retryable_instead_of_raising(
+    tmp_path, mocker
+):
+    """The finish create's ambiguous outcome is a retry, not a crashed tick.
+
+    ``hermes kanban create`` timing out (or returning an id nothing can parse)
+    leaves the card's existence unknown, which is exactly what
+    ``RetryableReviewRegistration`` means: the next tick re-derives the truth
+    from the snapshot. ``reconcile_reviews`` already handles it that way for
+    ``review:0``. Letting it propagate out of ``reconcile_todo_completion``
+    instead makes the whole tick raise -- and now that ``tpo tick`` reports a
+    non-zero rc, that raise fails the entire harness run as ``tick_crashed``
+    rather than costing one tick.
+    """
+    from hermes_pipeline.todos_completion import reconcile_todo_completion
+
+    state, run_dir = _run_dir(tmp_path)
+    (run_dir / "registration.json").write_text("{}")
+    (run_dir / "accepted-review-head").write_text("a" * 40)
+    worktree = tmp_path / ".worktrees" / "todo-3-x"
+    worktree.mkdir(parents=True)
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(
+            todo_id="TODO-3", worktree=worktree, branch="feat/native",
+            assignee="worker", prompt_client="codex", profile="native-sdd",
+            plan_hash="f" * 64, manifest=SimpleNamespace(tasks=()),
+            plan_reference=SimpleNamespace(value="docs/plan.md"),
+        ),
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
+        return_value={"review:0": SimpleNamespace(task_id="review", status="done")},
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("acme/repo", "main"),
+    )
+    # The real ``_create_task`` runs: no card in the snapshot, and the create
+    # itself never reports an outcome.
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation._find_task_id_in_snapshot",
+        return_value=None,
+    )
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation.subprocess.run",
+        side_effect=subprocess.TimeoutExpired(cmd="hermes", timeout=1),
+    )
+
+    # Same semantics as ``reconcile_reviews``: return "progress" so the tick
+    # ends, and leave the pending marker where it was written.
+    assert reconcile_todo_completion(
+        project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+        repo="acme/repo",
+    )
+    assert (run_dir / "pending-review-create.json").exists()
+
+
+def test_create_task_has_no_worktree_fallback_for_project_dir():
+    """The fallback is the bug; a missing ``project_dir`` must be a TypeError."""
+    import inspect
+
+    from hermes_pipeline.review_reconciliation import _create_task
+
+    parameter = inspect.signature(_create_task).parameters["project_dir"]
+    assert parameter.default is inspect.Parameter.empty

@@ -1,4 +1,4 @@
-"""Idempotent independent-review and bounded remediation reconciliation."""
+"""Idempotent independent-review reconciliation against the phase profile."""
 from __future__ import annotations
 
 import json
@@ -19,20 +19,19 @@ from .kanban_tasks import (
 )
 from .result_contract import (
     ResultContractError,
-    WorkerResult,
     load_validated_registration,
     parse_worker_result,
     render_result_template,
     sanitize_result_text,
-    verify_read_only_review,
-    verify_worker_git_result,
+    verify_optional_single_commit,
     verify_worker_git_topology,
 )
 from .state import _atomic_write_text
 
 log = logging.getLogger(__name__)
 
-MAX_REVIEW_ROUNDS = 5
+REVIEW_KEY = "review:0"
+REVIEW_PHASE_KEY = "phase_5_review"
 
 
 class RetryableReviewRegistration(RuntimeError):
@@ -63,19 +62,27 @@ def _clear_pending_create(path: Path, *, tick_id: str, key: str) -> None:
 
 
 def _persist_accepted_head(state_dir: Path, tick_id: str, head_sha: str) -> None:
-    _atomic_write_text(
-        state_dir / "runs" / tick_id / "accepted-review-head",
-        head_sha + "\n",
-    )
+    """Write the accepted review head once; afterwards only confirm it.
 
-
-def _head(worktree: Path) -> str:
-    result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=worktree, capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        raise ResultContractError("git_verification_failed")
-    return result.stdout.strip()
+    This file is the anchor every later check measures against: delivery's
+    ``_verify_finish`` bounds HEAD to it, and its presence is what relaxes
+    ``require_current`` on the review's own re-verification. Rewriting it every
+    tick the review card reads ``done`` let the anchor be re-derived from a
+    mutable card report under the relaxed check -- so a report that changed
+    after the first acceptance could move the very reference point that was
+    supposed to pin it. Once written, a differing report is a hard stop, not a
+    new anchor.
+    """
+    path = _accepted_head_path(state_dir, tick_id)
+    try:
+        recorded = path.read_text(encoding="utf-8").strip()
+    except (OSError, UnicodeError):
+        recorded = ""
+    if recorded:
+        if recorded != head_sha:
+            raise ResultContractError("accepted_review_head_conflict")
+        return
+    _atomic_write_text(path, head_sha + "\n")
 
 
 def _body(*, tick_id: str, todo_id: str, tenant: str, key: str, prompt: str) -> str:
@@ -85,11 +92,12 @@ def _body(*, tick_id: str, todo_id: str, tenant: str, key: str, prompt: str) -> 
 
 
 def _create_task(
-    *, project_dir: Path | None = None, tenant: str, tick_id: str, todo_id: str,
+    *, project_dir: Path, tenant: str, tick_id: str, todo_id: str,
     key: str, title: str,
     prompt: str, result_template: str, worktree: Path, assignee: str | None,
     parent: str | None = None,
     prompt_client: str,
+    tools: str, turns: int, timeout: int,
 ) -> str:
     """Create one assigned worker card. ``parent`` omitted means immediately ready.
 
@@ -97,11 +105,26 @@ def _create_task(
     the result template and its verdict is its own exit status. ``prompt`` is
     the work instruction the external client receives verbatim; the dispatcher's
     ``result_template`` stays outside that delimited block.
+
+    ``tools``, ``turns`` and ``timeout`` come from the phase profile the card
+    renders, never from a default here: the profile's ``phase_5_review`` needs
+    write tools to make its own review-fix commit, and a hardcoded empty tool
+    set is what silently made TPO's review read-only.
+
+    ``project_dir`` is required and has no ``or worktree`` fallback. It is the
+    clone whose ``.hermes/runs/<tick_id>/`` the pending-create marker lives in,
+    and that directory exists only because the run registered there. Defaulting
+    it to the worktree pointed the marker at ``<worktree>/.hermes/runs/...`` --
+    a directory a fresh ``git worktree add`` never has and ``.hermes`` being
+    gitignored never will -- so the write raised ``FileNotFoundError`` and the
+    finish card could not be created at all. Every caller has the clone in
+    scope; ``load_validated_registration`` validated the registration's
+    containment against exactly this value.
     """
-    project_dir = project_dir or worktree
     task_prompt = (
         _external_client_delegation_block(
-            prompt_client, timeout=1800, tools="", result_template=result_template,
+            prompt_client, timeout=timeout, tools=tools,
+            result_template=result_template,
         )
         + _external_agent_prompt_block(prompt)
     )
@@ -114,8 +137,8 @@ def _create_task(
         "--workspace", f"dir:{worktree}", "--idempotency-key", f"{tick_id}:{key}",
         "--assignee", assignee or "default",
         "--json",
-        "--max-runtime", str(1800 + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
-        "--max-retries", "1", "--goal", "--goal-max-turns", "20",
+        "--max-runtime", str(timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+        "--max-retries", "1", "--goal", "--goal-max-turns", str(turns),
     ]
     if parent is not None:
         cmd.extend(["--parent", parent])
@@ -142,37 +165,57 @@ def _create_task(
     return task_id
 
 
-def _review_result(task_id: str, *, tick_id: str, todo_id: str, key: str,
-                   worktree: Path, head_sha: str,
-                   require_current: bool = True) -> WorkerResult:
-    result = parse_worker_result(
-        _show_task_payload(task_id), tick_id=tick_id, todo_id=todo_id,
-        step_key=key, acceptance_criteria=(), allow_no_changes=True,
-    )
-    verify_read_only_review(
-        worktree, result, head_sha=head_sha, require_current=require_current
-    )
-    return result
+def _accepted_head_path(state_dir: Path, tick_id: str) -> Path:
+    return state_dir / "runs" / tick_id / "accepted-review-head"
 
 
-def _review_prompt(head_sha: str) -> str:
-    """The work instruction a review card hands the external client verbatim."""
-    return (
-        "Perform a fresh, independent, read-only review in a new external session. "
-        f"Review the complete branch at {head_sha}; do not modify the worktree.\n"
-        "Report a defect only if it is still present in the code you reviewed, "
-        "never one that has already been fixed there."
-    )
+def profile_phase(registration, phase_key: str):
+    """Return ``(phases_path, phase)`` for one phase of the run's pinned profile.
+
+    The phase profile is the specification: its prompt, tools, turn budget and
+    timeout are what a reconciler-created card must carry. Resolving it from the
+    registration -- not from the project's current config -- keeps a profile
+    switch mid-run from changing the run already in flight.
+    """
+    from .contract import ContractSchemaError
+    from .phases import load_phases, resolve_profile_phases_path
+
+    try:
+        phases_path = resolve_profile_phases_path(registration.profile)
+        phases = load_phases(phases_path)
+    except (ContractSchemaError, OSError, ValueError) as exc:
+        raise ResultContractError("profile_unavailable", phase_key) from exc
+    for phase in phases:
+        if phase.phase_key == phase_key:
+            return phases_path, phase
+    raise ResultContractError("profile_phase_missing", phase_key)
 
 
-def _review_template(head_sha: str, *, tick_id: str, todo_id: str, step_key: str) -> str:
-    return render_result_template(
+def render_profile_prompt(
+    registration, phase, phases_path, *, tick_id: str, tenant: str,
+    facts: dict[str, str],
+) -> str:
+    """Render one profile phase prompt as the card's delimited work instruction.
+
+    Per-card facts (the reviewed head, the branch) travel in the non-templated
+    pipeline-context header ``_render_phase_prompt`` prepends. Nothing is
+    appended after the profile's own words, so the delimited block a card hands
+    the external client is the profile prompt and nothing else -- which is the
+    only way the live harness can test the profile at all.
+    """
+    from .phases import _render_phase_prompt
+
+    plan_reference = getattr(registration, "plan_reference", None)
+    return _render_phase_prompt(
+        phase.prompt,
+        todo_id=registration.todo_id,
         tick_id=tick_id,
-        todo_id=todo_id,
-        step_key=step_key,
-        section="review",
-        pinned_head_sha=head_sha,
-        allow_no_changes=True,
+        project_slug=tenant,
+        plan_path=plan_reference.value if plan_reference is not None else None,
+        plan_hash=getattr(registration, "plan_hash", None),
+        prompt_client=registration.prompt_client,
+        template_source=f"{phases_path}:{phase.phase_key}",
+        context_facts=facts,
     )
 
 
@@ -209,59 +252,64 @@ def _ensure_initial_review(*, project_dir: Path, tasks: dict, registration, tena
         return
     parent = workers[-1].task_id
     head_sha = _implementation_head(tasks=tasks, registration=registration, tick_id=tick_id)
-    if tasks.get("review:0") is not None:
+    if tasks.get(REVIEW_KEY) is not None:
         return
+    phases_path, phase = profile_phase(registration, REVIEW_PHASE_KEY)
     _create_task(
         project_dir=project_dir,
         tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key="review:0", title="Independent review",
-        prompt=_review_prompt(head_sha),
-        result_template=_review_template(
-            head_sha, tick_id=tick_id, todo_id=registration.todo_id,
-            step_key="review:0",
+        key=REVIEW_KEY, title=phase.name,
+        prompt=render_profile_prompt(
+            registration, phase, phases_path, tick_id=tick_id, tenant=tenant,
+            facts={
+                "reviewed_head_sha": head_sha,
+                "branch": registration.branch,
+            },
+        ),
+        result_template=render_result_template(
+            tick_id=tick_id, todo_id=registration.todo_id, step_key=REVIEW_KEY,
+            allow_no_changes=True,
         ),
         worktree=registration.worktree,
         assignee=registration.review_assignee or registration.assignee, parent=parent,
         prompt_client=registration.prompt_client,
+        tools=phase.tools, turns=phase.turns, timeout=phase.timeout,
     )
 
 
-def _ensure_round(*, project_dir: Path, round_number: int, parent: str, registration, tenant: str,
-                  tick_id: str, tasks: dict, findings: tuple[dict[str, str], ...]) -> None:
-    fix_key = f"review-fix:{round_number}"
-    if fix_key in tasks:
-        return
-    residual = sanitize_result_text(json.dumps(findings, sort_keys=True), maximum=8000)
-    _create_task(
-        project_dir=project_dir,
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id, key=fix_key,
-        title=f"Fix review findings round {round_number}",
-        prompt=f"Fix exactly these reviewed findings using TDD, then commit:\n{residual}",
-        result_template=render_result_template(
-            tick_id=tick_id, todo_id=registration.todo_id, step_key=fix_key,
-        ),
-        worktree=registration.worktree, assignee=registration.assignee, parent=parent,
-        prompt_client=registration.prompt_client,
-    )
+#: Step keys only a pre-upgrade board can carry. The bounded remediation rounds
+#: were removed with the review-round machinery, so nothing creates these any
+#: more -- ``review:0`` is the whole of review now.
+_LEGACY_ROUND_PREFIXES = ("review-fix:", "re-review:", "fix-validation:")
 
 
-def _ensure_rereview(*, project_dir: Path, round_number: int, fix_id: str, head_sha: str,
-                     registration, tenant: str, tick_id: str, tasks: dict) -> None:
-    key = f"re-review:{round_number}"
-    if key in tasks:
-        return
-    _create_task(
-        project_dir=project_dir,
-        tenant=tenant, tick_id=tick_id, todo_id=registration.todo_id,
-        key=key, title=f"Independent re-review round {round_number}",
-        prompt=_review_prompt(head_sha),
-        result_template=_review_template(
-            head_sha, tick_id=tick_id, todo_id=registration.todo_id, step_key=key,
-        ),
-        worktree=registration.worktree,
-        assignee=registration.review_assignee or registration.assignee,
-        parent=fix_id, prompt_client=registration.prompt_client,
-    )
+def _assert_no_legacy_review_rounds(tasks: dict) -> None:
+    """Refuse a board that predates the removal of the review rounds.
+
+    A run whose old ``review:0`` returned findings got a ``review-fix:<n>`` card,
+    and THAT card made the fix commit -- ``review:0`` itself was read-only, so
+    its report ends at the implementation head. Such a run also never wrote
+    ``accepted-review-head``, because the old machinery recorded it only once
+    re-review passed.
+
+    Every tick after the upgrade then reconciles that board identically:
+    ``_ensure_initial_review`` returns early because ``review:0`` exists,
+    ``require_current`` is True because no accepted head was recorded, and
+    ``verify_optional_single_commit`` demands ``HEAD ==`` the head ``review:0``
+    reported -- the head ``review-fix:<n>`` moved past. The result is
+    ``head_mismatch``, forever, blaming the worker's topology for what is purely
+    a discontinuity across the upgrade.
+
+    Naming the cause does not unwedge the run, and nothing here tries to: such
+    a tick must be abandoned and the TODO re-selected (see
+    ``docs/howto-debugging-and-recovery.md``). What it does is stop an operator
+    chasing a topology bug that is not there.
+    """
+    legacy = sorted(key for key in tasks if key.startswith(_LEGACY_ROUND_PREFIXES))
+    if legacy:
+        raise ResultContractError(
+            "review_round_upgrade_discontinuity", ", ".join(legacy)
+        )
 
 
 def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
@@ -281,85 +329,37 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
     except RetryableReviewRegistration:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
-    review = tasks.get("review:0")
-    if review is None or review.status != "done":
-        return True
     try:
+        # Before anything is measured: a legacy round card means this board
+        # cannot be reconciled by this module at all, and every measurement
+        # below would misattribute that to the worker.
+        _assert_no_legacy_review_rounds(tasks)
+        review = tasks.get(REVIEW_KEY)
+        if review is None or review.status != "done":
+            return True
         expected_parent = _implementation_head(
             tasks=tasks, registration=registration, tick_id=tick_id
         )
-        evidence = _review_result(
-            review.task_id, tick_id=tick_id, todo_id=registration.todo_id,
-            key="review:0", worktree=registration.worktree,
-            head_sha=expected_parent, require_current="review-fix:1" not in tasks,
+        result = parse_worker_result(
+            _show_task_payload(review.task_id), tick_id=tick_id,
+            todo_id=registration.todo_id, step_key=REVIEW_KEY,
+            acceptance_criteria=(), allow_no_changes=True,
         )
-        assert evidence.review is not None
-        if evidence.review.verdict == "clean":
-            _persist_accepted_head(state_dir, tick_id, expected_parent)
-            return True
-        findings = evidence.review.findings
-        parent = review.task_id
-        for round_number in range(1, MAX_REVIEW_ROUNDS + 1):
-            tasks = get_todo_kanban_tasks(tenant, tick_id)
-            rereview_key = f"re-review:{round_number}"
-            fix_key = f"review-fix:{round_number}"
-            if fix_key not in tasks:
-                _ensure_round(
-                    project_dir=project_dir, round_number=round_number, parent=parent,
-                    registration=registration,
-                    tenant=tenant, tick_id=tick_id, tasks=tasks, findings=findings,
-                )
-                return True
-            fix = tasks[fix_key]
-            if fix.status != "done":
-                return True
-            fix_result = parse_worker_result(
-                _show_task_payload(fix.task_id), tick_id=tick_id,
-                todo_id=registration.todo_id, step_key=f"review-fix:{round_number}",
-                acceptance_criteria=(),
-            )
-            verify_worker_git_topology(
-                registration.worktree, fix_result.git,
-                expected_parent_sha=expected_parent,
-            )
-            # The re-review card's existence is the record that this round's fix
-            # was already validated against a live worktree: after it exists the
-            # worktree has legitimately moved on, so only the topology holds.
-            if rereview_key not in tasks:
-                verify_worker_git_result(
-                    registration.worktree, fix_result.git,
-                    expected_parent_sha=expected_parent,
-                )
-            expected_parent = fix_result.git.resulting_head_sha
-            _ensure_rereview(
-                project_dir=project_dir, round_number=round_number,
-                fix_id=fix.task_id,
-                head_sha=expected_parent, registration=registration,
-                tenant=tenant, tick_id=tick_id, tasks=tasks,
-            )
-            if rereview_key not in tasks:
-                return True
-            rereview = tasks[rereview_key]
-            if rereview.status != "done":
-                return True
-            evidence = _review_result(
-                rereview.task_id, tick_id=tick_id, todo_id=registration.todo_id,
-                key=rereview_key, worktree=registration.worktree,
-                head_sha=expected_parent,
-                require_current=f"review-fix:{round_number + 1}" not in tasks,
-            )
-            assert evidence.review is not None
-            if evidence.review.verdict == "clean":
-                _persist_accepted_head(state_dir, tick_id, expected_parent)
-                return True
-            findings = evidence.review.findings
-            parent = rereview.task_id
-        log.error(
-            "tick %s: review remediation limit reached: %s", tick_id,
-            sanitize_result_text(json.dumps(findings, sort_keys=True), maximum=1000),
+        # The profile's reviewer applies its own findings as one review-fix
+        # commit, so the reviewed head may legitimately have advanced by one.
+        # It may advance by no more than that, and it must still descend from
+        # the implementation chain this reconciler recomputed -- that is what
+        # keeps the accepted head an anchor rather than a worker's claim.
+        accepted = _accepted_head_path(state_dir, tick_id)
+        verify_optional_single_commit(
+            registration.worktree, result.git,
+            expected_parent_sha=expected_parent,
+            require_current=not accepted.exists(),
         )
-        return False
-    except RetryableReviewRegistration:
+        # Record the head the review actually left behind, not the head it
+        # started from: a review-fix commit is part of the reviewed work, and
+        # delivery anchors to what was blessed.
+        _persist_accepted_head(state_dir, tick_id, result.git.resulting_head_sha)
         return True
     except (ResultContractError, RuntimeError, OSError) as exc:
         log.error(

@@ -11,11 +11,11 @@ registration and crash-recovery evidence, never a second mutable workflow.
 | legacy Plan compiled | valid Markdown, no manifest | register one development worker and warn |
 | worker closes | valid sanitized result metadata and Git facts | chain may advance; the chain tip is also verified against HEAD and a clean worktree |
 | worker evidence invalid | immutable mismatch or unsafe Git state | tick reports no progress and logs the bounded diagnostic; no card is blocked |
-| initial review finds issues | unchanged head and clean worktree | create one `review-fix -> fix-validation -> re-review` round |
-| fifth re-review still finds issues | every round card terminal | review gate remains human `needs_input`; create no cards |
-| review is clean | review evidence validates | allow finish and closeout |
-| finish and closeout validate | PR branch/head/checks match | human merge gate remains `needs_input` |
-| GitHub reports merge | PR identity still matches | complete terminal gate; later selection allowed |
+| review card closes `done` | reported head is the implementation head or one commit past it, and descends from it | record `accepted-review-head` and allow finish |
+| review card closes `blocked` | the profile's own nonzero exit | Hermes keeps it sticky and both readers treat it as terminal, but they disagree on what that means: the harness poller fails the run, while the production tick counts `blocked` as complete, releases the project and selects the next TODO -- `observe_outcomes` does record a `failed_at_phase_<key>` outcome naming the blocked phase, so the abandonment is no longer silent (see [howto-review-outcomes.md](howto-review-outcomes.md)) |
+| review evidence invalid | reported parent, diff, or reachability mismatch | tick reports no progress and logs the bounded diagnostic; no head is accepted |
+| finish and closeout validate | PR branch/head/checks match | the open, unmerged pull request and its human merge decision are the run's terminal boundary; `phase_9_human_review` is a gate phase, so no card represents it |
+| GitHub reports merge | PR identity still matches | the run's terminal boundary is complete; later selection allowed |
 
 Exactly one run may be active per project; a multi-project cron scan reconciles
 projects independently. Stable idempotency keys make retries converge on the

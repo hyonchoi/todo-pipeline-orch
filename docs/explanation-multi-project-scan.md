@@ -125,6 +125,12 @@ recorded as a `tracker_error` decision),
 the error is logged and the scan continues to project-b. One project's failure
 does not block the others.
 
+Isolation bounds the *blast radius*, not the reporting. A project whose tick
+raised is logged with the exception message and a sanitized traceback, and the
+scan exits 1 once every project has been ticked. Returning 0 there made a
+crashed tick indistinguishable from a clean one — which is how the live harness
+came to report a crash as `tick_stalled`.
+
 **Trade-off:** A failed project doesn't count toward the circuit breaker in
 other projects. The circuit breaker is per-project — it lives in
 `<project>/.hermes/circuit.json`.

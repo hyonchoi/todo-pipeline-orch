@@ -20,6 +20,7 @@ from .plan_manifest import (
     parse_plan_manifest,
     render_embedded_plan,
 )
+from .result_contract import SECRET_RE
 
 REQUEST_KEYS = frozenset({"schema_version", "transaction_id", "title", "fields", "plan_markdown", "tasks"})
 FIELD_NAMES = (
@@ -35,9 +36,7 @@ PLAN_MAX_CHARS = 60_000
 MAX_ISSUE_NUMBER = 9_999_999_999_999_999_999
 MARKER_PREFIX = "<!-- tpo-create:"
 _CONTROL_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
-_SENSITIVE_RE = re.compile(
-    r"(?i)(?:authorization\s*:\s*bearer\s+\S+|-----BEGIN [A-Z ]*PRIVATE KEY-----|\bgh[pousr]_[A-Za-z0-9]{20,})"
-)
+
 
 
 class TodoCreateError(ValueError):
@@ -101,7 +100,7 @@ def load_create_request(path: Path) -> CreateRequest:
         after = path.lstat()
         if (after.st_dev, after.st_ino) != (opened.st_dev, opened.st_ino):
             raise TodoCreateError("invalid_request_file")
-        if _SENSITIVE_RE.search(raw):
+        if SECRET_RE.search(raw):
             raise TodoCreateError("secret_content")
         value = json.loads(raw, object_pairs_hook=_object)
     except TodoCreateError:

@@ -220,7 +220,9 @@ class TestTickContractAssignee:
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
         result = _cmd_tick(FakeArgs(), config)
 
-        assert result == 0  # scan-level result: per-project errors don't abort the scan
+        # The scan is not aborted -- the loop still reaches every other project
+        # -- but a project whose tick raised is reported: rc 1, not 0.
+        assert result == 1
         mock_register.assert_not_called()
 
     def test_tick_stale_contract_version_skips_project(self, tmp_path, mocker):
@@ -239,7 +241,8 @@ class TestTickContractAssignee:
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
         result = _cmd_tick(FakeArgs(), config)
 
-        assert result == 0
+        # Fails closed for that project *and* says so in the exit code.
+        assert result == 1
         mock_register.assert_not_called()
 
     def test_tick_blocks_unverified_profile_before_registration(self, tmp_path, mocker):
@@ -273,7 +276,7 @@ class TestTickContractAssignee:
         config = Config(projects_dir=projects_dir, state_dir=tmp_path / "state")
         result = _cmd_tick(FakeArgs(), config)
 
-        assert result == 0
+        assert result == 1
         run_selection.assert_not_called()
         mock_register.assert_not_called()
         agent_skills_path = resolve_profile_phases_path("agent-skills")

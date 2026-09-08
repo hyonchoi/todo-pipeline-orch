@@ -102,10 +102,14 @@ class HarnessTickError(RuntimeError):
     exist for it. Set for ``tick_not_started``, ``failed_to_spawn``,
     ``expected_phases_missing`` (and by callers for ``unexpected_registration``);
     ``None`` for ``tick_not_persisted`` and ``picked_none``, where no card can exist.
-    ``tick_timeout`` (raised by :func:`run_tick`) carries ``None``: the subprocess
-    may have persisted a tick id and spawned workers before the deadline, so the
-    caller must re-read ``current_tick_id.txt`` and, when no new id is readable,
-    treat the sandbox as not provably idle.
+    ``tick_timeout`` and ``tick_crashed`` (both raised by :func:`run_tick`) carry
+    ``None``: the subprocess may have persisted a tick id and spawned workers
+    before the deadline, or before the tick that raised, so the caller must
+    re-read ``current_tick_id.txt`` and, when no new id is readable, treat the
+    sandbox as not provably idle. ``tick_crashed`` means ``tpo tick`` exited
+    non-zero -- some project's tick raised -- and ``detail`` is ``rc=<n>`` plus
+    the tick log's tail, which carries that project's error line, its message
+    and its traceback.
 
     Plan-pinned (``requires_plan``) runs add, all carrying the tick id:
     ``registration_invalid`` (``load_validated_registration`` rejected the
@@ -117,9 +121,11 @@ class HarnessTickError(RuntimeError):
     ``unexpected_selection`` (raised by
     :func:`assert_tick_id_unchanged` when a later tick genuinely registered a
     different tick id, or persisted none), and, raised by the multi-tick driver
-    :func:`drive_ticks`, ``tick_stalled`` (two consecutive ticks settled on an
-    identical, undelivered status map, or a later tick selected no work at all,
-    so no card progressed) and ``tick_budget_exhausted`` (the run consumed
+    :func:`drive_ticks`, ``tick_stalled``
+    (:data:`_MAX_IDENTICAL_SETTLED_BOARDS` consecutive ticks settled on an
+    identical, undelivered status map, so one tolerated no-progress tick was
+    followed by another; or a later tick selected no work at all, so no card
+    progressed) and ``tick_budget_exhausted`` (the run consumed
     :func:`pinned_tick_budget` ticks without reaching a verdict).
 
     ``workers_unaccounted`` marks an error after which agents may be running
@@ -2167,7 +2173,7 @@ def poll_pinned_run(
     sleep; setting it ends the poll with ``{}``.
 
     Like ``poll_registered_phases`` this never completes cards; the dynamic
-    cards (``review:0``, ``review-fix:<n>``, ``finish``) are created by the
+    cards (``review:0``, ``finish``) are created by the
     ``tpo tick`` reconcilers on later ticks under the same tick id.
     Transition events are
     emitted for every key that *changes* relative to the initial fetch, which
@@ -2302,26 +2308,80 @@ def classify_pinned_run(status_map: Mapping[str, str]) -> str:
     return "in_progress"
 
 
+#: Consecutive settled boards that must be *identical* before ``drive_ticks``
+#: fails a plan-pinned run with ``tick_stalled``. Three tolerates exactly one
+#: no-progress tick, because one reconciler hop can legitimately change nothing
+#: and need the next tick: ``reconcile_plan_task_results`` returning False on a
+#: ``result-validation-blocked`` result set, ``reconcile_reviews`` returning
+#: False on a topology or contract failure, a ``_blocked`` delivery in
+#: ``todos_completion``, and an ambiguous ``hermes kanban create`` whose card
+#: did *not* land. Two -- comparing only against the immediately previous
+#: board -- tolerated none of them, so the first legitimate no-progress tick
+#: failed the whole run. The count is consecutive and resets whenever the board
+#: moves, so the tolerance is one tick per stall episode and
+#: :func:`pinned_tick_budget` is what bounds the run overall.
+_MAX_IDENTICAL_SETTLED_BOARDS = 3
+
+
 def pinned_tick_budget(step_keys: Iterable[str]) -> int:
     """How many ``tpo tick`` invocations one plan-pinned run may consume.
 
-    ``len(step_keys) + 5 + 2 * MAX_REVIEW_ROUNDS``:
+    ``len(step_keys) + 6``.
 
-    * ``len(step_keys)`` -- the registered cards are one ``plan:<task>`` per
-      plan task and nothing else, so the step-key count is the task count, and
-      one tick reconciles a task's result while the board runs the next.
-    * ``5`` -- slack for the fixed reconciler hops that own no step key:
-      opening ``review:0``, reconciling its verdict, creating ``finish``,
-      reconciling delivery, and one spare tick for a retryable registration.
-    * ``2 * MAX_REVIEW_ROUNDS`` -- each review round can need one tick to
-      register the round and another to reconcile its outcome.
+    ``len(step_keys)`` is the plan-task count: the registered cards are one
+    ``plan:<task>`` per plan task and nothing else. It is *not* one tick per
+    task -- those cards are created in one tick, chained ``--parent`` to each
+    other, and the poller settles the whole chain before that tick's poll
+    returns -- so for a run of N tasks this term is N-1 ticks of headroom on top
+    of the enumerated cost below. That is deliberate: the term keeps the budget
+    monotone in plan size, so a longer plan can never buy fewer ticks.
 
-    Deliberately generous: exhausting the budget means the run is stuck
-    (``tick_budget_exhausted``), not that it ran out of legitimate work.
+    The ``6`` is enumerated, not a round number. The delivered path costs three
+    ticks, whatever N is:
+
+    1. the registration tick -- it reconciles nothing (the reconcilers run
+       against the *prior* tick) and its poll settles the whole plan chain;
+    2. the tick that reconciles the plan results and creates ``review:0``,
+       whose poll settles the review card;
+    3. the tick that accepts the review, creates ``finish``, and settles it --
+       at which point :func:`classify_pinned_run` reads ``delivered``.
+
+    Three more ticks can be spent without reconciling anything, and only this
+    budget bounds them:
+
+    4. ``_ensure_initial_review``'s ``hermes kanban create`` for ``review:0``
+       returning an ambiguous outcome (a subprocess timeout or unparseable id)
+       *after* the card actually landed: ``reconcile_reviews`` swallows
+       ``RetryableReviewRegistration`` and returns "progress", so the tick ends
+       having reconciled nothing;
+    5. the same for the ``finish`` card created by
+       ``reconcile_todo_completion``;
+    6. the one no-progress tick :data:`_MAX_IDENTICAL_SETTLED_BOARDS` tolerates
+       -- a reconciler hop that legitimately reconciles nothing *and* leaves the
+       board unchanged: a ``result-validation-blocked`` result set, a review
+       whose reported topology fails verification, a ``_blocked`` delivery, or
+       an ambiguous create whose card did *not* land.
+
+    Items 4 and 5 leave the board *different*, so the stall detector never sees
+    the same map twice and only this budget governs them. Item 6 is the new
+    term, and it exists because the stall detector now counts *consecutive*
+    identical boards: while it compared only against the immediately previous
+    map, every board-invariant retry was decided by ``tick_stalled`` on the very
+    next tick and could not reach this budget at all. The tolerance is one tick
+    per stall episode -- the counter resets whenever the board moves -- so a run
+    that stalls once on each of several distinct boards spends a tick on each,
+    and this budget, not the stall detector, is what ends it.
+
+    Exhausting the budget therefore means the run is stuck
+    (``tick_budget_exhausted``), not that it ran out of legitimate work: at N=1
+    the enumeration needs 6 of the 7 ticks it gets. The constant tracks the
+    enumeration, which is why it grew from ``5`` with item 6 rather than
+    absorbing it into the one tick of slack N=1 used to have -- at ``+ 5`` a
+    single-task run's enumerated path would have consumed the whole budget, and
+    a second stall episode would then have reported ``tick_budget_exhausted``
+    for a run that had not run out of legitimate work.
     """
-    from .review_reconciliation import MAX_REVIEW_ROUNDS
-
-    return len(tuple(step_keys)) + 5 + 2 * MAX_REVIEW_ROUNDS
+    return len(tuple(step_keys)) + 6
 
 
 def _classify_error_class(exc: Exception) -> str:
@@ -2488,6 +2548,9 @@ _tick_runner = subprocess.run
 _TICK_ENTRYPOINT = "import sys; from hermes_pipeline.cli import main; sys.exit(main(sys.argv[1:]))"
 
 
+_TICK_CRASH_TAIL_LINES = 12
+
+
 def run_tick(
     slug: str,
     *,
@@ -2500,13 +2563,22 @@ def run_tick(
 
     The subprocess runs in *cwd* and inherits ``os.environ`` (including
     ``TPO_CONFIG_FILE`` exported by :func:`isolate_config`) merged with *env*.
-    The return code is informational only: ``tpo tick`` swallows per-project
-    failures and returns 0, so callers must inspect the persisted tick state via
+
+    ``tpo tick`` isolates per-project failures -- one project's crash never
+    aborts the others -- but it reports them: the scan exits non-zero when any
+    project's tick raised. That is a tick failure here, raised as
+    ``HarnessTickError("tick_crashed")`` with the tick log's tail as ``detail``.
+    Swallowing it is what made a crashed tick indistinguishable from a clean
+    one, so the driver saw a successful tick, an unchanged board, and reported
+    ``tick_stalled``. A zero rc still says nothing about what the tick decided:
+    callers read that from the persisted tick state via
     :func:`recover_tick_registration`.
 
     On timeout the partial output is logged and ``HarnessTickError("tick_timeout")``
-    is raised. The tick may already have spawned detached workers by then; the
-    caller must run the quiescence check before treating the sandbox as idle.
+    is raised. Either way the tick may already have spawned detached workers, so
+    the caller must run the quiescence check before treating the sandbox as
+    idle; ``workers_unaccounted`` is left to :func:`_tick_failure`, which
+    decides it from the persisted tick id rather than from the failure mode.
     """
     argv = [sys.executable, "-c", _TICK_ENTRYPOINT, "tick", slug]
     merged_env = {**os.environ, **(env or {})}
@@ -2534,6 +2606,12 @@ def run_tick(
         fh.write(f"# tpo tick {slug} rc={result.returncode} {stamp}\n")
         fh.write(_decode_output(result.stdout))
         fh.write(_decode_output(result.stderr))
+    if result.returncode != 0:
+        # The log is already written, so the tail is the crash: the per-project
+        # error line the scan logged, with its message and traceback.
+        tail = _log_tail(log_path, lines=_TICK_CRASH_TAIL_LINES).strip()
+        detail = f"rc={result.returncode}: {tail}" if tail else f"rc={result.returncode}"
+        raise HarnessTickError("tick_crashed", detail[:_ERROR_MESSAGE_MAX])
     return result.returncode
 
 
@@ -3003,8 +3081,8 @@ class TickDrive:
     ``registration`` is the recovered registration, or ``None`` when no tick
     ever registered one; it is retained even on a mid-loop timeout so the caller
     can still quiesce the live run. ``observed_keys`` are the card keys seen in
-    any settled pinned status map -- dynamic cards (``review:0``,
-    ``review-fix:<n>``, ``finish``) included -- for the caller to union with the registered step
+    any settled pinned status map -- dynamic cards (``review:0``, ``finish``)
+    included -- for the caller to union with the registered step
     keys at shutdown; it is empty for a non-pinned drive, whose poller reports no
     map. ``ticks_run`` counts ``run_tick`` invocations, always 1 for a
     non-pinned drive. ``failure_code`` is ``None`` for a plain card failure:
@@ -3085,8 +3163,23 @@ def _tick_failure(
 
 
 def _log_tick_error(exc: HarnessTickError, tick_log: Path) -> None:
-    if exc.code == "tick_not_persisted":
-        # The detail is the tick log tail and may carry sensitive tool output.
+    if exc.code == "tick_crashed":
+        # NOT "did not register a runnable run", which is what this branch used
+        # to say for both codes. ``run_tick`` raises ``tick_crashed`` from a
+        # subprocess that RETURNED a non-zero rc, so the usual cause is a run
+        # that registered fine and then had a reconciler or a verifier raise --
+        # describing that as a registration problem sends the operator looking
+        # in the wrong place. The detail is the tick log tail and may carry
+        # sensitive tool output, so the error line names the log rather than
+        # quoting it and the tail goes to debug.
+        log.error(
+            "harness: tick failed after starting: %s; detail withheld, see %s",
+            exc.code, tick_log,
+        )
+        log.debug("harness: tick log tail:\n%s", exc.detail)
+    elif exc.code == "tick_not_persisted":
+        # Here the wording is exact: no tick id was ever written, so no run was
+        # ever registered. The detail is the tick log tail, withheld as above.
         log.error(
             "harness: tick did not register a runnable run: %s; see %s", exc.code, tick_log
         )
@@ -3173,8 +3266,11 @@ def drive_ticks(
     pinned drive — ``pinned``, ``worktree`` and ``branch``; see
     :func:`_tick_registered_payload`), ``phase_timed_out`` (on the whole-run
     deadline), and, pinned only, ``tick_completed`` ``{tick_no, status_map}``
-    once per settled board plus ``tick_stalled`` ``{tick_no, status_map}`` when
-    that board is identical to the previous tick's. A non-pinned drive emits no
+    once per settled board plus ``tick_stalled`` ``{tick_no, status_map}`` on
+    the tick that *fails* the run -- the
+    :data:`_MAX_IDENTICAL_SETTLED_BOARDS`'th consecutive identical board. The
+    tolerated repeat before it emits no event, only a warning log line, because
+    this event is the run's failure signal. A non-pinned drive emits no
     per-tick event: its poller reports no status map, and its single tick is
     already named by ``tick_registered``.
 
@@ -3359,6 +3455,7 @@ def _drive_pinned_ticks(
     result_box: dict[str, Any] = {}
     observed: set[str] = set()
     previous_map: dict[str, str] | None = None
+    identical_boards = 0
     budget: int | None = None
     ticks_run = 0
     deadline = time.monotonic() + timeout
@@ -3490,10 +3587,16 @@ def _drive_pinned_ticks(
                 # the same map every later tick would settle on.
                 success = True
                 break
-            if previous_map is not None and status_map == previous_map:
+            identical_boards = (
+                identical_boards + 1 if status_map == previous_map else 1
+            )
+            previous_map = status_map
+            if identical_boards >= _MAX_IDENTICAL_SETTLED_BOARDS:
                 tick_error = HarnessTickError(
                     "tick_stalled",
-                    f"tick {ticks_run} settled on the same board as tick {ticks_run - 1}",
+                    f"tick {ticks_run} settled on the same board as the previous "
+                    f"{identical_boards - 1} ticks: {identical_boards} consecutive "
+                    "identical settled boards",
                     tick_id=registered.tick_id,
                 )
                 failure_code = tick_error.code
@@ -3502,7 +3605,18 @@ def _drive_pinned_ticks(
                     "tick_stalled", {"tick_no": ticks_run, "status_map": dict(status_map)}
                 )
                 break
-            previous_map = status_map
+            if identical_boards > 1:
+                # Tolerated, not failed: no ``tick_stalled`` event, because that
+                # event is the run's failure signal. The warning is the only
+                # trace a recovered stall leaves, so it must name the count.
+                log.warning(
+                    "harness: tick %d settled on the same board as the previous tick "
+                    "(%d consecutive identical settled boards, %d tolerated); "
+                    "one reconciler hop may legitimately change nothing",
+                    ticks_run,
+                    identical_boards,
+                    _MAX_IDENTICAL_SETTLED_BOARDS - 2,
+                )
             if budget is not None and ticks_run >= budget:
                 tick_error = HarnessTickError(
                     "tick_budget_exhausted",
@@ -3891,7 +4005,27 @@ _HARNESS_FIXTURE = "happy-path"
 #: exist (``TickDrive.observed_keys``) are the honest completeness set for
 #: shutdown. Every other tick error leaves the registration partial and forfeits
 #: the completeness check with ``None``.
-_OBSERVED_CARDS_TICK_ERRORS = frozenset({"tick_stalled", "tick_budget_exhausted"})
+#:
+#: ``tick_crashed`` belongs here and NOT with ``tick_timeout``, which is the
+#: comparison that looks tempting. ``tick_timeout`` is a ``TimeoutExpired``, so
+#: the subprocess was SIGKILLed and can have died halfway through a
+#: ``hermes kanban create``; ``tick_crashed`` is raised only from a subprocess
+#: that RETURNED a non-zero rc, having finished its project loop and run its own
+#: catch-all, so whatever cards it was going to make already exist.
+#:
+#: Nor is the ``None`` branch the conservative one to fall back to.
+#: ``shutdown_keys`` starts as the registered ``phase_keys``, and
+#: ``_wait_for_kanban_quiescence`` gates its membership test on
+#: ``expected_phase_keys is not None`` -- so ``None`` SKIPS that test and proves
+#: quiescence from whatever the snapshot happens to list. Requiring
+#: ``observed_keys`` is strictly harder, and its failure mode is benign:
+#: quiescence unproven, cleanup skipped, leftovers reported. A crash that
+#: predates registration needs no special case either, because
+#: ``tuple(sorted(observed_keys)) or None`` already yields ``None`` when nothing
+#: was ever polled.
+_OBSERVED_CARDS_TICK_ERRORS = frozenset(
+    {"tick_stalled", "tick_budget_exhausted", "tick_crashed"}
+)
 
 
 def _harness_tmp_root() -> Path:
@@ -4135,7 +4269,7 @@ def run_harness(
         )
         if shutdown_keys is not None and observed_keys:
             # A pinned run's reconcilers add cards that are not registered step
-            # keys (``review:0``, ``review-fix:<n>``, ``finish``). Requiring those
+            # keys (``review:0``, ``finish``). Requiring those
             # too is what stops shutdown from reading a board that is still
             # missing a dynamic card as quiescent. Registered order first, then
             # the extras, so the value stays deterministic; a non-pinned drive

@@ -11,8 +11,6 @@ the profile under test.
 """
 from types import SimpleNamespace
 
-import pytest
-
 from hermes_pipeline.result_contract import (
     RESULT_TEMPLATE_HEADING,
     render_result_template,
@@ -136,8 +134,41 @@ def _reconciler_registration(tmp_path):
     return SimpleNamespace(
         todo_id="TODO-42", worktree=tmp_path, assignee="implementer",
         review_assignee="reviewer", prompt_client="codex", branch="feat/x",
+        profile="native-sdd", plan_hash="f" * 64,
+        plan_reference=SimpleNamespace(value="docs/plan.md"),
         manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1"),)),
     )
+
+
+def _profile_phase(phase_key):
+    from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+    return next(
+        phase for phase in load_phases(resolve_profile_phases_path("native-sdd"))
+        if phase.phase_key == phase_key
+    )
+
+
+def _rendered_profile_prompt(phase, *, todo_id, facts):
+    """The profile's prompt as the pipeline renders it, built independently here."""
+    header = (
+        "Pipeline context:\n"
+        f"- todo_id: {todo_id}\n"
+        "- tick_id: 01TICK\n"
+        "- project_slug: demo\n"
+        + "".join(f"- {key}: {value}\n" for key, value in facts.items())
+        + f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
+        "Plan (execution authority): docs/plan.md\n"
+        f"Plan SHA-256: {'f' * 64}\n"
+        "Before using the Plan, verify its SHA-256 matches exactly; "
+        "fail closed on drift.\n\n"
+    )
+    body = phase.prompt.format(
+        todo_id=todo_id, tick_id="01TICK", project_slug="demo",
+        plan_path="docs/plan.md", agent_product="Codex", skill_prefix="$",
+        superpowers_skill_prefix="$superpowers:",
+    )
+    return header + body
 
 
 def _created_card_body(mocker, tmp_path, run):
@@ -157,10 +188,15 @@ def _created_card_body(mocker, tmp_path, run):
     return cmd[cmd.index("--body") + 1]
 
 
-def test_review_card_body_keeps_the_template_outside_the_delimited_prompt(
-    tmp_path, mocker
-):
-    """Composed end to end: the review card the reconciler really creates."""
+def test_review_card_delimited_prompt_is_exactly_the_profile_prompt(tmp_path, mocker):
+    """Composed end to end: the review card the reconciler really creates.
+
+    The delimited block is what Hermes hands the external client verbatim, so
+    it must be the phase profile's ``phase_5_review`` prompt and nothing else.
+    A TPO-authored review instruction in here is the exact failure this whole
+    change exists to remove: the live harness cannot test a profile whose words
+    never reach the reviewer.
+    """
     from hermes_pipeline.review_reconciliation import _ensure_initial_review
 
     mocker.patch(
@@ -179,82 +215,54 @@ def test_review_card_body_keeps_the_template_outside_the_delimited_prompt(
 
     dispatcher, delimited = _split_card_body(body)
     _assert_prompt_is_clean(delimited)
-    assert "fresh, independent, read-only" in delimited
+    assert delimited == _rendered_profile_prompt(
+        _profile_phase("phase_5_review"), todo_id="TODO-42",
+        facts={"reviewed_head_sha": "a" * 40, "branch": "feat/x"},
+    )
     assert render_result_template(
         tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
-        section="review", pinned_head_sha="a" * 40, allow_no_changes=True,
+        allow_no_changes=True,
     ) in dispatcher
 
 
-@pytest.mark.parametrize("step_key", ["review:0", "re-review:3"])
-def test_review_prompts_pass_their_template_beside_the_prompt(
-    tmp_path, mocker, step_key
-):
-    from hermes_pipeline.review_reconciliation import (
-        _ensure_initial_review,
-        _ensure_rereview,
-    )
+def test_review_card_passes_its_template_beside_the_prompt(tmp_path, mocker):
+    from hermes_pipeline.review_reconciliation import _ensure_initial_review
 
     create = mocker.patch(
         "hermes_pipeline.review_reconciliation._create_task", return_value="t_1"
     )
-    if step_key == "review:0":
-        mocker.patch(
-            "hermes_pipeline.review_reconciliation._implementation_head",
-            return_value="a" * 40,
-        )
-        _ensure_initial_review(
-            project_dir=tmp_path,
-            tasks={"plan:task-1": SimpleNamespace(task_id="worker-1", status="done")},
-            registration=_reconciler_registration(tmp_path),
-            tenant="demo", tick_id="01TICK",
-        )
-    else:
-        _ensure_rereview(
-            project_dir=tmp_path, round_number=3, fix_id="fix-id",
-            head_sha="a" * 40, registration=_reconciler_registration(tmp_path),
-            tenant="demo", tick_id="01TICK", tasks={},
-        )
-
-    _assert_prompt_is_clean(create.call_args.kwargs["prompt"])
-    assert create.call_args.kwargs["result_template"] == render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key=step_key,
-        section="review", pinned_head_sha="a" * 40, allow_no_changes=True,
+    mocker.patch(
+        "hermes_pipeline.review_reconciliation._implementation_head",
+        return_value="a" * 40,
     )
-
-
-def test_review_fix_card_passes_its_template_beside_the_prompt(tmp_path, mocker):
-    from hermes_pipeline.review_reconciliation import _ensure_round
-
-    create = mocker.patch(
-        "hermes_pipeline.review_reconciliation._create_task", return_value="t_1"
-    )
-    _ensure_round(
-        project_dir=tmp_path, round_number=1, parent="review-id",
+    _ensure_initial_review(
+        project_dir=tmp_path,
+        tasks={"plan:task-1": SimpleNamespace(task_id="worker-1", status="done")},
         registration=_reconciler_registration(tmp_path),
-        tenant="demo", tick_id="01TICK", tasks={},
-        findings=({"priority": "P1", "location": "a.py:1",
-                   "failure_scenario": "x", "recommendation": "y"},),
+        tenant="demo", tick_id="01TICK",
     )
 
     _assert_prompt_is_clean(create.call_args.kwargs["prompt"])
     assert create.call_args.kwargs["result_template"] == render_result_template(
-        tick_id="01TICK", todo_id="TODO-42", step_key="review-fix:1",
+        tick_id="01TICK", todo_id="TODO-42", step_key="review:0",
+        allow_no_changes=True,
     )
 
 
-def test_delivery_card_passes_its_template_beside_the_prompt(tmp_path, mocker):
+def _delivery_card_body(tmp_path, mocker):
     from hermes_pipeline.todos_completion import reconcile_todo_completion
 
     state = tmp_path / ".hermes"
-    (state / "runs" / "01TICK").mkdir(parents=True)
+    (state / "runs" / "01TICK").mkdir(parents=True, exist_ok=True)
     (state / "runs" / "01TICK" / "registration.json").write_text("{}")
     (state / "runs" / "01TICK" / "accepted-review-head").write_text("a" * 40)
     mocker.patch(
         "hermes_pipeline.todos_completion.load_validated_registration",
         return_value=SimpleNamespace(
             todo_id="TODO-1", worktree=tmp_path, branch="feat/native",
-            assignee="worker", prompt_client="codex",
+            assignee="worker", prompt_client="codex", profile="native-sdd",
+            plan_hash="f" * 64,
+            plan_reference=SimpleNamespace(value="docs/plan.md"),
         ),
     )
     mocker.patch(
@@ -272,12 +280,75 @@ def test_delivery_card_passes_its_template_beside_the_prompt(tmp_path, mocker):
         project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
         repo="acme/repo",
     )
+    return create
+
+
+def _delivery_card_real_body(tmp_path, mocker):
+    """Compose the finish card body through the real ``_create_task``."""
+    from hermes_pipeline.todos_completion import reconcile_todo_completion
+
+    state = tmp_path / ".hermes"
+    (state / "runs" / "01TICK").mkdir(parents=True, exist_ok=True)
+    (state / "runs" / "01TICK" / "registration.json").write_text("{}")
+    (state / "runs" / "01TICK" / "accepted-review-head").write_text("a" * 40)
+    mocker.patch(
+        "hermes_pipeline.todos_completion.load_validated_registration",
+        return_value=SimpleNamespace(
+            todo_id="TODO-1", worktree=tmp_path, branch="feat/native",
+            assignee="worker", prompt_client="codex", profile="native-sdd",
+            plan_hash="f" * 64,
+            plan_reference=SimpleNamespace(value="docs/plan.md"),
+        ),
+    )
+    mocker.patch(
+        "hermes_pipeline.todos_completion.get_todo_kanban_tasks",
+        return_value={"review:0": SimpleNamespace(task_id="review-id", status="done")},
+    )
+    mocker.patch("hermes_pipeline.todos_completion._git", return_value="a" * 40)
+    mocker.patch(
+        "hermes_pipeline.todos_completion._github_identity",
+        return_value=("acme/repo", "main"),
+    )
+    return _created_card_body(
+        mocker, tmp_path,
+        lambda: reconcile_todo_completion(
+            project_dir=tmp_path, state_dir=state, tenant="demo", tick_id="01TICK",
+            repo="acme/repo",
+        ),
+    )
+
+
+def test_finish_card_delimited_prompt_is_exactly_the_profile_prompt(tmp_path, mocker):
+    """``phase_8_finish_branch``'s own words reach the delivery worker.
+
+    Asserted on the SPLIT CARD BODY, not on ``_create_task``'s ``prompt``
+    keyword. The boundary this file exists to protect is created inside
+    ``_create_task`` -- it is what wraps the prompt in the delimiters and keeps
+    the result template on the dispatcher's side -- so checking the argument
+    going in tests the caller and leaves the composition untested. The review
+    card was the only one whose real boundary was ever exercised.
+    """
+    dispatcher, delimited = _split_card_body(_delivery_card_real_body(tmp_path, mocker))
+
+    _assert_prompt_is_clean(delimited)
+    assert delimited == _rendered_profile_prompt(
+        _profile_phase("phase_8_finish_branch"), todo_id="TODO-1",
+        facts={"accepted_review_head_sha": "a" * 40, "branch": "feat/native"},
+    )
+    assert RESULT_TEMPLATE_HEADING in dispatcher
+    assert render_result_template(
+        tick_id="01TICK", todo_id="TODO-1", step_key="finish",
+        section="delivery", branch="feat/native", allow_no_changes=True,
+    ) in dispatcher
+
+
+def test_delivery_card_passes_its_template_beside_the_prompt(tmp_path, mocker):
+    create = _delivery_card_body(tmp_path, mocker)
 
     _assert_prompt_is_clean(create.call_args.kwargs["prompt"])
     assert create.call_args.kwargs["result_template"] == render_result_template(
         tick_id="01TICK", todo_id="TODO-1", step_key="finish",
-        section="delivery", pinned_head_sha="a" * 40, branch="feat/native",
-        allow_no_changes=True,
+        section="delivery", branch="feat/native", allow_no_changes=True,
     )
 
 

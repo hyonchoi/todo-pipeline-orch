@@ -1847,6 +1847,90 @@ class TestObserveOutcomes:
 
         # No all_phases_complete because phase_6_1_cso is still ready (non-terminal)
 
+    def test_blocked_phase_writes_failed_outcome(self, state_dir):
+        """A sticky ``blocked`` card must be recorded, not silently abandoned.
+
+        ``all_phases_complete`` treats ``blocked`` as complete on purpose -- a
+        sticky block is terminal and the tick must not spin on it -- so the prior
+        tick reads as finished, the project lock is released and the scan moves
+        to the next TODO, abandoning the branch and worktree. Writing no outcome
+        line on top of that left the circuit breaker with NEITHER a success nor a
+        failure for the run, which is a run reporting a success it did not earn.
+        The record is the fix; the completion semantics are not the defect.
+        """
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        status_map = {"phase_5_review": "blocked"}
+
+        observe_outcomes(
+            state_dir=state_dir,
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            status_map=status_map,
+        )
+
+        phases_file = state_dir / "outcomes" / "01HA6PH2V0ZJ7GK0S39D243TQX-phases.json"
+        lines = [l for l in phases_file.read_text().strip().split("\n") if l.strip()]
+        outcomes = [json.loads(l) for l in lines]
+
+        # Same vocabulary as ``failed`` and ``archived``: the phase key is named
+        # so the decision store says WHERE the run stopped, and the kanban status
+        # distinguishes a block from an outright failure.
+        assert outcomes == [{
+            "outcome": "failed_at_phase_phase_5_review",
+            "detail": {"kanban_status": "blocked"},
+        }]
+
+    def test_a_blocked_phase_is_recorded_exactly_as_a_failed_one(self, state_dir):
+        """Parity with ``failed`` is the invariant, and it is what was missing.
+
+        Asserting the line exists proves little on its own. The realistic shape
+        is a card blocked AFTER earlier phases completed, and there the
+        ``phase_complete`` lines make ``observe_from_outcomes`` read progress
+        whichever way the last phase ended -- that ordering is pre-existing and
+        shared with ``failed``, so this fix does not claim to move the
+        no-progress counter. What it does change is that ``blocked`` stops being
+        a silent THIRD category: the decision store now names the phase the run
+        stopped at, in the same vocabulary as ``failed``, so no consumer has to
+        special-case it to see that the run was abandoned.
+        """
+        from hermes_pipeline.kanban_tasks import observe_outcomes
+
+        def observed(status, tick_id):
+            observe_outcomes(
+                state_dir=state_dir,
+                tick_id=tick_id,
+                status_map={
+                    "phase_2_autoplan": "done",
+                    "phase_4_development": "done",
+                    "phase_5_review": status,
+                },
+            )
+            path = state_dir / "outcomes" / f"{tick_id}-phases.json"
+            lines = [l for l in path.read_text().strip().split("\n") if l.strip()]
+            return [json.loads(l) for l in lines]
+
+        blocked = observed("blocked", "01HA6PH2V0ZJ7GK0S39D243TQA")
+        failed = observed("failed", "01HA6PH2V0ZJ7GK0S39D243TQB")
+
+        stop = "failed_at_phase_phase_5_review"
+        # The stop record itself is identical in shape to the ``failed`` one,
+        # down to the phase key, and differs only in the status it names.
+        assert [o for o in blocked if o["outcome"] == stop] == [
+            {"outcome": stop, "detail": {"kanban_status": "blocked"}}
+        ]
+        assert [o for o in failed if o["outcome"] == stop] == [
+            {"outcome": stop, "detail": {"kanban_status": "failed"}}
+        ]
+
+        # The one place a block is recorded MORE honestly than a failure, and
+        # the reason the outcome sets are deliberately not equal: ``failed`` is
+        # in ``COMPLETION_STATUSES`` so a failed run still gets the
+        # ``all_phases_complete`` sentinel, which ``observe_from_outcomes``
+        # classifies as progress. ``blocked`` is not, so an abandoned run must
+        # never carry that sentinel -- that would be the false success itself.
+        assert "all_phases_complete" not in {o["outcome"] for o in blocked}
+        assert "all_phases_complete" in {o["outcome"] for o in failed}
+
     def test_creates_outcomes_dir(self, state_dir):
         """Outcomes directory is created if it doesn't exist."""
         from hermes_pipeline.kanban_tasks import observe_outcomes

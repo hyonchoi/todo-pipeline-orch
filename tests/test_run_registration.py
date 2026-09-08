@@ -728,3 +728,73 @@ def test_active_registration_issue_numbers_warns_once_per_run_dir(tmp_path, capl
     warnings = [r for r in caplog.records if r.levelname == "WARNING" and "t-bad" in r.getMessage()]
     debugs = [r for r in caplog.records if r.levelname == "DEBUG" and "t-bad" in r.getMessage()]
     assert len(warnings) == 1 and len(debugs) == 1
+
+
+def test_registration_records_the_branch_the_finish_phase_is_told_to_verify(tmp_path):
+    """The profile's finish phase opens by verifying this file exists.
+
+    ``phase_8_finish_branch`` says "Verify that the current branch matches
+    .hermes/pipeline_branch.txt", a path relative to the worker's cwd -- the
+    worktree. Under a plan manifest the only profile phase that would write it
+    has its prompt replaced by per-task prompts, and ``git worktree add`` makes
+    a fresh checkout, so the file could not exist. The profile's own convention
+    is to exit nonzero when a stated check cannot be verified, so the finish
+    card either blocks or, if the worker is lenient, proceeds off the header
+    fact instead -- nondeterministic. TPO creates the branch and the worktree,
+    so only TPO can satisfy this.
+    """
+    repo, _ = _repo(tmp_path)
+
+    registration = _register(repo)
+
+    recorded = registration.worktree / ".hermes" / "pipeline_branch.txt"
+    assert recorded.read_text() == registration.branch + "\n"
+    # Not the project-level copy: that file has its own readers and its own
+    # lifecycle (the CLI deletes it when clearing a PR handoff, and reads its
+    # presence as pending-handoff state).
+    assert not (repo / ".hermes" / "pipeline_branch.txt").exists()
+
+
+def test_the_recorded_branch_is_invisible_to_git_and_survives_a_retry(tmp_path):
+    """Nothing TPO writes into the checkout may read as an uncommitted change.
+
+    A repository that does not ignore ``.hermes/`` would otherwise see this
+    file as untracked, and every worktree-clean check would then call the
+    worktree dirty: ``_validate_or_create_worktree`` on the next registration,
+    ``verify_optional_single_commit`` on the review card, and the finish worker
+    itself when the profile tells it to verify the worktree is clean. The
+    fixture repository has no ``.gitignore`` at all, which is exactly the case
+    that must hold.
+    """
+    repo, _ = _repo(tmp_path)
+    assert not (repo / ".gitignore").exists()
+
+    first = _register(repo)
+
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=first.worktree, check=True, capture_output=True, text=True,
+    )
+    assert status.stdout == ""
+    assert subprocess.run(
+        ["git", "check-ignore", "-q", ".hermes/pipeline_branch.txt"],
+        cwd=first.worktree, capture_output=True,
+    ).returncode == 0
+
+    # And the retry, which re-runs the worktree-clean check, still succeeds.
+    assert _register(repo) == first
+
+
+def test_recording_the_branch_never_fails_registration(tmp_path, mocker, caplog):
+    """A profile convenience file is not worth failing a run over."""
+    repo, _ = _repo(tmp_path)
+    mocker.patch(
+        "hermes_pipeline.run_registration._atomic_write_text",
+        side_effect=OSError("read-only"),
+    )
+
+    with caplog.at_level("WARNING", logger="hermes_pipeline.run_registration"):
+        registration = _register(repo)
+
+    assert registration.worktree.is_dir()
+    assert "pipeline_branch.txt" in caplog.text

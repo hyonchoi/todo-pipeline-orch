@@ -595,9 +595,10 @@ def test_native_sdd_stall_fails_closed(tmp_path, monkeypatch, fake_gh, native_sd
     assert "tick_stalled" in result.summary
     assert result.pr_numbers == ()
     assert result.cleanup_leftovers == ()
-    # The registration tick, then exactly one tick that changed nothing: the driver
-    # stops on the repeat instead of ticking out its budget.
-    assert len(live.tick_calls) == 2
+    # The registration tick, then the one no-progress tick the driver tolerates,
+    # then the second repeat that ends the run: it stops on the run of identical
+    # boards instead of ticking out its budget.
+    assert len(live.tick_calls) == 3
 
     native_sdd_kanban.cancel.assert_called_once()
     gh_calls = live.fake_gh.gh_calls()

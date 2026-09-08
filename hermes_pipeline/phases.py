@@ -363,6 +363,7 @@ def _render_phase_prompt(
     prompt_client: PromptClient = "claude",
     template_source: str | None = None,
     decisions: Mapping[str, str] | None = None,
+    context_facts: Mapping[str, str] | None = None,
 ) -> str:
     """Inject the pipeline context the phase prompt needs.
 
@@ -371,6 +372,13 @@ def _render_phase_prompt(
     prepend a non-templated context header and ALSO support strict named
     substitution for phases that want to weave pipeline and client vocabulary
     into prose.
+
+    `context_facts` are additional per-card pipeline facts (the reviewed head
+    SHA, the branch) that a reconciler-created card needs but the phase profile
+    must not have to declare a placeholder for. They join the non-templated
+    context header, so the profile's prompt text stays exactly the profile's
+    own words. Omitted entirely when absent, keeping output byte-identical for
+    every caller that has no per-card fact to add.
 
     `plan_path`/`spec_path`/`reference_paths` are optional, pre-validated (existence +
     project_dir containment already checked by the caller) values taken from the
@@ -383,12 +391,19 @@ def _render_phase_prompt(
     phase may consult a TODOS.md entry. Values are sanitized before rendering.
     """
     source = template_source or "<phase prompt>"
+    from .result_contract import sanitize_result_text
+
     header = (
         f"Pipeline context:\n"
         f"- todo_id: {todo_id}\n"
         f"- tick_id: {tick_id}\n"
         f"- project_slug: {project_slug}\n"
-        f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
+        + "".join(
+            f"- {sanitize_result_text(key, maximum=80)}: "
+            f"{sanitize_result_text(value, maximum=200)}\n"
+            for key, value in (context_facts or {}).items()
+        )
+        + f"Work on {todo_id} ONLY. Do not pick a different TODO.\n\n"
     )
     spec_reference_block = ""
     if plan_path:
@@ -405,8 +420,6 @@ def _render_phase_prompt(
     if spec_reference_block:
         header += spec_reference_block + "\n"
     if decisions:
-        from .result_contract import sanitize_result_text
-
         header += "Decisions:\n" + "".join(
             f"- {sanitize_result_text(key, maximum=80)}: "
             f"{sanitize_result_text(value, maximum=200)}\n"
