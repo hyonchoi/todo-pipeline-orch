@@ -32,9 +32,14 @@ and the prompt client are all real.
 
 The Codex dispatcher uses `workspace-write` with the per-command setting
 `sandbox_workspace_write.network_access=true` so agents can fetch dependencies
-and access GitHub; it does not change global Codex configuration. The dispatcher
-copies only the content inside the prompt markers into its stdin file, excluding
-the marker lines. It assigns the prompt variable before redirecting stdin and
+and access GitHub; it does not change global Codex configuration. It resolves
+the current worktree's absolute Git common directory with `git rev-parse` and
+grants access only to that directory with `--add-dir`, allowing commits in linked
+worktrees without granting access to the whole parent checkout. It preserves
+`workspace-write` and the network setting, and fails closed if the Git common
+directory cannot be resolved. The dispatcher copies only the content inside the
+prompt markers into its stdin file, excluding the marker lines. It assigns the
+prompt variable before redirecting stdin and
 shell-quotes the literal file path. Existing kanban cards retain their original
 instructions, so start a new harness run to exercise these dispatcher fixes.
 
