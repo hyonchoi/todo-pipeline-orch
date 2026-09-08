@@ -165,13 +165,18 @@ def _external_client_delegation_block(
     dispatcher is told only to carry the same result metadata forward.
     """
     if prompt_client == "codex":
-        command = "codex exec --sandbox workspace-write"
+        # ``codex exec [PROMPT]``: "If not provided as an argument (or if `-`
+        # is used), instructions are read from stdin." ``-`` is given
+        # explicitly because a prompt argument *plus* piped stdin makes Codex
+        # append the stdin as a separate ``<stdin>`` block instead.
+        command = "codex exec --sandbox workspace-write -"
     elif prompt_client == "claude":
         tool_names = [tool.strip() for tool in tools.split(",") if tool.strip()]
         if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", tool) for tool in tool_names):
             raise ValueError("Claude allowed tool names must be simple identifiers")
         allowed_tools = ",".join(tool_names)
-        command = 'claude -p "<external-agent prompt>" --permission-mode dontAsk'
+        # ``claude -p`` with no prompt argument reads the prompt from stdin.
+        command = "claude -p --permission-mode dontAsk"
         if allowed_tools:
             command += f" --allowedTools {allowed_tools}"
     else:
@@ -198,7 +203,29 @@ def _external_client_delegation_block(
         f"external client ({agent_product}). Build the external-agent prompt "
         "from the delimited block below and pass only that prompt to the "
         "external client.\n"
-        f"Required external command: `{command}`\n"
+        "Deliver that prompt on the external client's standard input. Write "
+        "the delimited block below to a prompt file, set `PROMPT_FILE` to its "
+        "path, and redirect the file into the command shown next. Never place "
+        "the prompt in the command line itself.\n"
+        "Write the prompt file to a temporary directory outside this "
+        "repository -- for example `PROMPT_FILE=\"$(mktemp -d)/prompt.txt\"` "
+        "-- and never anywhere inside the worktree you were given, not even a "
+        "gitignored path. This phase verifies that the worktree is clean, and "
+        "an untracked prompt file there fails the run with `worktree_dirty` "
+        "before any work begins.\n"
+        "Copy the prompt byte-for-byte into that file: no shell interpolation "
+        "or command substitution, no added quoting or escaping, no "
+        "re-wrapping, no truncation, and no summarizing. The prompt is a "
+        "specification whose prose is arbitrary -- it contains apostrophes, "
+        "double quotes, `$`, backticks, and newlines that a quoted shell "
+        "argument would truncate or that the shell would expand -- which is "
+        "why standard input is required and a command-line prompt is not "
+        "acceptable.\n"
+        "`PROMPT_FILE` must be set in the same shell invocation that launches "
+        "the client; if you write the file in a separate invocation, "
+        "substitute the prompt file's literal path in its place so the "
+        "redirect cannot read an empty path.\n"
+        f'Required external command: `{command} < "$PROMPT_FILE"`\n'
         f"External agent timeout: {timeout} seconds.\n"
         f"The external client deadline is {timeout} seconds. The Hermes worker "
         f"has a {PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS}-second cleanup grace "

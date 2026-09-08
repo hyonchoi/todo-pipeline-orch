@@ -331,11 +331,15 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
 @pytest.mark.parametrize(
     ("prompt_client", "command", "forbidden"),
     [
-        ("codex", "codex exec --sandbox workspace-write", "claude -p"),
+        (
+            "codex",
+            'codex exec --sandbox workspace-write - < "$PROMPT_FILE"',
+            "claude -p",
+        ),
         (
             "claude",
-            'claude -p "<external-agent prompt>" '
-            "--permission-mode dontAsk --allowedTools Read,Bash",
+            "claude -p --permission-mode dontAsk --allowedTools Read,Bash"
+            ' < "$PROMPT_FILE"',
             "codex exec",
         ),
     ],
@@ -402,6 +406,108 @@ def test_claude_delegation_rejects_unsafe_allowed_tool_names():
             1800,
             tools="Read,$(touch /tmp/unsafe-tool-name)",
         )
+
+
+# The live defect these two tests pin: a phase profile is the specification, so
+# its prose is arbitrary, and commit 3cc5042 started delivering it unmodified.
+# ``phase_4_development`` says "Execute the Plan's ordered tasks"; the wrapper
+# asked an LLM dispatcher to inline that multi-paragraph prompt into a shell
+# command line without saying how, it chose single quotes, and the shell
+# truncated the prompt at ``Plan'``. Codex exited 2 in 42 seconds having done
+# no work. Transport, not the prompt, is what these tests constrain.
+_HOSTILE_PROMPT = (
+    "Execute the Plan's ordered tasks, reply \"go\", keep $VAR and `date` intact."
+)
+
+
+@pytest.mark.parametrize(
+    ("prompt_client", "expected_command"),
+    [
+        ("codex", 'codex exec --sandbox workspace-write - < "$PROMPT_FILE"'),
+        (
+            "claude",
+            "claude -p --permission-mode dontAsk --allowedTools Read,Bash"
+            ' < "$PROMPT_FILE"',
+        ),
+    ],
+)
+def test_delegation_block_delivers_the_prompt_on_stdin_from_outside_the_repo(
+    prompt_client, expected_command
+):
+    """The required command must read the prompt from stdin, never from argv.
+
+    Both clients support it: ``codex exec [PROMPT]`` reads stdin when ``-`` is
+    given, and ``claude -p`` reads stdin when no prompt argument is passed.
+    The prompt file must land outside the repository, because the phase itself
+    verifies the worktree is clean and ``verify_worker_git_topology`` fails the
+    run on ``worktree_dirty`` -- which is how the run before this one died, on
+    a stray untracked file.
+    """
+    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
+
+    block = _external_client_delegation_block(
+        prompt_client, timeout=1800, tools="Read,Bash"
+    )
+
+    assert f"Required external command: `{expected_command}`" in block
+    # The old shape: a placeholder for the prompt inside a quoted argument.
+    assert "<external-agent prompt>" not in block
+    assert "standard input" in block
+    assert "byte-for-byte" in block
+    assert "outside this repository" in block.lower()
+    assert "mktemp -d" in block
+    assert "worktree_dirty" in block
+
+
+@pytest.mark.parametrize("prompt_client", ["codex", "claude"])
+def test_shell_metacharacters_in_a_phase_prompt_reach_the_card_unchanged(
+    tmp_path, prompt_client
+):
+    """Every byte that breaks a quoted shell argument must survive transport.
+
+    An apostrophe ends a single-quoted string, a double quote ends a
+    double-quoted one, and ``$``/backtick are expanded by the shell inside
+    double quotes. All four round-trip into the delimited block verbatim, and
+    none of them may appear in the dispatcher's command line -- if the prompt
+    text is in the command, some shell will parse it.
+    """
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+
+    phases_path = tmp_path / "phases.yaml"
+    phases_path.write_text(
+        "phases:\n"
+        "  - phase_key: phase_1\n"
+        "    name: One\n"
+        f"    prompt: {json.dumps(_HOSTILE_PROMPT)}\n"
+        "    tools: Read,Bash\n"
+        "    turns: 5\n"
+    )
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41",
+        tick_id="01CLIENT",
+        board_slug="demo",
+        phases_path=phases_path,
+        prompt_client=prompt_client,
+    )
+
+    body = prepared[0].body
+    dispatcher, _, rest = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
+    delimited, _, _ = rest.partition("END EXTERNAL AGENT PROMPT")
+
+    # The prompt survives verbatim on the client's side of the boundary.
+    assert _HOSTILE_PROMPT in delimited
+    # ...and appears nowhere in the dispatcher's half, so it cannot be inlined
+    # into a shell word. This is the assertion an inlined quoted command kills.
+    assert _HOSTILE_PROMPT not in dispatcher
+    for metacharacter in ("'", '"', "$VAR", "`date`"):
+        assert metacharacter in delimited
+    command_line = next(
+        line for line in dispatcher.splitlines()
+        if line.startswith("Required external command:")
+    )
+    assert command_line.endswith('< "$PROMPT_FILE"`')
+    assert "Plan's" not in command_line
 
 
 def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, mocker):
