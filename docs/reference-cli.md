@@ -472,7 +472,7 @@ tpo test --repo OWNER/NAME --keep --loop
 - Shutdown cancels the tick's tasks and waits for kanban quiescence, then — and only then — discovers artifacts by run provenance, closes the issue and PR, and deletes the branch with `git push --force-with-lease`. Destructive cleanup is skipped whenever an agent may still be pushing: an unconfirmed cancel, a quiescence timeout, or a later tick that registered a run this shutdown cannot cancel. In those cases the issue is still closed and every skipped branch, PR and board is printed as a leftover with the manual commands (`--keep` skips every remote operation, including closing the issue).
 - Prints a `[kanban]` summary line after report generation:
   ```
-  [kanban] tenant=<repo-name> tick_id=01ARZ3... profile=native-sdd ticks=4 repo=OWNER/NAME issue=#12 pr=#13 phases={plan:task-1: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
+  [kanban] tenant=<repo-name> tick_id=01ARZ3... profile=native-sdd ticks=4 repo=OWNER/NAME issue=#12 pr=#13 phases={phase_4_development: done, ...} report=~/.hermes/tmp/harness-.../artifacts/reports/report.json keep=no (temp dir will be removed)
   ```
 
 **Timeout and exceptional poll cleanup:**

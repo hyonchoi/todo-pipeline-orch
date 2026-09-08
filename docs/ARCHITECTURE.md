@@ -137,13 +137,18 @@ come from the pinned issue snapshot; legacy paths are resolved at the pinned
 base commit. Failure records `failed_to_spawn` with `plan_validation_failed`
 and creates no kanban tasks.
 
-The `native-sdd` profile uses that gate. A manifest Plan compiles to ordered
-worker cards chained directly onto one another: TPO validates each closing
-worker's result metadata and Git facts before the run advances, but no card
-stops the run for human input between Plan tasks. A manifest-free embedded
-Plan is not selectable under a plan-gated profile: eligibility blocks the issue
-as `plan_invalid:manifest_required`. A manifest-free `Plan:` path stays
-selectable and compiles to a single development card. Independent review uses
+The `native-sdd` profile uses that gate. A manifest Plan compiles to NO cards:
+the profile's `phase_4_development` phase registers one card whatever the task
+count, and that card carries the phase's own prompt verbatim -- the prompt is
+what orders the Plan's tasks, runs a fresh native implementer subagent for each,
+and makes exactly one atomic commit per task. The manifest supplies the
+acceptance criteria that card must report and the commit-count bound TPO checks
+(`len(tasks)` first-parent commits from the pinned base SHA); TPO validates that
+report before the run advances, and no card stops the run for human input. A
+manifest-free embedded Plan is not selectable under a plan-gated profile:
+eligibility blocks the issue as `plan_invalid:manifest_required`. A
+manifest-free `Plan:` path stays selectable and gets the same single card, with
+no result template and no parsed result. Independent review uses
 a distinct session and applies every valid finding itself, committing them as
 one review-fix commit; the card reaching `done` is the pass and `blocked` is the
 profile's own nonzero exit. An accepted review enables verified PR creation,
@@ -156,10 +161,11 @@ gstack, superpowers, and agent-skills workflows are not part of this profile.
 Kanban is authoritative for live state and `metadata.tpo_result`. Local files
 under `.hermes/runs/<tick-id>/` contain immutable registration and crash-recovery
 evidence only. TPO validates identity, commit topology, changed files,
-acceptance statuses, and review findings before opening a controller gate. The
-contract asks only for facts the dispatcher can observe, and its template is
-published in the card's delegation block: the delimited external-agent prompt
-carries the phase profile's or Plan task's own words and nothing else.
+acceptance statuses, and Git topology before a run advances. The contract asks
+only for facts the dispatcher can observe, and its template is published in the
+card's delegation block: the delimited external-agent prompt carries the phase
+profile's own words and nothing else -- no card kind appends, prepends, or
+substitutes a TPO-authored instruction.
 
 ## Data Flow
 

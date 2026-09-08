@@ -170,8 +170,9 @@ Without `--plan`, TPO resolves the embedded source or legacy path from the issue
 body. `--plan` remains a legacy repository-relative candidate check.
 `--require-manifest` rejects a legacy Markdown Plan with no
 `json tpo-plan` block; without it a manifest-free Plan passes with
-`warning: no tpo-plan manifest` and compiles to a single development card. That
-compatibility holds for a `Plan:` repository path under any profile; an embedded
+`warning: no tpo-plan manifest`; the run then gets the profile's ordinary
+implementation card, but with no result template and no parsed result, so
+nothing verifies its commits. That compatibility holds for a `Plan:` repository path under any profile; an embedded
 Plan without the block is blocked as `plan_invalid:manifest_required` under a
 plan-gated profile (`requires_plan`). A closed issue appends `warning: issue is closed (...)`. See the
 [CLI reference](reference-cli.md#plan-validate) for the failure codes.

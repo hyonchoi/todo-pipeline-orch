@@ -2328,16 +2328,22 @@ def pinned_tick_budget(step_keys: Iterable[str]) -> int:
 
     ``len(step_keys) + 6``.
 
-    ``len(step_keys)`` is the plan-task count: the registered cards are one
-    ``plan:<task>`` per plan task and nothing else. It is *not* one tick per
-    task -- those cards are created in one tick, chained ``--parent`` to each
-    other, and the poller settles the whole chain before that tick's poll
-    returns -- so for a run of N tasks this term is N-1 ticks of headroom on top
-    of the enumerated cost below. That is deliberate: the term keeps the budget
-    monotone in plan size, so a longer plan can never buy fewer ticks.
+    ``len(step_keys)`` is no longer the plan-task count, and the budget no
+    longer scales with plan size at all. A manifest-pinned run registers
+    exactly ONE card -- the profile's implementation phase, whose prompt drives
+    every Plan task inside a single agent's turn budget -- so for a plan-pinned
+    run this term is 1 and the whole budget is **7**, whatever the Plan's task
+    count. The term is kept rather than folded into the constant because
+    ``step_keys`` is the registered card set of *any* profile (a manifest-free
+    plan run registers ``phase_4_development``, ``phase_5_review`` and
+    ``phase_8_finish_branch``), and keeping it monotone in registered cards
+    means a profile with more cards can never buy fewer ticks.
 
-    The ``6`` is enumerated, not a round number. The delivered path costs three
-    ticks, whatever N is:
+    The ``6`` is enumerated, not a round number, and the enumeration is
+    unchanged by the collapse to one card: the implementation cards were always
+    created in one tick and settled by that tick's own poll, so removing N-1 of
+    them removes no tick from the sequence. The delivered path costs three
+    ticks:
 
     1. the registration tick -- it reconciles nothing (the reconcilers run
        against the *prior* tick) and its poll settles the whole plan chain;
@@ -2373,13 +2379,15 @@ def pinned_tick_budget(step_keys: Iterable[str]) -> int:
     and this budget, not the stall detector, is what ends it.
 
     Exhausting the budget therefore means the run is stuck
-    (``tick_budget_exhausted``), not that it ran out of legitimate work: at N=1
-    the enumeration needs 6 of the 7 ticks it gets. The constant tracks the
-    enumeration, which is why it grew from ``5`` with item 6 rather than
-    absorbing it into the one tick of slack N=1 used to have -- at ``+ 5`` a
-    single-task run's enumerated path would have consumed the whole budget, and
-    a second stall episode would then have reported ``tick_budget_exhausted``
-    for a run that had not run out of legitimate work.
+    (``tick_budget_exhausted``), not that it ran out of legitimate work: the
+    enumeration needs 6 of the 7 ticks a plan-pinned run gets, so there is
+    exactly one tick of spare headroom -- and now that the budget is 7 for every
+    Plan size, that single-card case is the only case rather than the tightest
+    one. The constant tracks the enumeration, which is why it grew from ``5``
+    with item 6 rather than absorbing it into that one tick of slack -- at
+    ``+ 5`` the enumerated path would have consumed the whole budget, and a
+    second stall episode would then have reported ``tick_budget_exhausted`` for
+    a run that had not run out of legitimate work.
     """
     return len(tuple(step_keys)) + 6
 

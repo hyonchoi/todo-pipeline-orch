@@ -150,15 +150,17 @@ full label vocabulary and body contract.
 ## Step 7: Attach a Plan with a manifest
 
 `native-sdd` is plan-gated, so the tick in Step 8 needs the issue to name a
-Plan. The `json tpo-plan` manifest is what turns that Plan into one worker card
-per task; without it the run compiles to a single development card instead. Copy
+Plan. The Plan gets one implementation card either way; the `json tpo-plan`
+manifest is what makes that card's result verifiable — it supplies the
+acceptance criteria the card must report and the one-commit-per-task bound TPO
+checks. Without it nothing verifies the run's commits. Copy
 [the Plan template](templates/tpo-plan.md) into the project, fill in the tasks,
 and commit it:
 
 ```bash
 mkdir -p docs/plans
 cp <tpo-checkout>/docs/templates/tpo-plan.md docs/plans/TODO-<N>.md
-# edit: set "todo_id": "TODO-<N>" and one entry per ordered task
+# edit: set "todo_id": "TODO-<N>" and one entry per ordered Plan task
 git add docs/plans/TODO-<N>.md && git commit -m "docs: plan for TODO-<N>"
 ```
 
@@ -208,10 +210,12 @@ See [Kanban-as-Scheduler](reference-kanban-as-scheduler.md) for how phase tasks 
 
 ## Step 10: Inspect PR handoff
 
-Under the default `native-sdd` profile the compiled run validates each Plan
-task's result before the chain advances, reconciles independent review and the
-verified PR handoff from Kanban results, and then stops at a terminal human
-merge gate -- the only card that waits for a human. The
+Under the default `native-sdd` profile the implementation card reports one
+result for the whole Plan, and TPO validates it -- every task's acceptance
+criteria, and one commit per task from the pinned base SHA -- before the chain
+advances. It then reconciles independent review and the verified PR handoff from
+Kanban results, and stops at a terminal human merge gate -- which no card
+represents. The
 deprecated `gstack` profile instead finishes at Phase 8, which runs `/ship` in
 Claude Code or `$ship` in Codex. Either way the branch is pushed and a PR is
 opened or updated without being merged. Inspect the PR in GitHub or from the

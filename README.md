@@ -107,19 +107,22 @@ for the evidence required to advertise a `Conditional` pair.
 
 `native-sdd` is the default profile for every contract `tpo init` writes
 ([ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md)); `gstack`
-is deprecated but still bundled and supported. It runs the compiled workflow:
-Hermes cron invokes TPO, TPO selects an eligible TODO and pins its embedded Plan
-from the issue snapshot in a linked worktree, then Hermes Kanban dispatches
-workers. A `tpo-plan` manifest produces one visible worker card and controller
-gate per ordered task. Independent review that applies its own findings and PR
+is deprecated but still bundled and supported. It runs the plan-pinned
+workflow: Hermes cron invokes TPO, TPO selects an eligible TODO and pins its
+embedded Plan from the issue snapshot in a linked worktree, then Hermes Kanban
+dispatches workers. A `tpo-plan` manifest produces exactly one implementation
+card whatever its task count — the profile's own `phase_4_development` prompt is
+what orders the Plan's tasks and commits one per task, and the manifest supplies
+the acceptance criteria and commit-count bound TPO verifies. Independent review
+that applies its own findings and PR
 closeout remain visible on the board; the run's terminal boundary is the open,
 unmerged pull request and its human merge decision, which no card represents. It does not
 require gstack, superpowers, or client-side workflow skills.
 
 Because the profile is plan-gated, an embedded Plan must carry a `json tpo-plan`
 manifest; one without it is blocked as `plan_invalid:manifest_required`. A
-legacy `Plan:` repository path still works without a manifest and compiles to a
-single development card. See the
+legacy `Plan:` repository path still works without a manifest and gets the same
+single card, with no result template and no parsed result. See the
 [native SDD profile guide](docs/howto-native-sdd-profile.md) and
 [Migrating from gstack](docs/howto-native-sdd-profile.md#migrating-from-gstack).
 

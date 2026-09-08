@@ -88,7 +88,12 @@ from hermes_pipeline.harness import (
     wait_for_issue_visible,
     write_project_contract,
 )
-from hermes_pipeline.phases import Phase, load_phases, resolve_profile_phases_path
+from hermes_pipeline.phases import (
+    IMPLEMENTATION_KEY,
+    Phase,
+    load_phases,
+    resolve_profile_phases_path,
+)
 from hermes_pipeline.plan_manifest import validate_plan_candidate
 from tests.gh_fakes import API_ARGV, issue_payload, seed_project_issues, todo_payload
 
@@ -1069,8 +1074,8 @@ class _LiveRunStubs:
     """
 
     SANDBOX = SandboxRepo(repo="acme/sandbox", slug="sandbox", url="https://github.com/acme/sandbox.git")
-    #: Registered step keys of a plan-pinned run (one plan/validate pair per task).
-    PINNED_KEYS = ("plan:task-1", "plan:task-2")
+    #: Registered step keys of a plan-pinned run: the one implementation card.
+    PINNED_KEYS = (IMPLEMENTATION_KEY,)
     #: Deliberately NOT ``issue.branch``: the pipeline records the branch it
     #: actually created, and the PR head invariant is checked against that one.
     PINNED_BRANCH = "feat/pipeline-created-branch"
@@ -6484,33 +6489,38 @@ _PINNED_ISSUE = 42
 _PINNED_TICK = "01PINNED"
 _PINNED_PLAN = "docs/harness/tok00000-plan.md"
 _PINNED_BRANCH = "feat/pinned-run"
-_PINNED_STEPS = ("plan:task-1", "plan:task-2")
+_PINNED_STEPS = (IMPLEMENTATION_KEY,)
 
 
-def _plan_step_keys(count: int) -> tuple[str, ...]:
-    """The ``count`` registered step keys of a pinned run.
+def _registered_step_keys(count: int) -> tuple[str, ...]:
+    """``count`` registered step keys of a pinned run, implementation card first.
 
-    A ``requires_plan`` registration creates one ``plan:<task>`` card per plan
-    task and nothing else, so this is the whole step-key set. ``count=2``
+    A ``requires_plan`` registration creates ONE card -- the profile's
+    implementation phase -- whatever the Plan's task count, so ``count=1``
     reproduces ``_PINNED_STEPS`` exactly (asserted by
-    ``test_plan_step_keys_matches_the_pinned_fixture``), which is what lets the
-    board fixtures below be parametrized without forking the pinned fixture.
+    ``test_registered_step_keys_matches_the_pinned_fixture``). Larger counts
+    stand for a profile that registers further phases: that is what keeps the
+    budget's monotonicity in registered cards exercised, without inventing a
+    Plan shape the compiler can no longer produce.
     """
-    return tuple(f"plan:task-{index}" for index in range(1, count + 1))
+    return (
+        IMPLEMENTATION_KEY,
+        *(f"phase_extra_{index}" for index in range(2, count + 1)),
+    )
 
 
-def _delivered_path_boards(count: int = 2) -> tuple[dict[str, str], ...]:
-    """The boards a delivered plan-pinned run walks, one per tick, for *count* tasks.
+def _delivered_path_boards(count: int = 1) -> tuple[dict[str, str], ...]:
+    """The boards a delivered plan-pinned run walks, one per tick.
 
-    Parametrized by task count on purpose: the plan cards are the part of the
-    board that grows with the plan, so a fixture hardcoded to two tasks made
-    every bound derived from it a constant that no ``count`` parametrization
-    could move.
+    Parametrized by registered-card count on purpose, so no bound derived from
+    this fixture is a constant a ``count`` parametrization cannot move. The
+    default is 1, which is what a plan-pinned run really registers now: the
+    implementation card, whatever the Plan's task count.
 
     The number of boards does not grow with *count*, and that is the finding
-    rather than an oversight: the plan cards are chained ``--parent`` to one
-    another and created in a single tick, so one poll settles the whole chain no
-    matter how long it is.
+    rather than an oversight: the registered cards are chained ``--parent`` to
+    one another and created in a single tick, so one poll settles the whole
+    chain no matter how long it is.
 
     Shared between ``test_native_sdd_reaches_delivered_after_four_ticks``, which
     pins the tick count, and ``TestPinnedTickBudget``, which needs the delivered
@@ -6519,7 +6529,7 @@ def _delivered_path_boards(count: int = 2) -> tuple[dict[str, str], ...]:
     """
     from hermes_pipeline.todos_completion import FINISH_KEY
 
-    plan_done = {key: "done" for key in _plan_step_keys(count)}
+    plan_done = {key: "done" for key in _registered_step_keys(count)}
     reviewed = {**plan_done, "review:0": "done"}
     return (
         dict(plan_done),
@@ -6824,11 +6834,15 @@ class TestRecoverPinnedRegistration:
     @pytest.mark.parametrize(
         "sentinel",
         [
-            ["plan:task-1"],
-            ["plan:task-1", "plan:task-2", "extra"],
-            ["plan:task-1", "plan:task-2", "plan:task-1"],
+            # A plan-pinned run registers one key, so there is no non-empty
+            # proper subset to try: an empty sentinel is a different failure
+            # (``expected_phases_missing``), and a sentinel naming another
+            # phase is the honest stand-in for a set that does not match.
+            ["some_other_phase"],
+            [IMPLEMENTATION_KEY, "extra"],
+            [IMPLEMENTATION_KEY, IMPLEMENTATION_KEY],
         ],
-        ids=["subset", "superset", "duplicate"],
+        ids=["mismatch", "superset", "duplicate"],
     )
     def test_sentinel_keys_must_match_step_keys(self, tmp_path: Path, sentinel):
         fx = _pinned_registration(tmp_path)
@@ -7119,10 +7133,10 @@ _TOLERATED_BOARD_INVARIANT_TICKS = 1
 class TestPinnedTickBudget:
     """pinned_tick_budget(): how many ticks a pinned run may consume."""
 
-    def test_plan_step_keys_matches_the_pinned_fixture(self):
+    def test_registered_step_keys_matches_the_pinned_fixture(self):
         """The parametrized keys must be the fixture's keys, or the bounds below
         would be measured against a board the drive tests never drive."""
-        assert _plan_step_keys(2) == _PINNED_STEPS
+        assert _registered_step_keys(1) == _PINNED_STEPS
 
     @pytest.mark.parametrize("count", [1, 2, 3, 4, 9, 20])
     def test_budget_outlasts_the_delivered_path_and_every_retryable_hop(self, count):
@@ -7136,7 +7150,7 @@ class TestPinnedTickBudget:
         """
         from hermes_pipeline.harness import pinned_tick_budget
 
-        step_keys = _plan_step_keys(count)
+        step_keys = _registered_step_keys(count)
         boards = _delivered_path_boards(count)
         # The fixture must cover at least the enumerated delivered path, so
         # lengthening the drive's script can only tighten this bound.
@@ -7177,7 +7191,7 @@ class TestPinnedTickBudget:
         """
         from hermes_pipeline.harness import pinned_tick_budget
 
-        keys = _plan_step_keys(4)
+        keys = _registered_step_keys(4)
 
         assert pinned_tick_budget(keys) - pinned_tick_budget(keys[:1]) == 3
 
@@ -7203,14 +7217,14 @@ class TestPinnedTickBudget:
         )
         assert pinned_tick_budget(("a",)) == 7
         assert pinned_tick_budget(("a",)) == enumerated + 1
-        assert pinned_tick_budget(_PINNED_STEPS) == 8
+        assert pinned_tick_budget(_PINNED_STEPS) == 7
 
     def test_consumes_a_one_shot_iterable_exactly_once(self):
         """``step_keys`` is typed ``Iterable``, and the drive passes a tuple, but
         a generator must not be counted as zero (or counted twice)."""
         from hermes_pipeline.harness import pinned_tick_budget
 
-        keys = _plan_step_keys(3)
+        keys = _registered_step_keys(3)
 
         assert pinned_tick_budget(iter(keys)) == pinned_tick_budget(keys)
 
@@ -7563,7 +7577,7 @@ class TestDriveTicks:
         assert drive.failure_code is None
         assert drive.registration is registration
         assert drive.observed_keys == frozenset(
-            {"plan:task-1", "plan:task-2", "review:0", FINISH_KEY}
+            {IMPLEMENTATION_KEY, "review:0", FINISH_KEY}
         )
         # Registration is recovered on tick 1 only; later ticks re-assert the id.
         assert order.count("recover_pinned_registration") == 1
@@ -8087,7 +8101,7 @@ class TestDriveTicks:
         state = kwargs["project_state"]
         # Every map differs so the stall check never fires before the budget does.
         maps = [
-            {"plan:task-1": "done", "plan:task-2": "done", f"review:{i}": "done"}
+            {IMPLEMENTATION_KEY: "done", f"review:{i}": "done"}
             for i in range(budget)
         ]
         registration, _run, poll = self._pinned_patches(
@@ -8100,8 +8114,8 @@ class TestDriveTicks:
         # Concrete, not just ``== budget``: recomputing the bound from the
         # function under test makes this test self-adjust, which is how ``+ 6``
         # -> ``+ 5`` survived. ``len(_PINNED_STEPS) + 6``.
-        assert budget == 8
-        assert drive.ticks_run == 8
+        assert budget == 7
+        assert drive.ticks_run == 7
         assert drive.ticks_run == budget
         assert len(poll.calls) == budget
         assert drive.failure_code == "tick_budget_exhausted"

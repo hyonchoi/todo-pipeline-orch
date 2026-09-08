@@ -24,7 +24,7 @@ def test_harness_docs_describe_profile_selection_and_fail_closed_rules():
     assert (root / "docs" / "howto-mock-integration-test-harness.md").exists() is False
 
 
-def test_native_sdd_docs_describe_compiled_plan_to_kanban_lifecycle():
+def test_native_sdd_docs_describe_the_single_implementation_card_lifecycle():
     root = Path(__file__).resolve().parents[1]
     documents = [
         (root / "README.md").read_text(),
@@ -36,8 +36,34 @@ def test_native_sdd_docs_describe_compiled_plan_to_kanban_lifecycle():
     combined = "\n".join(documents)
     assert "Hermes >= 0.19.0" in combined
     assert "```json tpo-plan" in combined
-    assert "controller gate" in combined
     assert "legacy" in combined.lower()
+    # The Plan compiles to NO cards. The profile's implementation phase gets one
+    # card whatever the task count, its own prompt is what orders the Plan's
+    # tasks, and the manifest survives as the commit-count bound TPO verifies.
+    # Named explicitly so the lifecycle cannot be re-described without the key.
+    assert "phase_4_development" in combined
+    assert "atomic commit per" in combined
+    assert "len(tasks)" in combined
+    # The step-key change is a persisted-format break in both directions, and an
+    # operator upgrading or downgrading with a run in flight must find it here.
+    assert "registration_invalid" in combined
+    # Every phrasing the deleted per-Plan-task fan-out left behind, forbidden
+    # rather than merely corrected: each of these was true of the old lifecycle,
+    # so a well-meaning edit could reintroduce one and the docs would then
+    # describe a board TPO no longer builds. ``controller gate`` used to be a
+    # REQUIRED substring here, and the only thing still satisfying it was a
+    # README sentence describing gates that had been deleted two releases
+    # earlier -- an assertion that a stale claim can satisfy pins nothing.
+    for phrasing in (
+        "controller gate",
+        "one worker card per",
+        "card per task",
+        "card and controller gate",
+        "single development card",
+        "plan worker",
+        "per ordered task",
+    ):
+        assert phrasing not in combined, phrasing
     assert "cron" in combined and "TPO" in combined and "Kanban" in combined
     assert "registration.json" in combined
     assert "review-fix" in combined

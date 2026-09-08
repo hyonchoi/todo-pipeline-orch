@@ -3,6 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_pipeline.phases import IMPLEMENTATION_KEY
 from hermes_pipeline.review_reconciliation import (
     _ensure_initial_review,
     reconcile_reviews,
@@ -42,15 +43,15 @@ def test_initial_review_is_the_only_card_the_reconciler_creates(tmp_path, mocker
 
     _ensure_initial_review(
         project_dir=tmp_path,
-        tasks={"plan:task-1": _task("worker-1"), "plan:task-2": _task("worker-2")},
+        tasks={IMPLEMENTATION_KEY: _task("worker-1")},
         registration=_registration(tmp_path, ("task-1", "task-2")),
         tenant="demo", tick_id="01TICK",
     )
 
     assert create.call_args_list[0].kwargs["key"] == "review:0"
     assert create.call_args_list[0].kwargs["assignee"] == "reviewer"
-    # The last Plan worker is the review's parent.
-    assert create.call_args_list[0].kwargs["parent"] == "worker-2"
+    # The implementation card is the review's parent.
+    assert create.call_args_list[0].kwargs["parent"] == "worker-1"
     # Nothing else: TPO synthesizes no card to stand for its own acceptance.
     assert len(create.call_args_list) == 1
 
@@ -79,7 +80,7 @@ def test_review_card_takes_its_tools_turns_and_timeout_from_the_profile(
     )
 
     _ensure_initial_review(
-        project_dir=tmp_path, tasks={"plan:task-1": _task("worker-1")},
+        project_dir=tmp_path, tasks={IMPLEMENTATION_KEY: _task("worker-1")},
         registration=_registration(tmp_path), tenant="demo", tick_id="01TICK",
     )
 
@@ -90,7 +91,7 @@ def test_review_card_takes_its_tools_turns_and_timeout_from_the_profile(
     assert kwargs["title"] == phase.name
 
 
-def test_initial_review_defers_until_every_plan_worker_is_done(tmp_path, mocker):
+def test_initial_review_defers_until_the_implementation_card_is_done(tmp_path, mocker):
     create = mocker.patch("hermes_pipeline.review_reconciliation._create_task")
     head = mocker.patch(
         "hermes_pipeline.review_reconciliation._implementation_head",
@@ -99,10 +100,7 @@ def test_initial_review_defers_until_every_plan_worker_is_done(tmp_path, mocker)
 
     _ensure_initial_review(
         project_dir=tmp_path,
-        tasks={
-            "plan:task-1": _task("worker-1"),
-            "plan:task-2": _task("worker-2", "running"),
-        },
+        tasks={IMPLEMENTATION_KEY: _task("worker-1", "running")},
         registration=_registration(tmp_path, ("task-1", "task-2")),
         tenant="demo", tick_id="01TICK",
     )
@@ -111,14 +109,28 @@ def test_initial_review_defers_until_every_plan_worker_is_done(tmp_path, mocker)
     head.assert_not_called()
 
 
-def test_implementation_head_revalidates_the_chain_without_gate_cards(tmp_path, mocker):
+def test_implementation_head_revalidates_the_card_report_against_the_base(
+    tmp_path, mocker
+):
+    """The anchor is ``base_sha`` and the bound is the Plan's task count.
+
+    There is one report now, so this recomputation spans the whole
+    implementation rather than one task at a time -- and the commit count it
+    demands comes straight from the profile's "exactly one atomic commit per
+    Plan task".
+    """
     from hermes_pipeline.review_reconciliation import _implementation_head
 
     registration = SimpleNamespace(
         todo_id="TODO-42",
         worktree=tmp_path,
         base_sha="a" * 40,
-        manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1", acceptance_criteria=()),)),
+        manifest=SimpleNamespace(
+            tasks=(
+                SimpleNamespace(id="task-1", acceptance_criteria=("one",)),
+                SimpleNamespace(id="task-2", acceptance_criteria=("two",)),
+            )
+        ),
     )
     mocker.patch(
         "hermes_pipeline.review_reconciliation._show_task_payload",
@@ -135,13 +147,14 @@ def test_implementation_head_revalidates_the_chain_without_gate_cards(tmp_path, 
     )
 
     head = _implementation_head(
-        tasks={"plan:task-1": _task("worker-1")},
+        tasks={IMPLEMENTATION_KEY: _task("worker-1")},
         registration=registration,
         tick_id="01TICK",
     )
 
     assert head == "b" * 40
     assert topology.call_args.kwargs["expected_parent_sha"] == "a" * 40
+    assert topology.call_args.kwargs["expected_commits"] == 2
 
 
 def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
@@ -157,7 +170,7 @@ def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
         "hermes_pipeline.review_reconciliation.load_validated_registration",
         return_value=registration,
     )
-    validation_tasks = {"plan:task-1": _task("worker-1")}
+    validation_tasks = {IMPLEMENTATION_KEY: _task("worker-1")}
     get_tasks = mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
         return_value=validation_tasks,
@@ -206,7 +219,7 @@ def _accepted_review(tmp_path, mocker, *, reviewed_head):
     )
     mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
-        return_value={"plan:task-1": _task("worker-1"), "review:0": _task("review")},
+        return_value={IMPLEMENTATION_KEY: _task("worker-1"), "review:0": _task("review")},
     )
     mocker.patch("hermes_pipeline.review_reconciliation._ensure_initial_review")
     mocker.patch(
@@ -284,7 +297,7 @@ def test_review_reconciliation_reports_a_rejected_report_as_no_progress(
     )
     mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
-        return_value={"plan:task-1": _task("worker-1"), "review:0": _task("review")},
+        return_value={IMPLEMENTATION_KEY: _task("worker-1"), "review:0": _task("review")},
     )
     mocker.patch("hermes_pipeline.review_reconciliation._ensure_initial_review")
     mocker.patch(
@@ -338,7 +351,7 @@ def test_review_card_delimited_prompt_is_the_profile_prompt_verbatim(tmp_path, m
     )
 
     _ensure_initial_review(
-        project_dir=tmp_path, tasks={"plan:task-1": _task("worker-1")},
+        project_dir=tmp_path, tasks={IMPLEMENTATION_KEY: _task("worker-1")},
         registration=_registration(tmp_path), tenant="demo", tick_id="01TICK",
     )
 
@@ -419,7 +432,7 @@ def test_review_head_that_does_not_descend_from_the_chain_is_not_accepted(
     )
     mocker.patch(
         "hermes_pipeline.review_reconciliation.get_todo_kanban_tasks",
-        return_value={"plan:task-1": _task("worker-1"), "review:0": _task("review")},
+        return_value={IMPLEMENTATION_KEY: _task("worker-1"), "review:0": _task("review")},
     )
     mocker.patch("hermes_pipeline.review_reconciliation._ensure_initial_review")
     mocker.patch(
@@ -516,7 +529,7 @@ def test_the_review_card_is_rendered_from_the_runs_own_pinned_profile(tmp_path, 
     )
 
     _ensure_initial_review(
-        project_dir=tmp_path, tasks={"plan:task-1": _task("worker-1")},
+        project_dir=tmp_path, tasks={IMPLEMENTATION_KEY: _task("worker-1")},
         registration=registration, tenant="demo", tick_id="01TICK",
     )
 
@@ -595,7 +608,7 @@ def _mid_round_upgrade_board(tmp_path, mocker, *, legacy_key):
         "hermes_pipeline.review_reconciliation.load_validated_registration",
         return_value=_registration(repo),
     )
-    board = {"plan:task-1": _task("worker-1"), "review:0": _task("review")}
+    board = {IMPLEMENTATION_KEY: _task("worker-1"), "review:0": _task("review")}
     if legacy_key is not None:
         board[legacy_key] = _task("legacy-round")
     mocker.patch(

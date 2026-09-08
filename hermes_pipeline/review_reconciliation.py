@@ -17,9 +17,11 @@ from .kanban_tasks import (
     _show_task_payload,
     get_todo_kanban_tasks,
 )
+from .phases import IMPLEMENTATION_KEY
 from .result_contract import (
     ResultContractError,
     load_validated_registration,
+    manifest_acceptance_criteria,
     parse_worker_result,
     render_result_template,
     sanitize_result_text,
@@ -220,37 +222,41 @@ def render_profile_prompt(
 
 
 def _implementation_head(*, tasks: dict, registration, tick_id: str) -> str:
-    """Derive and revalidate the implementation head from the task result chain."""
-    expected = registration.base_sha
-    for task in registration.manifest.tasks:
-        worker = tasks.get(f"plan:{task.id}")
-        if worker is None or worker.status != "done":
-            raise ResultContractError("review_prerequisite_incomplete")
-        result = parse_worker_result(
-            _show_task_payload(worker.task_id), tick_id=tick_id,
-            todo_id=registration.todo_id, step_key=f"plan:{task.id}",
-            acceptance_criteria=task.acceptance_criteria,
-        )
-        verify_worker_git_topology(
-            registration.worktree, result.git, expected_parent_sha=expected
-        )
-        expected = result.git.resulting_head_sha
-    return expected
+    """Derive and revalidate the implementation head from the card's own report.
+
+    The anchor is ``base_sha`` and the bound is the Plan's task count, because
+    the profile obliges the implementation card to make "exactly one atomic
+    commit per Plan task". One card means one report, so this recomputation is
+    over the whole implementation span rather than per task: it never trusts the
+    head ``reconcile_plan_task_results`` already accepted.
+    """
+    worker = tasks.get(IMPLEMENTATION_KEY)
+    if worker is None or worker.status != "done":
+        raise ResultContractError("review_prerequisite_incomplete")
+    result = parse_worker_result(
+        _show_task_payload(worker.task_id), tick_id=tick_id,
+        todo_id=registration.todo_id, step_key=IMPLEMENTATION_KEY,
+        acceptance_criteria=manifest_acceptance_criteria(registration.manifest),
+    )
+    verify_worker_git_topology(
+        registration.worktree, result.git,
+        expected_parent_sha=registration.base_sha,
+        expected_commits=len(registration.manifest.tasks),
+    )
+    return result.git.resulting_head_sha
 
 
 def _ensure_initial_review(*, project_dir: Path, tasks: dict, registration, tenant: str,
                            tick_id: str) -> None:
-    # The implementation chain is pure workers: the last one is the review's
-    # parent, and its completion is the only trigger the review waits for. The
-    # result reconciler has already validated the chain -- ``reconcile_reviews``
-    # runs only after it reported progress -- and ``_implementation_head``
-    # re-proves the topology below.
-    workers = [
-        tasks.get(f"plan:{task.id}") for task in registration.manifest.tasks
-    ]
-    if not workers or any(task is None or task.status != "done" for task in workers):
+    # The implementation card is a pure worker: it is the review's parent, and
+    # its completion is the only trigger the review waits for. The result
+    # reconciler has already validated its report -- ``reconcile_reviews`` runs
+    # only after it reported progress -- and ``_implementation_head`` re-proves
+    # the topology below.
+    worker = tasks.get(IMPLEMENTATION_KEY)
+    if worker is None or worker.status != "done":
         return
-    parent = workers[-1].task_id
+    parent = worker.task_id
     head_sha = _implementation_head(tasks=tasks, registration=registration, tick_id=tick_id)
     if tasks.get(REVIEW_KEY) is not None:
         return

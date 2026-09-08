@@ -31,7 +31,11 @@ from hermes_pipeline.github_issues import (
     render_issue_body,
 )
 from hermes_pipeline.harness import HarnessCleanupError, SandboxRepo, run_harness
-from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+from hermes_pipeline.phases import (
+    IMPLEMENTATION_KEY,
+    load_phases,
+    resolve_profile_phases_path,
+)
 from hermes_pipeline.run_registration import register_pinned_run
 from tests.gh_fakes import API_ARGV, issue_payload
 
@@ -350,15 +354,15 @@ def test_keep_dir_touches_nothing_remote_and_prunes_only_the_config(live, script
 
 # -- native-sdd: one registration, several ticks ------------------------------------
 #
-# The compiled-plan profile is not driven to completion by a single ``tpo tick``:
-# the first tick registers the run and its ``plan:`` worker cards, and each
-# later tick reconciles finished cards into the next stage (review, then finish).
+# The plan-pinned profile is not driven to completion by a single ``tpo tick``:
+# the first tick registers the run and its implementation card, and each later
+# tick reconciles finished cards into the next stage (review, then finish).
 # The harness therefore has to keep ticking the same run until every card is done,
 # and to fail closed when a tick changes nothing.
 
 _NATIVE_SDD = "native-sdd"
 _PLAN_PATH = f"docs/harness/{_RUN_TOKEN}-plan.md"
-_STEP_KEYS = ("plan:task-1",)
+_STEP_KEYS = (IMPLEMENTATION_KEY,)
 _REGISTRATION_BARRIER = "__registration_barrier__"
 
 
@@ -470,7 +474,7 @@ class _NativeSddSandbox(_LiveSandbox):
         run_outcomes.mkdir(parents=True, exist_ok=True)
         (run_outcomes / "expected-phases.json").write_text(json.dumps(list(_STEP_KEYS)))
         # A freshly registered worker card starts in todo; no gate stands behind it.
-        self.board.update({_REGISTRATION_BARRIER: "done", "plan:task-1": "todo"})
+        self.board.update({_REGISTRATION_BARRIER: "done", IMPLEMENTATION_KEY: "todo"})
         # The plan worker: one atomic task commit on the run branch, not pushed yet.
         (registration.worktree / "mock_transform.py").write_text(
             "def normalize_names(names):\n    return [n.strip().lower() for n in names if n.strip()]\n"
@@ -552,7 +556,7 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
     )
     assert boards[-1] == {
         _REGISTRATION_BARRIER: "done",  # fixture-only stand-in for the run's own card
-        "plan:task-1": "done",
+        IMPLEMENTATION_KEY: "done",
         "review:0": "done",
         "finish": "done",
     }
@@ -562,7 +566,9 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
     # already in its final state at that point counts as no change.
     report = json.loads(result.report_path.read_text())
     assert report["profile"] == _NATIVE_SDD
-    assert {phase["phase_key"] for phase in report["phases"]} == {"plan:task-1", "review:0", "finish"}
+    assert {phase["phase_key"] for phase in report["phases"]} == {
+        IMPLEMENTATION_KEY, "review:0", "finish"
+    }
     assert all(phase["status"] == "completed" for phase in report["phases"])
     assert report["failed_phases"] == 0
 

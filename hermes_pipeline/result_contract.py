@@ -20,6 +20,7 @@ from .github_issues import (
     snapshot_hash,
     split_canonical_snapshot,
 )
+from .phases import IMPLEMENTATION_KEY
 from .plan_manifest import PlanManifest, PlanReference, PlanSource, parse_plan_manifest
 
 MAX_METADATA_BYTES = 64 * 1024
@@ -282,6 +283,20 @@ def _successful_runs(payload: dict[str, object]) -> list[dict[str, object]]:
     if not successful:
         raise ResultContractError("missing_successful_run")
     return successful
+
+
+def manifest_acceptance_criteria(manifest) -> tuple[str, ...]:
+    """Every Plan task's acceptance criteria, concatenated in Plan order.
+
+    One card implements the whole Plan, so its single report answers for every
+    task's criteria. The order is the Plan's own, which is the order
+    ``render_result_template`` prefills and ``parse_worker_result`` demands back.
+    """
+    return tuple(
+        criterion
+        for task in manifest.tasks
+        for criterion in task.acceptance_criteria
+    )
 
 
 def parse_worker_result(
@@ -964,10 +979,18 @@ def load_validated_registration(
         raise ResultContractError("registration_invalid", "issue fields")
     if manifest is not None:
         # Subset, not equality: a run registered before the per-task controller
-        # gate was dropped still lists its ``validate:<id>`` keys and must keep
-        # validating so it can be resumed.
-        required_steps = {f"plan:{task.id}" for task in manifest.tasks}
-        if not required_steps <= set(steps):
+        # gate was dropped still lists its ``validate:<id>`` keys, and one
+        # registered before the per-Plan-task fan-out was deleted still lists
+        # its ``plan:<id>`` keys. Extra keys keep loading so a run that is only
+        # ahead of its registration format can still be resumed.
+        #
+        # A pre-fan-out-deletion registration does NOT load, and cannot: the
+        # implementation card's key is new rather than dropped, so the subset
+        # check fails and the run is rejected at the trust boundary
+        # (``registration_invalid``) instead of being verified against a card
+        # shape that no longer exists. That is a fail-closed break, stated in
+        # the major release note.
+        if IMPLEMENTATION_KEY not in set(steps):
             raise ResultContractError("registration_invalid")
     plan_reference_value = (
         str((path.parent / "plan.md").resolve())
@@ -1059,10 +1082,14 @@ def _git_bytes(cwd: Path, *args: str) -> bytes:
 
 
 def verify_worker_git_result(
-    worktree: Path, git: GitResult, *, expected_parent_sha: str
+    worktree: Path, git: GitResult, *, expected_parent_sha: str,
+    expected_commits: int = 1,
 ) -> None:
     """Verify immutable commit topology and changed paths in the pinned worktree."""
-    verify_worker_git_topology(worktree, git, expected_parent_sha=expected_parent_sha)
+    verify_worker_git_topology(
+        worktree, git, expected_parent_sha=expected_parent_sha,
+        expected_commits=expected_commits,
+    )
     status = _git_bytes(
         worktree, "status", "--porcelain=v1", "--untracked-files=all", "-z"
     )
@@ -1074,7 +1101,8 @@ def verify_worker_git_result(
 
 
 def verify_worker_git_topology(
-    worktree: Path, git: GitResult, *, expected_parent_sha: str
+    worktree: Path, git: GitResult, *, expected_parent_sha: str,
+    expected_commits: int = 1,
 ) -> None:
     """Verify immutable commit topology and reachability from the branch head.
 
@@ -1082,24 +1110,50 @@ def verify_worker_git_topology(
     ``git reset --hard`` has discarded: the object survives in the repository.
     Membership of HEAD's first-parent mainline is the only fact that proves the
     reported work is on the branch this run delivers, so it is checked for every
-    task, whether or not the stricter current-HEAD check in
+    card, whether or not the stricter current-HEAD check in
     ``verify_worker_git_result`` applies. It is first-parent and not
     ``merge-base --is-ancestor`` for the reason ``_on_first_parent_mainline``
     records: a side merge parent satisfies ancestry without ever being on the
-    mainline, and this function's own per-task anchor chain would otherwise
-    bless such a commit as an implementation task.
+    mainline, and this function's own anchor would otherwise bless such a commit
+    as implementation work.
+
+    ``expected_commits`` is how many commits the phase profile obliges the card
+    to make. It is 1 for a card the profile allows one commit, and it is the
+    Plan's task count for the implementation card, whose profile prompt says
+    "Stage explicit files or hunks and create exactly one atomic commit per Plan
+    task" -- N tasks, therefore exactly N commits, no looser. The bound is
+    expressed twice over, and both halves are needed:
+
+    * ``rev-parse <head>~N == anchor`` -- walking first parents N times from the
+      reported head lands exactly on the anchor. At N=1 this is literally the
+      ``<head>^ == anchor`` check it replaces, so no existing caller loosens.
+    * ``rev-list --count anchor..head == N`` -- and nothing else is reachable.
+      Together these forbid a merge: a second parent bringing in anything not
+      already reachable from the anchor raises the count above N, while the
+      ``~N`` walk pins the mainline length. ``merge-base --is-ancestor`` was
+      considered and rejected as the generalisation: with a count of N it admits
+      a merge whose parents are both reachable from the anchor, which
+      ``<head>~N`` refuses.
+
+    The count is checked BEFORE the ``~N`` walk, and the order is load-bearing:
+    ``rev-parse`` is fatal on a history shorter than N, and every git failure
+    here collapses into ``git_verification_failed`` ("git could not answer"). An
+    implementation card that made one commit for a three-task Plan is the most
+    likely real failure of this check, and it must read as
+    ``commit_count_mismatch`` -- the worker's fault -- not as broken
+    infrastructure.
     """
     if git.expected_parent_sha != expected_parent_sha:
         raise ResultContractError("parent_mismatch")
     if git.resulting_head_sha != git.task_commit_sha:
         raise ResultContractError("head_mismatch")
     _require_real_commits(worktree, git.resulting_head_sha, git.task_commit_sha)
-    parent = _git(worktree, "rev-parse", f"{git.task_commit_sha}^")
+    count = _git(worktree, "rev-list", "--count", f"{expected_parent_sha}..{git.resulting_head_sha}")
+    if count != str(expected_commits):
+        raise ResultContractError("commit_count_mismatch")
+    parent = _git(worktree, "rev-parse", f"{git.task_commit_sha}~{expected_commits}")
     if parent != expected_parent_sha:
         raise ResultContractError("parent_mismatch")
-    count = _git(worktree, "rev-list", "--count", f"{expected_parent_sha}..{git.resulting_head_sha}")
-    if count != "1":
-        raise ResultContractError("commit_count_mismatch")
     changed = _real_changed_paths(
         worktree, expected_parent_sha, git.resulting_head_sha
     )

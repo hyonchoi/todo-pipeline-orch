@@ -20,6 +20,7 @@ from hermes_pipeline.github_issues import (
     canonical_issue_snapshot,
     snapshot_hash,
 )
+from hermes_pipeline.phases import IMPLEMENTATION_KEY
 from hermes_pipeline.result_contract import (
     _PLACEHOLDER_RE,
     ResultContractError,
@@ -772,7 +773,7 @@ def test_registration_rejects_unknown_keys_and_mutable_plan_drift(tmp_path):
 def _registered_repo(
     tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str | None = "plan.md",
     embedded: bool = False, plan: str = PLAN,
-    step_keys: tuple[str, ...] = ("plan:task-1",),
+    step_keys: tuple[str, ...] = (IMPLEMENTATION_KEY,),
 ):
     from hermes_pipeline.plan_manifest import render_embedded_plan
     from hermes_pipeline.run_registration import register_pinned_run
@@ -835,12 +836,13 @@ def test_registration_authority_is_the_issue_snapshot(tmp_path):
 def test_registration_accepts_step_keys_beyond_the_plan_tasks(tmp_path):
     """``required_steps <= steps`` is deliberate, in both directions.
 
-    A profile that registers non-compiled phases alongside the plan workers, and
-    a run registered before the per-task controller gate was dropped, both carry
-    keys the manifest does not name. Neither may be rejected -- an equality
-    check here would refuse to load an in-flight run's own authority.
+    A profile that registers phases the manifest does not name, and a run
+    registered before the per-task controller gate was dropped, both carry extra
+    keys. Neither may be rejected -- an equality check here would refuse to load
+    an in-flight run's own authority. The other direction still fails closed:
+    a registration missing the implementation card's key cannot be verified.
     """
-    extra = ("plan:task-1", "review", "finish", "human", "validate:task-1")
+    extra = (IMPLEMENTATION_KEY, "review", "finish", "human", "validate:task-1")
     repo, _worktree, state, _parent = _registered_repo(tmp_path, step_keys=extra)
 
     authority = load_validated_registration(repo, state, "01TICK")
@@ -873,7 +875,7 @@ def test_embedded_registration_exposes_verified_artifact_reference(tmp_path):
         selected_issue=make_issue(42, repo=REPO, title="Do it", body=body),
         plan_path=None, profile="native-sdd", prompt_client="claude",
         assignee="pipeline", review_assignee=None,
-        step_keys=("plan:task-1",),
+        step_keys=(IMPLEMENTATION_KEY,),
     )
 
     authority = load_validated_registration(repo, state, "01TICK")
@@ -907,7 +909,7 @@ def test_embedded_plan_reconciliation_scenario(tmp_path, mocker):
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         return_value={
-            "plan:task-1": SimpleNamespace(task_id="worker", status="todo"),
+            IMPLEMENTATION_KEY: SimpleNamespace(task_id="worker", status="todo"),
         },
     )
 
@@ -1149,13 +1151,16 @@ def test_reconcile_completed_worker_validates_without_a_controller_gate(
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         return_value={
-            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+            IMPLEMENTATION_KEY: KanbanTaskInfo(
+                "worker", IMPLEMENTATION_KEY, "done", "TODO-42"
+            ),
         },
     )
     mocker.patch(
         "hermes_pipeline.kanban_tasks._show_task_payload",
         return_value=_worker_payload(
-            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+            step_key=IMPLEMENTATION_KEY, parent=parent, head=head,
+            changed=["change.txt"],
         ),
     )
     complete = mocker.patch(
@@ -1169,49 +1174,70 @@ def test_reconcile_completed_worker_validates_without_a_controller_gate(
     complete.assert_not_called()
 
 
-def test_reconcile_verifies_earlier_tasks_by_topology_and_the_tip_against_head(
-    tmp_path, mocker
-):
-    """Only the chain tip is checked against current HEAD and a clean worktree.
+def test_reconcile_requires_exactly_one_commit_per_plan_task(tmp_path, mocker):
+    """The bound is the Plan's task count, taken from the profile's own words.
 
-    A task a later task already built on cannot be HEAD any more, so re-running
-    the full check against it would fail after every resume.
+    ``phase_4_development`` tells the implementation agent to "create exactly
+    one atomic commit per Plan task", so a two-task Plan owes exactly two
+    commits measured from ``base_sha`` -- not one, and not three. Deleting the
+    per-task fan-out removed the per-commit anchor chain that used to prove this
+    one task at a time; this is the replacement, and it is derived from the
+    profile rather than loosened to "at least one".
     """
     from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
 
-    repo, worktree, state, base = _registered_repo(
-        tmp_path, plan=PLAN_TWO_TASKS, step_keys=("plan:task-1", "plan:task-2")
-    )
-    first = _commit(worktree, "one.txt")
+    repo, worktree, state, base = _registered_repo(tmp_path, plan=PLAN_TWO_TASKS)
+    _commit(worktree, "one.txt")
     second = _commit(worktree, "two.txt")
-    payloads = {
-        "worker-1": _worker_payload(
-            step_key="plan:task-1", parent=base, head=first, changed=["one.txt"]
-        ),
-        "worker-2": _worker_payload(
-            step_key="plan:task-2", parent=first, head=second, changed=["two.txt"]
-        ),
+    board = {
+        IMPLEMENTATION_KEY: KanbanTaskInfo(
+            "worker", IMPLEMENTATION_KEY, "done", "TODO-42"
+        )
     }
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
-        return_value={
-            "plan:task-1": KanbanTaskInfo("worker-1", "plan:task-1", "done", "TODO-42"),
-            "plan:task-2": KanbanTaskInfo("worker-2", "plan:task-2", "done", "TODO-42"),
-        },
-    )
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks._show_task_payload",
-        side_effect=lambda task_id: payloads[task_id],
+        side_effect=lambda *_args: board,
     )
 
+    def payload(*, head, changed):
+        result = _worker_payload(
+            step_key=IMPLEMENTATION_KEY, parent=base, head=head, changed=changed
+        )
+        # One card answers for every task's criteria, in Plan order.
+        result["runs"][0]["metadata"]["tpo_result"]["acceptance"] = [
+            {"criterion": "Observable criterion", "status": "passed"},
+            {"criterion": "Observable criterion", "status": "passed"},
+        ]
+        return result
+
+    show = mocker.patch(
+        "hermes_pipeline.kanban_tasks._show_task_payload",
+        return_value=payload(head=second, changed=["one.txt", "two.txt"]),
+    )
     assert reconcile_plan_task_results(
         project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
     )
 
-    (worktree / "stray.txt").write_text("uncommitted")
+    marker = state / "runs" / "01TICK" / "result-validation-blocked"
+    # One commit for two tasks is short of what the profile obliges, and it must
+    # read as the worker's fault -- not as a git that could not answer.
+    first_only = _git(worktree, "rev-parse", "HEAD~1")
+    show.return_value = payload(head=first_only, changed=["one.txt"])
     assert not reconcile_plan_task_results(
         project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
     )
+    assert json.loads(marker.read_text())["code"] == "commit_count_mismatch"
+
+    # A third commit is one more than the Plan asked for.
+    third = _commit(worktree, "three.txt")
+    marker.unlink()
+    show.return_value = payload(
+        head=third, changed=["one.txt", "three.txt", "two.txt"]
+    )
+    assert not reconcile_plan_task_results(
+        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
+    )
+    assert json.loads(marker.read_text())["code"] == "commit_count_mismatch"
 
 
 def test_reconcile_falls_back_to_topology_once_review_builds_on_the_chain(
@@ -1225,11 +1251,14 @@ def test_reconcile_falls_back_to_topology_once_review_builds_on_the_chain(
     mocker.patch(
         "hermes_pipeline.kanban_tasks._show_task_payload",
         return_value=_worker_payload(
-            step_key="plan:task-1", parent=base, head=head, changed=["change.txt"]
+            step_key=IMPLEMENTATION_KEY, parent=base, head=head,
+            changed=["change.txt"],
         ),
     )
     board = {
-        "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+        IMPLEMENTATION_KEY: KanbanTaskInfo(
+            "worker", IMPLEMENTATION_KEY, "done", "TODO-42"
+        ),
     }
     tasks = mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
@@ -1246,54 +1275,6 @@ def test_reconcile_falls_back_to_topology_once_review_builds_on_the_chain(
         project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
     )
     assert tasks.called
-
-
-def test_reconcile_completes_legacy_validate_gates_still_named_by_registration(
-    tmp_path, mocker
-):
-    """A run registered before the gate was dropped must still settle its gates.
-
-    ``poll_pinned_run`` waits for every registered step key, so a resumed run
-    whose ``step_keys`` still name ``validate:<id>`` would hang forever.
-    """
-    from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
-
-    repo, worktree, state, parent = _registered_repo(
-        tmp_path, step_keys=("plan:task-1", "validate:task-1")
-    )
-    head = _commit(worktree, "change.txt")
-    gate = KanbanTaskInfo("gate", "validate:task-1", "blocked", "TODO-42")
-    board = {
-        "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
-        "validate:task-1": gate,
-    }
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
-        side_effect=lambda *_args: board,
-    )
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks._show_task_payload",
-        return_value=_worker_payload(
-            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
-        ),
-    )
-    complete = mocker.patch(
-        "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=True
-    )
-
-    assert reconcile_plan_task_results(
-        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
-    )
-    complete.assert_called_once_with("demo", "gate")
-
-    board["validate:task-1"] = KanbanTaskInfo(
-        "gate", "validate:task-1", "done", "TODO-42"
-    )
-    complete.reset_mock()
-    assert reconcile_plan_task_results(
-        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
-    )
-    complete.assert_not_called()
 
 
 def test_topology_rejects_a_commit_no_longer_reachable_from_head(tmp_path):
@@ -1342,14 +1323,17 @@ def test_reconcile_rejects_a_discarded_commit_even_when_a_decoy_review_card_exis
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         return_value={
-            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+            IMPLEMENTATION_KEY: KanbanTaskInfo(
+                "worker", IMPLEMENTATION_KEY, "done", "TODO-42"
+            ),
             "review:0": KanbanTaskInfo("decoy", "review:0", "done", "TODO-42"),
         },
     )
     mocker.patch(
         "hermes_pipeline.kanban_tasks._show_task_payload",
         return_value=_worker_payload(
-            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+            step_key=IMPLEMENTATION_KEY, parent=parent, head=head,
+            changed=["change.txt"],
         ),
     )
 
@@ -1373,7 +1357,11 @@ def test_reconcile_records_a_durable_blocked_marker_and_clears_it_on_success(
 
     repo, worktree, state, parent = _registered_repo(tmp_path)
     head = _commit(worktree, "change.txt")
-    board = {"plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42")}
+    board = {
+        IMPLEMENTATION_KEY: KanbanTaskInfo(
+            "worker", IMPLEMENTATION_KEY, "done", "TODO-42"
+        )
+    }
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         side_effect=lambda *_args: board,
@@ -1388,13 +1376,13 @@ def test_reconcile_records_a_durable_blocked_marker_and_clears_it_on_success(
             project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
         )
     recorded = json.loads(marker.read_text())
-    assert recorded["step_key"] == "plan:task-1"
+    assert recorded["step_key"] == IMPLEMENTATION_KEY
     assert recorded["code"] == "missing_successful_run"
     assert recorded["tick_id"] == "01TICK"
     assert isinstance(recorded["reason"], str) and recorded["reason"]
 
     payload.return_value = _worker_payload(
-        step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
+        step_key=IMPLEMENTATION_KEY, parent=parent, head=head, changed=["change.txt"]
     )
     assert reconcile_plan_task_results(
         project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
@@ -1436,13 +1424,10 @@ def test_reconcile_records_a_structural_marker_when_the_chain_is_not_wired(
     """
     from hermes_pipeline.kanban_tasks import (
         CHAIN_WIRING_INCOMPLETE_CODE,
-        KanbanTaskInfo,
         reconcile_plan_task_results,
     )
 
-    repo, _worktree, state, _parent = _registered_repo(
-        tmp_path, step_keys=("plan:task-1", "validate:task-1")
-    )
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
     marker = state / "runs" / "01TICK" / "result-validation-blocked"
     board: dict[str, object] = {}
     mocker.patch(
@@ -1450,23 +1435,13 @@ def test_reconcile_records_a_structural_marker_when_the_chain_is_not_wired(
         side_effect=lambda *_args: board,
     )
 
-    # No worker card on the board at all.
+    # No implementation card on the board at all.
     assert not reconcile_plan_task_results(
         project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
     )
     recorded = json.loads(marker.read_text())
     assert recorded["code"] == CHAIN_WIRING_INCOMPLETE_CODE
-    assert recorded["step_key"] == "plan:task-1"
-
-    # Worker done, but the legacy gate this registration still names is missing.
-    board["plan:task-1"] = KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42")
-    marker.unlink()
-    assert not reconcile_plan_task_results(
-        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
-    )
-    recorded = json.loads(marker.read_text())
-    assert recorded["code"] == CHAIN_WIRING_INCOMPLETE_CODE
-    assert recorded["step_key"] == "validate:task-1"
+    assert recorded["step_key"] == IMPLEMENTATION_KEY
 
 
 def test_reconcile_records_a_marker_when_a_registered_step_key_is_absent(
@@ -1482,7 +1457,7 @@ def test_reconcile_records_a_marker_when_a_registered_step_key_is_absent(
         "hermes_pipeline.result_contract.load_validated_registration",
         return_value=SimpleNamespace(
             manifest=SimpleNamespace(tasks=(SimpleNamespace(id="task-1"),)),
-            step_keys=("phase_4_development",),
+            step_keys=("plan:task-1",),
             base_sha=parent,
             todo_id="TODO-42",
             worktree=worktree,
@@ -1497,50 +1472,8 @@ def test_reconcile_records_a_marker_when_a_registered_step_key_is_absent(
         (state / "runs" / "01TICK" / "result-validation-blocked").read_text()
     )
     assert recorded["code"] == CHAIN_WIRING_INCOMPLETE_CODE
-    assert recorded["step_key"] == "plan:task-1"
+    assert recorded["step_key"] == IMPLEMENTATION_KEY
     assert tasks.called
-
-
-def test_reconcile_records_a_marker_when_a_legacy_gate_cannot_be_completed(
-    tmp_path, mocker
-):
-    from hermes_pipeline.kanban_tasks import (
-        GATE_COMPLETION_FAILED_CODE,
-        KanbanTaskInfo,
-        reconcile_plan_task_results,
-    )
-
-    repo, worktree, state, parent = _registered_repo(
-        tmp_path, step_keys=("plan:task-1", "validate:task-1")
-    )
-    head = _commit(worktree, "change.txt")
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
-        return_value={
-            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
-            "validate:task-1": KanbanTaskInfo(
-                "gate", "validate:task-1", "blocked", "TODO-42"
-            ),
-        },
-    )
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks._show_task_payload",
-        return_value=_worker_payload(
-            step_key="plan:task-1", parent=parent, head=head, changed=["change.txt"]
-        ),
-    )
-    mocker.patch(
-        "hermes_pipeline.kanban_tasks.complete_todo_kanban_task", return_value=False
-    )
-
-    assert not reconcile_plan_task_results(
-        project_dir=repo, state_dir=state, tenant="demo", tick_id="01TICK"
-    )
-    recorded = json.loads(
-        (state / "runs" / "01TICK" / "result-validation-blocked").read_text()
-    )
-    assert recorded["code"] == GATE_COMPLETION_FAILED_CODE
-    assert recorded["step_key"] == "validate:task-1"
 
 
 def test_reconcile_invalid_result_reports_no_progress_without_a_blocking_card(
@@ -1552,7 +1485,9 @@ def test_reconcile_invalid_result_reports_no_progress_without_a_blocking_card(
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
         return_value={
-            "plan:task-1": KanbanTaskInfo("worker", "plan:task-1", "done", "TODO-42"),
+            IMPLEMENTATION_KEY: KanbanTaskInfo(
+                "worker", IMPLEMENTATION_KEY, "done", "TODO-42"
+            ),
         },
     )
     mocker.patch("hermes_pipeline.kanban_tasks._show_task_payload", return_value={"runs": []})
@@ -1564,7 +1499,7 @@ def test_reconcile_invalid_result_reports_no_progress_without_a_blocking_card(
         )
 
     assert "TPO result validation failed" in caplog.text
-    assert "plan:task-1" in caplog.text
+    assert IMPLEMENTATION_KEY in caplog.text
     complete.assert_not_called()
 
 

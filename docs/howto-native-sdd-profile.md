@@ -101,15 +101,17 @@ Migrate one project explicitly:
    `"default"` / `"default"` / the computed set. Adding `--assignee <name>`
    re-renders `review_assignee` as a *copy* of `assignee`, not as your previous
    value, so re-apply all three by editing `.hermes/pipeline.toml` afterwards.
-3. **Give every eligible TODO a Plan, and a manifest if you want per-task
-   cards.** `native-sdd` is plan-gated, so each `tpo:todo` issue needs exactly
-   one Plan authority: either one repo-relative `Plan:` path or one embedded
-   Plan block. Start from the [Plan template](templates/tpo-plan.md). An
-   embedded Plan must carry a `json tpo-plan` block; without one it is blocked
-   as `plan_invalid:manifest_required`, which is what `tpo doctor`'s `Hint:`
-   line points at. A `Plan:` path stays eligible without a manifest, but it
-   compiles to a single development card instead of one worker card per
-   Plan task.
+3. **Give every eligible TODO a Plan, and a manifest to get its results
+   verified.** `native-sdd` is plan-gated, so each `tpo:todo` issue needs
+   exactly one Plan authority: either one repo-relative `Plan:` path or one
+   embedded Plan block. Start from the [Plan template](templates/tpo-plan.md).
+   An embedded Plan must carry a `json tpo-plan` block; without one it is
+   blocked as `plan_invalid:manifest_required`, which is what `tpo doctor`'s
+   `Hint:` line points at. A `Plan:` path stays eligible without a manifest,
+   but a manifest-free run's implementation card publishes no result template
+   and its result is never parsed, so nothing anchors the reviewed head: the
+   task count, the acceptance criteria, and the commit-count bound all come
+   from the manifest.
 4. **Validate before the next tick.**
 
    ```bash
@@ -122,21 +124,33 @@ part of this profile. PR creation, review, and closeout are reconciled from
 Kanban results instead; the run's terminal boundary is the open, unmerged pull
 request and its human merge decision, which no card represents.
 
-## Compiled sequence
+## Run sequence
 
 1. TPO records schema-v3 `.hermes/runs/<tick-id>/registration.json`, including
    the tagged Plan source, pinned base SHA, TODO and Plan hashes, branch,
    linked worktree, roles, and step keys. Schema-v2 active runs remain readable;
    do not downgrade while a schema-v3 run is active. The same applies to the
-   per-task controller gate: a run registered after that gate was dropped lists
-   only `plan:<task-id>` step keys, which an older TPO rejects as
-   `registration_invalid` on every tick, so it wedges with the in-progress
-   label and a live worktree. Do not downgrade past that release while a
-   manifest run is active; drain the run first.
-2. Each Plan task becomes one worker card chained onto the previous task's
-   worker. The worker reports bounded `metadata.tpo_result`; TPO validates that
-   metadata and the Git topology on the next tick, and the run stops advancing
-   until it does. No card waits for a human between Plan tasks.
+   step keys themselves: a manifest run registered after the per-Plan-task
+   fan-out was deleted lists one `phase_4_development` step key, which an older
+   TPO rejects as `registration_invalid` on every tick because it looks for
+   `plan:<task-id>` keys instead — and the reverse is equally true, so a run
+   registered before that release will not load after it. The break is
+   fail-closed in both directions: nothing is verified against a card shape
+   that no longer exists, and the branch and its commits are left untouched. Do
+   not upgrade or downgrade across that release while a manifest run is active;
+   drain the run first.
+2. The Plan gets exactly ONE implementation card — the profile's
+   `phase_4_development` — whatever the Plan's task count. The card carries that
+   phase's prompt verbatim and its declared `tools`, `turns` and `timeout`; the
+   prompt is what tells the agent to read the Plan, branch from main, preserve
+   unrelated tracked and untracked work, run one native implementer subagent per
+   Plan task, and make exactly one atomic commit per Plan task. TPO does not
+   restate any of that and does not fan the phase into per-task cards: the
+   profile is the specification. The card reports bounded
+   `metadata.tpo_result`; on the next tick TPO validates that metadata, every
+   Plan task's acceptance criteria, and the Git topology — exactly
+   `len(tasks)` commits on the first-parent mainline from the pinned base SHA —
+   and the run stops advancing until it does. No card waits for a human.
 3. A fresh review session runs the profile's own `phase_5_review` prompt: it
    applies every valid finding and commits the fixes as one review-fix commit.
    The card reaching `done` IS the pass; the card reaching `blocked` is the

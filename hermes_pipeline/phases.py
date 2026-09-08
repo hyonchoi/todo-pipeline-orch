@@ -87,6 +87,16 @@ def _validate_prompt_template(template: str, source: str) -> None:
             )
 
 
+#: The phase whose one card implements the whole Plan of a manifest-pinned run.
+#: A fixed key, exactly as ``review_reconciliation.REVIEW_PHASE_KEY`` names
+#: ``phase_5_review``: the profile owns this phase's prompt, tools and budget,
+#: and the card's step key IS the phase key. A manifest-pinned run no longer
+#: registers one ``plan:<task-id>`` card per Plan task -- the profile's prompt
+#: addresses one agent orchestrating all of them, and its ``turns``/``timeout``
+#: budget is stated for that whole phase.
+IMPLEMENTATION_KEY = "phase_4_development"
+
+
 @dataclass(frozen=True)
 class Phase:
     phase_key: str
@@ -103,6 +113,15 @@ class Phase:
     # Parsed only so profiles that still carry the key stay loadable; nothing
     # reads it. Removing the key from the bundled profiles is a follow-up.
     kind: Literal["worker", "controller_gate", "human_gate"] | None = None
+    # Vestigial, exactly like ``kind`` above: parsed only so the bundled
+    # ``native-sdd`` profile -- which still declares ``compile_plan_tasks:
+    # true`` on ``phase_4_development`` -- stays loadable. Nothing reads it. It
+    # used to fan the phase out into one card per Plan task, each handed the
+    # whole phase's turn/timeout budget and a TPO-authored instruction in place
+    # of the profile's prompt; the phase now registers one card carrying the
+    # profile's own prompt, and ``IMPLEMENTATION_KEY`` is what identifies it.
+    # Removing the key from the bundled profile is a follow-up: the profile is
+    # the specification, and this change must not edit it.
     compile_plan_tasks: bool = False
 
 

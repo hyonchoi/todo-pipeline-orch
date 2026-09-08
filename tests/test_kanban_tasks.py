@@ -8,6 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_pipeline.phases import IMPLEMENTATION_KEY
+
 
 def _register_todo_phases(**kwargs):
     """Prepare then create back-to-back, as ``cli._tick_project`` does.
@@ -576,9 +578,17 @@ def test_prepare_todo_phases_renders_plan_path_into_bodies(tmp_path):
     assert "Implement from docs/plan.md" in prepared[0].body
 
 
-def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
+def test_prepare_todo_phases_registers_one_implementation_card_for_a_manifest(
     tmp_path, caplog, mocker
 ):
+    """A manifest no longer multiplies cards: the phase registers exactly one.
+
+    The profile's ``phase_4_development`` prompt drives every Plan task inside
+    one agent's turn budget, so the Plan's task count changes nothing about the
+    board. What is asserted here is the card-creation mechanics the fan-out
+    happened to share: the ``--parent`` chain, the stable idempotency keys, the
+    workspace, the assignee, and that registration forces no status.
+    """
     from hermes_pipeline.kanban_tasks import (
         create_prepared_todo_phases,
         prepare_todo_phases,
@@ -588,7 +598,7 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
     phases_path.write_text(
         "requires_plan: true\n"
         "phases:\n"
-        "  - phase_key: development\n"
+        "  - phase_key: phase_4_development\n"
         "    name: Development\n"
         "    prompt: implement legacy plan\n"
         "    tools: Read,Write,Edit,Bash\n"
@@ -635,17 +645,14 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
     )
 
     assert [task.phase_key for task in prepared] == [
-        "plan:task-1",
-        "plan:task-2",
+        "phase_4_development",
         "review",
         "finish",
     ]
-    assert "Exact first instruction." in prepared[0].body
-    assert "First exact criterion." in prepared[0].body
-    assert "uv run pytest tests/test_first.py" in prepared[0].body
-    assert "feat: first" in prepared[0].body
-    assert "Exact second instruction." in prepared[1].body
-    assert "Second exact criterion." in prepared[1].body
+    # The Plan's own words are NOT copied into the card any more: the profile's
+    # prompt is what the agent receives, and it tells the agent to read the Plan.
+    assert "Exact first instruction." not in prepared[0].body
+    assert "Required commit message" not in prepared[0].body
     assert "legacy" not in caplog.text.lower()
 
     created: list[list[str]] = []
@@ -675,8 +682,7 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
     cards = created[1:]
     keys = [card[card.index("--idempotency-key") + 1] for card in cards]
     assert keys == [
-        "01TICK:plan:task-1",
-        "01TICK:plan:task-2",
+        "01TICK:phase_4_development",
         "01TICK:review",
         "01TICK:finish",
     ]
@@ -686,7 +692,6 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
         "t_00000001",
         "t_00000002",
         "t_00000003",
-        "t_00000004",
     ]
     assert all(
         card[card.index("--workspace") + 1] == f"dir:{tmp_path}"
@@ -698,40 +703,6 @@ def test_prepare_todo_phases_compiles_manifest_workers_without_controller_gates(
     assert "--goal" in cards[1]
     # Nothing is ever forced into a status: registration only creates cards.
     assert blocked == []
-
-
-def test_prepare_todo_phases_keeps_legacy_single_development_card_with_warning(
-    tmp_path, caplog
-):
-    from hermes_pipeline.kanban_tasks import prepare_todo_phases
-
-    phases_path = tmp_path / "phases.yaml"
-    phases_path.write_text(
-        "requires_plan: true\n"
-        "phases:\n"
-        "  - phase_key: development\n"
-        "    name: Development\n"
-        "    prompt: implement from {plan_path}\n"
-        "    tools: Read,Bash\n"
-        "    turns: 20\n"
-        "    compile_plan_tasks: true\n"
-    )
-    (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "plan.md").write_text("# Legacy plan\n")
-
-    with caplog.at_level("WARNING"):
-        prepared = prepare_todo_phases(
-            todo_id="TODO-41",
-            tick_id="01TICK",
-            board_slug="demo",
-            phases_path=phases_path,
-            plan_path="docs/plan.md",
-            project_dir=tmp_path,
-        )
-
-    assert [task.phase_key for task in prepared] == ["development"]
-    assert "legacy" in caplog.text.lower()
-    assert "single development card" in caplog.text.lower()
 
 
 def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
@@ -3030,8 +3001,8 @@ def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles
         ), profile
 
     native = {task.phase_key: task for task in render("native-sdd")}
-    assert marker in native["plan:task-1"].body
-    assert decisions_marker in native["plan:task-1"].body
+    assert marker in native[IMPLEMENTATION_KEY].body
+    assert decisions_marker in native[IMPLEMENTATION_KEY].body
     assert not any(key.startswith("validate:") for key in native)
     assert not any(key.startswith(("phase_5", "phase_8", "phase_9")) for key in native)
 
@@ -3061,13 +3032,13 @@ def test_planned_phase_keys_are_exactly_the_cards_compilation_creates(tmp_path):
         '"commit_message":"feat: second"}]}\n```\n'
     )
     source = legacy_plan_source(repo, "docs/plan.md", expected_todo_id="TODO-41")
-    # A profile whose non-compiled phases are registered too, so the invariant is
-    # exercised on a key set that is not only plan workers.
+    # A profile with more than one registered phase, so the invariant is
+    # exercised on a key set larger than the implementation card alone.
     extra = tmp_path / "phases.yaml"
     extra.write_text(
         "requires_plan: true\n"
         "phases:\n"
-        "  - phase_key: development\n"
+        "  - phase_key: phase_4_development\n"
         "    name: Development\n"
         "    prompt: implement\n"
         "    tools: Read\n"
@@ -3092,10 +3063,12 @@ def test_planned_phase_keys_are_exactly_the_cards_compilation_creates(tmp_path):
         )
         assert keys == tuple(task.phase_key for task in prepared)
         assert not any(key.startswith("validate:") for key in keys)
-        assert keys[:2] == ("plan:task-1", "plan:task-2")
+        # A two-task Plan registers the implementation card once, not twice.
+        assert keys[0] == IMPLEMENTATION_KEY
+        assert not any(key.startswith("plan:") for key in keys)
 
     # The ``human`` gate phase contributes no registration key.
-    assert planned_phase_keys(extra, source)[2:] == ("review",)
+    assert planned_phase_keys(extra, source)[1:] == ("review",)
 
 
 def test_reconcile_plan_task_results_forwards_repo_to_registration_loader(tmp_path, mocker):
@@ -3128,8 +3101,14 @@ def test_contained_paths_drop_on_git_timeout(tmp_path, mocker, caplog):
     assert any("TimeoutExpired" in r.getMessage() for r in caplog.records)
 
 
-def test_plan_worker_card_publishes_the_result_metadata_template(tmp_path):
-    """The worker cannot satisfy the strict contract it is never shown."""
+def test_implementation_card_publishes_the_result_metadata_template(tmp_path):
+    """The worker cannot satisfy the strict contract it is never shown.
+
+    This is the one profile phase whose result IS parsed -- the reviewed head is
+    anchored to it -- so it is the one profile phase that publishes a template,
+    and the template names every Plan task's criteria in Plan order, because one
+    card answers for all of them.
+    """
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
     from hermes_pipeline.result_contract import render_result_template
 
@@ -3137,12 +3116,11 @@ def test_plan_worker_card_publishes_the_result_metadata_template(tmp_path):
     phases_path.write_text(
         "requires_plan: true\n"
         "phases:\n"
-        "  - phase_key: development\n"
+        "  - phase_key: phase_4_development\n"
         "    name: Development\n"
         "    prompt: implement legacy plan\n"
         "    tools: Read,Write,Edit,Bash\n"
         "    turns: 20\n"
-        "    compile_plan_tasks: true\n"
     )
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "plan.md").write_text(
@@ -3171,7 +3149,7 @@ def test_plan_worker_card_publishes_the_result_metadata_template(tmp_path):
     assert render_result_template(
         tick_id="01TICK",
         todo_id="TODO-41",
-        step_key="plan:task-1",
+        step_key=IMPLEMENTATION_KEY,
         acceptance_criteria=("First exact criterion.",),
     ) in dispatcher
     assert "metadata.tpo_result" in dispatcher

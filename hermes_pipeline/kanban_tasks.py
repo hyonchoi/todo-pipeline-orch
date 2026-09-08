@@ -24,11 +24,16 @@ from .outcomes import (
 )
 from .phases import (
     CLIENT_VOCABULARY,
+    IMPLEMENTATION_KEY,
     _render_phase_prompt,
     load_phase_profile,
     load_phases,
 )
-from .result_contract import RESULT_TEMPLATE_HEADING, render_result_template
+from .result_contract import (
+    RESULT_TEMPLATE_HEADING,
+    manifest_acceptance_criteria,
+    render_result_template,
+)
 from .state import _atomic_write_text
 
 # Sentinel written after successful registration to record expected phases.
@@ -39,7 +44,7 @@ _REGISTRATION_BARRIER_INFRASTRUCTURE = "registration_barrier"
 PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS = 60
 
 # The first dynamic card the review reconciler builds on the implementation
-# chain. Defined here so the result reconciler can recognise it without
+# card. Defined here so the result reconciler can recognise it without
 # importing review_reconciliation, which imports this module.
 INITIAL_REVIEW_KEY = "review:0"
 
@@ -48,11 +53,12 @@ INITIAL_REVIEW_KEY = "review:0"
 # would otherwise be visible only in the log. The marker blocks nothing.
 RESULT_VALIDATION_BLOCKED_MARKER = "result-validation-blocked"
 
-# Marker codes for stalls that are not a rejected result. They never collide
+# The marker code for a stall that is not a rejected result. It never collides
 # with a ResultContractError code, so an operator can tell a wiring problem
 # (a card or step key that is not there) from work TPO refused.
+# ``gate_completion_failed`` went with the legacy ``validate:<id>`` gate
+# completion: a registration that still names those keys cannot load any more.
 CHAIN_WIRING_INCOMPLETE_CODE = "chain_wiring_incomplete"
-GATE_COMPLETION_FAILED_CODE = "gate_completion_failed"
 
 log = logging.getLogger(__name__)
 
@@ -808,70 +814,6 @@ def prepare_todo_phases(
             # Its terminal meaning is carried by the phase it follows: a worker
             # that exits non-zero lands in Hermes's sticky ``blocked``.
             continue
-        compile_plan_tasks = getattr(phase, "compile_plan_tasks", False)
-        if compile_plan_tasks and manifest is not None:
-            for plan_task in manifest.tasks:
-                worker_key = f"plan:{plan_task.id}"
-                worker_prompt = (
-                    f"Implement Plan task {plan_task.id}: {plan_task.title}\n\n"
-                    f"Instructions:\n{plan_task.instructions}\n\n"
-                    "Acceptance criteria:\n"
-                    + "\n".join(f"- {item}" for item in plan_task.acceptance_criteria)
-                    + "\n\nVerification:\n"
-                    + "\n".join(f"- {item}" for item in plan_task.verification)
-                    + f"\n\nRequired commit message: {plan_task.commit_message}\n"
-                    "Complete only this task using red-green-refactor TDD.\n"
-                )
-                rendered_worker = _render_phase_prompt(
-                    "",
-                    todo_id=todo_id,
-                    tick_id=tick_id,
-                    project_slug=board_slug,
-                    plan_path=plan_reference_value,
-                    plan_hash=plan_source.plan_hash if plan_source is not None else None,
-                    spec_path=spec_paths[0] if spec_paths else None,
-                    reference_paths=references,
-                    prompt_client=prompt_client,
-                    template_source=f"manifest:{worker_key}",
-                    decisions=decisions,
-                ) + worker_prompt
-                prepared.append(
-                    PreparedPhaseTask(
-                        phase_key=worker_key,
-                        name=f"Plan task {plan_task.id}: {plan_task.title}",
-                        body=(
-                            _build_json_header(
-                                tick_id=tick_id,
-                                phase_key=worker_key,
-                                todo_id=todo_id,
-                                project_slug=board_slug,
-                            )
-                            + "\n"
-                            + _external_client_delegation_block(
-                                prompt_client,
-                                timeout=phase.timeout,
-                                tools=phase.tools,
-                                # Manifest workers always publish the template.
-                                result_template=render_result_template(
-                                    tick_id=tick_id,
-                                    todo_id=todo_id,
-                                    step_key=worker_key,
-                                    acceptance_criteria=plan_task.acceptance_criteria,
-                                ),
-                            )
-                            + _external_agent_prompt_block(rendered_worker)
-                        ),
-                        turns=phase.turns,
-                        timeout=phase.timeout,
-                    )
-                )
-            continue
-        if compile_plan_tasks and manifest is None:
-            log.warning(
-                "%s uses a legacy Plan without a tpo-plan manifest; "
-                "dispatching one legacy single development card",
-                todo_id,
-            )
         rendered_prompt = _render_phase_prompt(
             phase.prompt,
             todo_id=todo_id,
@@ -891,8 +833,23 @@ def prepare_todo_phases(
             timeout=phase.timeout,
             tools=phase.tools,
             # Profile phases publish no result template: their results are
-            # never parsed, and the prompt comes from overridable YAML.
-            result_template=None,
+            # never parsed, and the prompt comes from overridable YAML. The one
+            # exception is the implementation card of a manifest-pinned run:
+            # ``reconcile_plan_task_results`` and ``_implementation_head`` parse
+            # its report to anchor the reviewed head, so it must be told what to
+            # report. The template stays on the dispatcher's side of the
+            # delimiters, so the profile's prompt still reaches the client
+            # unmodified.
+            result_template=(
+                render_result_template(
+                    tick_id=tick_id,
+                    todo_id=todo_id,
+                    step_key=phase.phase_key,
+                    acceptance_criteria=manifest_acceptance_criteria(manifest),
+                )
+                if manifest is not None and phase.phase_key == IMPLEMENTATION_KEY
+                else None
+            ),
         )
         prepared.append(
             PreparedPhaseTask(
@@ -927,10 +884,7 @@ def planned_phase_keys(phases_path: str | Path | None, plan_source) -> tuple[str
             continue
         if phase.gate:
             continue
-        if getattr(phase, "compile_plan_tasks", False) and manifest is not None:
-            keys.extend(f"plan:{task.id}" for task in manifest.tasks)
-        else:
-            keys.append(phase.phase_key)
+        keys.append(phase.phase_key)
     return tuple(keys)
 
 
@@ -1514,28 +1468,16 @@ def reconcile_plan_task_results(
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
-    manifest_tasks = registration.manifest.tasks
-    # Which check applies to a task is read off the board, never off local
-    # state: a lost or moved state_dir must not turn a resumed run into a
-    # verification failure. ``verify_worker_git_result`` adds "this commit is
-    # the current HEAD and the worktree is clean" to the immutable topology
-    # facts, so it can only hold for the chain tip. The initial review is the
-    # first card built on top of the last Plan commit; once it exists, the
-    # profile's reviewer may have advanced HEAD with its own review-fix commit
-    # and the tip check no longer applies either.
-    #
-    # Accepted trade-off: worker N+1 starts the moment worker N closes, so a
-    # dirty worktree between two Plan tasks is not observable by construction --
-    # a per-task current-HEAD check would race the next worker instead of
-    # catching anything. Cleanliness is re-proved downstream, by
-    # ``verify_optional_single_commit`` when the review is reconciled and by
-    # the delivery reconciler's finish verification. The floor that does hold
-    # for every task
-    # is inside ``verify_worker_git_topology``: the reported commit must be an
-    # ancestor of the run branch's HEAD, so a discarded or off-branch commit is
-    # rejected however the board looks.
+    # Which check applies is read off the board, never off local state: a lost
+    # or moved state_dir must not turn a resumed run into a verification
+    # failure. ``verify_worker_git_result`` adds "this commit is the current
+    # HEAD and the worktree is clean" to the immutable topology facts, so it can
+    # only hold while the implementation card is the chain tip. The initial
+    # review is the first card built on top of the Plan's last commit; once it
+    # exists, the profile's reviewer may have advanced HEAD with its own
+    # review-fix commit and the tip check no longer applies.
     review_started = INITIAL_REVIEW_KEY in tasks
-    expected_parent = registration.base_sha
+
     def stalled(*, step_key: str, code: str, reason: str) -> bool:
         """Record a structural stall the same way a rejected result is recorded."""
         log.error("tick %s step %s: %s: %s", tick_id, step_key, code, reason)
@@ -1544,93 +1486,55 @@ def reconcile_plan_task_results(
         )
         return False
 
-    for index, plan_task in enumerate(manifest_tasks):
-        worker_key = f"plan:{plan_task.id}"
-        if worker_key not in registration.step_keys:
-            return stalled(
-                step_key=worker_key,
-                code=CHAIN_WIRING_INCOMPLETE_CODE,
-                reason="step key is not registered for this run",
-            )
-        worker = tasks.get(worker_key)
-        if worker is None:
-            return stalled(
-                step_key=worker_key,
-                code=CHAIN_WIRING_INCOMPLETE_CODE,
-                reason="no card for this step key on the board",
-            )
-        if worker.status != "done":
-            return True
-        # Compatibility: a run registered before the per-task controller gate
-        # was dropped still carries ``validate:<id>`` step keys and a sticky
-        # blocked gate card. ``poll_pinned_run`` waits for every registered step
-        # key, so those gates must still be completed or the run never settles.
-        legacy_gate_key = f"validate:{plan_task.id}"
-        legacy_gate = None
-        if legacy_gate_key in registration.step_keys:
-            legacy_gate = tasks.get(legacy_gate_key)
-            if legacy_gate is None:
-                return stalled(
-                    step_key=legacy_gate_key,
-                    code=CHAIN_WIRING_INCOMPLETE_CODE,
-                    reason="registered legacy gate card is not on the board",
-                )
-        is_chain_tip = (
-            index == len(manifest_tasks) - 1
-            and not review_started
-            and not (legacy_gate is not None and legacy_gate.status == "done")
+    if IMPLEMENTATION_KEY not in registration.step_keys:
+        return stalled(
+            step_key=IMPLEMENTATION_KEY,
+            code=CHAIN_WIRING_INCOMPLETE_CODE,
+            reason="step key is not registered for this run",
         )
-        payload = _show_task_payload(worker.task_id)
-        try:
-            result = parse_worker_result(
-                payload,
-                tick_id=tick_id,
-                todo_id=registration.todo_id,
-                step_key=worker_key,
-                acceptance_criteria=plan_task.acceptance_criteria,
-            )
-            if is_chain_tip:
-                verify_worker_git_result(
-                    registration.worktree,
-                    result.git,
-                    expected_parent_sha=expected_parent,
-                )
-            else:
-                verify_worker_git_topology(
-                    registration.worktree,
-                    result.git,
-                    expected_parent_sha=expected_parent,
-                )
-        except ResultContractError as exc:
-            # No card is blocked here: a Plan task must never open a human-input
-            # boundary mid-run. Returning False makes the tick report no
-            # progress; the marker and the log are where an operator finds why.
-            reason = sanitize_result_text(str(exc), maximum=1000)
-            log.error(
-                "tick %s step %s: TPO result validation failed: %s",
-                tick_id,
-                worker_key,
-                reason,
-            )
-            _record_validation_blocked(
-                state_dir,
-                tick_id=tick_id,
-                step_key=worker_key,
-                code=sanitize_result_text(exc.code, maximum=200),
-                reason=reason,
-            )
-            return False
-        expected_parent = result.git.resulting_head_sha
-        if (
-            legacy_gate is not None
-            and legacy_gate.status != "done"
-            and not complete_todo_kanban_task(tenant, legacy_gate.task_id)
-        ):
-            return stalled(
-                step_key=legacy_gate_key,
-                code=GATE_COMPLETION_FAILED_CODE,
-                reason="Hermes did not complete the registered legacy gate",
-            )
+    worker = tasks.get(IMPLEMENTATION_KEY)
+    if worker is None:
+        return stalled(
+            step_key=IMPLEMENTATION_KEY,
+            code=CHAIN_WIRING_INCOMPLETE_CODE,
+            reason="no card for this step key on the board",
+        )
+    if worker.status != "done":
+        return True
+    verify = verify_worker_git_topology if review_started else verify_worker_git_result
+    try:
+        result = parse_worker_result(
+            _show_task_payload(worker.task_id),
+            tick_id=tick_id,
+            todo_id=registration.todo_id,
+            step_key=IMPLEMENTATION_KEY,
+            acceptance_criteria=manifest_acceptance_criteria(registration.manifest),
+        )
+        verify(
+            registration.worktree,
+            result.git,
+            expected_parent_sha=registration.base_sha,
+            expected_commits=len(registration.manifest.tasks),
+        )
+    except ResultContractError as exc:
+        # No card is blocked here: the implementation card must never open a
+        # human-input boundary mid-run. Returning False makes the tick report no
+        # progress; the marker and the log are where an operator finds why.
+        reason = sanitize_result_text(str(exc), maximum=1000)
+        log.error(
+            "tick %s step %s: TPO result validation failed: %s",
+            tick_id,
+            IMPLEMENTATION_KEY,
+            reason,
+        )
+        _record_validation_blocked(
+            state_dir,
+            tick_id=tick_id,
+            step_key=IMPLEMENTATION_KEY,
+            code=sanitize_result_text(exc.code, maximum=200),
+            reason=reason,
+        )
+        return False
     _clear_validation_blocked(state_dir, tick_id)
     return True
 
