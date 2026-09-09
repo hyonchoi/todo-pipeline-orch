@@ -10,11 +10,12 @@ import secrets
 import stat
 import subprocess
 from collections.abc import Iterable, Iterator, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Literal
 
 from . import github_issues
+from .config import AgentPolicyMode
 from .github_issues import (
     IN_PROGRESS_LABEL,
     MAX_ISSUE_SNAPSHOT_CHARS,
@@ -73,6 +74,7 @@ class RunRegistration:
     assignee: str
     review_assignee: str | None
     step_keys: tuple[str, ...]
+    agent_policy_mode: AgentPolicyMode = "inherit"
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -405,6 +407,8 @@ def _load_registration_at(run_fd: int) -> dict[str, object] | None:
 
 def _json_payload(registration: RunRegistration) -> dict[str, object]:
     payload = asdict(registration)
+    if registration.schema_version < 4:
+        payload.pop("agent_policy_mode")
     payload["repository"] = str(registration.repository)
     payload["worktree"] = str(registration.worktree)
     payload["step_keys"] = list(registration.step_keys)
@@ -559,11 +563,15 @@ def register_pinned_run(
     review_assignee: str | None,
     step_keys: Iterable[str],
     repo: str | None = None,
+    agent_policy_mode: AgentPolicyMode = "inherit",
 ) -> RunRegistration:
     """Pin the issue snapshot and tracked Plan as authority, checkpoint, ensure worktree.
 
     ``repo`` defaults to the live ``origin`` identity; tests inject it.
     """
+    if agent_policy_mode not in ("inherit", "delegated"):
+        raise RunRegistrationError("invalid_agent_policy_mode")
+    effective_mode = agent_policy_mode if profile == "native-sdd" else "inherit"
     project_dir = project_dir.resolve()
     repository = _repository_root(project_dir)
     if repo is None:
@@ -583,7 +591,7 @@ def register_pinned_run(
     branch = _validate_branch(project_dir, selected_issue, state_dir=state_dir)
     worktree = (repository / ".worktrees" / _slug(selected_issue)).resolve()
     registration = RunRegistration(
-        schema_version=REGISTRATION_SCHEMA_VERSION,
+        schema_version=4 if effective_mode == "delegated" else REGISTRATION_SCHEMA_VERSION,
         tick_id=tick_id,
         todo_id=selected_issue.todo_id,
         repository=repository,
@@ -603,13 +611,27 @@ def register_pinned_run(
         assignee=assignee,
         review_assignee=review_assignee,
         step_keys=tuple(step_keys),
+        agent_policy_mode=effective_mode,
     )
     payload = _json_payload(registration)
     _run_dir, run_fd = _open_run_directory(state_dir, tick_id)
     try:
         existing = _load_registration_at(run_fd)
-        if existing is not None and existing != payload:
-            raise RunRegistrationError("registration_mismatch")
+        if existing is not None:
+            if type(existing.get("schema_version")) is not int:
+                raise RunRegistrationError("registration_mismatch")
+            # A retry may observe changed global configuration. Only this
+            # explicitly pinned choice is reused; every other authority field
+            # still has to match exactly, including the schema's exact keys.
+            if existing.get("schema_version") == 3 and "agent_policy_mode" not in existing:
+                registration = replace(registration, schema_version=3, agent_policy_mode="inherit")
+            elif (existing.get("schema_version") == 4
+                  and existing.get("agent_policy_mode") == "delegated"
+                  and existing.get("profile") == "native-sdd"):
+                registration = replace(registration, schema_version=4, agent_policy_mode="delegated")
+            payload = _json_payload(registration)
+            if existing != payload:
+                raise RunRegistrationError("registration_mismatch")
         if source.kind == "embedded":
             _materialize_embedded_artifact(run_fd, source)
         if existing is None:

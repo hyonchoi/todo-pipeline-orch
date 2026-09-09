@@ -2464,7 +2464,8 @@ def _validate_profile_prerequisites(
 
 
 @contextmanager
-def isolate_config(*, state_dir: Path, projects_dir: Path, prompt_client: str = "claude"):
+def isolate_config(*, state_dir: Path, projects_dir: Path, prompt_client: str = "claude",
+                   agent_policy_mode: str = "inherit"):
     """Context manager that points tpo at an isolated config file.
 
     Writes ``state_dir``/``projects_dir``/``prompt_client`` to
@@ -2488,6 +2489,7 @@ def isolate_config(*, state_dir: Path, projects_dir: Path, prompt_client: str = 
                 "state_dir": str(state_dir),
                 "projects_dir": str(projects_dir),
                 "prompt_client": prompt_client,
+                "agent_policy_mode": agent_policy_mode,
             },
             sort_keys=False,
         )
@@ -4155,7 +4157,8 @@ def run_harness(
         ticks_run = 0
         try:
             with isolate_config(
-                state_dir=state_dir, projects_dir=projects_dir, prompt_client=prompt_client
+                state_dir=state_dir, projects_dir=projects_dir, prompt_client=prompt_client,
+                agent_policy_mode=getattr(config, "agent_policy_mode", "inherit"),
             ):
                 # Emit initial event so the events log file exists for report generation
                 base_monitor(

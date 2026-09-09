@@ -1870,3 +1870,36 @@ class TestResumeIssueCloseout:
         mocks["flag"].assert_not_called()
         assert remote["writes"] == ["comment", "close", "edit", "edit"]
         assert (run_dir / "issue-closed").exists()
+
+
+@pytest.mark.parametrize("original,changed", [("inherit", "delegated"), ("delegated", "inherit")])
+def test_legacy_registration_retry_publishes_pinned_policy(tmp_path, mocker, fake_gh, original, changed):
+    from hermes_pipeline.run_registration import register_pinned_run
+    project = _create_project(tmp_path, "demo")
+    state = project / ".hermes"
+    state.mkdir()
+    TestTickPlanRequirement._configure_profile(project, tmp_path, mocker)
+    _commit_plan(project, text="# Legacy Plan\nImplement the feature.\n")
+    # Preserve registration and worktree artifacts outside tracked fixture work.
+    (project / ".git/info/exclude").write_text(".hermes/\n.worktrees/\n")
+    seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=PLAN_BODY)])
+    create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases", return_value=["worker"])
+    observed = []
+
+    def retry(**kwargs):
+        kwargs["step_keys"] = tuple(kwargs["step_keys"])
+        first = register_pinned_run(**(kwargs | {"agent_policy_mode": original}))
+        before = (state / "runs/01PINNEDRETRY/registration.json").read_bytes()
+        second = register_pinned_run(**kwargs)
+        assert first == second
+        assert (state / "runs/01PINNEDRETRY/registration.json").read_bytes() == before
+        observed.append(second)
+        return second
+
+    _run_project_tick(project_dir=project, config=Config(agent_policy_mode=changed),
+                      tick_id="01PINNEDRETRY", mocker=mocker, registration_side_effect=retry)
+    assert len(observed) == 1
+    create.assert_called_once()
+    body = create.call_args.kwargs["prepared"][0].body
+    _, _, prompt = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
+    assert prompt.startswith("AGENT-POLICY-MODE: delegated\n\n") == (original == "delegated")

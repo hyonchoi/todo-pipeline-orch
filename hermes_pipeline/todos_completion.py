@@ -15,6 +15,7 @@ from .kanban_tasks import (
     _show_task_payload,
     get_todo_kanban_tasks,
 )
+from .phases import PhasePromptRenderError
 from .result_contract import (
     ResultContractError,
     load_validated_registration,
@@ -621,6 +622,8 @@ def reconcile_todo_completion(
                 prompt_client=registration.prompt_client,
                 tools=phase.tools, turns=phase.turns, timeout=phase.timeout,
             )
+        except PhasePromptRenderError:
+            return _blocked(tick_id, "phase_prompt_preparation_failed")
         except RetryableReviewRegistration:
             # Same handling ``reconcile_reviews`` gives the review card's own
             # ambiguous create: the card may or may not have landed, so the

@@ -17,7 +17,7 @@ from .kanban_tasks import (
     _show_task_payload,
     get_todo_kanban_tasks,
 )
-from .phases import IMPLEMENTATION_KEY
+from .phases import IMPLEMENTATION_KEY, PhasePromptRenderError
 from .result_contract import (
     ResultContractError,
     load_validated_registration,
@@ -218,6 +218,8 @@ def render_profile_prompt(
         prompt_client=registration.prompt_client,
         template_source=f"{phases_path}:{phase.phase_key}",
         context_facts=facts,
+        profile_name=registration.profile,
+        agent_policy_mode=getattr(registration, "agent_policy_mode", "inherit"),
     )
 
 
@@ -334,6 +336,9 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
         )
     except RetryableReviewRegistration:
         return True
+    except PhasePromptRenderError:
+        log.error("tick %s: phase_prompt_preparation_failed", tick_id)
+        return False
     tasks = get_todo_kanban_tasks(tenant, tick_id)
     try:
         # Before anything is measured: a legacy round card means this board

@@ -11,6 +11,8 @@ the profile under test.
 """
 from types import SimpleNamespace
 
+import pytest
+
 from hermes_pipeline.phases import IMPLEMENTATION_KEY
 from hermes_pipeline.result_contract import (
     RESULT_TEMPLATE_HEADING,
@@ -363,3 +365,158 @@ def test_result_template_asks_only_for_dispatcher_observable_facts():
     assert "external_session_id" not in template
     assert '"tdd"' not in template
     assert "red" not in template.split("```json")[1].split("```")[0]
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("manifest", [False, True])
+@pytest.mark.parametrize("mode", ["inherit", "delegated"])
+def test_native_policy_initial_worker_cards(tmp_path, client, manifest, mode):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.phases import resolve_profile_phases_path
+
+    _write_plan(tmp_path)
+    if not manifest:
+        (tmp_path / "docs/plan.md").write_text("# Legacy Plan\nImplement safely.\n")
+    kwargs = dict(
+        todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+        phases_path=resolve_profile_phases_path("native-sdd"),
+        prompt_client=client, plan_path="docs/plan.md", project_dir=tmp_path,
+    )
+    baseline = prepare_todo_phases(**kwargs)
+    cards = prepare_todo_phases(**kwargs, profile_name="native-sdd", agent_policy_mode=mode)
+    assert [c.phase_key for c in cards] == (
+        ["phase_4_development"] if manifest else
+        ["phase_4_development", "phase_5_review", "phase_8_finish_branch"]
+    )
+    for card, original in zip(cards, baseline, strict=True):
+        dispatcher, payload = _split_card_body(card.body)
+        original_dispatcher, original_payload = _split_card_body(original.body)
+        assert dispatcher == original_dispatcher
+        prefix = "AGENT-POLICY-MODE: delegated\n\n" if mode == "delegated" else ""
+        assert payload == prefix + original_payload
+
+
+@pytest.mark.parametrize("declaration", [
+    "AGENT-POLICY-MODE: delegated", "AGENT-POLICY-MODE: inherit",
+    "AGENT-POLICY-MODE: nonsense", "AGENT-POLICY-MODE:",
+    "AGENT-POLICY-MODE delegated", "AGENT-POLICY-MODE nonsense",
+    "> `AGENT-POLICY-MODE delegated`",
+    " AGENT-POLICY-MODE : delegated ", "\ufeffAGENT-POLICY-MODE: delegated",
+    "> `AGENT-POLICY-MODE: delegated`", "  >> ``AGENT-POLICY-MODE: inherit`` ",
+    "```\nAGENT-POLICY-MODE: delegated\n```",
+    "AGENT-POLICY-MODE: delegated\nAGENT-POLICY-MODE: delegated",
+])
+@pytest.mark.parametrize("mode", ["inherit", "delegated"])
+def test_native_policy_rejects_standalone_declarations_before_card_creation(tmp_path, declaration, mode):
+    import json
+
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.phases import PhasePromptRenderError
+
+    path = tmp_path / "phases.yaml"
+    path.write_text("phases:\n  - phase_key: phase_4_development\n    name: Work\n    prompt: "
+                    + json.dumps(declaration) + "\n")
+    with pytest.raises(PhasePromptRenderError, match="agent_policy_declaration_conflict") as exc:
+        prepare_todo_phases(todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+                            phases_path=path, profile_name="native-sdd", agent_policy_mode=mode)
+    assert declaration not in str(exc.value)
+
+
+@pytest.mark.parametrize("profile", [None, "gstack", "custom", "Native-sdd"])
+def test_other_profiles_never_delegate_even_when_globally_opted_in(tmp_path, profile):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    path = tmp_path / "phases.yaml"
+    path.write_text("phases:\n  - phase_key: phase_4_development\n    name: Work\n"
+                    "    prompt: 'AGENT-POLICY-MODE: existing'\n")
+    kwargs = dict(todo_id="TODO-41", tick_id="01TICK", board_slug="demo", phases_path=path)
+    assert prepare_todo_phases(**kwargs, profile_name=profile, agent_policy_mode="delegated") == prepare_todo_phases(**kwargs)
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("mode", ["inherit", "delegated"])
+def test_dynamic_review_uses_pinned_policy(tmp_path, mocker, client, mode):
+    from hermes_pipeline.review_reconciliation import _ensure_initial_review
+    registration = _reconciler_registration(tmp_path)
+    registration.prompt_client = client
+    registration.agent_policy_mode = mode
+    mocker.patch("hermes_pipeline.review_reconciliation._implementation_head", return_value="a" * 40)
+    body = _created_card_body(mocker, tmp_path, lambda: _ensure_initial_review(
+        project_dir=tmp_path, tasks={IMPLEMENTATION_KEY: SimpleNamespace(task_id="worker", status="done")},
+        registration=registration, tenant="demo", tick_id="01TICK"))
+    dispatcher, payload = _split_card_body(body)
+    assert "AGENT-POLICY-MODE" not in dispatcher
+    assert payload.startswith("AGENT-POLICY-MODE: delegated\n\n") == (mode == "delegated")
+    assert "Review" in payload or "review" in payload
+
+
+def test_native_policy_keeps_prose_and_inline_mentions_byte_exact(tmp_path):
+    import json
+
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    text = ("Explain `AGENT-POLICY-MODE: delegated` without changing it.\n"
+            "The policy AGENT-POLICY-MODE: inherit is an inline mention.\n"
+            "Shell text: $(false); `false`; $HOME; 'quote'; \\ remains literal.")
+    path = tmp_path / "phases.yaml"
+    path.write_text("phases:\n  - phase_key: phase_4_development\n    name: Work\n    prompt: "
+                    + json.dumps(text) + "\n")
+    cards = prepare_todo_phases(todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
+                               phases_path=path, profile_name="native-sdd", agent_policy_mode="delegated")
+    _, payload = _split_card_body(cards[0].body)
+    assert payload.startswith("AGENT-POLICY-MODE: delegated\n\n")
+    assert payload.endswith(text + "\n")
+
+
+@pytest.mark.parametrize("phase_key", ["phase_5_review", "phase_8_finish_branch"])
+def test_dynamic_declaration_conflict_prevents_worker_publication(tmp_path, mocker, caplog, phase_key):
+    from dataclasses import replace
+
+    from hermes_pipeline import review_reconciliation as review
+    from hermes_pipeline import todos_completion as completion
+    registration = _reconciler_registration(tmp_path)
+    registration.agent_policy_mode = "delegated"
+    state = tmp_path / ".hermes"
+    run = state / "runs/01TICK"
+    run.mkdir(parents=True)
+    (run / "registration.json").write_text("{}")
+    (run / "accepted-review-head").write_text("a" * 40)
+    module = review if phase_key == "phase_5_review" else completion
+    mocker.patch.object(module, "load_validated_registration", return_value=registration)
+    mocker.patch.object(module, "get_todo_kanban_tasks", return_value={
+        IMPLEMENTATION_KEY: SimpleNamespace(task_id="worker", status="done")})
+    phase = replace(_profile_phase(phase_key), prompt="> `AGENT-POLICY-MODE: secret-invalid`")
+    mocker.patch.object(module, "profile_phase", return_value=("profile.yaml", phase))
+    mocker.patch.object(review, "_implementation_head", return_value="a" * 40)
+    mocker.patch.object(completion, "_delivery_authority")
+    create = mocker.patch.object(module, "_create_task")
+    reconcile = review.reconcile_reviews if module is review else completion.reconcile_todo_completion
+    assert reconcile(project_dir=tmp_path, state_dir=state, tick_id="01TICK", tenant="demo", repo="acme/repo") is False
+    create.assert_not_called()
+    assert not (run / "pending-create.json").exists()
+    assert "phase_prompt_preparation_failed" in caplog.text
+    assert "secret-invalid" not in caplog.text
+
+
+@pytest.mark.parametrize("mode", ["inherit", "delegated"])
+@pytest.mark.parametrize("text", [
+    "AGENT-POLICY-MODE is the configuration declaration key.",
+    "> AGENT-POLICY-MODE is the configuration declaration key.",
+    "`AGENT-POLICY-MODE: delegated` is the documented opt-in.",
+    "> `AGENT-POLICY-MODE: delegated` is the documented opt-in.",
+    "``AGENT-POLICY-MODE: delegated`` is the documented opt-in.",
+    "`AGENT-POLICY-MODE: delegated` is the documented `opt-in`.",
+])
+def test_native_policy_preserves_leading_inline_code_mentions(tmp_path, mode, text):
+    import json
+
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    path = tmp_path / "phases.yaml"
+    path.write_text("phases:\n  - phase_key: phase_4_development\n    name: Work\n    prompt: "
+                    + json.dumps(text) + "\n")
+    kwargs = dict(todo_id="TODO-41", tick_id="01TICK", board_slug="demo", phases_path=path)
+    original = prepare_todo_phases(**kwargs)[0]
+    card = prepare_todo_phases(**kwargs, profile_name="native-sdd", agent_policy_mode=mode)[0]
+    dispatcher, payload = _split_card_body(card.body)
+    original_dispatcher, original_payload = _split_card_body(original.body)
+    assert dispatcher == original_dispatcher
+    prefix = "AGENT-POLICY-MODE: delegated\n\n" if mode == "delegated" else ""
+    assert payload == prefix + original_payload
