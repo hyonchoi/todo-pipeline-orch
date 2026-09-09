@@ -61,6 +61,7 @@ def test_hermes_call_passes_correct_args():
         "hermes", "chat", "-q", "test prompt",
         "-Q",
         "-m", "claude-sonnet-4-6",
+        "-t", "none",
         "--source", "tool",
     ]
     assert mock_run.call_args[1]["timeout"] == 60
@@ -164,8 +165,7 @@ def test_hermes_agent_call_no_tools_prompt_not_contradictory():
     assert "Do not use tools." in prompt_arg
     # Must NOT contain the contradictory "You have tool access"
     assert "You have tool access" not in prompt_arg
-    # No -t flag when no tools
-    assert "-t" not in cmd
+    assert cmd[cmd.index("-t") + 1] == "none"
 
 
 def test_hermes_agent_call_handles_timeout():
@@ -745,7 +745,11 @@ def test_claude_call_passes_model_flag():
         from hermes_pipeline.hermes_adapter import claude_call
         claude_call(prompt="test", model="claude-sonnet-4-6")
 
-    assert captured_cmd[0] == ["claude", "-p", "test", "--model", "claude-sonnet-4-6"]
+    assert captured_cmd[0] == [
+        "claude", "-p", "test", "--tools", "",
+        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+        "--model", "claude-sonnet-4-6",
+    ]
 
 
 def test_claude_call_omits_model_flag_when_auto():
@@ -764,7 +768,7 @@ def test_claude_call_omits_model_flag_when_auto():
         from hermes_pipeline.hermes_adapter import claude_call
         claude_call(prompt="test", model="auto")
 
-    assert captured_cmd[0] == ["claude", "-p", "test"]
+    assert "--model" not in captured_cmd[0]
 
 
 def test_claude_call_passes_timeout():
@@ -822,3 +826,52 @@ def test_check_claude_raises_on_version_failure():
             check_claude()
     assert str(exc_info.value) == "claude --version failed (rc=1)"
     assert "SECRET_CLAUDE_VERSION_ERROR" not in str(exc_info.value)
+
+
+@pytest.mark.parametrize("mode,tools", [
+    ("query", ""), ("agent", ""), ("agent", "Read,Write"), ("claude", ""),
+])
+def test_client_subprocess_isolates_worker_authority(tmp_path, monkeypatch, mode, tools):
+    import json
+    import os
+    import sys
+
+    executable = tmp_path / ("claude" if mode == "claude" else "hermes")
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "print(json.dumps({'args': sys.argv[1:], 'worker_keys': "
+        "[key for key in os.environ if key.startswith('HERMES_KANBAN_')], "
+        "'profile': os.environ.get('HERMES_PROFILE'), "
+        "'auth': os.environ.get('OPENAI_API_KEY'), 'path': os.environ['PATH']}))\n"
+    )
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("HERMES_KANBAN_TASK", "task-sentinel")
+    monkeypatch.setenv("HERMES_KANBAN_FUTURE_AUTHORITY", "")
+    monkeypatch.setenv("HERMES_PROFILE", "test-profile")
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-auth-sentinel")
+    parent_env = dict(os.environ)
+    if mode == "claude":
+        from hermes_pipeline.hermes_adapter import claude_call
+        output = claude_call(prompt="test", model="test-model")
+    elif mode == "query":
+        output = hermes_call(prompt="test", model="test-model")
+    else:
+        output = hermes_agent_call(prompt="test", model="test-model", tools=tools).stdout
+    observed = json.loads(output)
+    assert observed["worker_keys"] == []
+    if mode == "claude":
+        assert observed["args"][observed["args"].index("--tools") + 1] == ""
+        assert "--strict-mcp-config" in observed["args"]
+        config = observed["args"][observed["args"].index("--mcp-config") + 1]
+        assert json.loads(config) == {"mcpServers": {}}
+        model_flag = "--model"
+    else:
+        assert observed["args"][observed["args"].index("-t") + 1] == (tools or "none")
+        model_flag = "-m"
+    assert observed["args"][observed["args"].index(model_flag) + 1] == "test-model"
+    assert observed["profile"] == "test-profile"
+    assert observed["auth"] == "synthetic-auth-sentinel"
+    assert observed["path"] == parent_env["PATH"]
+    assert dict(os.environ) == parent_env
