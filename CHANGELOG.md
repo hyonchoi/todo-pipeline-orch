@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.2
+
+### Patch Changes
+
+- Do not require legacy phase labels when running doctor with the native-sdd profile.
+
+- Require explicit live evaluation opt-in and isolate selection clients from Kanban worker authority.
+
+- Honor explicit delegated user-policy opt-in for native-SDD workers, pin policy mode per run, and require separate passing Claude and Codex release qualification.
+
+- Prefer the installed pipeline Hermes profile for new project implementation and review assignees.
+
+- Prevent the Hermes registration contract test from polluting live Kanban boards; require explicit opt-in and isolate its environment.
+
+- Retry verified PR handoffs after the current tick advances, including GitHub auto-closed issues, while preserving delivery verification and human merge boundaries.
+
+- Disable Slack notifications when no channel is configured and use the supported Hermes send command for configured alerts.
+
+- Fix release automation failing on missing or unrun agent-client diagnostics. Versioning preserves evidence unchanged and checks pytest, Ruff, and release metadata before updating the Version Packages branch.
+
 ## 1.0.1
 
 ### Patch Changes
