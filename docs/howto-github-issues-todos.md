@@ -278,6 +278,14 @@ run's breadcrumb records a different login; markers naming unknown ticks are
 ignored. Other lookup failures (`gh_invalid`, `gh_rate_limited`,
 `gh_unavailable`) abort the closeout for that tick and retry later.
 
+Ticks also retry active runs with a verified finish card (`finish-verified`)
+after the usual preflight, including the pending-create gate, even if the
+current tick has moved on or there are no eligible TODOs. Delivered and
+abandoned runs are skipped. TPO verifies that the PR merged before accepting
+an issue that GitHub already closed; identity or snapshot drift, hold labels,
+or a `not_planned` closure still block closeout. These retries only finish delivery:
+you still merge the PR yourself, and no manual run-state edits are needed.
+
 Non-plan profiles (`gstack`, `agent-skills`) keep the claim until you run
 `tpo todos complete <project> --todo N --pr N` after the merge; until you do,
 `tpo doctor` reports the delivered issue as `in_progress_stale`, which is the

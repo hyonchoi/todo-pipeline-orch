@@ -275,13 +275,23 @@ and `TODOS-archive.md` are retired (see
 - **Drift is a human boundary** — live issue drift after registration
   (`issue_drift`, `issue_closed`, `issue_on_hold`, `issue_identity_mismatch`)
   blocks the run as `needs_input` and is never auto-repaired;
-  `issue_unavailable:<code>` only warns. Tracker outages during selection are
-  persisted as `tracker_error: <gh code>` decisions.
+  verified delivery closeout may accept an already-closed issue after checking
+  that the PR merged, but identity, snapshot hash, hold, and `not_planned`
+  checks still apply.
+  `issue_unavailable:<code>` only warns during execution/resume preflight;
+  delivery requires a successful live drift read before closeout. Tracker
+  outages during selection are persisted as `tracker_error: <gh code>` decisions.
 - **Claim and closeout** — the tick that creates a run's cards adds
   `tpo:in-progress` under every profile; it is the re-selection guard between
   PR-open and merge. Under a plan-gated profile (`requires_plan`) closeout
   closes the issue via `gh`, removes the label, and writes the `issue-closed`
-  run marker after the PR merges. Non-plan profiles keep the claim until you run
+  run marker after the PR merges. After the usual tick preflight, including the
+  pending-create gate, ticks also retry delivery for active historical runs
+  with `finish-verified`, even when `current_tick_id` has advanced or selection
+  finds no eligible TODO. Delivered and abandoned runs are skipped. These
+  retries only reconcile delivery; they do not merge PRs or require manual
+  edits to run state. GitHub auto-closing the issue on merge does not prevent
+  closeout. Non-plan profiles keep the claim until you run
   `tpo todos complete <project> --todo N --pr N` after the merge; until then
   `in_progress_stale` is the expected blocked reason for a delivered issue.
   Completion markers count only when TPO wrote them (the current `gh` login, or
