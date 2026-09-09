@@ -112,11 +112,16 @@ repository; `doctor` reports any label still missing.
 another one. `native-sdd` is **plan-gated**: every TODO it picks must carry a
 Plan document with a machine manifest, which Step 7 covers.
 
+For a new contract, `init` also selects the `pipeline` Hermes profile for both
+implementation and review when it is installed, falling back to `default`
+otherwise. Use `--assignee` to choose explicitly. Existing contracts are
+unchanged unless you pass `--force` or `--assignee`.
+
 `doctor` first prints the selected prompt client and prerequisite diagnostics
-for that profile. Successful output ends with:
+for that profile. With the `pipeline` Hermes profile installed, successful output ends with:
 
 ```text
-OK: schema_version=3 assignee=default profile=native-sdd capabilities=['Bash', 'Edit', 'Read', 'Write']
+OK: schema_version=3 assignee=pipeline profile=native-sdd capabilities=['Bash', 'Edit', 'Read', 'Write']
 ```
 
 A project whose contract still selects `gstack`, or one whose contract predates
