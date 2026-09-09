@@ -1841,6 +1841,12 @@ def _tick_project(
 
     from . import github_issues
     from .github_issues import GitHubIssuesError
+    from .todos_completion import reconcile_pending_deliveries
+
+    reconcile_pending_deliveries(
+        project_dir=project_dir, state_dir=project_state,
+        tenant=project_slug, current_tick_id=prior_tick_id,
+    )
 
     if prior_tick_id is not None:
         pr_handoff_resolved = False
@@ -1898,6 +1904,7 @@ def _tick_project(
                     )
                     cb.observe(picked=None, counts_as_no_progress=True)
                     return
+            delivery_only = False
             if registration_path.exists() and registration_state(run_dir) == "active":
                 from .todos_completion import CLOSE_STARTED_MARKER
 
@@ -1920,9 +1927,13 @@ def _tick_project(
                     drift = github_issues.check_issue_drift(
                         project_dir, pinned, repo=repo, live=live
                     )
-                if drift == "issue_closed" and (run_dir / CLOSE_STARTED_MARKER).exists():
-                    # TPO itself began closing this issue; let the delivery
-                    # reconciler finish (it never re-claims a closed issue).
+                if drift == "issue_closed" and (
+                    (run_dir / CLOSE_STARTED_MARKER).exists()
+                    or (run_dir / "finish-verified").exists()
+                ):
+                    # GitHub may auto-close on human merge. Only delivery may
+                    # proceed, and it rechecks PR and issue facts before writes.
+                    delivery_only = True
                     log.info(
                         "project %s: prior tick %s closeout in progress; issue already closed",
                         project_slug,
@@ -1978,9 +1989,12 @@ def _tick_project(
                     return
 
             reconcilers = (
-                ("result", reconcile_plan_task_results),
-                ("review", reconcile_reviews),
-                ("delivery", reconcile_todo_completion),
+                (("delivery", reconcile_todo_completion),)
+                if delivery_only else (
+                    ("result", reconcile_plan_task_results),
+                    ("review", reconcile_reviews),
+                    ("delivery", reconcile_todo_completion),
+                )
             )
             for label, reconcile in reconcilers:
                 try:

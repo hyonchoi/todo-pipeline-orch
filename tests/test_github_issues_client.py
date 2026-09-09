@@ -782,3 +782,24 @@ def test_check_issue_drift_reports_on_hold_before_drift(fake_gh, tmp_path, label
         ),
     )
     assert check_issue_drift(tmp_path, _drift_registration(), repo=REPO) == "issue_on_hold"
+
+
+@pytest.mark.parametrize(
+    ("changes", "expected"),
+    [
+        ({}, None),
+        ({"body": "Edited"}, "issue_drift"),
+        ({"title": "Edited"}, "issue_drift"),
+        ({"labels": [{"name": "tpo:on-hold"}]}, "issue_on_hold"),
+        ({"state_reason": "not_planned"}, "issue_not_planned"),
+        ({"html_url": "https://github.com/other/repo/issues/7"}, "issue_identity_mismatch"),
+    ],
+)
+def test_delivery_closed_issue_exception_preserves_other_drift_checks(
+    fake_gh, tmp_path, changes, expected
+):
+    payload = issue_payload(7) | {"state": "closed", "state_reason": "completed"} | changes
+    fake_gh.on(*API, stdout=json.dumps(payload))
+    assert check_issue_drift(
+        tmp_path, _drift_registration(), repo=REPO, allow_closed=True
+    ) == expected

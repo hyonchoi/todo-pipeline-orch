@@ -1610,6 +1610,7 @@ def _finish_done_fixture(tmp_path, mocker, *, tasks, view):
                  return_value=("acme/repo", "main"))
     mocker.patch("hermes_pipeline.todos_completion._remote_head", return_value="a" * 40)
     mocker.patch("hermes_pipeline.todos_completion._pr_view", side_effect=lambda *_a: dict(view))
+    mocker.patch("hermes_pipeline.todos_completion.github_issues.check_issue_drift", return_value=None)
     return state
 
 
@@ -2165,3 +2166,53 @@ def test_create_task_has_no_worktree_fallback_for_project_dir():
 
     parameter = inspect.signature(_create_task).parameters["project_dir"]
     assert parameter.default is inspect.Parameter.empty
+
+
+@pytest.mark.parametrize("failure", [False, ResultContractError("registration_invalid"), RuntimeError("provider secret")])
+def test_pending_delivery_sweep_isolates_old_failures_and_skips_terminal_runs(
+    tmp_path, mocker, caplog, failure
+):
+    from hermes_pipeline import todos_completion as module
+
+    state = tmp_path / "state"
+    for tick in ("01BAD", "02READY", "03DELIVERED", "04ABANDONED", "05UNVERIFIED", "CURRENT"):
+        run = state / "runs" / tick
+        run.mkdir(parents=True)
+        (run / "registration.json").write_text(json.dumps({"schema_version": 3, "issue_number": 3}))
+        if tick != "05UNVERIFIED":
+            (run / "finish-verified").write_text("a" * 40)
+        if tick == "03DELIVERED":
+            (run / "issue-closed").touch()
+        if tick == "04ABANDONED":
+            (run / "abandoned").touch()
+    mocker.patch.object(module.github_issues, "repository_identity", return_value="acme/repo")
+    reconcile = mocker.patch.object(module, "reconcile_todo_completion", side_effect=[failure, True])
+    module.reconcile_pending_deliveries(
+        project_dir=tmp_path, state_dir=state, tenant="demo", current_tick_id="CURRENT",
+    )
+    assert [call.kwargs["tick_id"] for call in reconcile.call_args_list] == ["01BAD", "02READY"]
+    assert "provider secret" not in caplog.text
+
+
+@pytest.mark.parametrize("drift", ["issue_drift", "issue_on_hold", "issue_not_planned", "issue_identity_mismatch", "issue_unavailable:gh_auth"])
+def test_merged_delivery_rechecks_live_issue_drift_before_close(tmp_path, mocker, drift):
+    state = _finish_done_fixture(tmp_path, mocker, tasks=_finish_tasks(), view=_view("MERGED"))
+    mocker.patch("hermes_pipeline.todos_completion._check_state", return_value="passed")
+    check = mocker.patch("hermes_pipeline.todos_completion.github_issues.check_issue_drift", return_value=drift)
+    close = mocker.patch("hermes_pipeline.todos_completion.close_issue_for_delivery")
+    assert _reconcile(tmp_path, state) is False
+    assert check.call_args.kwargs["allow_closed"] is True
+    close.assert_not_called()
+
+
+def test_verified_handoff_with_missing_finish_card_never_recreates_work(tmp_path, mocker):
+    state = _finish_done_fixture(tmp_path, mocker, tasks={}, view=_view("MERGED"))
+    (state / "runs" / "01TICK" / "finish-verified").write_text("a" * 40)
+    mocker.patch("hermes_pipeline.todos_completion.profile_phase", return_value=(
+        tmp_path, SimpleNamespace(name="Finish", tools="", turns=1, timeout=1),
+    ))
+    mocker.patch("hermes_pipeline.todos_completion.render_profile_prompt", return_value="prompt")
+    mocker.patch("hermes_pipeline.todos_completion.render_result_template", return_value="template")
+    create = mocker.patch("hermes_pipeline.todos_completion._create_task")
+    assert _reconcile(tmp_path, state) is False
+    create.assert_not_called()
