@@ -57,6 +57,12 @@ class HermesAgentResult:
     timed_out: bool = False
 
 
+def _isolated_client_env() -> dict[str, str]:
+    """Keep client configuration but never delegate the parent worker lifecycle."""
+    return {key: value for key, value in os.environ.items()
+            if not key.startswith("HERMES_KANBAN_")}
+
+
 def hermes_call(
     *,
     prompt: str,
@@ -82,6 +88,7 @@ def hermes_call(
     ]
     if model != "auto":
         cmd.extend(["-m", model])
+    cmd.extend(["-t", "none"])
     cmd.extend(["--source", "tool"])
 
     last_err = None
@@ -92,6 +99,7 @@ def hermes_call(
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=_isolated_client_env(),
             )
             last_err = None  # clear any prior transient error on success
             break
@@ -197,8 +205,9 @@ def hermes_agent_call(
     ]
     if model != "auto":
         cmd.extend(["-m", model])
-    if tools:
-        cmd.extend(["-t", tools])
+    # A nonempty explicit toolset suppresses Hermes configured defaults.
+    # "none" resolves to no tools only without inherited Kanban worker context.
+    cmd.extend(["-t", tools or "none"])
     cmd.extend(["--max-turns", str(turns)])
     cmd.extend(["--source", "tool"])
 
@@ -215,6 +224,7 @@ def hermes_agent_call(
                 text=True,
                 cwd=cwd,
                 start_new_session=True,
+                env=_isolated_client_env(),
             )
             last_err = None  # clear prior transient error on success
             break  # spawned successfully
@@ -296,7 +306,11 @@ def claude_call(
     Raises:
         ClaudeCallError: If the process exits with non-zero.
     """
-    cmd = ["claude", "-p", prompt]
+    # Disable builtins and configured MCP servers for decision-only queries.
+    cmd = [
+        "claude", "-p", prompt, "--tools", "",
+        "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+    ]
     if model != "auto":
         cmd.extend(["--model", model])
 
@@ -305,6 +319,7 @@ def claude_call(
         capture_output=True,
         text=True,
         timeout=timeout,
+        env=_isolated_client_env(),
     )
 
     if result.returncode != 0:

@@ -1,5 +1,5 @@
 """Eval runner — exercises real Anthropic API via hermes or Claude Code CLI.
-Skipped only when neither backend is available.
+Requires TPO_RUN_LIVE_EVALS=1 outside a live Kanban worker context.
 """
 from __future__ import annotations
 
@@ -50,6 +50,10 @@ def _detect_backend() -> str | None:
 
 def _get_backend() -> str | None:
     """Lazily detect and cache the eval backend (avoids import-time subprocesses)."""
+    if os.environ.get("TPO_RUN_LIVE_EVALS") != "1" or any(
+        key.startswith("HERMES_KANBAN_") for key in os.environ
+    ):
+        return None
     if not hasattr(_get_backend, "_cached"):
         _get_backend._cached = _detect_backend()  # type: ignore[attr-defined]
     return _get_backend._cached  # type: ignore[attr-defined]
@@ -71,10 +75,15 @@ def _parse_fixture(p: Path) -> tuple[dict, str]:
 
 @pytest.mark.skipif(
     not _backend_available(),
-    reason="eval suite requires hermes or Claude Code CLI",
+    reason="live evals require TPO_RUN_LIVE_EVALS=1, no Kanban worker context, "
+    "and hermes or Claude Code CLI",
 )
 @pytest.mark.parametrize("fixture_path", sorted(FIXTURE_DIR.glob("*.md")), ids=lambda p: p.stem)
 def test_selection_fixture(fixture_path):
+    # Recheck at execution: collection-time permission and cached clients can go stale.
+    backend = _get_backend()
+    if backend is None:
+        pytest.skip("live evals are disabled, unavailable, or inside a Kanban worker")
     meta, body = _parse_fixture(fixture_path)
     ctx = SelectionContext(
         selection_markdown=body,
@@ -95,7 +104,7 @@ def test_selection_fixture(fixture_path):
             ctx=ctx, prompt_path=prompt_path,
             model=os.environ.get("EVAL_MODEL", "auto"),
             max_tokens=2000, expected_sha=None,
-            backend=_get_backend(),
+            backend=backend,
             timeout=120,
         )
     picked = r.parsed["picked"]
