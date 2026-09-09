@@ -67,6 +67,26 @@ The backlog is GitHub Issues (`tpo:todo`; see
 lives in `<project>/.hermes/runs/<tick-id>/`; the issue is the mirror TPO keeps
 consistent. These are the operator-facing recovery paths.
 
+### A live evaluation blocks its own Kanban task
+
+An older checkout can collect live selection evaluations during ordinary
+`pytest`. If a child agent inherits the worker's Kanban context, it can mark
+the real card blocked or start a duplicate worker while the original worker
+continues running.
+
+Before retrying the card, inspect its events and the original owning
+dispatcher's session and process tracking. An empty process registry in a
+separate agent session does not prove the original worker stopped. Preserve
+the worktree and partial changes, recover the existing worker where possible,
+and do not launch a second worker against the same worktree.
+
+Ensure the patched runner and adapters are available in the checkout used by
+the worker; fixing another checkout does not update an already imported module
+or a running subprocess. Coordinate any restart with the owning dispatcher
+before retrying. Keep `TPO_RUN_LIVE_EVALS` unset in workers. Intentional live
+evaluations require a separate invocation outside worker context; see
+[the eval guide](howto-eval-suite.md).
+
 ### `REGISTRATION UNSUPPORTED` from `tpo doctor`
 
 ```

@@ -1,16 +1,19 @@
 # How to run the selection eval suite
 
-Exercise the live Hermes selection agent (routed through `hermes chat -q` as of v0.3) against a fixture battery and
+Exercise the live selection agent against a fixture battery and
 verify the model picks (or correctly refuses to pick) the expected TODO. Use
-this before changing `decision/agent.py`, the prompt template
-(`hermes_pipeline/data/prompts/selection.md`), or the pinned model id.
+this for intentional live validation of `decision/agent.py`, the prompt
+template (`hermes_pipeline/data/prompts/selection.md`), or the configured model.
 
 ## Prerequisites
 
-- `ANTHROPIC_API_KEY` exported in your shell (the suite is `pytest.mark.skipif`
-  gated — without it, every fixture is silently skipped). Note: as of v0.3, the
-  orchestrator routes through Hermes via `hermes chat -q`, so Hermes must also be
-  installed and authenticated (`hermes login`).
+- Opt in for each live invocation with exactly `TPO_RUN_LIVE_EVALS=1`.
+  Run outside a Kanban worker: the presence of any `HERMES_KANBAN_*`
+  environment variable, even an empty one, refuses live evaluations.
+  Do not unset worker context to bypass this guard.
+- An installed, authenticated Hermes CLI (preferred), or Claude Code CLI
+  (fallback when Hermes is unavailable). Each client resolves authentication
+  internally; `ANTHROPIC_API_KEY` is not the eval permission gate.
 - `uv sync` has run at the repo root.
 - The bundled prompt at `hermes_pipeline/data/prompts/selection.md`, or
   `SELECTION_PROMPT_PATH` pointing to an override. The runner reads the bytes
@@ -21,18 +24,17 @@ this before changing `decision/agent.py`, the prompt template
 1. Run the full battery:
 
    ```bash
-     
-   uv run pytest tests/eval/ -v
+   TPO_RUN_LIVE_EVALS=1 uv run pytest tests/eval/ -v
    ```
 
    Each fixture under `tests/eval/selection/*.md` produces one parameterized
-   test. Expect ~8 tests today (1 API call each) — budget roughly $0.05–$0.15
-   per full run with `claude-opus-4-7`.
+   test. Each fixture calls the selected live client; provider usage and cost
+   depend on the configured model and account.
 
 2. Run a single fixture by id:
 
    ```bash
-   uv run pytest tests/eval/ -v -k respects_in_flight
+   TPO_RUN_LIVE_EVALS=1 uv run pytest tests/eval/ -v -k respects_in_flight
    ```
 
    Fixture id == filename stem. See `tests/eval/selection/` for the current
@@ -43,7 +45,7 @@ this before changing `decision/agent.py`, the prompt template
 3. Pin a different model for a one-off run (e.g. testing a fallback):
 
    ```bash
-   EVAL_MODEL=claude-sonnet-4-6 uv run pytest tests/eval/ -v
+   TPO_RUN_LIVE_EVALS=1 EVAL_MODEL=claude-sonnet-4-6 uv run pytest tests/eval/ -v
    ```
 
 ## Adding a fixture
@@ -90,10 +92,10 @@ Pass output:
 tests/eval/runner.py::test_selection_fixture[respects_in_flight] PASSED
 ```
 
-Skip (no API key):
+Skip (default invocation, worker context, or unavailable clients):
 
 ```
-SKIPPED [1] eval suite requires ANTHROPIC_API_KEY
+SKIPPED [1] live evals require TPO_RUN_LIVE_EVALS=1, no Kanban worker context, and hermes or Claude Code CLI
 ```
 
 Fail (model picked wrong TODO):
@@ -108,36 +110,33 @@ signal about whether the prompt is leading the model astray.
 
 ## Continuous integration
 
-`.github/workflows/eval.yml` runs the same battery on every PR that touches:
+The normal `uv run pytest` gate skips live fixtures without probing installed
+clients. Provider-free eval-runner tests still run. There is no dedicated
+`eval.yml` workflow; a live run requires the explicit command-scoped opt-in
+above and an authenticated client outside worker context.
 
-- `hermes_pipeline/decision/agent.py`
-- `hermes_pipeline/data/prompts/**`
-- `tests/eval/**`
+## Isolation boundary
 
-The workflow is `continue-on-error: true` — eval failures inform, they do not
-block merge. `ANTHROPIC_API_KEY` must be set as a repo secret (the eval suite
-still checks for it as a skip gate). Hermes must be installed and authenticated
-on the runner for the agent calls to succeed.
+Selection queries disable client tools and strip inherited `HERMES_KANBAN_*`
+variables. Hermes uses `-t none`; Claude disables builtins and configured MCP
+servers. Authentication and profile configuration remain available. These
+controls prevent inherited worker authority and normal tool access; they do
+not sandbox arbitrary user-configured hooks, plugins, or executable wrappers.
+Use a controlled client configuration for intentional live evaluations.
 
 ## Troubleshooting
 
 **Every test is SKIPPED.**
-`ANTHROPIC_API_KEY` is unset. The `pytest.mark.skipif` at
-`tests/eval/runner.py:23` triggers when the env var is missing. Export it and
-re-run. Note: the orchestrator now routes through Hermes — make sure Hermes is
-also installed and authenticated (`hermes login`).
+Check that this invocation has exactly `TPO_RUN_LIVE_EVALS=1`, that it is
+outside any `HERMES_KANBAN_*` context, and that Hermes or Claude Code CLI is
+installed. Permission is checked both at collection and before each fixture
+calls a provider, including when backend detection was cached. Authenticate
+the selected client before an intentional live run.
 
 **`HermesCallError: hermes call failed with return code N` thrown from `hermes_adapter.py`.**
-Hermes returned a non-zero exit code. Check `hermes login` to verify auth,
-`hermes model` to verify model, and `hermes chat -q "hello"` to confirm the
-CLI is working. Raw provider stdout and stderr are intentionally omitted from
-the exception. As of v0.3, the orchestrator no longer calls Anthropic directly —
-all LLM traffic goes through `hermes chat -q`.
-
-**`KeyError: 'ANTHROPIC_API_KEY'` thrown from the eval suite.**
-The eval suite still checks for `ANTHROPIC_API_KEY` (for backwards compatibility
-with the skip gate). The orchestrator itself no longer reads this env var directly —
-Hermes resolves auth internally.
+Hermes returned a non-zero exit code. Check authentication and model
+configuration in a controlled terminal outside worker context. Raw provider
+stdout and stderr are intentionally omitted from the exception.
 
 **Parse error: `picked=None, rationale='parse_error: invalid_response'`.**
 The model returned non-JSON or unfenced text. `agent.py:_parse` strips ` ```json `
