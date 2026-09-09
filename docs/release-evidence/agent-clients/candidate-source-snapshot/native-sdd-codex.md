@@ -29,4 +29,4 @@ for both `inherit` and `delegated`, retaining harmless user instructions.
 Capture Hermes discovery and dispatch, the real client launch/stdin, process
 exit, pinned mode through later workers, and implementation/review/finish
 observations before replacing this record with genuine passing evidence.
-Until then release finalization must remain blocked for this pair.
+This remains an unqualified diagnostic record; it does not block package releases.

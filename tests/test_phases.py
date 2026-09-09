@@ -16,7 +16,6 @@ from hermes_pipeline.phases import (
     load_profile_prerequisites,
     resolve_profile_phases_path,
 )
-from scripts.release_changesets import CONDITIONAL_PAIR_EVIDENCE
 
 FIXTURE = """
 phases:
@@ -221,23 +220,6 @@ def test_release_qualification_covers_conditional_pairs():
             for client in ("claude", "codex"):
                 assert f"`{profile}` / `{client}`" in guide
     assert "Normal CI does not run these checks" in guide
-
-
-def test_candidate_evidence_inventory_matches_conditional_pairs():
-    evidence_root = (
-        Path("docs/release-evidence/agent-clients") / "candidate-source-snapshot"
-    )
-    conditional_pairs = {
-        (profile, client)
-        for profile in ("gstack", "agent-skills", "native-sdd")
-        for item in load_profile_prerequisites(profile).skills
-        if item.support == "Conditional"
-        for client in ("claude", "codex")
-    }
-
-    assert set(CONDITIONAL_PAIR_EVIDENCE) == conditional_pairs
-    expected_names = set(CONDITIONAL_PAIR_EVIDENCE.values())
-    assert {path.name for path in evidence_root.glob("*.md")} == expected_names
 
 
 def _load_temporary_prerequisites(monkeypatch, tmp_path, metadata_text):

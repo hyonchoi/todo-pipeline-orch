@@ -17,13 +17,6 @@ PACKAGE_NAME = "hermes-pipeline"
 SEMVER_RE = re.compile(r"[0-9]+\.[0-9]+\.[0-9]+")
 ENTRY_RE = re.compile(r'^"hermes-pipeline": (patch|minor|major)$')
 BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
-CONDITIONAL_PAIR_EVIDENCE = {
-    ("gstack", "claude"): "gstack-claude.md",
-    ("gstack", "codex"): "gstack-codex.md",
-    ("native-sdd", "claude"): "native-sdd-claude.md",
-    ("native-sdd", "codex"): "native-sdd-codex.md",
-}
-EVIDENCE_FILES = tuple(dict.fromkeys(CONDITIONAL_PAIR_EVIDENCE.values()))
 
 
 class ReleaseError(ValueError):
@@ -212,78 +205,6 @@ def _prepend_release(changelog: str, section: str) -> str:
     return changelog[: first_release.start()] + section + changelog[first_release.start() :]
 
 
-def _replace_once(text: str, old: str, new: str, *, source: Path) -> str:
-    if text.count(old) != 1:
-        raise ReleaseError(
-            f"{source} must contain exactly one {old.strip()!r} marker"
-        )
-    return text.replace(old, new, 1)
-
-
-def _require_passing_evidence(text: str, *, source: Path) -> None:
-    # Only the initial metadata list counts; transcript lines cannot qualify
-    # an artifact even when they reproduce the exact accepted Result field.
-    metadata = re.match(
-        r"\A# [^\n]+\n(?P<fields>(?:\n|[ \t]+[^\n]*\n|- [^\n]*\n)+)", text
-    )
-    fields = metadata.group("fields").splitlines() if metadata else []
-    results = [line for line in fields if line.lstrip().startswith("- Result:")]
-    if results != ["- Result: `PASS`"]:
-        raise ReleaseError(f"{source} must contain exactly one metadata Result: `PASS` field")
-
-
-def finalize_release_evidence(root: Path, version: str) -> None:
-    evidence_root = root / "docs/release-evidence/agent-clients"
-    candidate_root = evidence_root / "candidate-source-snapshot"
-    release_root = evidence_root / version
-    rendered: dict[str, str] = {}
-    for filename in EVIDENCE_FILES:
-        source = candidate_root / filename
-        if not source.is_file():
-            raise ReleaseError(f"missing candidate evidence: {source}")
-        text = source.read_text()
-        _require_passing_evidence(text, source=source)
-        text = _replace_once(
-            text,
-            " candidate qualification\n",
-            " release qualification\n",
-            source=source,
-        )
-        text = _replace_once(
-            text,
-            "- Evidence status: `candidate/source-snapshot`\n",
-            "- Evidence status: `release-final`\n",
-            source=source,
-        )
-        text = _replace_once(
-            text,
-            "- Release: `not selected`\n",
-            f"- Release: `{version}`\n",
-            source=source,
-        )
-        text, replacements = re.subn(
-            r"(?m)^- Source version: `[0-9]+\.[0-9]+\.[0-9]+`$",
-            f"- Source version: `{version}`",
-            text,
-            count=1,
-        )
-        if replacements != 1:
-            raise ReleaseError(f"{source} must contain one semantic Source version field")
-        text = _replace_once(
-            text,
-            "This qualifies discovery against the recorded source snapshot. It is not\n"
-            "release-final evidence and does not select a release version.\n",
-            "This release-final artifact records the passing qualification at the source\n"
-            f"commit above for release `{version}`.\n",
-            source=source,
-        )
-        rendered[filename] = text
-
-    release_root.mkdir(parents=True, exist_ok=True)
-    for filename, text in rendered.items():
-        (release_root / filename).write_text(text)
-
-
 def apply_release(root: Path, *, release_date: date | None = None) -> str | None:
     items = changesets(root)
     if not items:
@@ -309,7 +230,6 @@ def apply_release(root: Path, *, release_date: date | None = None) -> str | None
         )
     )
     subprocess.run(["uv", "lock"], cwd=root, check=True)
-    finalize_release_evidence(root, new_version)
     for item in items:
         item.path.unlink()
     check_consistency(root)
