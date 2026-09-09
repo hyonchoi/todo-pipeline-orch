@@ -11,17 +11,33 @@ import pytest
 
 
 def _run_hermes(home, *args):
+    # Workers export live board paths and lifecycle authority. Never inherit
+    # that namespace, including overrides introduced by future Hermes versions.
+    env = {key: value for key, value in os.environ.items() if not key.startswith("HERMES_KANBAN_")}
+    env.update(
+        HERMES_HOME=str(home),
+        # Hermes dotenv loading can otherwise replace these explicit pins.
+        PYTHON_DOTENV_DISABLED="1",
+        HERMES_MANAGED_DIR=str(home / "managed"),
+        HERMES_KANBAN_HOME=str(home),
+        HERMES_KANBAN_DB=str(home / "kanban.db"),
+        HERMES_KANBAN_WORKSPACES_ROOT=str(home / "workspaces"),
+        HERMES_KANBAN_BOARD="default",
+    )
     return subprocess.run(
         ["hermes", *args],
         capture_output=True,
         text=True,
         check=True,
-        env={**os.environ, "HERMES_HOME": str(home)},
+        env=env,
+        timeout=60,
     )
 
 
 def test_live_hermes_registration_barrier_contract(tmp_path):
     """Hermes must keep an unassigned ready barrier and its child nonspawnable."""
+    if os.environ.get("TPO_RUN_LIVE_HERMES_CONTRACT") != "1":
+        pytest.skip("set TPO_RUN_LIVE_HERMES_CONTRACT=1 to run the live barrier contract")
     if shutil.which("hermes") is None:
         pytest.skip("hermes CLI is not installed; live barrier contract unavailable")
 
