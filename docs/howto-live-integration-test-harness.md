@@ -390,14 +390,15 @@ turns `events.jsonl` into the reports and `cli.py` wires the `test` subcommand.
 - An interrupt (`Ctrl-C`) starts no remote operation; the workspace is retained
   and recovery pointers are logged.
 - Accepted residual: the production circuit breaker observes the harness's
-  ticks. Its counter (`circuit.json`) lives in the isolated harness state, but
-  the alert itself is a **real** `hermes chan message` subprocess. A multi-tick
-  plan-gated run whose reconcile ticks pick nothing new can reach
-  `circuit_breaker.no_progress_threshold` (default 3) and fire that alert before
-  the harness's own `tick_stalled` / `tick_budget_exhausted` stops the run. The
-  isolated config sets no `slack_channel`, so the send normally goes nowhere and
-  failures are swallowed, but a channel resolved from your environment would
-  receive a live post. Alerts are deduped per `alert_dedup_hours` (default 24).
+  ticks. Its counter (`circuit.json`) lives in the isolated harness state. A
+  multi-tick plan-gated run whose reconcile ticks pick nothing new can reach
+  `circuit_breaker.no_progress_threshold` (default 3) before the harness's own
+  `tick_stalled` / `tick_budget_exhausted` stops the run. The isolated config
+  sets no `slack_channel`; without a valid project channel, no notification
+  subprocess runs and these observations do not advance `last_alert_at`. If a
+  valid channel is configured in the sandbox's `.hermes/project.toml`, alerts
+  use a **real** `hermes send --to slack:<channel> -- <message>` subprocess.
+  Configured alerts are deduped per `alert_dedup_hours` (default 24).
 
 ## Local verification and recovery
 

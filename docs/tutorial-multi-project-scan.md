@@ -85,8 +85,10 @@ slack_channel = "project__second-app"
 EOF
 ```
 
-Now alerts for second-app go to `#project__second-app`, while demo-app falls
-back to the global `slack_channel` config value or `#alert`.
+Now alerts for second-app go to `#project__second-app`, while demo-app uses
+a valid global `slack_channel` config value if one is configured. Without a
+valid project or global channel, Slack notifications are disabled and no
+notification subprocess runs. You can skip this step if you do not use Slack.
 
 Run another tick to verify:
 
