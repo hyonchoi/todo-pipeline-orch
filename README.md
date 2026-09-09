@@ -267,6 +267,19 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 
 Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orch/issues).
 
+For contributor checks, run `uv run pytest`. The installed-Hermes
+registration contract test is skipped by default; opt in explicitly to check
+the installed CLI:
+
+```bash
+TPO_RUN_LIVE_HERMES_CONTRACT=1 uv run pytest tests/test_hermes_registration_contract.py -q
+```
+
+This contract test uses a temporary Hermes home, Kanban database, and workspace,
+with dotenv loading and managed configuration disabled. It does not reuse
+inherited Kanban worker settings. Dispatch runs in dry-run mode, without model
+or provider execution; artifacts stay in the temporary test directory.
+
 Pull requests record their release intent with
 [Changesets-style fragments](https://github.com/changesets/changesets) managed
 by the repository's Python release command. This workflow requires Python and
