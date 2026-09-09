@@ -86,7 +86,8 @@ _MANIFEST_REQUIRED_HINT = (
 
 
 def _doctor_github_checks(
-    project_dir: Path, state_dir: Path, *, project: str, requires_plan: bool
+    project_dir: Path, state_dir: Path, *, project: str, requires_plan: bool,
+    profile: str,
 ) -> bool:
     """Report GitHub auth, repository, label vocabulary, plan readiness and runs.
 
@@ -127,9 +128,12 @@ def _doctor_github_checks(
     if repo is not None:
         try:
             present = {name.lower() for name in github_issues.list_labels(project_dir, repo=repo)}
+            # Native SDD executes the approved Plan; legacy issue-form Phase
+            # mirrors are not prerequisites for that profile.
             missing = [
                 name for name, _color, _description in github_issues.LABEL_VOCABULARY
                 if name.lower() not in present
+                and not (profile == "native-sdd" and name.startswith("phase:"))
             ]
             if missing:
                 print(f"INVALID: missing {', '.join(missing)}; Fix: tpo todos labels sync {project}")
@@ -3199,6 +3203,7 @@ def _cmd_doctor(args, config: Config) -> int:
         project_state,
         project=args.project,
         requires_plan=phase_profile.requires_plan,
+        profile=contract.profile,
     )
 
     if not _doctor_active_registration(project_dir, project_state) or not github_ok:
