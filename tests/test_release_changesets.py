@@ -20,12 +20,11 @@ from scripts.release_changesets import (
 )
 
 
-def test_native_sdd_reuses_matching_dispatcher_evidence():
-    assert CONDITIONAL_PAIR_EVIDENCE[("native-sdd", "claude")] == (
-        CONDITIONAL_PAIR_EVIDENCE[("gstack", "claude")]
-    )
-    assert CONDITIONAL_PAIR_EVIDENCE[("native-sdd", "codex")] == (
-        CONDITIONAL_PAIR_EVIDENCE[("gstack", "codex")]
+@pytest.mark.parametrize("client", ("claude", "codex"))
+def test_native_sdd_requires_distinct_policy_evidence(client):
+    assert CONDITIONAL_PAIR_EVIDENCE[("native-sdd", client)] == f"native-sdd-{client}.md"
+    assert CONDITIONAL_PAIR_EVIDENCE[("native-sdd", client)] != (
+        CONDITIONAL_PAIR_EVIDENCE[("gstack", client)]
     )
 
 
@@ -163,7 +162,7 @@ def test_apply_release_uses_highest_bump_and_consumes_all(mocker, tmp_path):
     _write_changeset(tmp_path, "a.md", "patch", "Fix one.")
     _write_changeset(tmp_path, "b.md", "minor", "Add two.")
     _write_changeset(tmp_path, "c.md", None)
-    for filename in ("gstack-claude.md", "gstack-codex.md"):
+    for filename in CONDITIONAL_PAIR_EVIDENCE.values():
         _write_candidate_evidence(tmp_path, filename)
     def regenerate_lock(*_args, **_kwargs):
         lock = tmp_path / "uv.lock"
@@ -189,7 +188,7 @@ def test_apply_release_can_render_dated_keep_a_changelog_heading(mocker, tmp_pat
 
     _write_release_files(tmp_path)
     _write_changeset(tmp_path, "release.md", "patch", "Fix one.")
-    for filename in ("gstack-claude.md", "gstack-codex.md"):
+    for filename in CONDITIONAL_PAIR_EVIDENCE.values():
         _write_candidate_evidence(tmp_path, filename)
 
     def regenerate_lock(*_args, **_kwargs):
@@ -251,10 +250,10 @@ def test_project_version_rejects_prerelease(tmp_path):
 
 
 def test_finalize_release_evidence_preserves_snapshot_and_sets_release(tmp_path):
-    for filename in ("gstack-claude.md", "gstack-codex.md"):
+    for filename in CONDITIONAL_PAIR_EVIDENCE.values():
         _write_candidate_evidence(tmp_path, filename)
     finalize_release_evidence(tmp_path, "1.3.0")
-    for filename in ("gstack-claude.md", "gstack-codex.md"):
+    for filename in CONDITIONAL_PAIR_EVIDENCE.values():
         release = (
             tmp_path / "docs/release-evidence/agent-clients/1.3.0" / filename
         ).read_text()
@@ -288,3 +287,72 @@ def test_release_workflow_only_edits_an_open_same_repository_pr():
     )
     assert 'if [ -n "${PR_NUMBER}" ]; then' in workflow
     assert 'gh pr edit "${PR_NUMBER}"' in workflow
+
+
+@pytest.mark.parametrize("client", ("claude", "codex"))
+@pytest.mark.parametrize("result", [
+    "", "- Result: `FAIL`\n", "- Result: PASS\n", "- Result: `PASS` extra\n",
+    "- Result: `PASS`\n- Result: `PASS`\n",
+    "- Result: `PASS`\n- Result: `FAIL`\n",
+    "- Result: `PASS`\n\n- Result: `PASS`\n",
+])
+def test_finalize_rejects_invalid_native_result_before_any_writes(tmp_path, client, result):
+    for filename in ("gstack-claude.md", "gstack-codex.md",
+                     "native-sdd-claude.md", "native-sdd-codex.md"):
+        source = _write_candidate_evidence(tmp_path, filename)
+        if filename == f"native-sdd-{client}.md":
+            source.write_text(source.read_text().replace("- Result: `PASS`\n", result)
+                              + "\n```text\n- Result: `PASS`\n```\n")
+    release = tmp_path / "docs/release-evidence/agent-clients/1.3.0"
+    release.mkdir()
+    sentinel = release / "gstack-claude.md"
+    sentinel.write_text("previous evidence")
+    with pytest.raises(ReleaseError, match="Result"):
+        finalize_release_evidence(tmp_path, "1.3.0")
+    assert {p.name: p.read_text() for p in release.iterdir()} == {
+        "gstack-claude.md": "previous evidence"
+    }
+
+
+@pytest.mark.parametrize("client", ("claude", "codex"))
+def test_finalize_requires_each_native_candidate_before_writes(tmp_path, client):
+    for filename in ("gstack-claude.md", "gstack-codex.md",
+                     "native-sdd-claude.md", "native-sdd-codex.md"):
+        if filename != f"native-sdd-{client}.md":
+            _write_candidate_evidence(tmp_path, filename)
+    with pytest.raises(ReleaseError, match=f"native-sdd-{client}.md"):
+        finalize_release_evidence(tmp_path, "1.3.0")
+    assert not (tmp_path / "docs/release-evidence/agent-clients/1.3.0").exists()
+
+
+@pytest.mark.parametrize("client", ("claude", "codex"))
+@pytest.mark.parametrize("results", [
+    "- Result: `PASS`\n- Environment note: Linux\n  continued note\n- Result: `FAIL`\n",
+    "- Result: `FAIL`\n- Environment note: Linux\n  continued note\n- Result: `PASS`\n",
+    "- Result: `PASS`\n- Environment note: Linux\n  continued note\n  - Result: `FAIL`\n",
+])
+def test_finalize_rejects_duplicate_results_across_metadata_continuation(
+    tmp_path, client, results,
+):
+    for filename in CONDITIONAL_PAIR_EVIDENCE.values():
+        source = _write_candidate_evidence(tmp_path, filename)
+        if filename == f"native-sdd-{client}.md":
+            source.write_text(source.read_text().replace("- Result: `PASS`\n", results))
+    release = tmp_path / "docs/release-evidence/agent-clients/1.3.0"
+    release.mkdir()
+    for filename in CONDITIONAL_PAIR_EVIDENCE.values():
+        (release / filename).write_text(f"previous evidence: {filename}")
+    before = {p.name: p.read_bytes() for p in release.iterdir()}
+    with pytest.raises(ReleaseError, match="Result"):
+        finalize_release_evidence(tmp_path, "1.3.0")
+    assert {p.name: p.read_bytes() for p in release.iterdir()} == before
+
+
+def test_repository_unrun_native_candidates_cannot_claim_pass():
+    root = Path(__file__).resolve().parents[1]
+    candidates = root / "docs/release-evidence/agent-clients/candidate-source-snapshot"
+    for client in ("claude", "codex"):
+        document = (candidates / f"native-sdd-{client}.md").read_text()
+        if "- Live qualification: `unrun`\n" in document:
+            assert "- Result: `FAIL`\n" in document
+    assert check_consistency(root) == project_version(root)
