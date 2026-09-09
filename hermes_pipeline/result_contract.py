@@ -10,9 +10,9 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import github_issues
+from .config import AgentPolicyMode
 from .github_issues import (
     MAX_ISSUE_SNAPSHOT_CHARS,
-    REGISTRATION_SCHEMA_VERSION,
     SUPPORTED_REGISTRATION_SCHEMA_VERSIONS,
     GitHubIssuesError,
     SnapshotFormatError,
@@ -193,6 +193,7 @@ class ValidatedRegistration:
     # reconcilers render their cards from this profile's prompts, so it must be
     # the run's own profile, not whatever the project config says now.
     profile: str = ""
+    agent_policy_mode: AgentPolicyMode = "inherit"
 
 
 def sanitize_result_text(value: object, *, maximum: int) -> str:
@@ -792,6 +793,7 @@ _REGISTRATION_KEYS = {
     "step_keys",
 }
 _REGISTRATION_V3_KEYS = _REGISTRATION_KEYS | {"plan_source_kind", "plan_artifact"}
+_REGISTRATION_V4_KEYS = _REGISTRATION_V3_KEYS | {"agent_policy_mode"}
 
 
 def load_validated_registration(
@@ -808,13 +810,21 @@ def load_validated_registration(
         raise ResultContractError("registration_invalid") from exc
     registration = _mapping(raw, code="registration_invalid")
     schema_version = registration.get("schema_version")
-    if schema_version not in SUPPORTED_REGISTRATION_SCHEMA_VERSIONS:
+    if type(schema_version) is not int or schema_version not in SUPPORTED_REGISTRATION_SCHEMA_VERSIONS:
         raise ResultContractError("registration_invalid", "unsupported schema_version")
     _exact_keys(
         registration,
-        _REGISTRATION_V3_KEYS if schema_version == REGISTRATION_SCHEMA_VERSION else _REGISTRATION_KEYS,
+        {2: _REGISTRATION_KEYS, 3: _REGISTRATION_V3_KEYS, 4: _REGISTRATION_V4_KEYS}[schema_version],
         code="registration_invalid",
     )
+    agent_policy_mode: AgentPolicyMode = "inherit"
+    if schema_version == 4:
+        if (
+            registration["agent_policy_mode"] != "delegated"
+            or registration["profile"] != "native-sdd"
+        ):
+            raise ResultContractError("registration_invalid", "agent policy mode")
+        agent_policy_mode = "delegated"
     # The issue snapshot is hash-pinned authority content, not agent metadata:
     # bound its size instead of scanning it for secret-like text.
     _reject_unsafe_strings({key: value for key, value in registration.items() if key != "issue_snapshot"})
@@ -1024,6 +1034,7 @@ def load_validated_registration(
         plan_reference,
         resolved_source,
         registration["profile"],
+        agent_policy_mode,
     )
 
 

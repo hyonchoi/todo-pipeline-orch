@@ -434,6 +434,7 @@ def test_skeleton_has_active_default_fields():
         "log_retention_days": 7,
         "slack_channel": "",
         "prompt_client": "claude",
+        "agent_policy_mode": "inherit",
     }
 
 
@@ -602,3 +603,20 @@ def test_regression_frozen_config_unchanged():
     cfg = Config.default()
     with pytest.raises(Exception):  # FrozenInstanceError
         cfg.projects_dir = Path("/changed")
+
+
+@pytest.mark.parametrize("value", ["inherit", "delegated"])
+def test_load_global_config_accepts_agent_policy_mode(monkeypatch, tmp_path, value):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"agent_policy_mode: {value}\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert load_global_config().agent_policy_mode == value
+
+
+@pytest.mark.parametrize("yaml_value", ["null", "Inherit", "DELEGATED", "auto", "true", "[]"])
+def test_load_global_config_rejects_invalid_agent_policy_mode(monkeypatch, tmp_path, yaml_value):
+    path = tmp_path / "config.yaml"
+    path.write_text(f"agent_policy_mode: {yaml_value}\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    with pytest.raises(ValueError, match="invalid value for 'agent_policy_mode'"):
+        load_global_config()

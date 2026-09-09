@@ -519,10 +519,12 @@ def test_shell_metacharacters_in_a_phase_prompt_reach_the_card_unchanged(
     assert "Plan's" not in command_line
 
 
+@pytest.mark.parametrize("client_exit", [0, 17])
+@pytest.mark.parametrize("policy_mode", ["inherit", "delegated"])
 @pytest.mark.parametrize("linked_worktree", [False, True])
 @pytest.mark.parametrize("prompt_client", ["codex", "claude"])
 def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
-    tmp_path, prompt_client, linked_worktree
+    tmp_path, prompt_client, linked_worktree, policy_mode, client_exit
 ):
     """Run the advertised shell sequence with an unset PROMPT_FILE and fake client."""
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
@@ -540,12 +542,14 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
     body = prepare_todo_phases(
         todo_id="TODO-41", tick_id="01CLIENT", board_slug="demo",
         phases_path=phases_path, prompt_client=prompt_client,
+        profile_name="native-sdd", agent_policy_mode=policy_mode,
     )[0].body
     dispatcher, _, rest = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
     payload, _, _ = rest.partition("END EXTERNAL AGENT PROMPT\n")
     assert "Exclude both marker lines" in dispatcher
     assert "dispatcher instructions and result metadata" in dispatcher
     assert payload.endswith(prompt + "\n")
+    assert payload.startswith("AGENT-POLICY-MODE: delegated\n\n") == (policy_mode == "delegated")
 
     # The dispatcher writes precisely the content between the marker lines.
     # Run its advertised launch sequence without an inherited prompt variable:
@@ -569,6 +573,7 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
         "#!/bin/sh\n"
         'printf "%s\\n" "$@" > "$CAPTURE_ARGS"\n'
         'cat > "$CAPTURE_STDIN"\n'
+        f'exit {client_exit}\n'
     )
     client.chmod(0o755)
     args_file, stdin_file = tmp_path / "args", tmp_path / "stdin"
@@ -597,7 +602,7 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
         ["/bin/sh", "-eu", "-c", snippet], env=env, cwd=launch_dir,
         capture_output=True, text=True, timeout=10,
     )
-    assert completed.returncode == 0, completed.stderr
+    assert completed.returncode == client_exit, completed.stderr
     assert stdin_file.read_bytes() == payload.encode()
     assert "BEGIN EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
     assert "END EXTERNAL AGENT PROMPT" not in stdin_file.read_text()

@@ -22,11 +22,10 @@ would be
 `docs/release-evidence/agent-clients/0.7.0/gstack-codex.md`.
 
 `scripts/release_changesets.py` owns the explicit mapping from every advertised
-`Conditional` profile/client pair to its canonical evidence artifact. Multiple
-pairs may share one artifact only when they use the same qualified external
-contract. The `native-sdd` pairs map to the corresponding gstack artifacts
-solely for their shared Hermes `ai-coding-agents` dispatcher evidence; gstack
-and superpowers discovery sections do not become native-SDD prerequisites.
+`Conditional` profile/client pair to its evidence artifact. Native-SDD uses
+separate `native-sdd-claude.md` and `native-sdd-codex.md` files because dispatcher
+transport alone does not qualify delegated user-policy semantics. gstack and
+superpowers discovery are required only for gstack pairs.
 
 Do not create a passing artifact without running and capturing the live
 qualification commands. See the
@@ -45,8 +44,8 @@ Each artifact must include:
 - Operating system and version
 - Exact Hermes version
 - Exact client version
-- Exact gstack and superpowers distribution versions
-- Exact gstack skill root and superpowers plugin source
+- Exact gstack and superpowers distribution versions (gstack pairs only)
+- Exact gstack skill root and superpowers plugin source (gstack pairs only)
 - Discovery command and complete discovery output
 - Hermes `skills list --enabled-only` command and output proving that
   `ai-coding-agents` is enabled
@@ -69,6 +68,15 @@ An artifact that cannot prove either Hermes skill enablement or dispatcher
 execution must record `Result: FAIL`; direct client invocation alone is not a
 substitute.
 
+Native-SDD evidence additionally records both policy modes, retained harmless
+user instructions, pinned registration behavior, and phase-specific worker
+observations from the [live recipes](../../release-qualification-agent-clients.md#native-sdd-live-policy-recipes).
+Unrun candidates must say `FAIL` and identify unavailable evidence, without
+invented versions, commands, outputs or verifier claims. The initial metadata
+list after the title (including blank lines and indented continuations) must contain exactly one
+`- Result: ` field with backtick-delimited `PASS` for finalization; duplicate,
+missing or non-PASS fields fail. Transcript mentions are not metadata.
+
 ## Release commit finalization
 
 The Python changeset workflow selects the release version. In the release commit,
@@ -83,3 +91,7 @@ other synchronized release files and run:
 ```bash
 rtk env -u VIRTUAL_ENV uv run --locked pytest -q tests/test_release_qualification_evidence.py
 ```
+
+The complete pre-render preflight validates all four candidates before writing
+any release-final artifact. Failed candidates still permit the independent
+version/lock/changelog consistency check to pass.

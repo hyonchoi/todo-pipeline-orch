@@ -20,11 +20,8 @@ BUMP_ORDER = {"patch": 0, "minor": 1, "major": 2}
 CONDITIONAL_PAIR_EVIDENCE = {
     ("gstack", "claude"): "gstack-claude.md",
     ("gstack", "codex"): "gstack-codex.md",
-    # native-sdd has the same sole external contract: Hermes dispatches the
-    # selected client through ai-coding-agents. It does not use the gstack or
-    # superpowers portions of these canonical artifacts.
-    ("native-sdd", "claude"): "gstack-claude.md",
-    ("native-sdd", "codex"): "gstack-codex.md",
+    ("native-sdd", "claude"): "native-sdd-claude.md",
+    ("native-sdd", "codex"): "native-sdd-codex.md",
 }
 EVIDENCE_FILES = tuple(dict.fromkeys(CONDITIONAL_PAIR_EVIDENCE.values()))
 
@@ -223,6 +220,18 @@ def _replace_once(text: str, old: str, new: str, *, source: Path) -> str:
     return text.replace(old, new, 1)
 
 
+def _require_passing_evidence(text: str, *, source: Path) -> None:
+    # Only the initial metadata list counts; transcript lines cannot qualify
+    # an artifact even when they reproduce the exact accepted Result field.
+    metadata = re.match(
+        r"\A# [^\n]+\n(?P<fields>(?:\n|[ \t]+[^\n]*\n|- [^\n]*\n)+)", text
+    )
+    fields = metadata.group("fields").splitlines() if metadata else []
+    results = [line for line in fields if line.lstrip().startswith("- Result:")]
+    if results != ["- Result: `PASS`"]:
+        raise ReleaseError(f"{source} must contain exactly one metadata Result: `PASS` field")
+
+
 def finalize_release_evidence(root: Path, version: str) -> None:
     evidence_root = root / "docs/release-evidence/agent-clients"
     candidate_root = evidence_root / "candidate-source-snapshot"
@@ -233,6 +242,7 @@ def finalize_release_evidence(root: Path, version: str) -> None:
         if not source.is_file():
             raise ReleaseError(f"missing candidate evidence: {source}")
         text = source.read_text()
+        _require_passing_evidence(text, source=source)
         text = _replace_once(
             text,
             " candidate qualification\n",

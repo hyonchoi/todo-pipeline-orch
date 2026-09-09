@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import logging
+import re
 import string
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -10,7 +11,7 @@ from typing import Final, Literal
 
 import yaml
 
-from .config import PromptClient
+from .config import AgentPolicyMode, PromptClient
 
 log = logging.getLogger(__name__)
 
@@ -383,6 +384,8 @@ def _render_phase_prompt(
     template_source: str | None = None,
     decisions: Mapping[str, str] | None = None,
     context_facts: Mapping[str, str] | None = None,
+    profile_name: str | None = None,
+    agent_policy_mode: AgentPolicyMode = "inherit",
 ) -> str:
     """Inject the pipeline context the phase prompt needs.
 
@@ -459,4 +462,33 @@ def _render_phase_prompt(
         plan_path=plan_path or "",
         **vocabulary,
     )
-    return header + body
+    rendered = header + body
+    if profile_name != "native-sdd":
+        return rendered
+    if agent_policy_mode not in ("inherit", "delegated"):
+        raise PhasePromptRenderError("invalid_agent_policy_mode")
+    # Only standalone declarations count. Unwrap presentation syntax repeatedly
+    # so nested blockquotes, inline code, BOMs and fence contents cannot hide one.
+    # This validates the payload before a worker card can be published; nothing
+    # is removed from the task text, and diagnostics never echo rejected text.
+    for line in rendered.splitlines():
+        normalized = line
+        while True:
+            unwrapped = normalized.strip().strip("\ufeff").strip().lstrip(">")
+            wrapper = re.match(r"`+", unwrapped)
+            if wrapper is not None:
+                delimiter = wrapper.group()
+                width = len(delimiter)
+                # Unwrap only a code span occupying the entire line. A span
+                # followed by prose is an inline mention, not a declaration.
+                if (len(unwrapped) >= 2 * width
+                        and unwrapped.find(delimiter, width) == len(unwrapped) - width):
+                    unwrapped = unwrapped[width:-width]
+            if unwrapped == normalized:
+                break
+            normalized = unwrapped
+        if re.match(r"^AGENT-POLICY-MODE(?:\s*[:=]|\s+\S+\s*$|\s*$)", normalized):
+            raise PhasePromptRenderError("agent_policy_declaration_conflict")
+    if agent_policy_mode == "delegated":
+        return "AGENT-POLICY-MODE: delegated\n\n" + rendered
+    return rendered

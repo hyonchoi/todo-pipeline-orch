@@ -301,6 +301,7 @@ class TestIsolateConfig:
                 "state_dir": str(state_dir),
                 "projects_dir": str(projects_dir),
                 "prompt_client": "hermes",
+                "agent_policy_mode": "inherit",
             }
             assert state_dir.is_dir()
             assert projects_dir.is_dir()
@@ -1843,7 +1844,10 @@ class TestRunHarness:
         assert "[picked_none]" in result.summary
         assert live.kwargs["shutdown_run"]["tick_id"] is None
 
-    def test_poll_timeout_emits_event_then_shuts_down(self, live):
+    @pytest.mark.parametrize("mode", ["inherit", "delegated"])
+    def test_poll_timeout_emits_event_then_shuts_down(self, live, mode):
+        from hermes_pipeline.config import Config
+
         lifecycle: list[str] = []
 
         def cooperative_poll(**kwargs):
@@ -1852,22 +1856,25 @@ class TestRunHarness:
             lifecycle.append("poll_stopped")
             return False
 
-        live.poll = cooperative_poll
-        live.status_map = {_LIVE_KEYS[0]: "running"}
+        live.pin([])
+        live.poll_pinned = cooperative_poll
+        live.status_map = {IMPLEMENTATION_KEY: "running"}
 
-        result = live.run(timeout=1, keep_dir=True)
+        result = live.run(timeout=1, keep_dir=True, profile_name="native-sdd",
+                          config=Config(agent_policy_mode=mode))
 
         assert result.exit_code == 1
         assert lifecycle == ["poll_started", "poll_stopped"]
         assert result.summary.startswith("[overall timeout after 1s] ")
         timed_out = [event for event in live.events() if event["event_type"] == "phase_timed_out"]
-        assert [event["phase_key"] for event in timed_out] == [_LIVE_KEYS[0]]
+        assert [event["phase_key"] for event in timed_out] == [IMPLEMENTATION_KEY]
         assert "discover_remote_artifacts" not in live.order
         assert live.order[-1] == "shutdown_run"
         assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
         assert live.kwargs["shutdown_run"]["keep_remote"] is True
         assert "_prune_retained_state" not in live.order
-        assert (live.workspace / "state" / "tpo-config.yaml").exists()
+        config_data = yaml.safe_load((live.workspace / "state" / "tpo-config.yaml").read_text())
+        assert config_data["agent_policy_mode"] == mode
 
     def test_timeout_is_exit_1_even_if_the_worker_reported_success(self, live, monkeypatch):
         live._stub(monkeypatch, "_run_with_timeout", lambda *_a, **_k: (True, True, {}))
@@ -1997,7 +2004,8 @@ class TestRunHarness:
         assert (live.artifacts_dir / "happy-path-report.1.json").exists()
         assert not (live.project_dir / "happy-path-report.1.json").exists()
 
-    def test_prompt_client_flows_to_preflight_and_isolated_config(self, live):
+    @pytest.mark.parametrize("mode", ["inherit", "delegated"])
+    def test_prompt_client_flows_to_preflight_and_isolated_config(self, live, mode):
         from types import SimpleNamespace
 
         seen: dict[str, str] = {}
@@ -2007,7 +2015,7 @@ class TestRunHarness:
             return 0
 
         live.tick = tick
-        live.run(keep_dir=True, config=SimpleNamespace(prompt_client="codex"))
+        live.run(keep_dir=True, config=SimpleNamespace(prompt_client="codex", agent_policy_mode=mode))
 
         assert live.kwargs["preflight_check"]["prompt_client"] == "codex"
         assert live.kwargs["preflight_check"]["profile_name"] == "gstack"
@@ -2017,6 +2025,7 @@ class TestRunHarness:
             "state_dir": str(live.workspace / "state"),
             "projects_dir": str(live.workspace / "projects"),
             "prompt_client": "codex",
+            "agent_policy_mode": mode,
         }
 
     def test_keyboard_interrupt_retains_workspace_without_remote_ops(self, live, caplog):
@@ -2148,12 +2157,15 @@ class TestRunHarness:
         assert result.exit_code == 1
         assert result.summary.startswith("[convergence_halt] ")
 
-    def test_poll_cancellation_error_message_carries_leftovers(self, live, monkeypatch):
+    @pytest.mark.parametrize("mode", ["inherit", "delegated"])
+    def test_poll_cancellation_error_message_carries_leftovers(self, live, monkeypatch, mode):
+        from hermes_pipeline.config import Config
         from hermes_pipeline.harness import PollCancellationError
 
         def stuck(*_a, **_k):
             raise PollCancellationError("poll worker did not stop after cooperative cancellation")
 
+        live.pin([])
         live._stub(monkeypatch, "_run_with_timeout", stuck)
         live.shutdown_report = ShutdownReport(
             tick_id="tick-1", kanban_quiescent=True, remote_all_ok=True, leftovers=("left-x",),
@@ -2161,11 +2173,14 @@ class TestRunHarness:
         )
 
         with pytest.raises(HarnessCleanupError) as exc_info:
-            live.run()
+            live.run(profile_name="native-sdd", config=Config(agent_policy_mode=mode))
 
         assert "did not stop" in str(exc_info.value)
         assert "left-x" in str(exc_info.value)
         assert live.workspace.exists()
+        config_data = yaml.safe_load((live.workspace / "state" / "tpo-config.yaml").read_text())
+        assert config_data["agent_policy_mode"] == mode
+        assert live.order[-1] == "shutdown_run"
 
     def test_pending_exception_carries_shutdown_leftovers_as_a_note(self, live):
         def poll(**_k):
@@ -8427,3 +8442,10 @@ class TestDriveTicks:
         assert _make(result_box={"exception": RuntimeError("x")}) == drive
         assert hash(_make(result_box={"exception": RuntimeError("x")})) == hash(drive)
         assert _make(ticks_run=1) != drive
+
+
+def test_isolated_config_preserves_delegated_opt_in(tmp_path):
+    from hermes_pipeline.config_loader import load_global_config
+    with isolate_config(state_dir=tmp_path / "state", projects_dir=tmp_path / "projects",
+                        agent_policy_mode="delegated"):
+        assert load_global_config().agent_policy_mode == "delegated"

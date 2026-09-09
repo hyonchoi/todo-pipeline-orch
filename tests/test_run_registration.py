@@ -88,7 +88,7 @@ def _register(
         tick_id=tick_id,
         selected_issue=issue if issue is not None else _issue(),
         plan_path=plan_path,
-        profile="native-sdd",
+        profile=kwargs.pop("profile", "native-sdd"),
         prompt_client="codex",
         assignee="implementer",
         review_assignee="reviewer",
@@ -320,13 +320,13 @@ def test_embedded_artifact_rejects_lstat_fstat_identity_swap(tmp_path, mocker):
         _register(repo, issue=issue, plan_path=None)
 
 
-def test_active_registration_reader_accepts_v2_and_v3(tmp_path):
+def test_active_registration_reader_accepts_v2_v3_and_v4(tmp_path):
     state = tmp_path / ".hermes"
     _write_registration(state, "v2", {"schema_version": 2, "issue_number": 2})
     _write_registration(state, "v3", {"schema_version": 3, "issue_number": 3})
     _write_registration(state, "v4", {"schema_version": 4, "issue_number": 4})
 
-    assert active_registration_issue_numbers(state) == frozenset({2, 3})
+    assert active_registration_issue_numbers(state) == frozenset({2, 3, 4})
 
 
 def test_registration_does_not_read_todos_md(tmp_path):
@@ -798,3 +798,51 @@ def test_recording_the_branch_never_fails_registration(tmp_path, mocker, caplog)
 
     assert registration.worktree.is_dir()
     assert "pipeline_branch.txt" in caplog.text
+
+
+@pytest.mark.parametrize("mode,version", [("inherit", 3), ("delegated", 4)])
+def test_writer_pins_effective_native_policy_mode(tmp_path, mode, version):
+    project, _ = _repo(tmp_path)
+    registration = _register(project, agent_policy_mode=mode)
+    payload = json.loads((project / ".hermes/runs/01TICK/registration.json").read_text())
+    assert payload["schema_version"] == version
+    assert (payload.get("agent_policy_mode") == "delegated") == (version == 4)
+    assert ("agent_policy_mode" in payload) == (version == 4)
+    validated = load_validated_registration(project, project / ".hermes", "01TICK", repo=REPO)
+    assert validated.agent_policy_mode == mode
+    assert registration.agent_policy_mode == mode
+
+
+@pytest.mark.parametrize("original,changed", [("inherit", "delegated"), ("delegated", "inherit")])
+def test_registration_retry_retains_pinned_mode_when_global_config_changes(tmp_path, original, changed):
+    project, _ = _repo(tmp_path)
+    registration = _register(project, agent_policy_mode=original)
+    path = project / ".hermes/runs/01TICK/registration.json"
+    pinned = path.read_bytes()
+    resumed = _register(project, agent_policy_mode=changed)
+    assert path.read_bytes() == pinned
+    assert resumed == registration
+
+
+@pytest.mark.parametrize("version", [3.0, 4.0, True])
+def test_writer_retry_rejects_non_integer_schema(tmp_path, version):
+    project, _ = _repo(tmp_path)
+    _register(project, agent_policy_mode="delegated" if version == 4 else "inherit")
+    path = project / ".hermes/runs/01TICK/registration.json"
+    payload = json.loads(path.read_text())
+    payload["schema_version"] = version
+    path.write_text(json.dumps(payload))
+    with pytest.raises(RunRegistrationError, match="registration_mismatch"):
+        _register(project, agent_policy_mode="delegated" if version == 4 else "inherit")
+
+
+@pytest.mark.parametrize("profile", ["gstack", "custom", "native-sdd-custom"])
+def test_global_opt_in_keeps_other_profile_registrations_v3(tmp_path, profile):
+    project, _ = _repo(tmp_path)
+    registration = _register(project, profile=profile, agent_policy_mode="delegated")
+    payload = json.loads((project / ".hermes/runs/01TICK/registration.json").read_text())
+    assert payload["schema_version"] == 3
+    assert "agent_policy_mode" not in payload
+    assert registration.agent_policy_mode == "inherit"
+    validated = load_validated_registration(project, project / ".hermes", "01TICK", repo=REPO)
+    assert validated.agent_policy_mode == "inherit"

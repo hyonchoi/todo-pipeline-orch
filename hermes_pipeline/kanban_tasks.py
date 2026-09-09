@@ -817,6 +817,8 @@ def prepare_todo_phases(
     reference_paths: Sequence[str] = (),
     project_dir: str | Path | None = None,
     decisions: Mapping[str, str] | None = None,
+    profile_name: str | None = None,
+    agent_policy_mode: str = "inherit",
 ) -> list[PreparedPhaseTask]:
     """Render every phase card for ``todo_id`` without touching Hermes.
 
@@ -898,6 +900,8 @@ def prepare_todo_phases(
             prompt_client=prompt_client,
             template_source=f"{phases_path or 'gstack'}:{phase.phase_key}",
             decisions=decisions,
+            profile_name=profile_name,
+            agent_policy_mode=agent_policy_mode,
         )
         body_prompt = _external_agent_prompt_block(rendered_prompt)
         delegation = _external_client_delegation_block(

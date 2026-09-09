@@ -2279,6 +2279,7 @@ def _tick_project(
                 project_dir=project_dir, state_dir=project_state, tick_id=tick_id,
                 selected_issue=issue, plan_path=None, repo=repo, profile=contract.profile,
                 prompt_client=config.prompt_client, assignee=contract.assignee,
+                agent_policy_mode=config.agent_policy_mode,
                 review_assignee=getattr(contract, "review_assignee", None),
                 step_keys=planned_phase_keys(phases_path, plan_source),
             )
@@ -2300,12 +2301,17 @@ def _tick_project(
 
     log.info("project %s: selected %s, registering kanban phases", project_slug, picked)
     try:
-        prepared = prepare_todo_phases(
+        prepare_kwargs = dict(
             todo_id=picked,
             tick_id=tick_id,
             board_slug=project_slug,
             phases_path=phases_path,
             prompt_client=config.prompt_client,
+            profile_name=getattr(registration, "profile", contract.profile),
+            agent_policy_mode=(
+                getattr(registration, "agent_policy_mode", "inherit") if registration is not None
+                else config.agent_policy_mode
+            ),
             plan_path=plan_path,
             plan_source=plan_source,
             plan_reference=plan_reference,
@@ -2314,6 +2320,7 @@ def _tick_project(
             project_dir=project_dir,
             decisions=github_issues.issue_decisions(issue),
         )
+        prepared = prepare_todo_phases(**prepare_kwargs)
     except Exception as exc:  # PhasePromptRenderError, path validation, manifest errors
         if registration is not None:
             _abandon_run_if_registered(
@@ -2356,6 +2363,7 @@ def _tick_project(
                 repo=repo,
                 profile=contract.profile,
                 prompt_client=config.prompt_client,
+                agent_policy_mode=config.agent_policy_mode,
                 assignee=contract.assignee,
                 review_assignee=getattr(contract, "review_assignee", None),
                 step_keys=(phase.phase_key for phase in prepared),
@@ -2376,6 +2384,29 @@ def _tick_project(
             )
             if exc.code in _CONTENT_REGISTRATION_CODES:
                 _demote_issue(project_dir, issue, repo=repo, project_slug=project_slug, code=exc.code)
+            return
+
+    # A legacy registration retry can reuse an older policy choice after the
+    # initial preflight rendered with today's config. Publish only the pinned
+    # choice, applying the same preparation boundary before any Hermes call.
+    if registration is not None and (
+        prepare_kwargs["agent_policy_mode"] != getattr(registration, "agent_policy_mode", "inherit")
+        or prepare_kwargs["profile_name"] != getattr(registration, "profile", contract.profile)
+    ):
+        prepare_kwargs.update(
+            profile_name=getattr(registration, "profile", contract.profile),
+            agent_policy_mode=getattr(registration, "agent_policy_mode", "inherit"),
+        )
+        try:
+            prepared = prepare_todo_phases(**prepare_kwargs)
+        except Exception as exc:
+            _abandon_run_if_registered(project_state, tick_id, "phase_prompt_preparation_failed")
+            _record_failed_to_spawn(
+                project_state, tick_id, picked, exc, reason="phase_prompt_preparation_failed",
+            )
+            cb.observe(picked=None, counts_as_no_progress=True)
+            log.error("project %s: phase prompt preparation failed: error_type=%s",
+                      project_slug, type(exc).__name__)
             return
 
     # Step 5: Persist immediately before the first Hermes mutation. The

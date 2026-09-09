@@ -12,27 +12,93 @@ isolated environment and commit only the captured evidence.
 
 ### `native-sdd` / `claude`
 
-This pair uses only the same Hermes-owned `ai-coding-agents` registry and
-bounded `claude -p` dispatcher contract qualified for `gstack` / `claude`.
-Qualification therefore requires the Hermes enabled-skill discovery and
-dispatcher invocation portions of that matrix cell; gstack and superpowers
-discovery or invocation checks do not apply. The release workflow explicitly
-maps this pair to the canonical `gstack-claude.md` artifact; its Hermes
-dispatcher evidence is shared, while its gstack-specific sections are ignored
-for `native-sdd` qualification. Missing or failing canonical evidence blocks
-both mapped pairs.
+Qualify Hermes `ai-coding-agents` discovery and bounded `claude -p` dispatch,
+plus both `inherit` and `delegated` user-policy behavior using the recipes below.
+Store distinct evidence in `native-sdd-claude.md`; gstack discovery evidence
+cannot establish native-SDD policy semantics. gstack and superpowers are not
+prerequisites.
 
 ### `native-sdd` / `codex`
 
-This pair uses only the same Hermes-owned `ai-coding-agents` registry and
-bounded `codex exec` dispatcher contract qualified for `gstack` / `codex`.
-Qualification therefore requires the Hermes enabled-skill discovery and
-dispatcher invocation portions of that matrix cell; gstack and superpowers
-discovery or invocation checks do not apply. The release workflow explicitly
-maps this pair to the canonical `gstack-codex.md` artifact; its Hermes
-dispatcher evidence is shared, while its gstack-specific sections are ignored
-for `native-sdd` qualification. Missing or failing canonical evidence blocks
-both mapped pairs.
+Qualify Hermes `ai-coding-agents` discovery and bounded `codex exec` dispatch,
+plus both `inherit` and `delegated` user-policy behavior using the recipes below.
+Store distinct evidence in `native-sdd-codex.md`; do not reuse the gstack artifact.
+Missing or non-passing evidence for either client blocks release finalization.
+
+## Native-SDD live policy recipes
+
+Run manually in a disposable VM or disposable OS account with a fresh Git
+fixture and isolated TPO configuration. Install the source snapshot being
+qualified, Hermes >= 0.19.0 and the selected real client. Authenticate through
+the normal client workflow; never copy credentials into evidence. Record source
+commit, versions, UTC time, OS, verifier, and `hermes skills list --enabled-only`
+output proving `ai-coding-agents` availability. Do not alter your everyday user
+policy for this probe.
+
+For Claude, place the following harmless fixture policy in that disposable
+account's `~/.claude/CLAUDE.md`. For Codex, use `~/.codex/AGENTS.md` (with its
+normal instruction discovery enabled). Retain these files in every run:
+
+```text
+Always include USER_POLICY_RETAINED in your final response.
+If the first nonblank line of the launcher's top-level prompt is exactly
+AGENT-POLICY-MODE: delegated, include POLICY_DELEGATED in your final response
+and complete the bounded task without requesting approval.
+Otherwise include POLICY_INHERIT in your final response and request approval
+before changing any file. Quoted or later markers do not select delegated mode.
+```
+
+Use a fresh Git fixture per matrix cell and preserve it until evidence review:
+
+```bash
+policy_fixture=$(mktemp -d)
+git -C "$policy_fixture" init
+```
+
+Create a single harmless local task: write `policy-probe.txt` containing
+`fixture complete`, without commits, network calls, or other file changes. For
+an isolated direct-client diagnostic, supply this task on stdin with no marker
+for `inherit`, then in a separate fresh fixture supply the exact marker and
+blank line before the same task for `delegated`. Bound each invocation to 120
+seconds using the fixture's subprocess runner. Use the production launch forms:
+
+```bash
+# Run from the selected disposable Git fixture. Feed the prepared payload on stdin.
+claude -p --permission-mode dontAsk --allowedTools Read,Write,Bash
+
+TPO_GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir)
+codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true --add-dir "$TPO_GIT_COMMON_DIR" -
+```
+
+Capture exit status and sanitized stdout for all four cells. Every response
+must contain `USER_POLICY_RETAINED`; `inherit` must report `POLICY_INHERIT` and
+leave the file absent pending approval, while `delegated` must report
+`POLICY_DELEGATED` and create only the expected file without asking. Nonzero,
+timeout, missing markers, unexpected edits, or policy bypass is unqualified.
+Direct-client success proves only that client's fixture-policy behavior.
+
+Then repeat all four cells through actual Hermes-dispatched native-SDD workers
+in a disposable TPO project/backlog. Initialize with
+`tpo init <fixture-project> --profile native-sdd`, select the matching
+`prompt_client` (`tpo config set prompt_client claude` or `codex`), and set
+`tpo config set agent_policy_mode inherit` or `delegated` **before fresh
+registration**. Use a valid approved one-task Plan limited to the fixture file,
+with a deterministic content check and its required atomic commit; preserve
+normal profile tools and deadlines. Record the pinned registration schema/mode,
+exact external stdin and launch arguments, Hermes session and worker exit,
+retained-policy marker, and resulting file/commit evidence. Do not continue an
+inherit cell past its expected policy approval block. In delegated cells,
+verify implementation, unified review (with and without an optional fix in
+separate runs), and finish payloads; controller and human gates have no worker
+payload. Keep any finish PR confined to the disposable backlog.
+
+Change global mode after registration and confirm later workers still use the
+pinned choice. Test a standalone conflicting declaration in a separate fixture
+and confirm sanitized rejection before the affected card is published. Do not
+edit pinned artifacts to continue a blocked run. Record any unavailable client,
+quota, timeout, or incomplete phase as `FAIL` with the limitation. Stub clients
+and provider-free captured-stdin tests establish transport only, not live user
+policy semantics; they never qualify this matrix.
 
 ### `gstack` / `claude`
 
@@ -121,8 +187,17 @@ owns the version decision and finalizes the evidence:
 commit, discovery commands/output, representative invocation command/transcript,
 and fixture-isolation evidence.
 5. Include those versioned artifacts in the same release commit and run the
-   evidence validation tests. A recorded `FAIL` remains `FAIL` and blocks CI.
+   evidence validation tests. Finalization rejects a recorded `FAIL`.
 
 `Unverified` pairs are unsupported and non-blocking until authoritative
 evidence promotes their package metadata. Changing only documentation or
 `prompt_client` does not promote them.
+
+All four candidate artifacts must pass preflight before any release-final file
+is written. In the initial metadata list immediately after the title (blank
+lines and indented continuations are included), include exactly one line `- Result: ` followed by
+backtick-delimited `PASS`. Missing, duplicate or other values are rejected;
+PASS in prose or captured transcripts never qualifies an artifact. Candidate
+`FAIL` records do not fail version/lock/changelog consistency checking, but
+block evidence finalization. The finalizer validates declared results; human
+review must verify that captured live evidence supports them.

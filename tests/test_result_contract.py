@@ -2554,3 +2554,65 @@ def test_a_plan_path_the_base_commit_does_not_carry_is_a_registration_error(tmp_
     with pytest.raises(ResultContractError) as exc_info:
         load_validated_registration(repo, state, "01TICK")
     assert exc_info.value.code == "registration_invalid"
+
+
+@pytest.mark.parametrize("embedded", [False, True])
+def test_v4_registration_exposes_delegated_mode(tmp_path, embedded):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path, embedded=embedded)
+    _rewrite_registration(state, lambda payload: payload.update(
+        schema_version=4, agent_policy_mode="delegated"
+    ))
+    authority = load_validated_registration(repo, state, "01TICK")
+    assert authority.agent_policy_mode == "delegated"
+    assert authority.profile == "native-sdd"
+
+
+@pytest.mark.parametrize("schema_version", [2, 3])
+def test_legacy_registration_inherits_and_rejects_mode_field(tmp_path, schema_version):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+
+    def legacy(payload):
+        payload["schema_version"] = schema_version
+        if schema_version == 2:
+            del payload["plan_source_kind"]
+            del payload["plan_artifact"]
+
+    _rewrite_registration(state, legacy)
+    assert load_validated_registration(repo, state, "01TICK").agent_policy_mode == "inherit"
+    _rewrite_registration(state, lambda payload: payload.update(agent_policy_mode="delegated"))
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "01TICK")
+
+
+@pytest.mark.parametrize("mutate", [
+    lambda p: p.pop("agent_policy_mode"),
+    lambda p: p.update(agent_policy_mode="inherit"),
+    lambda p: p.update(agent_policy_mode=None),
+    lambda p: p.update(agent_policy_mode="Delegated"),
+    lambda p: p.update(agent_policy_mode=[]),
+    lambda p: p.update(profile="sdd"),
+    lambda p: p.update(profile="Native-SDD"),
+    lambda p: p.update(profile="native-sdd "),
+    lambda p: p.update(unexpected=True),
+    lambda p: p.pop("plan_artifact"),
+])
+def test_v4_registration_rejects_invalid_mode_profile_and_keys(tmp_path, mutate):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+
+    def v4(payload):
+        payload.update(schema_version=4, agent_policy_mode="delegated")
+        mutate(payload)
+
+    _rewrite_registration(state, v4)
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "01TICK")
+
+
+@pytest.mark.parametrize("schema_version", [4.0, [], {}, "4", None, True])
+def test_registration_rejects_non_integer_schema_version(tmp_path, schema_version):
+    repo, _worktree, state, _parent = _registered_repo(tmp_path)
+    _rewrite_registration(state, lambda payload: payload.update(
+        schema_version=schema_version, agent_policy_mode="delegated"
+    ))
+    with pytest.raises(ResultContractError, match="registration_invalid"):
+        load_validated_registration(repo, state, "01TICK")

@@ -62,9 +62,15 @@ def _git(project, *args):
                           capture_output=True, text=True).stdout.strip()
 
 
-@pytest.mark.parametrize("line_endings", ["lf", "crlf-extra-trailing-newlines"])
+@pytest.mark.parametrize("line_endings,client,policy_mode,review_fix", [
+    (line, client, mode, fix)
+    for line in ("lf", "crlf-extra-trailing-newlines")
+    for client in ("claude", "codex")
+    for mode in ("inherit", "delegated")
+    for fix in (False, True)
+] + [("lf", client, "delegated", "blocked") for client in ("claude", "codex")])
 def test_real_cli_pins_harness_embedded_plan_across_ticks(
-    tmp_path, monkeypatch, fake_gh, line_endings,
+    tmp_path, monkeypatch, fake_gh, line_endings, client, policy_mode, review_fix,
 ):
     project = tmp_path / "projects" / "sandbox"
     state = project / ".hermes"
@@ -83,8 +89,10 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
                  ("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")]:
         _git(project, *args)
     base = _git(project, "rev-parse", "HEAD")
+    current_mode = [policy_mode]
     monkeypatch.setattr(Config, "from_env", classmethod(lambda cls: Config(
-        projects_dir=project.parent, state_dir=tmp_path / "global", prompt_client="codex")))
+        projects_dir=project.parent, state_dir=tmp_path / "global", prompt_client=client,
+        agent_policy_mode=current_mode[0])))
     # Prerequisite installation is an external agent fact; profile prompts stay real.
     monkeypatch.setattr(phases, "load_profile_prerequisites", lambda *_: SimpleNamespace(skills=()))
     remote = {"body": "", "title": "", "labels": [], "created": False, "state": "open"}
@@ -183,7 +191,9 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert registration.plan_hash == hashlib.sha256(GOLDEN.encode()).hexdigest()
     assert Path(registration.plan_reference.value).read_text() == GOLDEN
     assert registration.base_sha == base
-    assert json.loads(pinned)["schema_version"] == 3
+    assert json.loads(pinned)["schema_version"] == (4 if policy_mode == "delegated" else 3)
+    assert registration.agent_policy_mode == policy_mode
+    current_mode[0] = "inherit" if policy_mode == "delegated" else "delegated"
     assert json.loads(pinned)["plan_path"] is None
     implementation = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == phases.IMPLEMENTATION_KEY)
     assert registration.plan_reference.value in implementation["body"]
@@ -222,11 +232,42 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
                   acceptance=registration.manifest.tasks[0].acceptance_criteria)
     assert cli.main(["tick", "sandbox"]) == 0
     review = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "review:0")
-    worker_result(review, head, head)
+    if review_fix == "blocked":
+        # Model the dispatcher's needs_input card after its client exits 17.
+        # This checks TPO attribution, not that live Hermes honors the contract.
+        review["status"] = "blocked"
+        review["runs"] = [{"status": "failed", "metadata": {"external_agent_exit_code": 17}}]
+        assert cli.main(["tick", "sandbox"]) == 0
+        workers = [c for c in cards if "BEGIN EXTERNAL AGENT PROMPT" in c["body"]]
+        assert workers == [implementation, review]
+        assert not (registration_file.parent / "accepted-review-head").exists()
+        assert registration_file.read_bytes() == pinned
+        outcomes = [json.loads(line) for line in (state / "outcomes" / f"{tick}-phases.json").read_text().splitlines()]
+        assert any(o["outcome"] == "failed_at_phase_review:0" for o in outcomes)
+        assert not any("finish" in o["outcome"] or "human" in o["outcome"] for o in outcomes)
+        _, _, worker_prompt = review["body"].partition("BEGIN EXTERNAL AGENT PROMPT\n")
+        assert worker_prompt.startswith("AGENT-POLICY-MODE: delegated\n\n")
+        return
+    reviewed_parent = head
+    changed_files = ()
+    if review_fix:
+        (worktree / "review.txt").write_text("Reviewed correction\n")
+        _git(worktree, "add", "review.txt")
+        _git(worktree, "commit", "-m", "fix: review correction")
+        head = _git(worktree, "rev-parse", "HEAD")
+        changed_files = ("review.txt",)
+    worker_result(review, reviewed_parent, head, changed=changed_files)
     assert cli.main(["tick", "sandbox"]) == 0
     finish = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "finish")
     assert registration.plan_reference.value in review["body"]
     assert registration.plan_reference.value in finish["body"]
+    workers = [implementation, review, finish]
+    for worker in workers:
+        dispatcher, _, worker_prompt = worker["body"].partition("BEGIN EXTERNAL AGENT PROMPT\n")
+        assert "AGENT-POLICY-MODE" not in dispatcher
+        assert worker_prompt.startswith("AGENT-POLICY-MODE: delegated\n\n") == (policy_mode == "delegated")
+    # The controller barrier gets no payload; no human-gate or remediation worker exists.
+    assert all(c in workers or "BEGIN EXTERNAL AGENT PROMPT" not in c["body"] for c in cards)
     assert registration_file.read_bytes() == pinned
 
     pr_url = f"https://github.com/{REPO}/pull/17"
@@ -264,4 +305,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert registration_file.read_bytes() == pinned
     assert Path(registration.plan_reference.value).read_bytes() == GOLDEN.encode()
     assert _git(project, "ls-files") == ".gitignore\nREADME.md"
-    assert _git(worktree, "log", "--format=%s", f"{base}..HEAD") == "feat: add normalize_names mock transform"
+    assert _git(worktree, "log", "--format=%s", f"{base}..HEAD") == (
+        ("fix: review correction\n" if review_fix else "")
+        + "feat: add normalize_names mock transform"
+    )
