@@ -111,9 +111,11 @@ authentication. If Hermes is unavailable, the profile check fails, or it times
 out, both fields remain `default`. An explicit `--assignee` bypasses the check.
 An existing contract is left untouched without `--force` or `--assignee`.
 
-The default profile is plan-gated (`requires_plan`), so a freshly initialized
-project selects nothing until each `tpo:todo` issue carries a `Plan:` path whose
-document embeds one `json tpo-plan` manifest. See
+The default profile is plan-gated (`requires_plan`), so
+a TODO is eligible only when it carries one valid Plan authority. New TODOs
+embed the Plan and one `json tpo-plan` manifest in the issue body. A legacy
+`Plan:` repository path remains eligible without a manifest; it compiles to
+one development card without per-task commit verification. See
 [Migrating from gstack](howto-native-sdd-profile.md#migrating-from-gstack).
 
 ---
@@ -433,7 +435,7 @@ for the evidence protocol.
 ## tpo test
 
 Run the live integration test harness: clones a disposable GitHub sandbox
-repository, files a real `tpo:todo` issue, commits a Plan, runs the production
+repository, files a real `tpo:todo` issue with an embedded Plan, runs the production
 `tpo tick` as a subprocess (repeatedly, for a plan-gated profile, until the run
 reaches its human merge gate), follows its Hermes kanban cards, requires exactly
 one attributable open pull request, and tears everything down fail-closed. The kanban
@@ -473,7 +475,7 @@ tpo test --repo OWNER/NAME --keep --loop
 - Verifies locally discoverable Conditional Hermes skills against the `pipeline` assignee before workspace creation.
 - Verifies `gh` auth, the viewer login, push permission, and that no other open `tpo:todo` + `ready-for-agent` issue exists in the sandbox.
 - Runs `hermes kanban list --tenant <repo-name>` before phase execution. Timeouts after 15 s.
-- Clones the sandbox, verifies the seed (`sandbox_seed_check`), ensures labels, creates the issue `[harness <token>] Implement mock name normalization`, commits the Plan locally (the fixture Plan carries a `json tpo-plan` manifest, which a plan-gated profile requires), and runs the production tick (log at `artifacts/tick.log`).
+- Clones the sandbox, verifies the seed (`sandbox_seed_check`), ensures labels, creates the issue `[harness <token>] Implement mock name normalization` through the production TODO creation transaction with an embedded Plan and `json tpo-plan` manifest, and runs the production tick (log at `artifacts/tick.log`).
 - A plan-gated (`requires_plan`) profile is driven across up to `pinned_tick_budget(step_keys)` ticks under one tick id: each tick's board is polled until it settles, classified (`in_progress`, `delivered`, `failed`), and the next tick is run until the run reaches its human merge gate. Registration is recovered through the production trust boundary, so a rejected, re-based, or re-pinned registration fails the run (`registration_invalid`, `registration_base_mismatch`, `registration_plan_mismatch`), as does a later tick that registers a different run (`unexpected_selection`), and a board that stops moving, a tick that selects nothing, or an exhausted budget fails with `tick_stalled` or `tick_budget_exhausted`. Non-plan profiles still complete in a single tick.
 - Kanban cards are created by the production tick in the tenant named after the repository (never suffixed with tick ID).
 - Shutdown cancels the tick's tasks and waits for kanban quiescence, then — and only then — discovers artifacts by run provenance, closes the issue and PR, and deletes the branch with `git push --force-with-lease`. Destructive cleanup is skipped whenever an agent may still be pushing: an unconfirmed cancel, a quiescence timeout, or a later tick that registered a run this shutdown cannot cancel. In those cases the issue is still closed and every skipped branch, PR and board is printed as a leftover with the manual commands (`--keep` skips every remote operation, including closing the issue).

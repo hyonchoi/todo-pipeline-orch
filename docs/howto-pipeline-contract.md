@@ -23,7 +23,7 @@ Expected output:
 Wrote pipeline execution contract: /path/to/<project>/.hermes/pipeline.toml
 ```
 
-The file looks like:
+When the local `pipeline` Hermes profile is unavailable, the file looks like:
 ```toml
 # Pipeline execution contract — read at tick start.
 # See docs/tutorial-getting-started.md and `tpo doctor --help`.
@@ -34,7 +34,13 @@ capabilities = ["Bash", "Edit", "Read", "Write"]
 profile = "native-sdd"
 ```
 
-If a contract already exists, `init` is a no-op. Use `--force` to regenerate:
+`init` checks `hermes profile show pipeline` with a 10-second timeout. If the
+check succeeds, both assignee fields are `"pipeline"`; otherwise both are
+`"default"`. `--assignee <name>` sets both fields explicitly and bypasses this
+check. The check does not verify authentication.
+
+If a contract already exists, `init` is a no-op unless `--force` or `--assignee`
+is supplied. Use `--force` to regenerate:
 
 ```bash
 uv run tpo init <project> --force
@@ -56,7 +62,8 @@ Run `doctor` to check the contract against the selected profile's `phases.yaml`:
 uv run tpo doctor <project>
 ```
 
-Four possible outcomes:
+Contract-validation outcomes (prerequisite, issue, and registration checks can
+produce additional diagnostics; see [the CLI reference](reference-cli.md#doctor)):
 
 | Output | Exit code | Meaning |
 |--------|-----------|---------|
@@ -79,7 +86,7 @@ profile = "native-sdd"          # which phases.yaml to run
 
 - **`schema_version`** — Do not edit manually. Bump only when the contract field set changes. Regenerate with `init --force` instead.
 - **`assignee`** — Passed as `--assignee` when registering each phase's kanban task. Change this to route phases to a different Hermes profile.
-- **`review_assignee`** — The Hermes profile that review cards are registered to, so an independent review runs under a different profile than the workers. `init` writes `"default"`; `init --assignee <name>` re-renders it as a copy of `assignee`.
+- **`review_assignee`** — The Hermes profile that review cards are registered to, so an independent review runs under a different profile than the workers. `init` sets it to the same automatically selected profile as `assignee`; `init --assignee <name>` explicitly sets both. Edit `review_assignee` to select a distinct reviewer.
 - **`capabilities`** — The tool set phases are allowed to use. If a phase in the selected profile's phases.yaml requires a tool not in this list, the tick fails with a capability mismatch error.
 - **`profile`** — Which pipeline skill-set profile's phases.yaml to run (`native-sdd` by default, or `agent-skills`; `gstack` is deprecated). Omitting the key entirely is legacy behavior: the contract then resolves to `gstack` and `doctor`/`tick` print a deprecation notice. See [How to use the agent-skills profile](howto-agent-skills-profile.md).
 
@@ -97,7 +104,10 @@ capabilities = ["Bash", "Edit", "Agent", "Read", "Write"]
 uv run tpo init <project> --force
 ```
 
-This overwrites the file with capabilities computed from the current profile's phases.yaml. Any custom `assignee`, `review_assignee`, or `capabilities` will be lost.
+This overwrites the file using `native-sdd` and its computed capabilities. To
+retain another profile, pass `--profile <name>` explicitly. Custom `assignee`,
+`review_assignee`, and `capabilities` values are replaced; `--assignee <name>`
+can explicitly set both assignee fields.
 
 ## Verification
 
@@ -117,7 +127,7 @@ uv run tpo tick
 - The contract exists but is missing tools phases.yaml requires.
 - **Fix:** Run `tpo doctor <project>` to see which capabilities are missing, then add them to `.hermes/pipeline.toml` or regenerate with `init --force`.
 
-**"ContractVersionMismatchError: schema_version=99, expected 2"**
+**"ContractVersionMismatchError: schema_version=99, expected 3"**
 - The contract file has a `schema_version` the code doesn't recognize.
 - **Fix:** Run `tpo init <project> --force` to regenerate with the current schema version. This resets `profile` to `native-sdd` unless you also pass `--profile <name>` — if the project was previously running a non-default profile, re-specify it explicitly or the regenerated contract will silently switch phase sets.
 

@@ -123,8 +123,10 @@ If `doctor` reports drift, regenerate the contract with `init --force --profile 
    the same schema as the bundled profiles. Two optional top-level keys, both
    booleans that default to `false`:
    - `requires_plan` — the profile is plan-gated: a selected TODO must carry a
-     valid `Plan:` path, and (as `native-sdd` shows) the compiler may additionally
-     require a `json tpo-plan` manifest.
+     valid embedded Plan with a `json tpo-plan` manifest, or a valid legacy
+     `Plan:` repository path. A legacy path remains eligible without a manifest;
+     `native-sdd` compiles it to one development card without per-task commit
+     verification.
    - `deprecated` — the profile still runs unchanged, but `tpo init --profile
      <name>` prints a `note:` line and `tpo doctor` / `tpo tick` emit one
      informational deprecation notice for a contract that selects it. It never

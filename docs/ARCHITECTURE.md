@@ -213,7 +213,8 @@ that abandoned its branch and worktree. The failure line is now written. Unlike
 ## Circuit Breaker
 
 - Tracks consecutive no-progress ticks (selection returns `picked=None`)
-- After threshold (default: 3), fires Slack alert
+- At threshold (default: 3), attempts a Slack alert if a valid project or global
+  channel is configured; otherwise no notification subprocess runs
 - Alert dedup: one alert per `alert_dedup_hours` (default: 24)
 - Gateway service manages tick scheduling and cron backoff
 

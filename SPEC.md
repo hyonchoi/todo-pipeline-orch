@@ -1,5 +1,10 @@
 # Spec: Pluggable Pipeline Skill-Set Profiles
 
+> Historical design specification. The objective below describes the system before
+> pluggable profiles were implemented. For current profile selection, paths, and
+> defaults, see [the profile guide](docs/howto-agent-skills-profile.md) and
+> [ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md).
+
 ## Objective
 
 Today `hermes_pipeline` has exactly one phase composition, bundled at

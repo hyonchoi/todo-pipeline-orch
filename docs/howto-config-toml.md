@@ -3,7 +3,8 @@
 Pipeline behavior that doesn't fit the environment-variable surface lives in
 a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 `[selection]` (Hermes-agent model + prompt pinning) and `[circuit_breaker]`
-(stall detection and Slack alerting).
+(stall detection and optional Slack alerting). Alerts require a valid project
+or global channel; see [Slack channel resolution](howto-multi-project-setup.md#slack-channel-resolution).
 
 ## Prerequisites
 
@@ -67,9 +68,9 @@ a TOML overlay at `.hermes/config.toml`. Two sections are read today:
 
 | Key | Default | Effect |
 |---|---|---|
-| `no_progress_threshold` | `3` | Consecutive `picked=null` decisions before a Slack alert is sent (the gateway service manages tick scheduling — the circuit breaker no longer adjusts cron). |
-| `alert_dedup_hours` | `24` | Identical alert bodies inside this window are suppressed by the sink. |
-| `max_phase_timeout_min` | `120` | Upper bound on a single phase invocation. A phase that exceeds this is killable by `tpo kill` and surfaces as orphaned. |
+| `no_progress_threshold` | `3` | Consecutive no-progress observations before a Slack alert is attempted, if a valid channel is configured (the gateway service manages tick scheduling — the circuit breaker no longer adjusts cron). |
+| `alert_dedup_hours` | `24` | Minimum interval between circuit-breaker alert attempts, tracked in `circuit.json` as `last_alert_at`; without a valid channel, this timestamp is not advanced. |
+| `max_phase_timeout_min` | `120` | Retained for compatibility; current kanban-based in-flight detection does not use this value as a phase timeout. |
 | `max_tick_duration_min` | `10` | Upper bound on one tick (selection + phase invocation). Beyond this, the stale-marker sweep treats the tick lock as abandoned. |
 
 ## Tasks

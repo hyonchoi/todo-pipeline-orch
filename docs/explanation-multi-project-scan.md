@@ -110,8 +110,13 @@ global configuration.
 For each project, `_tick_project()` runs the same flow as the single-project
 tick:
 
-1. **Check prior tick** — is `current_tick_id.txt` present? If yes, are all
-   phases complete? If not, skip the project.
+1. **Reconcile registered work** — inspect the current run before selecting
+   another TODO. For `native-sdd`, advance development and review, verify the
+   finish worker's PR, and close out the TODO when their gates are satisfied;
+   otherwise retain
+   the active run. Historical finish-verified registrations can also need
+   closeout when the current-tick pointer is absent. See
+   [the runtime architecture](ARCHITECTURE.md).
 2. **Observe outcomes** — if the prior tick completed, read the outcomes and
    update the circuit breaker.
 3. **Run selection** — the orchestrator compiles the eligible `tpo:todo`

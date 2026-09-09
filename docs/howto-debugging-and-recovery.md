@@ -3,7 +3,7 @@
 This guide covers the tools you use when a tick doesn't behave the way you expect or when a run's issue registration needs operator attention.
 
 - **`--verbose`** — add informational details (selection results, lock state) without noise
-- **`--debug`** — surface internal state (agent call summaries, circuit breaker transitions, kanban payloads)
+- **`--debug`** — surface internal state (agent call summaries, lock acquisition, circuit breaker observations)
 - **Run recovery** — handle unsupported registrations, abandon a run, and clear stale issue labels
 
 ## Prerequisites
@@ -50,13 +50,10 @@ uv run tpo --debug tick my-project
 | Selection | `selection decision: picked=TODO-N candidates=... rationale=...` |
 | Circuit breaker | `circuit breaker observe: picked=... counts_as_no_progress=... state=...` |
 | Circuit breaker | `circuit breaker: sending slack alert after N consecutive no-progress ticks` |
-| Circuit breaker | `circuit breaker: backed off to N min interval` |
-| Circuit breaker | `circuit breaker: resuming from backoff (was backed_off=True)` |
-| Kanban | `kanban registration payload (raw JSON, truncated): ...` |
 
 **Important:** Selection-agent prompt and response bodies are never logged.
-Debug output reports only the prompt SHA and character counts. Kanban payloads
-remain truncated at 500 characters.
+Agent-call debug output reports only the prompt SHA and character counts.
+The circuit breaker does not change scheduling or log cron backoff transitions.
 
 **Common use:** Troubleshoot why a specific TODO was or wasn't selected, or why the circuit breaker tripped.
 
@@ -128,8 +125,10 @@ label can linger and block re-selection. Remove it manually:
 gh issue edit <N> --remove-label tpo:in-progress
 ```
 
-Only do this once `tpo doctor <project>` reports no active run (no
-`current_tick_id.txt`) for that issue.
+Only do this once `tpo doctor <project>` reports no active registration for
+that issue. Check its complete `runs/` inventory as well as
+`current_tick_id.txt`: an older active registration can still block selection
+even when the current-tick pointer is absent.
 
 ### Pausing a TODO
 
@@ -176,7 +175,7 @@ Registered-run drift is reported by `tpo doctor` as `ISSUE DRIFT: <code>` with
 After using any of these tools, verify the result:
 
 - **`--verbose`/`--debug`:** Check the log output includes the expected detail level. Run `uv run tpo tick my-project` (no flag) and confirm no verbose or debug output appears.
-- **Run recovery:** `tpo doctor` does not read the `abandoned` marker. Run the next `tpo tick <project>`, then `tpo doctor <project>`; it should print `Issue authority: pinned` (or no active run) instead of `REGISTRATION UNSUPPORTED` / `ISSUE DRIFT`.
+- **Run recovery:** The doctor run inventory reads `abandoned` markers, but its current-registration authority check does not treat the marker as recovery. Run the next `tpo tick <project>`, then `tpo doctor <project>`; it should print `Issue authority: pinned` (or no active run) instead of `REGISTRATION UNSUPPORTED` / `ISSUE DRIFT`.
 
 ## Troubleshooting
 

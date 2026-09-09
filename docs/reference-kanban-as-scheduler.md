@@ -3,7 +3,10 @@
 `tpo tick` uses the Hermes kanban board as the source of truth for
 pipeline phase state. Instead of writing internal state files tracking which
 phase is active, phases are registered as one kanban task chain with
-`--parent` dependencies. A gate phase dispatches no worker, so registration skips it entirely: no card is created for it and no block is ever applied. Kanban status queries (`get_todo_kanban_status`,
+`--parent` dependencies. In static profile registration, phases marked `gate` are
+skipped, including the manifest-free legacy Plan fallback. The manifest-backed
+`native-sdd` flow described below uses controller reconciliation between worker
+cards. Kanban status queries (`get_todo_kanban_status`,
 `all_phases_complete`) drive the tick loop: selection, lock release, and
 circuit breaker observation.
 
@@ -12,9 +15,13 @@ Plan gets one implementation card, whatever its task count:
 
 ```text
 implementation (phase_4_development)
-            -> independent review -> review acceptance gate
-            -> finish -> TODO closeout -> open, unmerged PR + human merge decision
+            -> independent review -> finish
+            -> TODO closeout -> open, unmerged PR + human merge decision
 ```
+
+TPO reconciles results between worker cards and verifies the finish worker's PR
+before TODO closeout. Review acceptance is a controller decision, not a separate
+Kanban card.
 
 The manifest is still authority -- it gates eligibility, pins the Plan hash,
 supplies the acceptance criteria the card must report, and sets the commit-count
@@ -222,6 +229,10 @@ Retries all queued operations. Dequeues on success, leaves on failure so it can 
 
 ## Architecture
 
+The diagram below shows the legacy flow with static profile registration. For
+manifest-backed `native-sdd` runs, the [opening overview](#kanban-as-scheduler)
+describes controller reconciliation between worker cards.
+
 ```
 tick starts
     |
@@ -298,9 +309,10 @@ dependencies allow each later executable phase to run when its predecessor ends.
   from the board, not hidden in `.hermes/phase_started/` files.
 - The `--parent` dependency chain means kanban preserves the configured phase
   order — the orchestrator doesn't need to manage phase ordering.
-- A gate phase is not in the chain at all: registration skips it, so it has no
-  card and no block, and its terminal meaning is carried by the phase it
-  follows. The default `gstack` profile has no gate phase.
+- Static profile registration skips phases marked `gate`, so they
+  have no card or block and their terminal meaning is carried by the preceding
+  phase. Manifest-backed `native-sdd` uses controller reconciliation between
+  worker cards as described above; its final human merge boundary has no card. The deprecated `gstack` profile has no gate phase.
 - `todo` means an executable task is still waiting on its parent. `ready` means
   it is runnable and queued for dispatch.
 
