@@ -34,6 +34,12 @@ jobs:
           git switch -C changeset-release/main
           uv run python scripts/release_changesets.py apply
 
+      - name: Validate release metadata and deterministic checks
+        run: |
+          uv run pytest
+          uv run ruff check .
+          uv run python scripts/release_changesets.py check
+
       - name: Push release branch and create or update pull request
         run: |
           if [ -z "$(git status --porcelain)" ]; then
@@ -43,7 +49,7 @@ jobs:
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add --all -- .changeset CHANGELOG.md pyproject.toml uv.lock docs/release-evidence/agent-clients
+          git add --all -- .changeset CHANGELOG.md pyproject.toml uv.lock
           git commit -m "chore(release): version packages"
 
           BRANCH="changeset-release/main"
