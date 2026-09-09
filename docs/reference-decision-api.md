@@ -31,7 +31,7 @@ Build prompt → call agent → persist immutable decision → return.
 - `timeout` — Hard ceiling in seconds for the agent call. When `None`, auto-derived from `max_tokens`. Pass an explicit value when bounded by a per-project tick budget.
 
 **Error handling:**
-- `PromptShaMismatch` → returns `picked=None`, fires Slack alert. Rationale prefixed with `prompt_sha_mismatch:`
+- `PromptShaMismatch` → returns `picked=None`, attempts a Slack alert only when a valid channel is configured. Rationale prefixed with `prompt_sha_mismatch:`
 - Config error (missing required setting) → returns `picked=None`, rationale `config_error: missing_setting`
 - API error → returns `picked=None` with a stable sanitized rationale code: `hermes_error`, `claude_error`, `dependency_error`, `timeout`, `transport_error`, or `unexpected_error`
 - All error paths persist a decision record so the next tick's `recent_decisions` carries the cause.

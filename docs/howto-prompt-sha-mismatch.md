@@ -4,7 +4,8 @@ The selection agent SHA-pins the resolved selection prompt against
 `selection.expected_prompt_sha` in `.hermes/config.toml`. By default, that
 prompt is bundled at `hermes_pipeline/data/prompts/selection.md`; a project can
 override it with `[selection].prompt_path`. On mismatch, the
-tick aborts with `picked=None`, fires a Slack alert, and is **explicitly not
+tick aborts with `picked=None`, attempts a Slack alert when a valid channel is
+configured, and is **explicitly not
 counted as a no-progress event** (so it doesn't trip the circuit breaker).
 This guide unblocks the pipeline after a mismatch.
 
@@ -164,8 +165,9 @@ ship a normal package change. For a project override, restore the override file.
 
 After either path, `.hermes/decisions/<newest>.json` should show a real
 `picked` value (or a non-mismatch `picked=null` with a behavioral
-rationale). The Slack alerts channel should stop receiving the dedup'd
-mismatch alert within `circuit_breaker.alert_dedup_hours`.
+rationale). If Slack is configured, the next tick should no longer emit a
+mismatch alert. Prompt-SHA mismatch alerts do not use the circuit breaker's
+`alert_dedup_hours` window.
 
 ## Why this is treated as a config fault, not a stall
 

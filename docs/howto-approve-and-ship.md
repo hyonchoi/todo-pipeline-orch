@@ -16,10 +16,11 @@ Use this only for existing sidecars from older/default-overridden profiles that 
 Check that the pipeline detected ship-ready state by verifying kanban task statuses — all phases except `phase_9_ship` should be `done` or `failed`, and `phase_9_ship` should be `blocked`:
 
 ```bash
-hermes kanban list <project> --query "todo_id=TODO-5"
+hermes kanban list --tenant <project> --json
 ```
 
-Look for the TODO's kanban card with all phases except ship in completion status.
+Inspect the returned task metadata for `todo_id=TODO-5` and confirm all phases
+except ship are in completion status.
 
 ### 2. Run the approve command
 

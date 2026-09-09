@@ -14,10 +14,11 @@ Both failures surfaced late in the tick lifecycle. The contract moves validation
 
 ## The Approach
 
-The contract is a declarative manifest — not a configuration file. It lives at `.hermes/pipeline.toml` and declares four things:
+The contract is a declarative manifest — not a configuration file. It lives at `.hermes/pipeline.toml` and declares five things:
 
 - **`schema_version`** — which version of the contract format is in use
 - **`assignee`** — the Hermes profile that runs phases for this project
+- **`review_assignee`** — the Hermes profile used for independent review cards
 - **`profile`** — which pipeline skill-set profile's phases to run (`native-sdd` by default, or `agent-skills`; `gstack` is deprecated)
 - **`capabilities`** — the tools phases are allowed to use
 

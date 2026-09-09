@@ -145,8 +145,9 @@ cat ~/projects/<project>/.hermes/circuit.json | jq .
 Key fields:
 - `consecutive_no_progress` — resets to 0 when a TODO is selected,
   increments on no-progress ticks. When it hits `no_progress_threshold`
-  (default: 3), a Slack alert is sent.
-- `last_alert_at` — ISO timestamp of the last Slack alert; used for dedup
+  (default: 3), a Slack alert is attempted if a valid project or global channel
+  is configured.
+- `last_alert_at` — ISO timestamp of the last Slack alert attempt; used for dedup
   (one alert per `alert_dedup_hours`, default: 24).
 
 ## Debugging a Single Project
@@ -195,7 +196,9 @@ commit. Check the marker, tick logs, and archived-inclusive kanban snapshot;
 see [durable registration and uncertain-create recovery](reference-kanban-as-scheduler.md#durable-registration-and-uncertain-create-recovery).
 
 **Circuit breaker trips (consecutive_no_progress >= 3).**
-Three consecutive no-progress ticks triggered a Slack alert. The gateway
+Three consecutive no-progress ticks reached the alert threshold. A Slack alert
+is attempted only with a valid configured channel and an expired dedup window.
+Without a channel, the counter still advances but `last_alert_at` does not. The gateway
 service manages tick scheduling and backoff — the circuit breaker no longer
 adjusts the cron interval. Check `<project>/.hermes/decisions/` for
 `picked=None` decisions — the rationale explains why each tick found nothing
