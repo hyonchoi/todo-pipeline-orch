@@ -571,6 +571,40 @@ def _run_marker(state_dir: Path, tick_id: str, name: str) -> Path:
     return state_dir / "runs" / tick_id / name
 
 
+def reconcile_pending_deliveries(
+    *, project_dir: Path, state_dir: Path, tenant: str,
+    current_tick_id: str | None,
+) -> None:
+    """Retry verified human-merge handoffs independently of the selection pointer.
+
+    The caller holds the project tick lock. Historical runs only reconcile
+    delivery: they never resume implementation/review or reclaim an issue.
+    A broken handoff must not starve other handoffs or the current tick.
+    """
+    from .run_registration import _active_registrations
+
+    repo = None
+    for run_dir, _number in _active_registrations(state_dir):
+        if run_dir.name == current_tick_id or not (run_dir / "finish-verified").is_file():
+            continue
+        try:
+            if repo is None:
+                repo = github_issues.repository_identity(project_dir)
+            reconciled = reconcile_todo_completion(
+                project_dir=project_dir, state_dir=state_dir, tenant=tenant,
+                tick_id=run_dir.name, repo=repo,
+            )
+        except Exception as exc:
+            # Provider errors may contain secrets; only expose their type.
+            log.warning(
+                "project %s: pending delivery tick %s failed: error_type=%s",
+                tenant, run_dir.name, type(exc).__name__,
+            )
+            continue
+        if not reconciled:
+            log.warning("project %s: pending delivery tick %s blocked", tenant, run_dir.name)
+
+
 def reconcile_todo_completion(
     *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str, repo: str,
 ) -> bool:
@@ -589,6 +623,8 @@ def reconcile_todo_completion(
 
     finish = tasks.get(FINISH_KEY)
     if finish is None:
+        if _run_marker(state_dir, tick_id, "finish-verified").exists():
+            return _blocked(tick_id, "verified_finish_missing")
         try:
             # The accepted review head is written by the review reconciler when
             # a review card reports a clean verdict. Its absence is the only
@@ -715,8 +751,23 @@ def reconcile_todo_completion(
         return _blocked(tick_id, "pr_checks_failed")
     if checks == "pending" or view.get("state") != "MERGED":
         # A verified, open pull request waiting on a human merge is not a
-        # stall: the run is delivered and the board says so.
+        # stall: keep the registration active until post-merge issue closeout.
         return True
+
+    # A human merge can auto-close the issue before TPO observes it. Allow
+    # that state only here, after all finish, PR identity/head and CI checks.
+    # The default drift policy remains strict for execution and review.
+    try:
+        pinned = json.loads(registration_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return _blocked(tick_id, "registration_invalid")
+    if not isinstance(pinned, dict):
+        return _blocked(tick_id, "registration_invalid")
+    drift = github_issues.check_issue_drift(
+        project_dir, pinned, repo=repo, allow_closed=True,
+    )
+    if drift is not None:
+        return _blocked(tick_id, f"issue_drift:{drift}")
 
     try:
         close_issue_for_delivery(

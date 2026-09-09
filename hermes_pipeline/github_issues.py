@@ -857,6 +857,7 @@ def check_issue_drift(
     *,
     repo: str | None = None,
     live: IssueTodo | None = None,
+    allow_closed: bool = False,
 ) -> str | None:
     """Compare a registration's pinned issue hash with the live issue.
 
@@ -865,7 +866,8 @@ def check_issue_drift(
     failure or malformed registration), ``"issue_identity_mismatch"``,
     ``"issue_closed"``, ``"issue_on_hold"`` (``tpo:on-hold`` or ``wontfix``), or
     ``"issue_drift"``. Drift covers title and body only; other gating labels are
-    evaluated by eligibility, not here.
+    evaluated by eligibility, not here. ``allow_closed`` is for verified delivery
+    closeout only; identity, holds, snapshot drift and not-planned still block.
     """
     number = registration_payload.get("issue_number")
     pinned_hash = registration_payload.get("selected_entry_hash")
@@ -886,7 +888,10 @@ def check_issue_drift(
     if live.url.lower() != pinned_url.lower():
         return "issue_identity_mismatch"
     if live.state != "open":
-        return "issue_closed"
+        if not allow_closed or live.state != "closed":
+            return "issue_closed"
+        if live.state_reason == "not_planned":
+            return "issue_not_planned"
     if ON_HOLD_LABEL in live.labels or "wontfix" in live.labels:
         return "issue_on_hold"
     hashes_match = live.entry_hash == pinned_hash
