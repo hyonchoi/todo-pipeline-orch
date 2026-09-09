@@ -99,10 +99,17 @@ tpo init myproject --profile native-sdd
 |-----|----------|-------------|
 | `project` | Yes | Project slug |
 | `--force` | No | Overwrite an existing contract |
-| `--assignee` | No | Set the assignee field (e.g. `--assignee pipeline`) |
+| `--assignee` | No | Set both `assignee` and `review_assignee`, overriding automatic selection (e.g. `--assignee pipeline`) |
 | `--profile` | No | Pipeline workflow profile (`native-sdd`, `agent-skills`, or `gstack`). Default: `native-sdd` ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)). Determines which `phases.yaml` and capabilities the contract uses. `gstack` is deprecated: writing a gstack contract prints one `note: profile 'gstack' is deprecated; new projects default to 'native-sdd' ...` line (exit code unchanged). See [profile selection](howto-agent-skills-profile.md) and [native SDD](howto-native-sdd-profile.md). |
 
 Capabilities are computed from `phases.yaml` at write time, not hardcoded.
+
+When creating a contract or regenerating it with `--force`, `init` sets both
+`assignee` and `review_assignee` to `pipeline` if `hermes profile show pipeline`
+succeeds. This local profile check has a 10-second timeout and does not verify
+authentication. If Hermes is unavailable, the profile check fails, or it times
+out, both fields remain `default`. An explicit `--assignee` bypasses the check.
+An existing contract is left untouched without `--force` or `--assignee`.
 
 The default profile is plan-gated (`requires_plan`), so a freshly initialized
 project selects nothing until each `tpo:todo` issue carries a `Plan:` path whose

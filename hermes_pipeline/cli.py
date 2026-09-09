@@ -2915,10 +2915,25 @@ def _cmd_init(args, config: Config) -> int:
         log.error("failed to write pipeline contract at %s: %s", path, e)
         return 1
 
-    # If --assignee was provided, patch the assignee field in the written file
+    assignee = getattr(args, "assignee", None)
+    if written and assignee is None:
+        try:
+            probe = _cli_sp.run(
+                ["hermes", "profile", "show", "pipeline"],
+                stdin=_cli_sp.DEVNULL,
+                stdout=_cli_sp.DEVNULL,
+                stderr=_cli_sp.DEVNULL,
+                timeout=10,
+            )
+        except (OSError, _cli_sp.TimeoutExpired):
+            pass  # Keep the default contract when the local profile cannot be checked.
+        else:
+            if probe.returncode == 0:
+                assignee = "pipeline"
+
+    # If an assignee was selected, patch the assignee field in the written file
     # by using the contract module's TOML renderer so future schema fields
     # are preserved automatically.
-    assignee = getattr(args, "assignee", None)
     if assignee is not None and path.exists():
         try:
             data = tomllib.loads(path.read_text())

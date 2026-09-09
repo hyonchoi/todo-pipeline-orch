@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import subprocess as _test_sp
+import tomllib
 from unittest.mock import MagicMock
 
 import pytest
@@ -1550,6 +1551,14 @@ class TestBuildParserInit:
         assert args.force is False
 
 
+@pytest.fixture
+def init_profile_probe(monkeypatch):
+    probe = MagicMock(return_value=_test_sp.CompletedProcess([], 1))
+    monkeypatch.setattr("hermes_pipeline.cli._cli_sp.run", probe)
+    return probe
+
+
+@pytest.mark.usefixtures("init_profile_probe")
 class TestCmdInit:
     def test_init_unknown_project_returns_2(self, tmp_path):
         projects_dir = tmp_path / "projects"
@@ -1608,6 +1617,7 @@ class TestCmdInit:
         assert f"schema_version = {CONTRACT_SCHEMA_VERSION}" in contract.read_text()
 
 
+@pytest.mark.usefixtures("init_profile_probe")
 class TestInitAssignee:
     def test_init_assignee_parser(self):
         parser = build_parser()
@@ -1641,9 +1651,88 @@ class TestInitAssignee:
 
         assert result == 0
         contract = projects_dir / "demo" / ".hermes" / "pipeline.toml"
-        assert 'assignee = "default"' in contract.read_text()
+        data = tomllib.loads(contract.read_text())
+        assert (data["assignee"], data["review_assignee"]) == ("default", "default")
+
+    @pytest.mark.parametrize("force", [False, True])
+    @pytest.mark.parametrize("profile", ["native-sdd", "agent-skills"])
+    def test_init_prefers_installed_pipeline(self, tmp_path, init_profile_probe, force, profile):
+        from hermes_pipeline.contract import required_capabilities
+        from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+        _create_project(tmp_path, "demo")
+        contract = tmp_path / "demo" / ".hermes" / "pipeline.toml"
+        if force:
+            contract.parent.mkdir(exist_ok=True)
+            contract.write_text('schema_version = 2\nassignee = "custom"\n')
+        init_profile_probe.return_value = _test_sp.CompletedProcess([], 0)
+
+        assert _cmd_init(
+            FakeArgs(project="demo", force=force, profile=profile), Config(projects_dir=tmp_path)
+        ) == 0
+
+        data = tomllib.loads(contract.read_text())
+        assert (data["assignee"], data["review_assignee"]) == ("pipeline", "pipeline")
+        assert data["profile"] == profile
+        assert data["capabilities"] == sorted(
+            required_capabilities(load_phases(resolve_profile_phases_path(profile)))
+        )
+        init_profile_probe.assert_called_once_with(
+            ["hermes", "profile", "show", "pipeline"],
+            stdin=_test_sp.DEVNULL,
+            stdout=_test_sp.DEVNULL,
+            stderr=_test_sp.DEVNULL,
+            timeout=10,
+        )
+
+    @pytest.mark.parametrize("failure", [
+        FileNotFoundError("private details"),
+        PermissionError("private details"),
+        _test_sp.TimeoutExpired(["hermes"], 10, output="private details"),
+    ])
+    def test_init_probe_failure_falls_back(
+        self, tmp_path, init_profile_probe, failure, capsys, caplog
+    ):
+        _create_project(tmp_path, "demo")
+        init_profile_probe.side_effect = failure
+
+        assert _cmd_init(FakeArgs(project="demo", force=False), Config(projects_dir=tmp_path)) == 0
+
+        contract = tmp_path / "demo" / ".hermes" / "pipeline.toml"
+        data = tomllib.loads(contract.read_text())
+        assert (data["assignee"], data["review_assignee"]) == ("default", "default")
+        init_profile_probe.assert_called_once()
+        captured = capsys.readouterr()
+        assert "private details" not in captured.out + captured.err + caplog.text
+
+    @pytest.mark.parametrize("assignee", ["default", "custom", "pipeline"])
+    def test_explicit_assignee_bypasses_detection(self, tmp_path, init_profile_probe, assignee):
+        _create_project(tmp_path, "demo")
+        init_profile_probe.side_effect = AssertionError("must not probe")
+
+        assert _cmd_init(
+            FakeArgs(project="demo", force=False, assignee=assignee), Config(projects_dir=tmp_path)
+        ) == 0
+
+        data = tomllib.loads((tmp_path / "demo" / ".hermes" / "pipeline.toml").read_text())
+        assert (data["assignee"], data["review_assignee"]) == (assignee, assignee)
+        init_profile_probe.assert_not_called()
+
+    def test_existing_contract_untouched_without_detection(self, tmp_path, init_profile_probe):
+        _create_project(tmp_path, "demo")
+        contract = tmp_path / "demo" / ".hermes" / "pipeline.toml"
+        contract.parent.mkdir(exist_ok=True)
+        original = '# preserved\nschema_version = 2\nassignee = "custom"\nreview_assignee = "reviewer"\n'
+        contract.write_text(original)
+        init_profile_probe.side_effect = AssertionError("must not probe")
+
+        assert _cmd_init(FakeArgs(project="demo", force=False), Config(projects_dir=tmp_path)) == 0
+
+        assert contract.read_text() == original
+        init_profile_probe.assert_not_called()
 
 
+@pytest.mark.usefixtures("init_profile_probe")
 class TestInitProfile:
     def test_init_profile_parser_defaults_to_native_sdd(self):
         from hermes_pipeline.contract import DEFAULT_PROFILE

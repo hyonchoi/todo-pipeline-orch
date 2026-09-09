@@ -97,8 +97,9 @@ Migrate one project explicitly:
 
    `--force` rewrites the whole contract from the profile defaults: it
    recomputes `capabilities` from `native-sdd`'s `phases.yaml` and resets a
-   customized `assignee`, `review_assignee`, and `capabilities` to
-   `"default"` / `"default"` / the computed set. Adding `--assignee <name>`
+   customized `capabilities` to the computed set. Both `assignee` and
+   `review_assignee` become `"pipeline"` when the local Hermes profile check
+   succeeds, or `"default"` when it fails or times out. Adding `--assignee <name>`
    re-renders `review_assignee` as a *copy* of `assignee`, not as your previous
    value, so re-apply all three by editing `.hermes/pipeline.toml` afterwards.
 3. **Give every eligible TODO a Plan, and a manifest to get its results
