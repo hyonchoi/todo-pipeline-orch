@@ -13,11 +13,10 @@ log = logging.getLogger(__name__)
 
 PROJECT_TOML_PATH = ".hermes/project.toml"
 PIPELINE_TOML_PATH = ".hermes/pipeline.toml"
-DEFAULT_SLACK_CHANNEL = "#alert"
+DEFAULT_SLACK_CHANNEL = ""
 
 # A valid Slack channel: optional #/@ sigil, then an alphanumeric first
-# character (no leading dash — that could inject a CLI flag into the
-# `hermes chan message <channel> ...` argv), then alnum/dot/dash/underscore.
+# character, then alnum/dot/dash/underscore.
 # \Z (not $) so a trailing newline can't sneak through.
 _SLACK_CHANNEL_RE = re.compile(r'^[#@]?[A-Za-z0-9][A-Za-z0-9._-]*\Z')
 
@@ -71,7 +70,7 @@ def _resolve_slack_channel(
     Priority:
       1. project.toml's [notifications] slack_channel
       2. Global config slack_channel value (env_channel parameter)
-      3. #alert (hardcoded fallback)
+      3. Empty string (notifications disabled)
 
     Args:
         project_dir: Project root directory.
@@ -79,7 +78,7 @@ def _resolve_slack_channel(
         toml_data: Pre-parsed project.toml data (optional — read from disk if not provided).
 
     Returns:
-        Slack channel string (e.g., "project__my-slug" or "#alert").
+        Slack channel string, or an empty string when notifications are disabled.
     """
     # Level 1: project.toml
     if toml_data is None:
@@ -105,7 +104,7 @@ def _resolve_slack_channel(
             env_channel,
         )
 
-    # Level 3: hardcoded default
+    # Level 3: notifications disabled
     return DEFAULT_SLACK_CHANNEL
 
 

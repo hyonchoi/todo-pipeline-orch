@@ -13,7 +13,7 @@ def _br(tmp_path, **kw):
         state_path=tmp_path / "circuit.json",
         no_progress_threshold=kw.get("threshold", 3),
         alert_dedup_hours=kw.get("dedup", 24),
-        slack_channel="alerts",
+        slack_channel=kw.get("channel", "alerts"),
     )
 
 def test_first_two_no_progress_no_alert(tmp_path):
@@ -323,3 +323,29 @@ def test_sha_mismatch_does_not_count(tmp_path):
         for _ in range(10):
             br.observe(picked=None, counts_as_no_progress=False)
     assert sent == []
+
+
+@pytest.mark.parametrize("channel", ["", "ops"])
+def test_circuit_notification_respects_optional_channel(tmp_path, channel):
+    with patch("subprocess.run") as run:
+        br = _br(tmp_path, threshold=1, channel=channel)
+        br.observe(picked=None, counts_as_no_progress=True)
+        br.observe(picked=None, counts_as_no_progress=True)
+    if channel:
+        run.assert_called_once()
+        assert run.call_args.args[0][:5] == ["hermes", "send", "--to", "slack:ops", "--"]
+    else:
+        run.assert_not_called()
+    assert br._load()["consecutive_no_progress"] == 2
+
+
+def test_disabled_circuit_alert_does_not_suppress_later_configured_alert(tmp_path):
+    br = _br(tmp_path, threshold=1, channel="")
+    with patch("subprocess.run") as run:
+        br.observe(picked=None, counts_as_no_progress=True)
+        assert br._load()["last_alert_at"] is None
+        run.assert_not_called()
+        br.slack_channel = "ops"
+        br.observe(picked=None, counts_as_no_progress=True)
+        run.assert_called_once()
+    assert br._load()["last_alert_at"] is not None

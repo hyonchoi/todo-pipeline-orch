@@ -5,10 +5,10 @@ import datetime as _dt
 import fcntl
 import json
 import logging
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
+from hermes_pipeline import slack
 from hermes_pipeline.outcomes import (
     OUTCOME_ALL_COMPLETE,
     OUTCOME_FAILED_PREFIX,
@@ -16,6 +16,7 @@ from hermes_pipeline.outcomes import (
     OUTCOME_PICKED_NONE,
     OUTCOME_TICK_STARTED,
 )
+from hermes_pipeline.project_config import _is_valid_slack_channel
 
 log = logging.getLogger(__name__)
 
@@ -24,10 +25,7 @@ def _now() -> _dt.datetime:
     return _dt.datetime.now(_dt.UTC)
 
 def _send_slack(*, channel: str, msg: str) -> None:
-    try:
-        subprocess.run(["hermes", "chan", "message", channel, msg], timeout=10, check=False)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    slack.notify(channel, msg)
 
 @dataclass
 class CircuitBreaker:
@@ -72,7 +70,7 @@ class CircuitBreaker:
                 last_dt = _dt.datetime.fromisoformat(last.replace("Z", "+00:00"))
                 if (_now() - last_dt).total_seconds() < self.alert_dedup_hours * 3600:
                     dedup_ok = False
-            if dedup_ok:
+            if dedup_ok and _is_valid_slack_channel(self.slack_channel):
                 log.debug("circuit breaker: sending slack alert after %d consecutive no-progress ticks",
                           st["consecutive_no_progress"])
                 suffix = f" ({detail})" if detail else ""

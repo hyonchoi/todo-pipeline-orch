@@ -109,6 +109,71 @@ class FakeArgs:
             setattr(self, k, v)
 
 
+@pytest.mark.parametrize(
+    ("global_channel", "project_channel", "expected_channel"),
+    [
+        ("", "", ""),
+        ("#global", "", "#global"),
+        ("#global", "#project", "#project"),
+        ("#global", "--invalid", "#global"),
+    ],
+)
+def test_tick_sha_mismatch_uses_resolved_optional_slack_channel(
+    tmp_path, mocker, global_channel, project_channel, expected_channel,
+):
+    """The outer tick routes real selection faults through project notification settings."""
+    from hermes_pipeline.decision.agent import PromptShaMismatch
+
+    project_dir = _create_project(tmp_path / "projects", "demo")
+    project_state = project_dir / ".hermes"
+    project_state.mkdir()
+    circuit = mocker.Mock()
+    make_circuit = mocker.patch(
+        "hermes_pipeline.cli._make_circuit_breaker", return_value=circuit,
+    )
+    call_agent = mocker.patch(
+        "hermes_pipeline.decision.call_agent",
+        side_effect=PromptShaMismatch("a" * 64, "b" * 64),
+    )
+    subprocess_run = mocker.patch(
+        "subprocess.run",
+        return_value=subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    _tick_project(
+        project_dir=project_dir,
+        project_slug="demo",
+        project_state=project_state,
+        config=Config(
+            projects_dir=project_dir.parent,
+            state_dir=tmp_path / "global-state",
+            slack_channel=global_channel,
+        ),
+        cb_cfg=CircuitBreakerConfig(),
+        tick_id="optional-slack-tick",
+        project_toml={"notifications": {"slack_channel": project_channel}},
+    )
+
+    call_agent.assert_called_once()
+    notification_commands = [
+        call.args[0]
+        for call in subprocess_run.call_args_list
+        if call.args[0][:2] in (["hermes", "send"], ["hermes", "chan"])
+    ]
+    if expected_channel:
+        assert len(notification_commands) == 1
+        assert notification_commands[0][:5] == [
+            "hermes", "send", "--to", f"slack:{expected_channel}", "--",
+        ]
+        assert "PROMPT SHA MISMATCH" in notification_commands[0][5]
+    else:
+        assert notification_commands == []
+    assert make_circuit.call_args.args[2] == expected_channel
+    assert json.loads(
+        (project_state / "outcomes" / "optional-slack-tick-phases.json").read_text()
+    ) == {"outcome": "picked_none"}
+
+
 class TestTickContractAssignee:
     def test_tick_uses_contract_assignee(self, tmp_path, mocker):
         """create_prepared_todo_phases is called with the contract's assignee."""
@@ -573,7 +638,7 @@ class TestTickPromptPreparation:
                 project_dir=project_dir,
                 project_slug=project_dir.name,
                 project_state=project_state,
-                config=Config(prompt_client="codex"),
+                config=Config(prompt_client="codex", slack_channel="#alerts"),
                 cb_cfg=cb_cfg,
                 tick_id=tick_id,
                 project_toml={},

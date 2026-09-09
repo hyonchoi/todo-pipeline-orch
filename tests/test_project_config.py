@@ -95,12 +95,12 @@ def test_resolve_channel_env_fallback(tmp_path: Path):
     assert result == "env_channel"
 
 
-def test_resolve_channel_default_fallback(tmp_path: Path):
-    """#alert is the final fallback when no config source provides channel."""
+def test_resolve_channel_unconfigured_disables_notifications(tmp_path: Path):
+    """Without either configuration source, notifications are disabled."""
     project_dir = tmp_path / "myproject"
     project_dir.mkdir()
     result = _resolve_slack_channel(project_dir, env_channel="")
-    assert result == "#alert"
+    assert result == ""
 
 
 def test_resolve_channel_empty_project_toml_channel_uses_env(tmp_path: Path):
@@ -231,3 +231,10 @@ def test_discover_projects_warns_for_unmigrated_project_shaped_dirs(tmp_path: Pa
     assert any("has-hermes" in m and "no .hermes/pipeline.toml" in m and "tpo init" in m for m in messages)
     assert any("has-todos" in m and "no .hermes/pipeline.toml" in m for m in messages)
     assert not any("plain" in m for m in messages)
+
+
+def test_resolve_channel_invalid_sources_disable_notifications(tmp_path):
+    assert _resolve_slack_channel(
+        tmp_path, env_channel="   ",
+        toml_data={"notifications": {"slack_channel": "--to=other"}},
+    ) == ""

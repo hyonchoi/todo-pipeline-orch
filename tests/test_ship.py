@@ -906,3 +906,17 @@ def test_bump_and_merge_refuses_when_the_rollup_describes_another_commit(mocker,
                         state_dir=tmp_path)
 
     merge.assert_not_called()
+
+
+def test_maybe_ship_ready_without_channel_preserves_human_gate(tmp_path, mocker):
+    (tmp_path / "pipeline_branch.txt").write_text("todo-5-feat\n")
+    mocker.patch("hermes_pipeline.ship.get_todo_kanban_tasks", return_value=_ready_tasks())
+    mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value={
+        "number": 42, "headRefOid": "reviewed_sha", "baseRefName": "main",
+        "state": "OPEN", "statusCheckRollup": [],
+    })
+    run = mocker.patch("subprocess.run")
+    maybe_ship_ready(project_dir=tmp_path, project_slug="demo",
+                     prior_tick_id="01TICK", state_dir=tmp_path, slack_channel="")
+    assert read_sidecar(tmp_path, "01TICK").pr_head_sha == "reviewed_sha"
+    run.assert_not_called()
