@@ -102,8 +102,9 @@ local skill registry; remote worker prerequisites remain operator-provisioned.
 | `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `native-sdd` | `ai-coding-agents` | hermes | `Hermes skill registry` / `claude -p` | `Hermes skill registry` / `codex exec` | Conditional |
 
-See [agent client release qualification](docs/release-qualification-agent-clients.md)
-for the evidence required to advertise a `Conditional` pair.
+See [optional agent client diagnostics](docs/release-qualification-agent-clients.md)
+for live checks of `Conditional` pairs. These are informational and do not gate
+package releases.
 
 `native-sdd` is the default profile for every contract `tpo init` writes
 ([ADR-0004](docs/adr/0004-native-sdd-is-the-default-phase-profile.md)); `gstack`
@@ -240,7 +241,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | [Configure the pipeline contract](docs/howto-pipeline-contract.md) | How-to | Editing assignee, fixing capability drift, schema migration |
 | [Why the pipeline contract](docs/explanation-pipeline-contract.md) | Explanation | Design rationale for versioned contracts and capability gates |
 | [Use the agent-skills profile](docs/howto-agent-skills-profile.md) | How-to | Selecting `native-sdd`, `agent-skills`, or `gstack` pipeline phases |
-| [Qualify agent clients for release](docs/release-qualification-agent-clients.md) | Reference | Capturing evidence for conditional profile/client support |
+| [Run optional agent client diagnostics](docs/release-qualification-agent-clients.md) | Reference | Capturing evidence for conditional profile/client support |
 | [Use the Hermes adapter](docs/howto-hermes-adapter.md) | How-to | How `hermes chat -q` routes LLM calls |
 | [Selection seat contract](hermes_pipeline/decision/README.md) | Reference | Integrating with the Hermes config repo |
 
@@ -314,6 +315,11 @@ Version Packages pull request. The highest pending bump determines the next
 version. That pull request updates `pyproject.toml`, regenerates `uv.lock`, adds
 the release section to `CHANGELOG.md`, and consumes the fragments. Merging it
 lets the existing auto-tag workflow create the matching `vX.Y.Z` tag.
+
+Before pushing the Version Packages branch, the Release workflow runs pytest,
+Ruff, and release metadata consistency checks. It requires no live AI client,
+provider authentication, VM, or manual qualification result. Versioning never
+copies or rewrites diagnostic evidence; archived records remain historical.
 
 `pyproject.toml` is the sole editable version manifest. Do not add or update a
 `VERSION` file, edit `uv.lock` by hand, or manually add generated release

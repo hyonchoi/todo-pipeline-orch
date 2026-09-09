@@ -1,12 +1,16 @@
-# Agent Client Release Qualification
+# Optional Agent Client Diagnostics
 
-This protocol qualifies profile/client pairs whose package metadata says
-`Conditional`. It tests external skill installation and client discovery that
-the hermetic package suite cannot prove.
+This optional protocol investigates profile/client pairs whose package metadata
+says `Conditional`. It tests external skill installation and client discovery
+that the hermetic package suite cannot prove. Results describe the recorded
+source and environment; they are informational and do not gate package releases.
 
 Normal CI does not run these checks. Third-party credentials and installations
-are forbidden in hermetic CI. Run qualification manually in a disposable,
-isolated environment and commit only the captured evidence.
+are forbidden in hermetic CI. The Release workflow does not run live diagnostics
+and requires no live agent, provider authentication, disposable VM, or additional
+OS account.
+If you choose to run them manually, use a disposable, isolated environment and
+retain only sanitized captured evidence.
 
 ## Conditional pairs
 
@@ -23,12 +27,12 @@ prerequisites.
 Qualify Hermes `ai-coding-agents` discovery and bounded `codex exec` dispatch,
 plus both `inherit` and `delegated` user-policy behavior using the recipes below.
 Store distinct evidence in `native-sdd-codex.md`; do not reuse the gstack artifact.
-Missing or non-passing evidence for either client blocks release finalization.
+Missing, failed, or unrun diagnostics do not block release automation.
 
 ## Native-SDD live policy recipes
 
-Run manually in a disposable VM or disposable OS account with a fresh Git
-fixture and isolated TPO configuration. Install the source snapshot being
+For an optional live investigation, run manually in a disposable VM or
+disposable OS account with a fresh Git fixture and isolated TPO configuration. Install the source snapshot being
 qualified, Hermes >= 0.19.0 and the selected real client. Authenticate through
 the normal client workflow; never copy credentials into evidence. Record source
 commit, versions, UTC time, OS, verifier, and `hermes skills list --enabled-only`
@@ -119,14 +123,13 @@ policy semantics; they never qualify this matrix.
   and capture output proving the client discovered and started the skill
   without an unknown-skill error.
 - Evidence artifact:
-  `docs/release-evidence/agent-clients/<release>/gstack-claude.md`.
+  `docs/release-evidence/agent-clients/candidate-source-snapshot/gstack-claude.md`.
 - Required fields: evidence status, release, qualified source version and
   commit, profile/client pair, UTC timestamp, OS, client version, distribution
   versions, exact skill/plugin sources, discovery commands and their captured
   output, invocation forms, result, and verifier.
-- Blocking rule: a release advertising this Conditional pair is blocked when
-  the current release has no passing artifact or the artifact records a
-  failure.
+- Interpretation: results apply only to the recorded source and environment;
+  a missing or failed artifact does not block a package release.
 
 ### `gstack` / `codex`
 
@@ -148,56 +151,49 @@ policy semantics; they never qualify this matrix.
   and capture output proving the client discovered and started the skill
   without an unknown-skill error.
 - Evidence artifact:
-  `docs/release-evidence/agent-clients/<release>/gstack-codex.md`.
+  `docs/release-evidence/agent-clients/candidate-source-snapshot/gstack-codex.md`.
 - Required fields: evidence status, release, qualified source version and
   commit, profile/client pair, UTC timestamp, OS, client version, distribution
   versions, exact skill/plugin sources, discovery commands and their captured
   output, invocation forms, result, and verifier.
-- Blocking rule: a release advertising this Conditional pair is blocked when
-  the current release has no passing artifact or the artifact records a
-  failure.
+- Interpretation: results apply only to the recorded source and environment;
+  a missing or failed artifact does not block a package release.
 
 ## Evidence handling
 
 Use the [agent client evidence schema](release-evidence/agent-clients/README.md#required-artifact-fields)
-and its release-directory naming convention. A passing artifact must contain
-the real commands and output captured from the stated environment. Do not copy
-an earlier release's result or create a placeholder passing artifact. If skill
-enablement, Hermes dispatch, or external-client completion cannot be verified
-for either matrix cell, record that cell as `FAIL` with the exact limitation.
-A direct client probe does not qualify the Hermes dispatcher.
+when recording optional diagnostics. A passing artifact must contain the real
+commands and output captured from the stated environment. Do not copy an
+earlier result or create a placeholder passing artifact. Record unavailable
+or unsuccessful checks as `FAIL` with the limitation; direct client probes do
+not establish Hermes dispatcher behavior.
 
-Before the Python release workflow selects a version, store an honest qualification snapshot under
-`docs/release-evidence/agent-clients/candidate-source-snapshot/`. It must say
-`Evidence status: candidate/source-snapshot` and `Release: not selected`, and
-must record the source version and commit that were actually qualified. A
-candidate `PASS` is useful review evidence, but it does not satisfy the
-release-specific blocking rule.
+Store source snapshots under
+`docs/release-evidence/agent-clients/candidate-source-snapshot/`, with
+`Evidence status: candidate/source-snapshot` and `Release: not selected`.
+Record the source version and commit actually tested. Existing `release-final`
+artifacts in versioned directories are historical records, not fresh
+qualification of the current package or a future release commit. Versioning
+must not relabel source facts, copy snapshots, or synthesize passing evidence.
 
-During the Version Packages release commit, `scripts/release_changesets.py`
-owns the version decision and finalizes the evidence:
+## Automated release checks
 
-1. Select and synchronize the release version.
-2. Re-run qualification if the recorded environment, discovery output, or
-   qualified source has changed.
-3. Copy each current candidate artifact to
-   `docs/release-evidence/agent-clients/<release>/`.
-4. Set `Evidence status: release-final`, set `Release` to the selected version,
-   and ensure `Source version` matches it. Preserve the exact qualified source
-commit, discovery commands/output, representative invocation command/transcript,
-and fixture-isolation evidence.
-5. Include those versioned artifacts in the same release commit and run the
-   evidence validation tests. Finalization rejects a recorded `FAIL`.
+The Python changeset command selects the release version, updates
+`pyproject.toml`, regenerates `uv.lock`, prepends `CHANGELOG.md`, and consumes
+pending changeset fragments. It neither reads nor writes diagnostic evidence.
+The Release workflow runs deterministic `uv run pytest`, `uv run ruff check .`,
+and `uv run python scripts/release_changesets.py check` before pushing the
+Version Packages branch. Only generated release metadata is staged.
 
-`Unverified` pairs are unsupported and non-blocking until authoritative
-evidence promotes their package metadata. Changing only documentation or
-`prompt_client` does not promote them.
+No manual or AI-assigned `PASS` status is required. Missing, malformed, failed,
+unrun, and passing candidate records all leave the versioning decision
+unchanged. Historical artifact tests check record structure, without requiring
+current-version evidence or agreement with current candidates.
 
-All four candidate artifacts must pass preflight before any release-final file
-is written. In the initial metadata list immediately after the title (blank
-lines and indented continuations are included), include exactly one line `- Result: ` followed by
-backtick-delimited `PASS`. Missing, duplicate or other values are rejected;
-PASS in prose or captured transcripts never qualifies an artifact. Candidate
-`FAIL` records do not fail version/lock/changelog consistency checking, but
-block evidence finalization. The finalizer validates declared results; human
-review must verify that captured live evidence supports them.
+`Unverified` pairs remain unsupported until authoritative evidence promotes
+their package metadata. Changing documentation or `prompt_client` does not
+promote them or relax runtime prerequisite checks.
+
+Rollback requires reverting the release-gate correction, which restores the
+previous manual evidence gate. This change has no migration or external-state
+rollback requirement; historical artifacts remain preserved.
