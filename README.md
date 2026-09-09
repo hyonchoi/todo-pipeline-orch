@@ -140,6 +140,15 @@ tpo config get prompt_client
 tpo doctor <project>
 ```
 
+Use `tpo config get` or the equivalent `tpo config get --all` to list every
+global setting, including defaults for missing values. Each line uses
+`key: value (from ...)` to identify its source: `default`, `file: <path>`, or
+`env: PIPELINE_PROJECTS_DIR`. Explicit file values take precedence, even when
+equal to defaults. The projects-directory environment fallback applies only
+when that key is absent from the file; other environment overrides are ignored.
+Use `tpo config get <key>` to inspect a single setting. These commands do not
+create or modify configuration files.
+
 One global client covers every project under `projects_dir`; use separate
 project roots for mixed Claude/Codex fleets. The settings have separate jobs:
 

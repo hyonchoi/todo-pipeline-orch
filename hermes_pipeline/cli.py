@@ -24,7 +24,7 @@ import sys
 import tempfile
 import time
 import tomllib
-from dataclasses import replace
+from dataclasses import fields, replace
 from pathlib import Path
 
 from hermes_pipeline import __version__
@@ -910,9 +910,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     config_get_parser = config_subparsers.add_parser(
         "get",
-        help="Get the effective value of a config key",
+        help="Get one or all effective config values",
+        description="Omit key or use --all to show all effective config values.",
     )
-    config_get_parser.add_argument("key", help="Config key name")
+    config_get_parser.add_argument("key", nargs="?", help="Config key name (optional)")
+    config_get_parser.add_argument(
+        "--all", action="store_true", help="Show all values, equivalent to omitting key"
+    )
     config_get_parser.set_defaults(func=_cmd_config_get)
 
     config_set_parser = config_subparsers.add_parser(
@@ -3446,16 +3450,22 @@ def _cmd_config_path(args, config: Config | None) -> int:
 
 
 def _cmd_config_get(args, config: Config | None) -> int:
-    """Handle 'config get <key>' — show effective value with source attribution."""
-    from .config import Config
+    """Show one or all effective config values with source attribution."""
     from .config_loader import (
         find_config_file,
         load_global_config_with_active_keys,
         validate_config_key,
     )
 
+    if args.key is not None and args.all:
+        print("Error: a config key cannot be combined with --all", file=sys.stderr)
+        return 2
     try:
-        key = validate_config_key(args.key)
+        keys = (
+            [validate_config_key(args.key)]
+            if args.key is not None
+            else [field.name for field in fields(Config)]
+        )
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 2
@@ -3468,23 +3478,17 @@ def _cmd_config_get(args, config: Config | None) -> int:
         cfg = Config.default()
         active_keys = set()
 
-    value = getattr(cfg, key)
-
-    # Determine source attribution
-    default_cfg = Config.default()
-    if key in active_keys:
-        cfg_file = find_config_file()
-        source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
-    elif key == "projects_dir" and "PIPELINE_PROJECTS_DIR" in os.environ:
-        source = " (from env: PIPELINE_PROJECTS_DIR)"
-        value = Config.from_env().projects_dir
-    elif value != getattr(default_cfg, key):
-        cfg_file = find_config_file()
-        source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
-    else:
-        source = " (from default)"
-
-    print(f"{key}: {value}{source}")
+    cfg_file = find_config_file() if active_keys else None
+    for key in keys:
+        value = getattr(cfg, key)
+        if key in active_keys:
+            source = f" (from file: {cfg_file})" if cfg_file else " (from config file)"
+        elif key == "projects_dir" and "PIPELINE_PROJECTS_DIR" in os.environ:
+            source = " (from env: PIPELINE_PROJECTS_DIR)"
+            value = Path(os.environ["PIPELINE_PROJECTS_DIR"]).expanduser()
+        else:
+            source = " (from default)"
+        print(f"{key}: {value}{source}")
     return 0
 
 
