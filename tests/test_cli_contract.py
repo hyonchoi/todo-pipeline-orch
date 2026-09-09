@@ -1026,8 +1026,9 @@ def test_doctor_reports_repository_identity_detail(tmp_path, mocker, capsys, fak
     assert "OK:" not in output
 
 
-def test_doctor_reports_missing_labels_with_sync_fix(tmp_path, mocker, capsys, fake_gh):
-    args = _create_valid_doctor_project(tmp_path)
+@pytest.mark.parametrize("profile", ["gstack", "native-sdd"])
+def test_doctor_reports_missing_labels_with_sync_fix(tmp_path, mocker, capsys, fake_gh, profile):
+    args = _create_valid_doctor_project(tmp_path, profile=profile)
     _seed_doctor_github(fake_gh, labels=("tpo:todo", "needs-triage"))
     mocker.patch(
         "hermes_pipeline.cli._cli_sp.run",
@@ -1040,6 +1041,33 @@ def test_doctor_reports_missing_labels_with_sync_fix(tmp_path, mocker, capsys, f
     assert "ready-for-agent" in output and "tpo:on-hold" in output
     assert "Fix: tpo todos labels sync demo" in output
     assert fake_gh.gh_calls().count(["auth", "status", "--hostname", "github.com"]) == 1
+
+
+@pytest.mark.parametrize("profile, expected_exit", [("native-sdd", 0), ("gstack", 1)])
+def test_doctor_phase_label_requirements_follow_profile(
+    tmp_path, mocker, capsys, fake_gh, profile, expected_exit
+):
+    from hermes_pipeline.github_issues import LABEL_VOCABULARY
+
+    args = _create_valid_doctor_project(tmp_path, profile=profile)
+    _seed_doctor_github(fake_gh, labels=[
+        name.upper() for name, _color, _description in LABEL_VOCABULARY
+        if not name.startswith("phase:")
+    ])
+    mocker.patch(
+        "hermes_pipeline.cli._cli_sp.run",
+        side_effect=_allow_hermes_registry_skill_check,
+    )
+
+    assert _cmd_doctor(args, Config(projects_dir=tmp_path)) == expected_exit
+    output = capsys.readouterr().out
+    if expected_exit == 0:
+        assert "Label vocabulary: ok" in output
+        assert "INVALID: missing" not in output
+        assert "OK:" in output
+    else:
+        assert "INVALID: missing phase:" in output
+        assert "Fix: tpo todos labels sync demo" in output
 
 
 def _seed_runs(state, runs):
