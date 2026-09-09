@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Literal
 
 PromptClient = Literal["claude", "codex"]
+AgentPolicyMode = Literal["inherit", "delegated"]
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class Config:
     log_retention_days: int = 7
     slack_channel: str = ""
     prompt_client: PromptClient = "claude"
+    agent_policy_mode: AgentPolicyMode = "inherit"
 
     @classmethod
     def default(cls) -> Config:

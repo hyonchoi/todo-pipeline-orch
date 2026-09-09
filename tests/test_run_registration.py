@@ -320,13 +320,13 @@ def test_embedded_artifact_rejects_lstat_fstat_identity_swap(tmp_path, mocker):
         _register(repo, issue=issue, plan_path=None)
 
 
-def test_active_registration_reader_accepts_v2_and_v3(tmp_path):
+def test_active_registration_reader_accepts_v2_v3_and_v4(tmp_path):
     state = tmp_path / ".hermes"
     _write_registration(state, "v2", {"schema_version": 2, "issue_number": 2})
     _write_registration(state, "v3", {"schema_version": 3, "issue_number": 3})
     _write_registration(state, "v4", {"schema_version": 4, "issue_number": 4})
 
-    assert active_registration_issue_numbers(state) == frozenset({2, 3})
+    assert active_registration_issue_numbers(state) == frozenset({2, 3, 4})
 
 
 def test_registration_does_not_read_todos_md(tmp_path):

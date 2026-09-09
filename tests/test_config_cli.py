@@ -358,3 +358,39 @@ def test_config_set_rejects_invalid_prompt_client(monkeypatch, tmp_path, value):
     monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
     assert main(["config", "set", "prompt_client", value]) == 2
     assert not path.exists()
+
+
+def test_config_init_emits_agent_policy_mode(monkeypatch, tmp_path):
+    path = tmp_path / "config.yaml"
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert main(["config", "init"]) == 0
+    assert "agent_policy_mode: inherit\n" in path.read_text()
+
+
+def test_config_get_agent_policy_mode_default(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(tmp_path / "missing.yaml"))
+    assert main(["config", "get", "agent_policy_mode"]) == 0
+    output = capsys.readouterr().out
+    assert "inherit" in output
+    assert "default" in output
+
+
+@pytest.mark.parametrize("value", ["delegated", "inherit"])
+def test_config_set_agent_policy_mode_round_trips(monkeypatch, tmp_path, capsys, value):
+    path = tmp_path / "config.yaml"
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert main(["config", "set", "agent_policy_mode", value]) == 0
+    assert load_global_config().agent_policy_mode == value
+    assert main(["config", "get", "agent_policy_mode"]) == 0
+    output = capsys.readouterr().out
+    assert value in output
+    assert str(path) in output
+
+
+@pytest.mark.parametrize("value", ["Inherit", "DELEGATED", "auto", "null", ""])
+def test_config_set_rejects_invalid_agent_policy_mode(monkeypatch, tmp_path, value):
+    path = tmp_path / "config.yaml"
+    path.write_text("agent_policy_mode: inherit\n")
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    assert main(["config", "set", "agent_policy_mode", value]) == 2
+    assert path.read_text() == "agent_policy_mode: inherit\n"

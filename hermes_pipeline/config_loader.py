@@ -213,4 +213,5 @@ log_file_subpath: pipeline.log
 log_retention_days: 7
 slack_channel: ""
 prompt_client: claude
+agent_policy_mode: inherit
 """
