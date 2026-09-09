@@ -394,3 +394,108 @@ def test_config_set_rejects_invalid_agent_policy_mode(monkeypatch, tmp_path, val
     monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
     assert main(["config", "set", "agent_policy_mode", value]) == 2
     assert path.read_text() == "agent_policy_mode: inherit\n"
+
+
+@pytest.mark.parametrize("arguments", [[], ["--all"]])
+@pytest.mark.parametrize("content", [None, "", "log_retention_days: 7\nslack_channel: '#file'\nprompt_client: codex\n"])
+def test_config_get_all_ordered_values(monkeypatch, tmp_path, capsys, arguments, content):
+    from dataclasses import fields
+    from unittest.mock import Mock
+
+    from hermes_pipeline import config_loader
+    from hermes_pipeline.config import Config
+
+    path = tmp_path / "config.yaml"
+    if content is not None:
+        path.write_text(content)
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    monkeypatch.delenv("PIPELINE_PROJECTS_DIR", raising=False)
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#ignored")
+    loader = Mock(wraps=config_loader.load_global_config_with_active_keys)
+    monkeypatch.setattr(config_loader, "load_global_config_with_active_keys", loader)
+
+    assert main(["config", "get", *arguments]) == 0
+    captured = capsys.readouterr()
+    overrides = {"log_retention_days": 7, "slack_channel": "#file", "prompt_client": "codex"} if content else {}
+    expected = []
+    for field in fields(Config):
+        key = field.name
+        source = f"file: {path}" if key in overrides else "default"
+        value = overrides.get(key, getattr(Config.default(), key))
+        expected.append(f"{key}: {value} (from {source})")
+    assert captured.out.splitlines() == expected
+    assert captured.err == ""
+    loader.assert_called_once_with()
+    # Every listed key must also be accepted by single-key reads, identically.
+    for line in expected:
+        assert main(["config", "get", line.split(":", 1)[0]]) == 0
+        assert capsys.readouterr().out == line + "\n"
+    assert path.read_text() == content if content is not None else not path.exists()
+
+
+@pytest.mark.parametrize("arguments", [[], ["--all"], ["projects_dir"]])
+@pytest.mark.parametrize("env_value", [None, "~/environment-projects", ""])
+@pytest.mark.parametrize("content", [None, "projects_dir: ~/file-projects\n", "broken: [", "log_retention_days: invalid\n", "badkey: value\n"])
+def test_config_get_projects_precedence_and_recovery(
+    monkeypatch, tmp_path, capsys, arguments, env_value, content
+):
+    from pathlib import Path
+    from unittest.mock import Mock
+
+    from hermes_pipeline import config_loader
+    from hermes_pipeline.config import Config
+
+    path = tmp_path / "config.yaml"
+    if content is not None:
+        path.write_text(content)
+    monkeypatch.setenv("TPO_CONFIG_FILE", str(path))
+    monkeypatch.setenv("PIPELINE_SLACK_CHANNEL", "#ignored")
+    if env_value is None:
+        monkeypatch.delenv("PIPELINE_PROJECTS_DIR", raising=False)
+    else:
+        monkeypatch.setenv("PIPELINE_PROJECTS_DIR", env_value)
+    loader = Mock(wraps=config_loader.load_global_config_with_active_keys)
+    monkeypatch.setattr(config_loader, "load_global_config_with_active_keys", loader)
+    assert main(["config", "get", *arguments]) == 0
+    captured = capsys.readouterr()
+    loader.assert_called_once_with()
+    if content and content.startswith("projects_dir:"):
+        value, source = Path("~/file-projects").expanduser(), f"file: {path}"
+    elif env_value is not None:
+        value, source = Path(env_value).expanduser(), "env: PIPELINE_PROJECTS_DIR"
+    else:
+        value, source = Config.default().projects_dir, "default"
+    assert f"projects_dir: {value} (from {source})\n" in captured.out
+    broken = content is not None and not content.startswith("projects_dir:")
+    assert captured.out.count("Warning: config file has errors:") == int(broken)
+    assert captured.out.count("Falling back to defaults.") == int(broken)
+    if not arguments or arguments == ["--all"]:
+        assert "slack_channel:  (from default)\n" in captured.out
+        assert "log_retention_days: 7 (from default)\n" in captured.out
+    assert captured.err == ""
+    assert path.read_text() == content if content is not None else not path.exists()
+
+
+@pytest.mark.parametrize("arguments", [["nonexistent"], ["slack_channel", "--all"]])
+def test_config_get_invalid_arguments_before_load(monkeypatch, capsys, arguments):
+    from unittest.mock import Mock
+
+    from hermes_pipeline import config_loader
+
+    loader = Mock(side_effect=AssertionError("must validate before loading"))
+    monkeypatch.setattr(config_loader, "load_global_config_with_active_keys", loader)
+    assert main(["config", "get", *arguments]) == 2
+    captured = capsys.readouterr()
+    assert "Error:" in captured.err
+    assert captured.out == ""
+    loader.assert_not_called()
+
+
+def test_config_get_help_documents_aggregate_forms(capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["config", "get", "--help"])
+    assert exc.value.code == 0
+    output = capsys.readouterr().out
+    assert "[key]" in output
+    assert "--all" in output
+    assert "Omit key" in output
