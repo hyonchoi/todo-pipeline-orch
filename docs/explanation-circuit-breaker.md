@@ -22,7 +22,13 @@ The circuit breaker tracks consecutive no-progress ticks in `.hermes/circuit.jso
 4. **Prior tick phases fail** → counter increments (no progress)
 5. **Prior tick picked None** (all TODOs done/blocked) → counter unchanged (idle, not a failure)
 
-**Alert:** When the counter reaches the threshold (default: 3), fires a Slack alert via `hermes chan message`. Alert dedup: one alert per `alert_dedup_hours` (default: 24).
+**Alert:** When the counter reaches the threshold (default: 3) and a valid Slack
+channel is configured, sends an alert via
+`hermes send --to slack:<channel> -- <message>`. Alert dedup: one alert per
+`alert_dedup_hours` (default: 24). A valid project channel takes precedence over
+the global channel. Without either, the counter still tracks no-progress ticks,
+but no notification subprocess runs and the observation does not advance
+`last_alert_at` or consume the alert dedup window.
 
 ## Configuration
 
@@ -47,7 +53,7 @@ max_tick_duration_min = 10   # max time for the entire project tick
 ## Trade-offs
 
 - **False negatives on rapid fix:** if an operator resolves a stuck TODO between ticks, the counter still increments once before resetting. Not a risk — one extra alert is harmless.
-- **No circuit breaker for selection timeouts.** A `PromptShaMismatch` or API error returns `picked=None` but the rationale prefix distinguishes config faults from genuine stalls. The config-fault path fires a Slack alert directly and skips the circuit breaker.
+- **No circuit breaker for selection timeouts.** A `PromptShaMismatch` or API error returns `picked=None` but the rationale prefix distinguishes config faults from genuine stalls. The `PromptShaMismatch` path sends a Slack alert directly when a valid channel is configured and skips the circuit breaker. Without a channel, it starts no notification subprocess.
 
 ## See Also
 

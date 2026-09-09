@@ -2159,7 +2159,9 @@ def _tick_project(
     except (FileNotFoundError, ValueError):
         toml_cfg = None
 
-    project_base_config = replace(config, state_dir=project_state)
+    project_base_config = replace(
+        config, state_dir=project_state, slack_channel=slack_channel
+    )
     if toml_cfg is not None:
         full_cfg = FullConfig(
             base=project_base_config,

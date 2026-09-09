@@ -62,10 +62,15 @@ The next tick will skip this project.
 
 ### Slack Channel Resolution
 
-Alerts for each project go to the Slack channel determined by:
+Slack notifications are optional. Alerts use the first valid configured channel:
+
 1. `project.toml`'s `[notifications] slack_channel`
 2. Global config `slack_channel`
-3. `#alert` (hardcoded fallback)
+
+If neither provides a valid channel, notifications are disabled and no notification
+subprocess runs. This applies to circuit-breaker, ship-handoff, and selection
+SHA-mismatch alerts. Configured alerts use
+`hermes send --to slack:<channel> -- <message>`.
 
 ## Cron Setup
 

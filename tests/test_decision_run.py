@@ -323,23 +323,28 @@ def test_picked_with_invalid_shape_is_rejected(tmp_path):
     assert d.picked is None
     assert "invalid_pick_shape" in d.rationale
 
-def test_sha_mismatch_returns_picked_none_and_alerts(tmp_path):
+@pytest.mark.parametrize("channel", ["", "ops"])
+def test_sha_mismatch_returns_picked_none_and_optional_alert(tmp_path, channel):
+    from dataclasses import replace
+
     state = tmp_path / "state"
     state.mkdir()
-    p = _prompt(tmp_path)
-    alerts = []
+    cfg = _cfg(state, _prompt(tmp_path), expected_sha="expected")
+    cfg = replace(cfg, base=replace(cfg.base, slack_channel=channel))
     with patch(
         "hermes_pipeline.decision.call_agent",
         side_effect=PromptShaMismatch("expected", "actual"),
-    ), patch(
-        "hermes_pipeline.decision._emit_sha_mismatch_alert",
-        side_effect=lambda *a, **kw: alerts.append((a, kw)),
-    ):
-        d = run_selection(tick_id="01JB", ctx=_ctx(), cfg=_cfg(state, p, expected_sha="expected"))
+    ), patch("subprocess.run") as run:
+        d = run_selection(tick_id="01JB", ctx=_ctx(), cfg=cfg)
     assert d.picked is None
-    assert "SHA" in d.rationale or "sha" in d.rationale
     assert d.rationale.startswith("prompt_sha_mismatch:")
-    assert len(alerts) == 1
+    assert (state / "decisions" / "01JB.json").exists()
+    if channel:
+        run.assert_called_once()
+        assert run.call_args.args[0][:5] == ["hermes", "send", "--to", "slack:ops", "--"]
+        assert "PROMPT SHA MISMATCH" in run.call_args.args[0][5]
+    else:
+        run.assert_not_called()
 
 
 def test_record_tracker_error_persists_picked_none_decision(tmp_path):

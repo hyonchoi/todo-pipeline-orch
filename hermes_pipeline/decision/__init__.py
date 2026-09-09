@@ -10,6 +10,7 @@ from importlib.resources import as_file as _as_file
 from importlib.resources import files as _resource_files
 from pathlib import Path as _P
 
+from hermes_pipeline import slack
 from hermes_pipeline.hermes_adapter import (
     AgentClientDependencyError,
     ClaudeCallError,
@@ -95,20 +96,16 @@ def record_tracker_error(
 def _now_iso() -> str:
     return _dt.datetime.now(_dt.UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def _emit_sha_mismatch_alert(*, tick_id: str, expected: str, actual: str) -> None:
+def _emit_sha_mismatch_alert(
+    *, tick_id: str, expected: str, actual: str, channel: str = ""
+) -> None:
     msg = (
         f"[pipeline-tick {tick_id}] PROMPT SHA MISMATCH: "
         f"expected={expected[:12]} actual={actual[:12]}. "
         "Selection skipped (NOT counted as no-progress). "
         "Check TPO selection prompt for drift."
     )
-    try:
-        subprocess.run(
-            ["hermes", "chan", "message", "alerts", msg],
-            timeout=10, check=False,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    slack.notify(channel, msg)
 
 def _selection_prompt_path(prompt_path: str | None):
     if prompt_path:
@@ -141,7 +138,7 @@ def run_selection(
 ) -> HermesSelectionDecision:
     """Build prompt -> call agent -> persist immutable decision -> return.
 
-    On `PromptShaMismatch`: return `picked=None`, fire Slack alert, do NOT
+    On `PromptShaMismatch`: return `picked=None`, optionally fire a Slack alert, do NOT
     raise. The caller treats this as a config-fault tick (not a no-progress
     tick) by inspecting the rationale prefix.
 
@@ -167,7 +164,10 @@ def run_selection(
             parsed = result.parsed
             prompt_sha = result.prompt_sha
         except PromptShaMismatch as e:
-            _emit_sha_mismatch_alert(tick_id=tick_id, expected=e.expected, actual=e.actual)
+            _emit_sha_mismatch_alert(
+                tick_id=tick_id, expected=e.expected, actual=e.actual,
+                channel=cfg.base.slack_channel,
+            )
             parsed = {
                 "candidates_considered": [],
                 "picked": None,
