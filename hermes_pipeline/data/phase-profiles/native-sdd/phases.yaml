@@ -8,7 +8,11 @@ phases:
 
       Read the repository instructions, the selected TODO entry, and {plan_path}. Re-open the Plan before implementation and exit nonzero if it is missing, unreadable, contradictory, or insufficient to execute safely. Work on {todo_id} only.
 
-      Start from main and create a task branch using repository conventions. Preserve unrelated tracked and untracked work. Write the branch name to .hermes/pipeline_branch.txt.
+      For a supervised fresh run, use the pinned registered worktree and branch; preparation has already selected them. For a resume, read TPO_RECOVERY_CONTEXT_PATH and remain in the original registered worktree and branch with the original approved Plan. Preserve and inspect task-owned staged, unstaged, and untracked partial work before continuing the unfinished task. Never reset, clean, or switch to main during recovery. Without a supervisor registration, a genuinely fresh run may create a task branch from main using repository conventions. Preserve unrelated tracked and untracked work. Write the branch name to .hermes/pipeline_branch.txt.
+
+      Skip completed tasks only when the supervisor's recovery context records accepted commits with verified checks and coordinator-review receipts. Agent assertions and commit messages do not establish completion. In recovery_validation mode, validate and independently review existing candidate commits before implementing more work. In verification_only mode, collect final verification and results without repeating implementation. Block on Plan drift, rewritten history, unexpected HEAD, or Git lock/merge state. Legacy or non-manifest recovery supplies no subtask-checkpoint guarantee.
+
+      Submit checkpoint claims only inside TPO_CHECKPOINT_DIR, using the supervisor's versioned submission contract. Claims await trusted verification and review before supervisor promotion; never write authoritative journals. Use TPO_RESULT_PATH for the final structured result when provided.
 
       Execute the Plan's ordered tasks with a fresh native implementer subagent for each task. For every task:
       1. Follow red -> green -> refactor. Add the focused test first and verify that it fails for the intended reason.
