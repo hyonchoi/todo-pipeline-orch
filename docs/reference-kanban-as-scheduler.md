@@ -501,7 +501,7 @@ get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]
 - `todo` — executable phase is waiting for its `--parent`
 - `running` — phase is actively executing
 - `ready` — executable phase is runnable and queued
-- `blocked` — sticky block requiring resolution, including `needs_input` human gates and worker failures that Hermes cannot retry
+- `blocked` — sticky block requiring resolution, including worker requests for operator input (`needs_input`) and worker failures that Hermes cannot retry
 - `done` — phase completed successfully
 - `failed` — phase execution failed
 - `archived` — phase was archived mid-registration (abandoned)
