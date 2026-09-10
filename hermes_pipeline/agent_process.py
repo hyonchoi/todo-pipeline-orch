@@ -1,8 +1,8 @@
 """Best-effort owned process supervision; no shell or provider output capture.
 
-Linux process birth identities and pidfds prevent signaling reused PIDs. Other
-platforms fail closed. Discovery cannot guarantee capture of a descendant which
-escapes its session and ancestry between samples; this is not a containment
+Linux birth identities/pidfds and Darwin unique IDs/audit tokens prevent
+signaling reused PIDs. Other platforms fail closed. Discovery cannot guarantee
+capture of a descendant which escapes its session and ancestry between samples; this is not a containment
 boundary. Missing observations or unverifiable known owners block cleanup.
 """
 
@@ -14,6 +14,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -73,11 +74,54 @@ def _pidfd_signal(fd: int, sig: int) -> None:
         raise OSError(ctypes.get_errno(), "pidfd signaling unavailable")
 
 
+def _open_handle(pid: int) -> int | dict:
+    if sys.platform == "darwin":
+        from .agent_darwin import Backend
+        backend = Backend()
+        record = backend._record(pid)
+        if record is None:
+            raise ProcessLookupError("process disappeared")
+        return {"pid": pid, "start_ticks": record["start_ticks"],
+                "boot_id": backend.boot_id(), "host": socket.gethostname()}
+    return _pidfd_open(pid)
+
+
+def _handle_signal(handle: int | dict, sig: int) -> None:
+    if isinstance(handle, dict):
+        if not _signal(handle, sig):
+            raise OSError("owned process signal unconfirmed")
+    else:
+        _pidfd_signal(handle, sig)
+
+
+def _close_handle(handle: int | dict) -> None:
+    if isinstance(handle, int):
+        os.close(handle)
+
+
+def confirm_process_capability() -> None:
+    """Verify native identity and safe signaling availability before launch."""
+    try:
+        if process_snapshot(os.getpid()) is None:
+            raise RuntimeError("process_identity_unconfirmed")
+        if sys.platform != "darwin":
+            probe = _pidfd_open(os.getpid())
+            try:
+                _pidfd_signal(probe, 0)
+            finally:
+                os.close(probe)
+    except (OSError, RuntimeError, ValueError):
+        raise ProcessLaunchError() from None
+
+
 def process_snapshot(pid: int) -> Identity | None:
     """Return a verified birth identity, or None only for a disappeared process.
 
     Permission errors and unsupported identity mechanisms intentionally propagate.
     """
+    if sys.platform == "darwin":
+        from .agent_darwin import Backend
+        return Backend().snapshot(pid)
     boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
@@ -99,11 +143,19 @@ def _discover(known: dict[int, Identity]) -> bool:
     """Capture descendants and members of still-verified owned sessions."""
     snapshots = {}
     try:
-        for entry in Path("/proc").iterdir():
-            if entry.name.isdecimal():
-                snapshot = process_snapshot(int(entry.name))
-                if snapshot is not None:
-                    snapshots[int(entry.name)] = snapshot
+        if sys.platform == "darwin":
+            from .agent_darwin import Backend
+            backend = Backend()
+            pids = set(backend.pids()) | set(known)
+        else:
+            pids = [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdecimal()]
+        for pid in pids:
+            if sys.platform == "darwin" and pid not in known:
+                snapshot = backend.discovery_snapshot(pid)
+            else:
+                snapshot = process_snapshot(pid)
+            if snapshot is not None:
+                snapshots[pid] = snapshot
     except (OSError, ValueError, IndexError):
         return False
     live = {pid for pid, old in known.items() if pid in snapshots and _same(old, snapshots[pid])}
@@ -169,6 +221,12 @@ def _live(identity: Identity) -> bool | None:
 
 def _signal(identity: Identity, sig: int) -> bool:
     """Pin kernel identity before signaling, closing the verify/kill race."""
+    if sys.platform == "darwin":
+        from .agent_darwin import Backend
+        try:
+            return Backend().signal(identity, sig)
+        except OSError:
+            return False
     try:
         fd = _pidfd_open(identity["pid"])
     except ProcessLookupError:
@@ -243,7 +301,7 @@ def cleanup_processes(
 
 
 def _cleanup_owned_child(
-    child: subprocess.Popen, fd: int | None, deadline: float,
+    child: subprocess.Popen, fd: int | dict | None, deadline: float,
     identity: Identity | None = None,
 ) -> None:
     """Use the unreaped child's retained kernel handle if birth lookup failed.
@@ -252,17 +310,20 @@ def _cleanup_owned_child(
     receipt. The original exception still reaches the supervisor, which must
     retain an interrupted attempt with unconfirmed cleanup.
     """
-    if (fd is None and identity is None) or child.poll() is not None:
+    if child.poll() is not None:
         return
 
     def send(sig: int) -> None:
         if fd is not None:
-            _pidfd_signal(fd, sig)
-        elif identity is not None and _live(identity) is True and child.poll() is None:
+            _handle_signal(fd, sig)
+        elif sys.platform == "darwin" and identity is not None:
+            _signal(identity, sig)
+        elif child.poll() is None:
             # This function is the exclusive collector of this direct child.
             # While unreaped, its PID cannot be recycled; Popen.send_signal
-            # checks again before sending. Birth evidence is still mandatory
-            # for this fallback; never apply it to discovered descendants.
+            # checks again before sending. This authority comes only from the
+            # exclusive unreaped Popen child, never from a persisted or discovered
+            # numeric PID. Failed birth acquisition remains cleanup_unconfirmed.
             child.send_signal(sig)
 
     for sig in (signal.SIGTERM, signal.SIGCONT):
@@ -312,17 +373,7 @@ def run_process(
         raise ValueError("cleanup_timeout must be between zero and 60 seconds")
     if deadline_monotonic is not None and (not math.isfinite(deadline_monotonic) or deadline_monotonic < 0):
         raise ValueError("absolute deadline must be finite and nonnegative")
-    # Establish support before admitting any external process.
-    try:
-        if process_snapshot(os.getpid()) is None:
-            raise RuntimeError("process_identity_unconfirmed")
-        probe = _pidfd_open(os.getpid())
-        try:
-            _pidfd_signal(probe, 0)
-        finally:
-            os.close(probe)
-    except (OSError, RuntimeError, ValueError):
-        raise ProcessLaunchError() from None
+    confirm_process_capability()
     started = time.monotonic()
     deadline = started + timeout
     if deadline_monotonic is not None:
@@ -345,7 +396,7 @@ def run_process(
         # PID cannot be reused. Retain the kernel handle before /proc lookup,
         # so even a denied birth-identity read cannot strand the direct child.
         try:
-            child_fd = _pidfd_open(child.pid)
+            child_fd = _open_handle(child.pid)
         except OSError:
             # Still obtain and persist birth evidence. The preflight probe can
             # succeed while a later child-specific kernel handle is denied.
@@ -358,6 +409,11 @@ def run_process(
             raise
         if identity is None:
             raise ProcessOwnershipError([])
+        if sys.platform == "darwin" and identity["state"] == "Z":
+            # Popen completed setsid before exec. Preserve this historical SID
+            # even when the child exits before the first birth receipt; unknown
+            # surviving session members must still block confirmed cleanup.
+            identity["session"] = child.pid
         known[child.pid] = identity
         if on_launch:
             on_launch({"identity": identity, "launched_monotonic": started, "deadline": deadline})
@@ -409,7 +465,7 @@ def run_process(
             exit_code = child.poll()
         finally:
             if child_fd is not None:
-                os.close(child_fd)
+                _close_handle(child_fd)
     if uncertain or not known:
         cleanup["cleanup"] = "cleanup_unconfirmed"
     return {

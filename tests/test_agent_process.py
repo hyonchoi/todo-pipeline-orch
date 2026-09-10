@@ -249,6 +249,7 @@ def test_child_handle_acquisition_failure_records_cleanup(tmp_path, monkeypatch,
             run(tmp_path, "import time; time.sleep(30)", on_launch=receipts.append)
         assert caught.value.cleanup == "cleanup_unconfirmed"
         assert "sensitive" not in str(caught.value)
+        assert children[0].poll() is not None
         if deny_identity:
             assert not caught.value.processes
             assert not receipts

@@ -17,6 +17,7 @@ import re
 import secrets
 import socket
 import stat
+import sys
 import threading
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -55,18 +56,28 @@ class LockUnconfirmed(ExecutionError):
 def host_boot_identity() -> dict:
     """Return boot identity; unsupported platforms cannot verify process ownership."""
     try:
-        boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+        if sys.platform == "darwin":
+            from .agent_darwin import Backend
+            boot_id = Backend().boot_id()
+        else:
+            boot_id = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     except OSError:
         boot_id = None
     return {"host": socket.gethostname(), "boot_id": boot_id}
 
 
 def process_identity(pid: int) -> dict:
-    """Pin PID to Linux start ticks, host and boot, never to PID alone."""
+    """Pin PID to native birth identity, host and boot, never to PID alone."""
     identity = {**host_boot_identity(), "pid": pid, "start_ticks": None}
     if type(pid) is not int or pid <= 0:
         return identity
     try:
+        if sys.platform == "darwin":
+            from .agent_darwin import Backend
+            snapshot = Backend().snapshot(pid)
+            if snapshot is not None:
+                identity["start_ticks"] = snapshot["start_ticks"]
+            return identity
         # comm may contain spaces and parentheses, so split after its final ')'.
         fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
         identity["start_ticks"] = int(fields[19])
