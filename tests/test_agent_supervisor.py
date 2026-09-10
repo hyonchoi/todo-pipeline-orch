@@ -232,6 +232,150 @@ def test_client_capability_failure_does_not_admit_and_fixed_reentry_can_launch(e
     assert len(store.load("execution-1")["attempts"]) == 1
 
 
+def test_detached_prelaunch_refusal_is_visible_without_consuming_attempt(execution, monkeypatch, capsys):
+    store, _ = execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: ["tpo-test-missing-client"])
+    assert supervisor.main(["_supervise", "--root", str(store.root), "--execution", "execution-1"]) == 1
+    capsys.readouterr()
+    assert supervisor.status(store, "execution-1")["status"] == "client_unavailable"
+    assert not store.load("execution-1")["attempts"]
+    refusal_path = store.root / "execution-1" / "launch-refusal.json"
+    refusal = json.loads(refusal_path.read_text())
+    refusal["generation"] = 2
+    refusal_path.write_text(json.dumps(refusal))
+    assert supervisor.status(store, "execution-1")["status"] == "registered"
+    refusal["generation"] = 1
+    refusal["registration_sha256"] = "f" * 64
+    refusal_path.write_text(json.dumps(refusal))
+    assert supervisor.status(store, "execution-1")["status"] == "registered"
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    refusal_path.write_text('{"reason":"malformed provider payload"}')
+    assert supervisor.status(store, "execution-1")["status"] == "timed_out"
+
+
+def test_prerequisite_disappears_between_attach_and_daemon(execution, monkeypatch, capsys):
+    store, _ = execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    spawn = supervisor.subprocess.Popen
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" not in argv:
+            return spawn(argv, **kwargs)
+        monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: ["tpo-test-missing-client"])
+        supervisor.main(argv[1:])
+        capsys.readouterr()  # Detached daemon stdout would normally be discarded.
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+    assert supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "client_unavailable"
+    assert not store.load("execution-1")["attempts"]
+
+
+def test_cli_distinguishes_real_locks_and_never_exposes_unknown_errors(execution, monkeypatch, capsys):
+    from hermes_pipeline.agent_execution import LockUnconfirmed
+
+    store, _ = execution
+    command = ["run", "--root", str(store.root), "--execution", "execution-1"]
+    for error, expected in [(LockUnconfirmed("locked"), "lock_unconfirmed"),
+                            (ExecutionError("provider secret payload"), "execution_invalid")]:
+        def failed(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(supervisor, "attach", failed)
+        assert supervisor.main(command) == 1
+        output = capsys.readouterr().out
+        assert json.loads(output)["status"] == expected
+        assert "provider secret" not in output
+
+
+def test_actual_admission_lock_remains_distinct_from_capability_refusal(execution, monkeypatch, capsys):
+    import fcntl
+
+    store, _ = execution
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: pytest.fail("locked preflight"))
+    with store._directory_handle("execution-1") as directory:
+        fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        try:
+            assert supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"]) == 1
+            assert json.loads(capsys.readouterr().out)["status"] == "lock_unconfirmed"
+        finally:
+            fcntl.flock(directory, fcntl.LOCK_UN)
+    assert supervisor.status(store, "execution-1")["status"] == "registered"
+
+
+@pytest.mark.parametrize("daemon_admits", [False, True])
+def test_explicit_recovery_waits_for_daemon_without_rewriting_terminal_attempt(execution, monkeypatch, capsys, daemon_admits):
+    from types import SimpleNamespace
+
+    from hermes_pipeline.agent_recovery import approve_recovery, prepare_recovery
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    before = store.load("execution-1")["attempts"]
+    preview = prepare_recovery(store, "execution-1")
+    event = approve_recovery(store, "execution-1", preview)
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    spawn = supervisor.subprocess.Popen
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda argv, **kwargs: (
+        None if "_supervise" in argv else spawn(argv, **kwargs)))
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+        if daemon_admits and clock[0] >= 0.2 and len(store.load("execution-1")["attempts"]) == 1:
+            supervisor.supervise(store, "execution-1", recovery_event=event)
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
+    result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1",
+                              "--recovery-event", event])
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == ("timed_out" if daemon_admits else "running_detached")
+    assert report["generation"] == (2 if daemon_admits else 1)
+    assert result == (1 if daemon_admits else 0)
+    assert report["completion_allowed"] is False
+    assert store.load("execution-1")["attempts"][:1] == before
+    assert 0.2 <= clock[0] <= 5.1
+
+
+@pytest.mark.parametrize("failure", ["entrypoint", "spawn"])
+def test_cli_detach_refusal_remains_visible_to_status(execution, monkeypatch, capsys, failure):
+    store, _ = execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    def unavailable():
+        raise ExecutionError("supervisor_unavailable")
+    monkeypatch.setattr(supervisor, "installed_entrypoint", unavailable if failure == "entrypoint" else lambda: "/missing/supervisor")
+    command = ["run", "--root", str(store.root), "--execution", "execution-1"]
+    expected = "supervisor_unavailable" if failure == "entrypoint" else "launch_unavailable"
+    assert supervisor.main(command) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == expected
+    assert supervisor.main(["status", *command[1:]]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == expected
+    assert not store.load("execution-1")["attempts"]
+
+
+def test_detach_failure_cannot_write_refusal_over_concurrent_admission(execution, monkeypatch, capsys):
+    store, _ = execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/missing/supervisor")
+    spawn = supervisor.subprocess.Popen
+    def race(argv, **kwargs):
+        if "_supervise" not in argv:
+            return spawn(argv, **kwargs)
+        store.admit("execution-1")
+        store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+        raise FileNotFoundError("disappeared supervisor")
+    monkeypatch.setattr(supervisor.subprocess, "Popen", race)
+    assert supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "timed_out"
+    assert not (store.root / "execution-1" / "launch-refusal.json").exists()
+
+
 def test_proven_spawn_failure_has_confirmed_cleanup_but_never_automatic_retry(execution, monkeypatch):
     from hermes_pipeline import agent_process
 
@@ -317,6 +461,41 @@ def _committed_profile(tmp_path, monkeypatch):
         phase="analysis", prompt="Exact prompt: $() `echo no`\x00\n", client="codex", tools="Bash",
         worktree=worktree, timeout=10, todo_id="TODO-1")
     return ExecutionStore(root), identity, worktree
+
+
+def test_registered_cli_repair_runs_fake_client_once(tmp_path, monkeypatch, capsys):
+    store, identity, _ = _committed_profile(tmp_path, monkeypatch)
+    fake_client = tmp_path / "fake-codex"
+    original_which = supervisor.shutil.which
+    monkeypatch.setattr(supervisor.shutil, "which", lambda name, **kwargs: (
+        str(fake_client) if fake_client.exists() else None) if name == "codex" else original_which(name, **kwargs))
+    spawn = supervisor.subprocess.Popen
+    daemons = []
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" not in argv:
+            return spawn(argv, **kwargs)
+        daemons.append(argv)
+        supervisor.main(argv[1:])
+        capsys.readouterr()
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+    command = ["run", "--root", str(store.root), "--execution", identity]
+    assert supervisor.main(command) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "client_unavailable"
+    assert not daemons
+    fake_client.write_text("#!" + sys.executable + "\nimport sys\nsys.stdin.buffer.read()\nsys.exit(17)\n")
+    fake_client.chmod(0o700)
+    assert supervisor.main(command) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "exited"
+    assert report["exit_code"] == 17
+    assert report["generation"] == 1
+    first = store.load(identity)["attempts"]
+    fake_client.unlink()
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: pytest.fail("reentry preflight"))
+    assert supervisor.main(command) == 1
+    capsys.readouterr()
+    assert store.load(identity)["attempts"] == first
+    assert len(daemons) == 1
 
 
 def test_promoted_result_is_immutable_and_dirty_work_blocks_completion(tmp_path, monkeypatch):

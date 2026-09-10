@@ -31,6 +31,75 @@ def build(layout):
     return agent_client.build_client_argv(registration, staging, authority_root=authority)
 
 
+def test_native_profile_registration_enables_implementer_without_widening_reviewer(layout, monkeypatch):
+    from hermes_pipeline.agent_execution import ExecutionStore
+    from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
+
+    registration, staging, authority = layout
+    phases = load_phases(resolve_profile_phases_path("native-sdd"))
+    development = next(phase for phase in phases if phase.phase_key == "phase_4_development")
+    store = ExecutionStore(authority)
+    record = store.register(
+        "native", registration_id="tick", plan_identity="a" * 64, phase=development.phase_key,
+        prompt=development.prompt.encode(), client={"name": "claude", "tools": development.tools.split(",")},
+        worktree=registration["worktree"], branch="task", result_contract=registration["result_contract"], timeout=30)
+    monkeypatch.setattr(agent_client, "_confirm_claude_sandbox", lambda: None)
+    argv = agent_client.build_client_argv(record["registration"], staging, authority_root=authority)
+    assert "Agent" in argv[argv.index("--tools") + 1].split(",")
+    settings = json.loads(argv[argv.index("--settings") + 1])
+    assert "Agent" in settings["permissions"]["allow"]
+    assert settings["sandbox"]["failIfUnavailable"] is True
+    assert str(authority) in settings["sandbox"]["filesystem"]["denyRead"]
+    assert argv[argv.index("--mcp-config") + 1] == '{"mcpServers":{}}'
+    assert all("Agent" not in phase.tools.split(",") for phase in phases if phase is not development)
+
+
+@pytest.mark.parametrize("platform_name", ["linux", "darwin"])
+@pytest.mark.parametrize("client_name", ["claude", "codex"])
+def test_client_platform_argv_and_prerequisites(layout, monkeypatch, platform_name, client_name):
+    """Configuration matrix only; Darwin and installed-client probes are simulated."""
+    from types import SimpleNamespace
+
+    registration, _, _ = layout
+    registration["client"]["name"] = client_name
+    monkeypatch.setattr(agent_client, "sys", SimpleNamespace(platform=platform_name))
+    run = subprocess.run
+    version_checks = []
+    def client_probe(argv, **kwargs):
+        if argv == ["claude", "--version"]:
+            version_checks.append(argv)
+            return SimpleNamespace(returncode=0, stdout=b"2.1.267 (Claude Code)\n")
+        return run(argv, **kwargs)
+    monkeypatch.setattr(agent_client.subprocess, "run", client_probe)
+    which = agent_client.shutil.which
+    dependencies = []
+    def dependency(name, **kwargs):
+        if name in {"bwrap", "socat"}:
+            dependencies.append(name)
+            return "/fake/" + name
+        return which(name, **kwargs)
+    monkeypatch.setattr(agent_client.shutil, "which", dependency)
+    argv = build(layout)
+    assert argv[0] == client_name
+    if client_name == "claude":
+        assert len(version_checks) == 1
+        assert set(dependencies) == ({"bwrap", "socat"} if platform_name == "linux" else set())
+        assert argv[argv.index("--tools") + 1] == "Read,Write,Edit,Bash"
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        assert settings["sandbox"]["failIfUnavailable"] is True
+        assert settings["sandbox"]["allowUnsandboxedCommands"] is False
+        monkeypatch.setattr(agent_client.subprocess, "run", lambda args, **kwargs: (
+            SimpleNamespace(returncode=1, stdout=b"untrusted provider response")
+            if args == ["claude", "--version"] else run(args, **kwargs)))
+        with pytest.raises(ExecutionError, match="^client_sandbox_unconfirmed$"):
+            build(layout)
+    else:
+        assert not version_checks and not dependencies
+        assert argv[-1] == "-"
+        assert 'approval_policy="never"' in argv
+        assert 'default_permissions="tpo-worktree"' in argv
+
+
 def test_same_head_clone_cannot_substitute_registered_git_directory(layout, tmp_path):
     from pathlib import Path
     registration, staging, authority = layout
@@ -166,7 +235,7 @@ def test_claude_rejects_permission_pattern_metacharacters(claude, tmp_path):
         build((claude[0], staging, claude[2]))
 
 
-@pytest.mark.parametrize("tools", [["Bash;echo unsafe"], ["mcp__custom"], ["Agent"]])
+@pytest.mark.parametrize("tools", [["Bash;echo unsafe"], ["mcp__custom"], ["UnqualifiedTool"]])
 def test_unconfirmed_claude_tools_block(claude, tools):
     claude[0]["client"]["tools"] = tools
     with pytest.raises(ExecutionError, match="invalid_client_tools"):

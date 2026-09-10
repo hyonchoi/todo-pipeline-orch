@@ -32,6 +32,7 @@ from .agent_process import (
     ProcessLaunchError,
     ProcessOwnershipError,
     cleanup_processes,
+    confirm_process_capability,
     run_process,
 )
 from .result_contract import (
@@ -47,6 +48,92 @@ from .result_contract import (
     verify_optional_single_commit,
     verify_worker_git_result,
 )
+
+_FAILURE_CODES = frozenset({
+    "supervisor_unavailable", "client_unavailable", "client_sandbox_unavailable",
+    "client_sandbox_unconfirmed", "process_capability_unavailable", "invalid_client_tools",
+    "invalid_client", "registration_invalid", "registration_drift", "execution_identity_mismatch",
+    "profile_authority_root_unconfirmed", "registration_root_mismatch", "branch_drift",
+    "phase_identity_mismatch", "git_metadata_drift", "git_metadata_unconfirmed",
+    "git_permissions_unconfirmed", "execution_invalid", "launch_unavailable",
+})
+
+
+def _failure_code(error: Exception) -> str:
+    if isinstance(error, LockUnconfirmed):
+        return "lock_unconfirmed"
+    if isinstance(error, ProcessLaunchError):
+        return "process_capability_unavailable"
+    # Only exact, closed vocabulary matches may cross the reporting boundary.
+    if isinstance(error, ExecutionError) and error.args and isinstance(error.args[0], str) and error.args[0] in _FAILURE_CODES:
+        return error.args[0]
+    return "launch_unavailable" if isinstance(error, OSError) else "execution_invalid"
+
+
+def _registration_digest(record: dict) -> str:
+    return hashlib.sha256(json.dumps(record["registration"], sort_keys=True,
+                                     separators=(",", ":")).encode()).hexdigest()
+
+
+def _remember_launch_refusal(store: ExecutionStore, identity: str, error: Exception) -> None:
+    """Called under both admission locks; a refusal never consumes an attempt."""
+    record = store.load(identity)
+    if record["attempts"] or isinstance(error, LockUnconfirmed):
+        return
+    receipt = {"version": 1, "execution_id": identity, "generation": 1,
+               "registration_sha256": _registration_digest(record), "reason": _failure_code(error)}
+    with store._directory_handle(identity) as directory:
+        _atomic_write(Path("launch-refusal.json"), receipt, directory_fd=directory)
+
+
+def _launch_refusal(store: ExecutionStore, identity: str, record: dict) -> str | None:
+    try:
+        with store._directory_handle(identity) as directory:
+            raw = _safe_read(Path("launch-refusal.json"), directory_fd=directory)
+    except FileNotFoundError:
+        return None
+    if len(raw) > 1024:
+        raise ExecutionError("execution_invalid")
+    receipt = json.loads(raw)
+    fields = {"version", "execution_id", "generation", "registration_sha256", "reason"}
+    if (not isinstance(receipt, dict) or set(receipt) != fields
+            or type(receipt["version"]) is not int or receipt["version"] != 1
+            or type(receipt["generation"]) is not int or receipt["generation"] < 1
+            or not isinstance(receipt["execution_id"], str)
+            or not isinstance(receipt["registration_sha256"], str)
+            or len(receipt["registration_sha256"]) != 64
+            or any(character not in "0123456789abcdef" for character in receipt["registration_sha256"])
+            or not isinstance(receipt["reason"], str) or receipt["reason"] not in _FAILURE_CODES):
+        raise ExecutionError("execution_invalid")
+    if (receipt["execution_id"] != identity or receipt["generation"] != 1
+            or receipt["registration_sha256"] != _registration_digest(record)):
+        return None
+    return receipt["reason"]
+
+
+def _prepare_launch(store: ExecutionStore, identity: str, record: dict) -> tuple[Path, list[str]]:
+    validate_registration(store, identity)
+    if not record["attempts"]:
+        from .agent_checkpoint import ProgressJournal
+
+        ProgressJournal(store, identity).validate_fresh()
+    confirm_process_capability()
+    staging = staging_directory(store, identity, len(record["attempts"]) + 1)
+    arguments = client_argv(record["registration"], staging, authority_root=store.root)
+    executable = shutil.which(arguments[0])
+    if executable is None:
+        raise ExecutionError("client_unavailable")
+    arguments[0] = executable
+    # A repaired prerequisite permits the first admission; status must not keep
+    # returning an older refusal while the new daemon is being started.
+    if not record["attempts"]:
+        with store._directory_handle(identity) as directory:
+            try:
+                os.unlink("launch-refusal.json", dir_fd=directory)
+                os.fsync(directory)
+            except FileNotFoundError:
+                pass
+    return staging, arguments
 
 
 def installed_entrypoint() -> str:
@@ -292,6 +379,9 @@ def _status(store: ExecutionStore, identity: str) -> dict:
     report = {"version": 1, "execution_id": identity, "generation": 0,
               "status": "registered", "completion_allowed": False}
     if not record["attempts"]:
+        refusal = _launch_refusal(store, identity, record)
+        if refusal is not None:
+            report.update(status=refusal, reason=refusal)
         return report
     attempt = record["attempts"][-1]
     report.update(generation=attempt["generation"], status=attempt["status"],
@@ -312,109 +402,130 @@ def _status(store: ExecutionStore, identity: str) -> dict:
 
 def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
     with store.worktree_locked(identity), store.locked(identity):
-        validate_registration(store, identity)
+        try:
+            return _supervise_locked(store, identity, recovery_event=recovery_event)
+        except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
+            _remember_launch_refusal(store, identity, error)
+            raise
+
+
+def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: str | None) -> dict:
+    current = store.load(identity)
+    if current["attempts"] and recovery_event is None:
+        return status(store, identity)
+    staging, arguments = _prepare_launch(store, identity, current)
+    if recovery_event is not None:
+        from .agent_recovery import consume_recovery
+
+        preview = consume_recovery(store, identity, recovery_event)
+        store.authorize_retry(identity, expected_generation=preview["generation"], event_id=recovery_event,
+                              recovery_context=json.dumps(preview["context"], sort_keys=True))
+    record, created = store.admit(identity, recovery_event=recovery_event)
+    if not created:
+        return status(store, identity)
+    generation = record["attempts"][-1]["generation"]
+    registration = record["registration"]
+    store.update_attempt(identity, generation, supervisor=process_identity(os.getpid()))
+    context_path = ""
+    if generation > 1:
         from .agent_checkpoint import ProgressJournal
 
-        current = store.load(identity)
-        if current["attempts"] and recovery_event is None:
-            return status(store, identity)
-        if not current["attempts"]:
-            journal = ProgressJournal(store, identity)
-            journal.validate_fresh()
-        # Creating an empty candidate staging directory grants no launch
-        # authority. All deterministic client validation precedes admission.
-        staging = staging_directory(store, identity, len(current["attempts"]) + 1)
-        arguments = client_argv(current["registration"], staging, authority_root=store.root)
-        executable = shutil.which(arguments[0])
-        if executable is None:
-            raise ExecutionError("client_unavailable")
-        arguments[0] = executable
-        if recovery_event is not None:
-            from .agent_recovery import consume_recovery
-
-            preview = consume_recovery(store, identity, recovery_event)
-            store.authorize_retry(identity, expected_generation=preview["generation"], event_id=recovery_event,
-                                  recovery_context=json.dumps(preview["context"], sort_keys=True))
-        record, created = store.admit(identity, recovery_event=recovery_event)
-        if not created:
-            return status(store, identity)
-        generation = record["attempts"][-1]["generation"]
-        registration = record["registration"]
-        store.update_attempt(identity, generation, supervisor=process_identity(os.getpid()))
-        context_path = ""
-        if generation > 1:
-            from .agent_checkpoint import ProgressJournal
-
-            context = ProgressJournal(store, identity).recovery_context(generation)
-            context["approved_intent"] = record["attempts"][-1]["recovery_context"]
-            with _open_directory(staging) as directory:
-                _atomic_write(Path("recovery-context.json"), context, directory_fd=directory)
-            context_path = str(staging / "recovery-context.json")
-        try:
-            result = run_process(
-                arguments, cwd=Path(registration["worktree"]),
-                stdin_bytes=base64.b64decode(registration["prompt_base64"]), timeout=registration["timeout"],
-                env={**os.environ, "TPO_RESULT_PATH": str(staging / "result.json"), "TPO_CHECKPOINT_DIR": str(staging),
-                     "TPO_ATTEMPT_GENERATION": str(generation),
-                     "TPO_RECOVERY_CONTEXT_PATH": context_path},
-                on_launch=lambda receipt: store.update_attempt(
-                    identity, generation, status="running", client_process=receipt["identity"],
-                    started_monotonic=receipt["launched_monotonic"], deadline_monotonic=receipt["deadline"]),
-                on_processes=lambda processes: store.update_attempt(identity, generation, owned_processes=processes),
+        context = ProgressJournal(store, identity).recovery_context(generation)
+        context["approved_intent"] = record["attempts"][-1]["recovery_context"]
+        with _open_directory(staging) as directory:
+            _atomic_write(Path("recovery-context.json"), context, directory_fd=directory)
+        context_path = str(staging / "recovery-context.json")
+    try:
+        result = run_process(
+            arguments, cwd=Path(registration["worktree"]),
+            stdin_bytes=base64.b64decode(registration["prompt_base64"]), timeout=registration["timeout"],
+            env={**os.environ, "TPO_RESULT_PATH": str(staging / "result.json"), "TPO_CHECKPOINT_DIR": str(staging),
+                 "TPO_ATTEMPT_GENERATION": str(generation),
+                 "TPO_RECOVERY_CONTEXT_PATH": context_path},
+            on_launch=lambda receipt: store.update_attempt(
+                identity, generation, status="running", client_process=receipt["identity"],
+                started_monotonic=receipt["launched_monotonic"], deadline_monotonic=receipt["deadline"]),
+            on_processes=lambda processes: store.update_attempt(identity, generation, owned_processes=processes),
+        )
+    except ProcessLaunchError:
+        store.update_attempt(identity, generation, status="blocked", reason="client_not_launched", cleanup="confirmed")
+    except ProcessOwnershipError as exc:
+        store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable",
+                             cleanup="unconfirmed", owned_processes=exc.processes)
+    except Exception:
+        store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable", cleanup="unconfirmed")
+    else:
+        collecting = result["outcome"] == "exited" and result["exit_code"] == 0 and result["cleanup"] == "confirmed"
+        store.update_attempt(identity, generation, status="running" if collecting else result["outcome"], exit_code=result["exit_code"],
+                             exit_signal=result["signal"], cleanup="confirmed" if result["cleanup"] == "confirmed" else "unconfirmed",
+                             owned_processes=result["processes"])
+        if collecting:
+            from .agent_collector import (
+                CollectionInterrupted,
+                CollectionTimedOut,
+                collect_checkpoints,
             )
-        except ProcessLaunchError:
-            store.update_attempt(identity, generation, status="blocked", reason="client_not_launched", cleanup="confirmed")
-        except ProcessOwnershipError as exc:
-            store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable",
-                                 cleanup="unconfirmed", owned_processes=exc.processes)
-        except Exception:
-            store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable", cleanup="unconfirmed")
-        else:
-            collecting = result["outcome"] == "exited" and result["exit_code"] == 0 and result["cleanup"] == "confirmed"
-            store.update_attempt(identity, generation, status="running" if collecting else result["outcome"], exit_code=result["exit_code"],
-                                 exit_signal=result["signal"], cleanup="confirmed" if result["cleanup"] == "confirmed" else "unconfirmed",
-                                 owned_processes=result["processes"])
-            if collecting:
-                from .agent_collector import (
-                    CollectionInterrupted,
-                    CollectionTimedOut,
-                    collect_checkpoints,
-                )
 
-                try:
-                    collected = collect_checkpoints(store, identity, generation,
-                                                    deadline_monotonic=result["deadline"])
-                    if not collected["complete"]:
-                        raise ExecutionError("checkpoint_evidence_incomplete")
-                    validated_result(store, identity, generation, promote=True)
-                except CollectionTimedOut:
-                    store.update_attempt(identity, generation, status="timed_out", reason="checkpoint_deadline_exceeded")
-                except CollectionInterrupted:
-                    store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable")
-                except (ExecutionError, ResultContractError, OSError, ValueError, KeyError):
-                    store.update_attempt(identity, generation, status="exited", reason="result_invalid")
-                else:
-                    store.update_attempt(identity, generation, status="exited")
-        return status(store, identity)
+            try:
+                collected = collect_checkpoints(store, identity, generation,
+                                                deadline_monotonic=result["deadline"])
+                if not collected["complete"]:
+                    raise ExecutionError("checkpoint_evidence_incomplete")
+                validated_result(store, identity, generation, promote=True)
+            except CollectionTimedOut:
+                store.update_attempt(identity, generation, status="timed_out", reason="checkpoint_deadline_exceeded")
+            except CollectionInterrupted:
+                store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable")
+            except (ExecutionError, ResultContractError, OSError, ValueError, KeyError):
+                store.update_attempt(identity, generation, status="exited", reason="result_invalid")
+            else:
+                store.update_attempt(identity, generation, status="exited")
+    return status(store, identity)
 
 
 def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
     record = store.load(identity)
     if record["attempts"] and recovery_event is None:
         return status(store, identity)
-    validate_registration(store, identity)
-    if recovery_event is not None:
-        from .agent_recovery import validate_recovery
+    with store.worktree_locked(identity), store.locked(identity):
+        record = store.load(identity)
+        if record["attempts"] and recovery_event is None:
+            return status(store, identity)
+        try:
+            if recovery_event is not None:
+                from .agent_recovery import validate_recovery
 
-        validate_recovery(store, identity, recovery_event)
+                validate_recovery(store, identity, recovery_event)
+            _prepare_launch(store, identity, record)
+        except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
+            _remember_launch_refusal(store, identity, error)
+            raise
     # Each daemon races only for kernel locks; only the winner admits a client.
-    command = [installed_entrypoint(), "_supervise", "--root", str(store.root), "--execution", identity]
-    if recovery_event is not None:
-        command += ["--recovery-event", recovery_event]
-    subprocess.Popen(command,
-                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     start_new_session=True, close_fds=True)
-    return {**status(store, identity), "status": "running_detached"}
+    try:
+        command = [installed_entrypoint(), "_supervise", "--root", str(store.root), "--execution", identity]
+        if recovery_event is not None:
+            command += ["--recovery-event", recovery_event]
+        subprocess.Popen(command,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+    except (ExecutionError, OSError, ValueError) as error:
+        with store.worktree_locked(identity), store.locked(identity):
+            latest = store.load(identity)
+            if _registration_digest(latest) != _registration_digest(record):
+                raise ExecutionError("registration_drift") from None
+            if len(latest["attempts"]) > len(record["attempts"]):
+                return status(store, identity)
+            _remember_launch_refusal(store, identity, error)
+        raise
+    report = status(store, identity)
+    if report["status"] == "registered" or (
+        recovery_event is not None and report["generation"] == len(record["attempts"])
+    ):
+        # An explicitly requested recovery may still be waiting for admission.
+        # Retain the existing generation's durable outcome while polling.
+        return {"version": 1, "execution_id": identity, "generation": report["generation"],
+                "status": "running_detached", "completion_allowed": False}
+    return report
 
 
 def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60) -> dict:
@@ -513,13 +624,26 @@ def main(argv: list[str] | None = None) -> int:
         if args.operation == "status":
             report = status(store, args.execution)
         else:
+            expected_generation = (len(store.load(args.execution)["attempts"]) + 1
+                                   if args.operation == "run" and args.recovery_event is not None else None)
             report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event)
         if args.operation == "run":
             stop = time.monotonic() + 5
             while report["status"] in {"running_detached", "registered", "lock_unconfirmed"} and time.monotonic() < stop:
                 time.sleep(0.1)
-                report = status(store, args.execution)
-    except (ExecutionError, ResultContractError, OSError, ValueError):
-        report = {"version": 1, "status": "lock_unconfirmed", "completion_allowed": False}
+                observed = status(store, args.execution)
+                if (expected_generation is not None and observed["generation"] < expected_generation
+                        and report["status"] == "running_detached"):
+                    # The previous terminal outcome remains authoritative for
+                    # that generation, but cannot settle this requested retry.
+                    continue
+                report = observed
+    except (ExecutionError, ProcessLaunchError, ResultContractError, OSError, ValueError) as error:
+        report = {"version": 1, "status": _failure_code(error), "completion_allowed": False}
+        try:
+            record = ExecutionStore(args.root).load(args.execution)
+            report.update(execution_id=record["execution_id"], generation=len(record["attempts"]))
+        except (ExecutionError, OSError, ValueError):
+            pass
     print(json.dumps(report, sort_keys=True))
     return 0 if report["completion_allowed"] or report["status"] == "running_detached" else 1

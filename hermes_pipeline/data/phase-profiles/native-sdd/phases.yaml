@@ -22,7 +22,7 @@ phases:
       5. Have the coordinator review the task result before starting the next task.
 
       Never commit a red, incomplete, or known-failing task. If native subagents are unavailable, the Plan is contradictory, or safe completion is impossible, exit nonzero. Do not implement inline and do not ask questions in this unattended phase.
-    tools: "Read,Write,Edit,Bash"
+    tools: "Read,Write,Edit,Bash,Agent"
     turns: 100
     timeout: 7200
   - phase_key: "phase_5_review"

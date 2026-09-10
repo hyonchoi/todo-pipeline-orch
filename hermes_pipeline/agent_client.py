@@ -20,7 +20,7 @@ from .agent_git import inspection_root, metadata_paths
 # A new client release needs explicit qualification of these security settings.
 # Unknown versions must not silently ignore a required sandbox setting.
 _CLAUDE_SANDBOX_VERSIONS = {(2, 1, 267)}
-_CLAUDE_TOOLS = frozenset({"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite"})
+_CLAUDE_TOOLS = frozenset({"Read", "Write", "Edit", "Bash", "Glob", "Grep", "WebFetch", "WebSearch", "TodoWrite", "Agent"})
 
 
 def _confirm_claude_sandbox() -> None:
@@ -150,7 +150,7 @@ def _render_argv(client: dict, worktree: Path, directories: list[Path], authorit
         return [*argv, "-"]
     if client["name"] != "claude":
         raise ExecutionError("invalid_client")
-    requested = client["tools"] or sorted(_CLAUDE_TOOLS)
+    requested = client["tools"] or sorted(_CLAUDE_TOOLS - {"Agent"})
     if any(tool not in _CLAUDE_TOOLS for tool in requested):
         raise ExecutionError("invalid_client_tools")
     paths = [_claude_path(path) for path in (directories if read_only else [worktree, *directories])]
