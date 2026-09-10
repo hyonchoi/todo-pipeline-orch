@@ -44,7 +44,7 @@ tick:
   1. Acquire global TickLock
   2. Discover active projects (scans projects_dir)
   3. For each project:
-     a. Check prior tick (per-project)
+     a. Reconcile prior tick, then check older unresolved registrations (per-project)
      b. Fetch eligible `tpo:todo` issues via `gh` and run selection (per-project)
      c. Validate the selected TODO's Plan when the profile requires one
      d. Render every phase body from the selected profile for prompt_client
@@ -87,7 +87,8 @@ You should see the phases with statuses:
 - `running` — the first phase in the chain is executing
 - `todo` — subsequent executable phases are waiting on `--parent` completion
 - `ready` — an executable phase is runnable and queued for dispatch
-- `blocked` — human gate phases, which stay blocked until manual approval
+- `blocked` — sticky human-input gates or worker failures; new selection waits
+  for resolution or explicit abandonment
 
 The `--parent` chain means phases execute sequentially through the kanban
 board. When phase 2 completes, phase 4 transitions from `todo` through `ready`
@@ -165,13 +166,34 @@ but there is deliberately no single global tick lock.
 
 ## Troubleshooting
 
-**"tick already in flight, skipping".**
-A prior tick's kanban tasks are still running or ready, or a completed Phase 8
-handoff is waiting on a PR that is open, closed without merge, or temporarily
-unverifiable. Check the board with
-`hermes kanban list --tenant demo` and check the PR named by
-`.hermes/pipeline_branch.txt`. If tasks are stuck in `running`, manually clear
-them via `hermes kanban complete <task_id>`.
+**"tick already in flight, skipping" or blocked phases.**
+A prior tick's kanban tasks are still running, ready, or blocked, or a completed
+Phase 8 handoff is waiting on a PR that is open, closed without merge, or
+temporarily unverifiable. Inspect `tpo doctor <project>`,
+`hermes kanban list --tenant <project-slug>`, and
+`hermes kanban show <task_id>`. A blocked phase records failure evidence and
+no-progress diagnostics; repeated ticks do not duplicate the same failure.
+Resolve the reported input or worker problem before continuing. Do not mark a
+blocked task complete merely to release selection. A Plan correction requires
+an explicitly approved, diff-confirmed edit and validation before retry.
+
+**"unresolved historical execution runs" or "historical registration state unavailable".**
+The current pointer may have advanced past an older unfinished registration.
+Current work reconciles first and already-running tasks continue, but no fresh
+TODO is selected until the older execution is resolved. Use
+`tpo doctor <project>` and `hermes kanban show <task_id>` to inspect the run and
+its blocking reason. Check logs and the run's registration if state cannot be
+read. The tick does not automatically restart older work or move the pointer
+back. Verified delivery handoffs have their own recovery path and do not hold
+this execution gate. Legacy manifest-free runs need valid pinned registration,
+all registered steps complete (`done` or `failed`), and, after successful Phase
+8, a merged PR for the exact pinned branch; missing or unavailable evidence
+keeps selection held.
+
+If the operator chooses to abandon a run, create its existing
+`.hermes/runs/<tick-id>/abandoned` marker as described in
+[Abandoning a run](howto-debugging-and-recovery.md#abandoning-a-run). Abandonment
+is an explicit recovery choice, not automatic completion of blocked work.
 
 **"Error: tick.lock held by pid X"**.
 The tick lock is held. If the PID is alive (within `max_tick_duration_min` —
