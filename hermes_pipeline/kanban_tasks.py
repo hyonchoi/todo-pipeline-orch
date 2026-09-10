@@ -768,7 +768,14 @@ def prepare_todo_phases(
                 timeout=phase.timeout,
                 rendered_prompt=rendered_prompt,
                 prompt_client=prompt_client,
-                tools=phase.tools,
+                # Native SDD already requires an implementation subagent. Agent
+                # is a Claude launch grant, separate from the stable contract
+                # capabilities; retain full validation of declared phase tools.
+                tools=(phase.tools + ",Agent" if (
+                    profile_name == "native-sdd" and prompt_client == "claude"
+                    and phase.phase_key == IMPLEMENTATION_KEY
+                    and "Agent" not in phase.tools.split(",")
+                ) else phase.tools),
                 result_template=(render_result_template(
                     tick_id=tick_id, todo_id=todo_id, step_key=phase.phase_key,
                     acceptance_criteria=manifest_acceptance_criteria(manifest),

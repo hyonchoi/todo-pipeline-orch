@@ -33,15 +33,27 @@ def build(layout):
 
 def test_native_profile_registration_enables_implementer_without_widening_reviewer(layout, monkeypatch):
     from hermes_pipeline.agent_execution import ExecutionStore
+    from hermes_pipeline.contract import PipelineContract, missing_capabilities
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
     from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
 
     registration, staging, authority = layout
     phases = load_phases(resolve_profile_phases_path("native-sdd"))
-    development = next(phase for phase in phases if phase.phase_key == "phase_4_development")
+    # Existing native contracts grant the stable phase capabilities.
+    assert missing_capabilities(PipelineContract(schema_version=3), phases) == set()
+    assert missing_capabilities(
+        PipelineContract(schema_version=3, capabilities=("Read", "Write", "Bash")), phases,
+    ) == {"Edit"}
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41", tick_id="tick", board_slug="demo",
+        phases_path=resolve_profile_phases_path("native-sdd"),
+        plan_path="plan.md", profile_name="native-sdd", prompt_client="claude",
+    )
+    development = next(phase for phase in prepared if phase.phase_key == "phase_4_development")
     store = ExecutionStore(authority)
     record = store.register(
         "native", registration_id="tick", plan_identity="a" * 64, phase=development.phase_key,
-        prompt=development.prompt.encode(), client={"name": "claude", "tools": development.tools.split(",")},
+        prompt=development.rendered_prompt.encode(), client={"name": "claude", "tools": development.tools.split(",")},
         worktree=registration["worktree"], branch="task", result_contract=registration["result_contract"], timeout=30)
     monkeypatch.setattr(agent_client, "_confirm_claude_sandbox", lambda: None)
     argv = agent_client.build_client_argv(record["registration"], staging, authority_root=authority)
@@ -51,7 +63,23 @@ def test_native_profile_registration_enables_implementer_without_widening_review
     assert settings["sandbox"]["failIfUnavailable"] is True
     assert str(authority) in settings["sandbox"]["filesystem"]["denyRead"]
     assert argv[argv.index("--mcp-config") + 1] == '{"mcpServers":{}}'
-    assert all("Agent" not in phase.tools.split(",") for phase in phases if phase is not development)
+    assert all("Agent" not in phase.tools.split(",") for phase in phases)
+    assert all("Agent" not in phase.tools.split(",") for phase in prepared if phase is not development)
+
+
+@pytest.mark.parametrize("profile_name,client_name", [
+    ("native-sdd", "codex"), ("superpowers", "claude"), (None, "claude"),
+])
+def test_preparation_does_not_grant_native_claude_delegation_to_other_contexts(profile_name, client_name):
+    from hermes_pipeline.kanban_tasks import prepare_todo_phases
+    from hermes_pipeline.phases import resolve_profile_phases_path
+
+    prepared = prepare_todo_phases(
+        todo_id="TODO-41", tick_id="tick", board_slug="demo",
+        phases_path=resolve_profile_phases_path("native-sdd"),
+        plan_path="plan.md", profile_name=profile_name, prompt_client=client_name,
+    )
+    assert all("Agent" not in phase.tools.split(",") for phase in prepared)
 
 
 @pytest.mark.parametrize("platform_name", ["linux", "darwin"])
