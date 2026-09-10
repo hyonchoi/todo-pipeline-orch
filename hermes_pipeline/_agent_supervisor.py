@@ -28,6 +28,7 @@ from .agent_execution import (
     identity_matches,
     process_identity,
 )
+from .agent_git import check_collection_deadline, collection_deadline
 from .agent_process import (
     ProcessLaunchError,
     ProcessOwnershipError,
@@ -315,7 +316,13 @@ def validate_registration(store: ExecutionStore, identity: str) -> None:
             raise ExecutionError("phase_identity_mismatch")
 
 
-def validated_result(store: ExecutionStore, identity: str, generation: int, *, promote: bool = False) -> dict:
+def validated_result(store: ExecutionStore, identity: str, generation: int, *, promote: bool = False,
+                     deadline_monotonic: float | None = None) -> dict:
+    with collection_deadline(deadline_monotonic):
+        return _validated_result(store, identity, generation, promote=promote)
+
+
+def _validated_result(store: ExecutionStore, identity: str, generation: int, *, promote: bool) -> dict:
     validate_registration(store, identity)
     from .agent_checkpoint import ProgressJournal
 
@@ -354,6 +361,7 @@ def validated_result(store: ExecutionStore, identity: str, generation: int, *, p
             try:
                 existing = json.loads(_safe_read(accepted, directory_fd=directory))
             except FileNotFoundError:
+                check_collection_deadline()
                 _atomic_write(accepted, raw, directory_fd=directory)
             else:
                 if existing != raw:
@@ -389,7 +397,7 @@ def status(store: ExecutionStore, identity: str) -> dict:
                 "completion_allowed": False}
 
 
-def _status(store: ExecutionStore, identity: str) -> dict:
+def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) -> dict:
     record = store.load(identity)
     report = {"version": 1, "execution_id": identity, "generation": 0,
               "status": "registered", "completion_allowed": False}
@@ -405,7 +413,7 @@ def _status(store: ExecutionStore, identity: str) -> dict:
         report["status"] = "running_detached" if identity_matches(attempt["supervisor"]) else "lock_unconfirmed"
     elif attempt["cleanup"] != "confirmed":
         report["status"] = "cleanup_unconfirmed"
-    elif attempt["status"] == "exited" and attempt["exit_code"] == 0:
+    elif revalidate and attempt["status"] == "exited" and attempt["exit_code"] == 0:
         try:
             raw = validated_result(store, identity, attempt["generation"])
         except (ExecutionError, ResultContractError, OSError, ValueError, KeyError):
@@ -482,19 +490,31 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
             )
 
             try:
-                collected = collect_checkpoints(store, identity, generation,
-                                                deadline_monotonic=result["deadline"])
-                if not collected["complete"]:
-                    raise ExecutionError("checkpoint_evidence_incomplete")
-                validated_result(store, identity, generation, promote=True)
+                with collection_deadline(result["deadline"]):
+                    collected = collect_checkpoints(store, identity, generation,
+                                                    deadline_monotonic=result["deadline"])
+                    if not collected["complete"]:
+                        raise ExecutionError("checkpoint_evidence_incomplete")
+                    raw = validated_result(store, identity, generation, promote=True,
+                                           deadline_monotonic=result["deadline"])
+                    # This exact result was just validated while holding both locks.
+                    # Historical status calls revalidate independently of this budget.
+                    report = _status(store, identity, revalidate=False)
+                    report.update(status="completed", completion_allowed=True, metadata={"tpo_result": raw})
             except CollectionTimedOut:
                 store.update_attempt(identity, generation, status="timed_out", reason="checkpoint_deadline_exceeded")
             except CollectionInterrupted:
                 store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable")
             except (ExecutionError, ResultContractError, OSError, ValueError, KeyError):
                 store.update_attempt(identity, generation, status="exited", reason="result_invalid")
+                report = _status(store, identity, revalidate=False)
+                report["status"] = "result_invalid"
+                return report
             else:
+                # Eligibility is final before the immutable terminal write. A
+                # slow fsync cannot turn an eligible success into a late timeout.
                 store.update_attempt(identity, generation, status="exited")
+                return report
     return status(store, identity)
 
 

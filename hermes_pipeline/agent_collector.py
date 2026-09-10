@@ -24,16 +24,12 @@ from pathlib import Path, PurePosixPath
 from .agent_checkpoint import ProgressJournal
 from .agent_client import validate_git_metadata
 from .agent_execution import ExecutionError, _atomic_write, _open_directory, _safe_read
-from .agent_git import inspection_root, run_git
+from .agent_git import CollectionTimedOut, collection_deadline, inspection_root, run_git
 from .agent_process import ProcessLaunchError, ProcessOwnershipError, run_process
 
 _MAX_SNAPSHOT = 64 * 1024 * 1024
 _MAX_DIFF = 1024 * 1024
 _REVIEW_FIELDS = {'version', 'task_id', 'commit', 'plan_identity', 'diff_sha256', 'outcome'}
-
-
-class CollectionTimedOut(ExecutionError):
-    """Collection consumed the original attempt's absolute deadline."""
 
 
 class CollectionInterrupted(ExecutionError):
@@ -355,6 +351,11 @@ def _run_owned(store, identity, generation, argv, *, cwd, stdin_bytes, env, dead
 
 
 def collect_checkpoints(store, identity, generation, *, deadline_monotonic):
+    with collection_deadline(deadline_monotonic):
+        return _collect_checkpoints(store, identity, generation, deadline_monotonic=deadline_monotonic)
+
+
+def _collect_checkpoints(store, identity, generation, *, deadline_monotonic):
     """Validate candidates, collect real receipts, then promote in manifest order.
 
     The caller holds both execution and worktree locks through this function and

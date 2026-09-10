@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 
 from .agent_execution import ExecutionError, _atomic_write, _open_directory, _safe_read
-from .agent_git import run_git
+from .agent_git import check_collection_deadline, run_git
 
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 _COMMIT = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?\Z')
@@ -44,6 +44,7 @@ class ProgressJournal:
 
     def _write(self, journal):
         with self.store._directory_handle(self.execution_id) as directory:
+            check_collection_deadline()
             _atomic_write(Path('progress.json'), journal, directory_fd=directory)
             # A crash between these fsynced replacements deliberately blocks
             # recovery. Never silently accept a truncated or rewritten history.

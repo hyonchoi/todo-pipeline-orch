@@ -12,13 +12,63 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
+
+from .agent_execution import ExecutionError
 
 _READ_COMMANDS = frozenset({
     'branch', 'cat-file', 'check-ignore', 'check-ref-format', 'diff', 'diff-tree', 'ls-files',
     'ls-tree', 'merge-base', 'rev-list', 'rev-parse', 'show', 'show-ref',
     'status', 'symbolic-ref',
 })
+
+
+
+class CollectionTimedOut(ExecutionError):
+    """Collection consumed the original attempt's absolute deadline."""
+
+
+_collection_deadline = ContextVar('collection_deadline', default=None)
+
+
+def check_collection_deadline():
+    deadline = _collection_deadline.get()
+    if deadline is not None:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise CollectionTimedOut('checkpoint deadline exceeded')
+        return remaining
+    return None
+
+
+@contextmanager
+def collection_deadline(deadline):
+    """Scope a budget to this execution context, never to later status queries."""
+    current = _collection_deadline.get()
+    effective = current if deadline is None else deadline if current is None else min(current, deadline)
+    token = _collection_deadline.set(effective)
+    try:
+        check_collection_deadline()
+        yield
+        check_collection_deadline()
+    finally:
+        _collection_deadline.reset(token)
+
+
+def _run_query(*args, **kwargs):
+    remaining = check_collection_deadline()
+    if remaining is not None:
+        kwargs['timeout'] = min(kwargs.get('timeout', 60), remaining)
+    try:
+        result = subprocess.run(*args, **kwargs)
+    except subprocess.SubprocessError:
+        check_collection_deadline()
+        raise
+    check_collection_deadline()
+    return result
 
 
 def _file(path: Path, maximum: int = 64 * 1024 * 1024) -> bytes:
@@ -121,6 +171,7 @@ def inspection_environment() -> dict[str, str]:
 
 def run_git(cwd: Path, arguments, **kwargs):
     """Run only internal read queries; never use this for worktree mutations."""
+    check_collection_deadline()
     arguments = list(arguments)
     prefix = []
     if arguments[:2] == ['-c', 'core.quotePath=false']:
@@ -148,7 +199,7 @@ def run_git(cwd: Path, arguments, **kwargs):
     if executable is None:
         raise OSError('Git is unavailable')
     if command == 'check-ref-format':
-        return subprocess.run([executable, *prefix, *arguments], cwd=cwd, env=environment, **kwargs)
+        return _run_query([executable, *prefix, *arguments], cwd=cwd, env=environment, **kwargs)
     tree, directory, common = metadata_paths(Path(cwd))
     with tempfile.TemporaryDirectory(prefix='query-', dir=_private_root(common)) as scratch:
         view = Path(scratch)
@@ -182,7 +233,7 @@ def run_git(cwd: Path, arguments, **kwargs):
         environment.update(GIT_DIR=str(view), GIT_WORK_TREE=str(tree))
         if command == 'status':
             with tempfile.TemporaryFile(dir=view) as tracked:
-                subprocess.run([executable, 'ls-files', '--stage', '-z'], cwd=cwd,
+                _run_query([executable, 'ls-files', '--stage', '-z'], cwd=cwd,
                                env=environment, stdout=tracked, stderr=subprocess.DEVNULL,
                                check=True, timeout=kwargs['timeout'])
                 if tracked.tell() > 64 * 1024 * 1024:
@@ -190,7 +241,7 @@ def run_git(cwd: Path, arguments, **kwargs):
                 tracked.seek(0)
                 if any(entry.startswith(b'160000 ') for entry in tracked.read().split(b'\0')):
                     raise OSError('submodule cleanliness requires isolated validation')
-        result = subprocess.run([executable, *prefix, *arguments], cwd=cwd, env=environment, **kwargs)
+        result = _run_query([executable, *prefix, *arguments], cwd=cwd, env=environment, **kwargs)
         if command == 'rev-parse' and result.returncode == 0 and result.stdout is not None:
             # Lock/merge-state checks must inspect the real paths, not our view.
             text = os.fsdecode(result.stdout) if isinstance(result.stdout, bytes) else result.stdout

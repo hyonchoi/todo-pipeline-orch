@@ -107,6 +107,57 @@ def test_checks_and_review_share_original_remaining_deadline(candidate, monkeypa
     assert 0 < calls[1][1]['timeout'] <= calls[0][1]['timeout'] <= 10
 
 
+@pytest.mark.parametrize('context_call', [1, 2, 4])
+def test_collection_deadline_includes_journal_revalidation(candidate, monkeypatch, context_call):
+    from hermes_pipeline import agent_collector as collector
+    store, journal, _ = candidate
+    fake_clients(monkeypatch)
+    clock = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    original = ProgressJournal.recovery_context
+    calls = 0
+
+    def delayed(self, generation):
+        nonlocal calls
+        result = original(self, generation)
+        calls += 1
+        if calls == context_call:
+            clock[0] = 201.0
+        return result
+
+    monkeypatch.setattr(ProgressJournal, 'recovery_context', delayed)
+    with pytest.raises(collector.CollectionTimedOut):
+        collector.collect_checkpoints(store, 'execution', 1, deadline_monotonic=110.0)
+    # Expired scope must not contaminate historical read-only queries.
+    history = journal.recovery_context(1)
+    if context_call <= 2:
+        assert history['accepted'] == []
+        assert journal._load()['receipts'] == []
+
+
+def test_collection_git_queries_share_remaining_budget(candidate, monkeypatch):
+    from hermes_pipeline import agent_collector as collector
+    from hermes_pipeline import agent_git
+    store, journal, _ = candidate
+    clock = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    original = subprocess.run
+    timeouts = []
+
+    def consume(argv, **kwargs):
+        timeouts.append(kwargs['timeout'])
+        value = original(argv, **kwargs)
+        clock[0] += 3
+        return value
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(agent_git.subprocess, 'run', consume)
+        with pytest.raises(collector.CollectionTimedOut):
+            collector.collect_checkpoints(store, 'execution', 1, deadline_monotonic=110.0)
+    assert timeouts == [10.0, 7.0, 4.0, 1.0]
+    assert journal.recovery_context(1)['accepted'] == []
+
+
 def test_refuses_shell_syntax_in_pinned_checks():
     from hermes_pipeline.agent_collector import parse_check
     for command in ('pytest && git reset --hard', 'VAR=x pytest', 'echo $(cat secret)', 'pytest > result'):

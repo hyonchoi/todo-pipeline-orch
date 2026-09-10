@@ -664,12 +664,99 @@ def test_promoted_result_is_immutable_and_dirty_work_blocks_completion(tmp_path,
     (staging / "result.json").write_text(json.dumps(result))
     # Even a valid staging assertion is insufficient until supervisor promotion.
     assert supervisor.status(store, identity)["completion_allowed"] is False
-    supervisor.validated_result(store, identity, 1, promote=True)
+    supervisor.validated_result(store, identity, 1, promote=True, deadline_monotonic=time.monotonic() + 10)
+    monkeypatch.setattr(time, "monotonic", lambda: 10**12)
     (staging / "result.json").write_text('{"provider_payload":"untrusted changed staging"}')
     assert supervisor.status(store, identity)["metadata"]["tpo_result"] == result
     (worktree / "partial-work").write_text("unfinished")
     assert supervisor.status(store, identity)["completion_allowed"] is False
     assert (worktree / "partial-work").read_text() == "unfinished"
+
+
+def test_result_promotion_rejects_validation_past_deadline(tmp_path, monkeypatch):
+    from hermes_pipeline.agent_collector import CollectionTimedOut
+    store, identity, worktree = _committed_profile(tmp_path, monkeypatch)
+    store.admit(identity)
+    staging = supervisor.staging_directory(store, identity, 1)
+    result = dict(schema_version=1, execution_id=identity, generation=1, tick_id="tick-test",
+                  todo_id="TODO-1", step_key="analysis", verdict="success",
+                  head_sha=supervisor._git(worktree, "rev-parse", "HEAD"))
+    (staging / "result.json").write_text(json.dumps(result))
+    clock = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    original = supervisor._git
+
+    def delayed(*args):
+        value = original(*args)
+        if args[1:] == ('merge-base', '--is-ancestor', result['head_sha'], result['head_sha']):
+            clock[0] = 201.0
+        return value
+
+    monkeypatch.setattr(supervisor, '_git', delayed)
+    with pytest.raises(CollectionTimedOut):
+        supervisor.validated_result(store, identity, 1, promote=True, deadline_monotonic=110.0)
+    assert not (store.root / identity / 'result-1.json').exists()
+
+
+def test_supervision_preserves_timeout_when_final_validation_expires(execution, monkeypatch):
+    from hermes_pipeline import agent_collector as collector
+    store, _ = execution
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *args: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+    clock = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'exited', 'exit_code': 0, 'signal': None, 'cleanup': 'confirmed',
+                         'processes': [], 'deadline': 110.0})
+
+    def collect(*args, **kwargs):
+        clock[0] = 201.0
+        return {'complete': True}
+
+    monkeypatch.setattr(collector, 'collect_checkpoints', collect)
+    report = supervisor.supervise(store, 'execution-1')
+    assert report['status'] == 'timed_out'
+    assert report['completion_allowed'] is False
+    assert store.load('execution-1')['attempts'][-1]['reason'] == 'checkpoint_deadline_exceeded'
+
+
+@pytest.mark.parametrize('late_boundary', ['report', 'terminal_write'])
+def test_supervision_decides_deadline_before_terminal_success(tmp_path, monkeypatch, late_boundary):
+    store, identity, worktree = _committed_profile(tmp_path, monkeypatch)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+    staging = supervisor.staging_directory(store, identity, 1)
+    result = dict(schema_version=1, execution_id=identity, generation=1, tick_id="tick-test",
+                  todo_id="TODO-1", step_key="analysis", verdict="success",
+                  head_sha=supervisor._git(worktree, "rev-parse", "HEAD"))
+    (staging / "result.json").write_text(json.dumps(result))
+    clock = [100.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'exited', 'exit_code': 0, 'signal': None, 'cleanup': 'confirmed',
+                         'processes': [], 'deadline': 110.0})
+    original_status = supervisor._status
+    original_update = store.update_attempt
+
+    def delayed_status(*args, **kwargs):
+        report = original_status(*args, **kwargs)
+        if late_boundary == 'report' and kwargs.get('revalidate') is False:
+            clock[0] = 201.0
+        return report
+
+    def delayed_update(*args, **kwargs):
+        value = original_update(*args, **kwargs)
+        if late_boundary == 'terminal_write' and kwargs.get('status') == 'exited':
+            clock[0] = 201.0
+        return value
+
+    monkeypatch.setattr(supervisor, '_status', delayed_status)
+    monkeypatch.setattr(store, 'update_attempt', delayed_update)
+    report = supervisor.supervise(store, identity)
+    expected = 'timed_out' if late_boundary == 'report' else 'completed'
+    assert report['status'] == expected
+    assert report['completion_allowed'] is (late_boundary == 'terminal_write')
+    # Durable status must agree, even when promotion happened before timeout.
+    assert supervisor.status(store, identity)['status'] == expected
 
 
 def test_copied_profile_registration_in_staging_is_not_authority(tmp_path, monkeypatch):
