@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.1.0
+
+### Minor Changes
+
+- Add issue-planner for reviewed goal-preserving issue groups, private batch records, and held TODO creation
+
+### Patch Changes
+
+- Show all effective configuration values with tpo config get
+
+- Scope Codex Git permissions dynamically to each phase worktree
+
+- Hold new TODO selection while current or older execution remains blocked or unresolved.
+
 ## 1.0.2
 
 ### Patch Changes
