@@ -252,10 +252,10 @@ tick starts
             v
 [process prior tick] -- read prior ID; observe completed outcomes
     |
-    +-- prior phases still in-flight
+    +-- prior phases still in-flight or blocked
     |       |
     |       v
-    |   log "project <slug>: prior tick <id> still in-flight, skipping"
+    |   log in-flight or blocked-phase diagnostic
     |       |
     |       v
     |   skip this project tick
@@ -269,6 +269,16 @@ tick starts
     |   skip this project tick
     |
     +-- no prior tick, or completed/resolved prior tick
+            |
+            v
+[check older active registrations before verified delivery]
+    |
+    +-- unresolved execution or unavailable evidence
+    |       |
+    |       v
+    |   record no-progress diagnostic; skip fresh selection
+    |
+    +-- no unresolved execution
             |
             v
 [run_selection] -- picks TODO-10 or picked=None
@@ -491,14 +501,15 @@ get_todo_kanban_status(board_slug: str, tick_id: str) -> dict[str, str]
 - `todo` — executable phase is waiting for its `--parent`
 - `running` — phase is actively executing
 - `ready` — executable phase is runnable and queued
-- `blocked` — Hermes's own sticky block, set when a worker exits non-zero in a way it cannot retry
+- `blocked` — sticky block requiring resolution, including worker requests for operator input (`needs_input`) and worker failures that Hermes cannot retry
 - `done` — phase completed successfully
 - `failed` — phase execution failed
 - `archived` — phase was archived mid-registration (abandoned)
 
 ### `all_phases_complete`
 
-Checks if every kanban task for a tick is in a terminal status.
+Checks if every kanban task for a tick is in a completion status (`done` or
+`failed`); a sticky `blocked` status holds selection.
 
 ```python
 all_phases_complete(
@@ -560,18 +571,22 @@ observe_outcomes(
 | `todo`, `running`, `ready` | (skipped) | In-flight phases are not written |
 | all `done` or `failed` | `all_phases_complete` | `{"outcome": "all_phases_complete"}` |
 
-`blocked` is terminal and sticky, not in-flight, and `all_phases_complete`
-counts it as complete so a tick cannot spin on it -- so a blocked card releases
-the project lock and lets the scan move to the next TODO. Writing no outcome for
-it left the circuit breaker and the decision store with neither a success nor a
-failure for a run that abandoned its branch, worktree and unmerged work, so the
-failure line is written. It does NOT get the `all_phases_complete` sentinel:
-`blocked` is not in `COMPLETION_STATUSES`, and an abandoned run carrying an
-all-complete sentinel would be the false success itself.
+`blocked` holds new selection until resolved or explicitly abandoned. It
+records a failure outcome and no-progress diagnostics while held, but never an
+`all_phases_complete` sentinel.
 
-**High-watermark dedup:** If an outcome for a phase_key already exists in the
-file, it is not written again. Running `observe_outcomes` twice with the same
-`status_map` does not duplicate entries.
+After current-tick reconciliation, older active registrations also hold fresh
+selection until execution is resolved. Runs with an `issue-closed`,
+`abandoned`, or `finish-verified` marker are exempt. For a legacy manifest-free
+run, release requires a valid pinned registration and all registered steps in `done` or
+`failed`; successful Phase 8 requires a merged PR whose head is the exact pinned
+branch. Malformed registrations, missing steps, or unavailable Kanban/PR
+verification hold selection. This gate does not restart historical runs, change
+the current pointer, or interrupt already-running current work.
+
+**High-watermark dedup:** Completion outcomes are deduplicated by phase key;
+failure outcomes by phase and Kanban status. Repeated observations of the same
+status do not duplicate entries, while a later failure status remains visible.
 
 **File locking:** Uses `fcntl.flock(LOCK_EX)` on the file descriptor for
 atomic append — safe for concurrent tick access.

@@ -201,14 +201,21 @@ All pipeline state lives under `<project>/.hermes/`:
 | `archived` | `failed_at_phase_<key>` with `kanban_status: "archived"` |
 | `blocked` | `failed_at_phase_<key>` with `kanban_status: "blocked"` |
 
-A `blocked` card is terminal and sticky, and `all_phases_complete` deliberately
-counts it as complete so a tick cannot spin on it. That combination used to make
-the abandonment silent: the prior tick read as finished, the project lock was
-released and the scan selected the next TODO while no outcome line was written
-at all, so the decision store held neither a success nor a failure for a run
-that abandoned its branch and worktree. The failure line is now written. Unlike
-`failed`, a blocked run never gets the `all_phases_complete` sentinel, because
-`blocked` is not in `COMPLETION_STATUSES`.
+A `blocked` card is sticky and holds new project selection until resolved or
+explicitly abandoned. `all_phases_complete` accepts only `done` and `failed`;
+blocked phases still produce failure outcomes and no-progress diagnostics, but
+never an `all_phases_complete` sentinel. Repeated observations do not duplicate
+the same phase/status failure outcome.
+
+After reconciling the current tick, the scheduler also checks older active
+registrations that have not reached verified delivery. Unresolved execution
+holds fresh selection without restarting an older run or changing the current
+tick pointer; already-running current work continues normally. Runs with an
+`issue-closed`, `abandoned`, or `finish-verified` marker do not hold this gate.
+A legacy manifest-free run can also pass with a valid pinned registration and all
+registered steps in `done` or `failed`; a successful Phase 8 additionally
+requires a merged PR for that registration's exact branch. Missing, malformed,
+or unavailable evidence holds selection.
 
 ## Circuit Breaker
 

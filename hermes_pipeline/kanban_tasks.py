@@ -64,10 +64,8 @@ log = logging.getLogger(__name__)
 
 TERMINAL_STATUSES = frozenset({"done", "failed", "archived"})
 
-# Hermes moves a card to "blocked" when a worker has exhausted its failure
-# limit (``_record_task_failure`` -> ``gave_up``); the block event is sticky, so
-# ``recompute_ready`` never promotes it back. TPO creates no blocked cards of
-# its own, so "blocked" means exactly one thing: the phase gave up.
+# Blocked cards may need operator input or represent exhausted worker retries.
+# They hold selection until resolved; they are not successful completion.
 BLOCKED = "blocked"
 
 # Statuses that count as "complete" for the purpose of determining whether
@@ -2011,10 +2009,9 @@ def all_phases_complete(
 ) -> bool:
     """Check if all kanban tasks for a tick are in completion statuses.
 
-    Completion statuses: done, failed, blocked. ``blocked`` counts because TPO
-    creates no blocked cards: Hermes only blocks a card whose worker exhausted
-    its failure limit, and that block is sticky, so the card will never move
-    again. Archived phases (from mid-registration cleanup) are excluded — they
+    Completion statuses: done and failed. Blocked phases require resolution
+    before another TODO can be selected. Archived phases (from mid-registration
+    cleanup) are excluded — they
     indicate the tick didn't finish cleanly, so we hold the lock until the
     operator intervenes or the stale lock is reclaimed.
 
@@ -2059,7 +2056,7 @@ def all_phases_complete(
         return False
 
     for phase_key, status in status_map.items():
-        if status not in COMPLETION_STATUSES and status != BLOCKED:
+        if status not in COMPLETION_STATUSES:
             log.debug(
                 "phase %s for tick %s is still %s (not in completion status %s)",
                 phase_key, tick_id, status, sorted(COMPLETION_STATUSES),
@@ -2116,6 +2113,7 @@ def observe_outcomes(
 
     # Read existing outcomes (high-watermark to avoid duplicates)
     existing = set()
+    existing_failures = set()
     if phases_file.exists():
         content = phases_file.read_text().strip()
         if content:
@@ -2130,6 +2128,9 @@ def observe_outcomes(
                     outcome = entry.get("outcome", "")
                     if outcome:
                         existing.add(outcome)
+                    if outcome.startswith("failed_at_phase_"):
+                        detail = entry.get("detail", {})
+                        existing_failures.add((outcome, detail.get("kanban_status")))
 
     new_outcomes: list[str] = []
 
@@ -2146,7 +2147,7 @@ def observe_outcomes(
                     )
                 )
         elif status == "failed":
-            if phase_key not in existing:
+            if (f"failed_at_phase_{phase_key}", status) not in existing_failures:
                 new_outcomes.append(
                     json.dumps(
                         {
@@ -2157,22 +2158,10 @@ def observe_outcomes(
                     )
                 )
         elif status in ("archived", BLOCKED):
-            # ``blocked`` is a terminal, sticky state: Hermes sets it when a
-            # phase exits non-zero in a way it cannot retry, and
-            # ``all_phases_complete`` deliberately accepts it as complete so the
-            # tick does not spin on it forever. That combination used to make
-            # the abandonment SILENT -- the prior tick read as finished, the
-            # project lock was released and the scan moved on, while this
-            # function wrote no line at all and the ``all_phases_complete``
-            # sentinel below is gated on the narrower ``COMPLETION_STATUSES``.
-            # The circuit breaker and the decision store were therefore left
-            # with neither a success nor a failure for a run that abandoned its
-            # branch, worktree and unmerged work. A run must never report a
-            # success it did not earn, so a block is recorded in exactly the
-            # vocabulary ``failed`` uses, with the phase key naming where the
-            # run stopped. The completion semantics are not the defect and are
-            # left alone.
-            if phase_key not in existing:
+            # Preserve failure evidence while the selection gate holds blocked
+            # or archived work for operator resolution. Neither status earns an
+            # all-phases-complete outcome.
+            if (f"failed_at_phase_{phase_key}", status) not in existing_failures:
                 new_outcomes.append(
                     json.dumps(
                         {

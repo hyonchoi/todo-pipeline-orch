@@ -696,6 +696,42 @@ def _active_registrations(state_dir: Path) -> Iterator[tuple[Path, int]]:
         yield path.parent, number
 
 
+def unresolved_execution_runs(state_dir: Path, *, current_tick_id: str | None) -> tuple[str, ...]:
+    """Historical registrations that still need execution recovery.
+
+    Do not parse registration metadata: unreadable or malformed registrations
+    must hold selection too. Verified delivery handoffs have their own retry
+    path. Filesystem errors propagate so the caller cannot mistake them for an
+    empty set; avoid glob(), which can silently suppress directory-read errors.
+    """
+    try:
+        run_dirs = sorted((state_dir / "runs").iterdir())
+    except FileNotFoundError:
+        return ()
+    def probe(path: Path) -> os.stat_result | None:
+        try:
+            return path.stat()
+        except FileNotFoundError:
+            return None
+
+    unresolved = []
+    for run_dir in run_dirs:
+        if run_dir.name == current_tick_id:
+            continue
+        run_info = probe(run_dir)
+        if run_info is None or not stat.S_ISDIR(run_info.st_mode):
+            continue
+        if probe(run_dir / "registration.json") is None:
+            continue
+        if probe(run_dir / "issue-closed") or probe(run_dir / "abandoned"):
+            continue
+        finish = probe(run_dir / "finish-verified")
+        if finish is not None and stat.S_ISREG(finish.st_mode):
+            continue
+        unresolved.append(run_dir.name)
+    return tuple(unresolved)
+
+
 def active_registration_issue_numbers(state_dir: Path) -> frozenset[int]:
     """Issue numbers pinned by every schema-v2 ``registration.json`` still ``active``."""
     return frozenset(number for _run_dir, number in _active_registrations(state_dir))

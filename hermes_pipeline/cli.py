@@ -1194,6 +1194,46 @@ def _status_map_has_successful_pr_handoff(status_map: dict[str, str]) -> bool:
     return status_map.get("phase_8_finish_branch") == "done"
 
 
+def _historical_legacy_execution_complete(
+    project_dir: Path, state_dir: Path, tenant: str, tick_id: str
+) -> bool:
+    """Check legacy completion without changing the current checkout or pointer.
+
+    Manifest-free runs predate delivery markers. They must retain their phase
+    completion/PR handoff rules after the selection pointer has advanced.
+    """
+    from . import ship
+    from .kanban_tasks import COMPLETION_STATUSES, get_todo_kanban_status
+    from .result_contract import load_validated_registration
+
+    try:
+        registration = load_validated_registration(project_dir, state_dir, tick_id)
+        if registration.manifest is not None:
+            return False
+        statuses = get_todo_kanban_status(tenant, tick_id)
+        if (
+            not statuses
+            or not set(registration.step_keys).issubset(statuses)
+            or any(status not in COMPLETION_STATUSES for status in statuses.values())
+        ):
+            return False
+        if _status_map_has_successful_pr_handoff(statuses):
+            view = ship.gh_pr_view(registration.branch, cwd=project_dir)
+            return (
+                isinstance(view, dict)
+                and view.get("headRefName") == registration.branch
+                and view.get("state") == "MERGED"
+            )
+        return True
+    except Exception as exc:
+        # Invalid or unavailable authority, board, or PR evidence holds work.
+        log.warning(
+            "historical tick %s completion unavailable: error_type=%s",
+            tick_id, type(exc).__name__,
+        )
+        return False
+
+
 def _persist_tick_id(
     state_dir: Path, tick_id: str, *, write_sentinel: bool = True
 ) -> None:
@@ -1852,6 +1892,17 @@ def _tick_project(
         tenant=project_slug, current_tick_id=prior_tick_id,
     )
 
+    from .run_registration import registration_state, unresolved_execution_runs
+
+    # Explicit resolution releases even sticky blocked cards. Pending task
+    # creation and historical delivery recovery above must still run first.
+    if prior_tick_id is not None:
+        prior_run_dir = project_state / "runs" / prior_tick_id
+        if (prior_run_dir / "registration.json").exists() and registration_state(
+            prior_run_dir
+        ) != "active":
+            prior_tick_id = None
+
     if prior_tick_id is not None:
         pr_handoff_resolved = False
         # Legacy ship-gate compatibility: custom/older profiles can still have
@@ -2044,7 +2095,20 @@ def _tick_project(
         ):
             from .kanban_tasks import get_todo_kanban_status
 
-            if not get_todo_kanban_status(project_slug, prior_tick_id):
+            status_map = get_todo_kanban_status(project_slug, prior_tick_id)
+            if any(status == "blocked" for status in status_map.values()):
+                observe_outcomes(
+                    state_dir=project_state, tick_id=prior_tick_id, status_map=status_map
+                )
+                detail = "blocked kanban phases: " + ", ".join(
+                    key for key, status in status_map.items() if status == "blocked"
+                )
+                log.warning(
+                    "project %s: prior tick %s %s; resolve or abandon before selection",
+                    project_slug, prior_tick_id, detail,
+                )
+                cb.observe(picked=None, counts_as_no_progress=True, detail=detail)
+            elif not status_map:
                 # A persisted tick with no cards is a stall (crash before/during
                 # card creation), not a legitimate in-flight skip.
                 log.warning(
@@ -2103,6 +2167,29 @@ def _tick_project(
             )
             cb.observe(picked=None, counts_as_no_progress=True)
             return
+
+    # The pointer may already have advanced past blocked work in an older
+    # version. Reconcile current work first, but never start another execution
+    # while a historical registration still needs recovery.
+    try:
+        unresolved = tuple(
+            old_tick for old_tick in unresolved_execution_runs(
+                project_state, current_tick_id=prior_tick_id
+            )
+            if not _historical_legacy_execution_complete(
+                project_dir, project_state, project_slug, old_tick
+            )
+        )
+    except OSError as exc:
+        detail = f"historical registration state unavailable: {type(exc).__name__}"
+        log.warning("project %s: %s; skipping selection", project_slug, detail)
+        cb.observe(picked=None, counts_as_no_progress=True, detail=detail)
+        return
+    if unresolved:
+        detail = "unresolved historical execution runs: " + ", ".join(unresolved)
+        log.warning("project %s: %s; resolve or abandon before selection", project_slug, detail)
+        cb.observe(picked=None, counts_as_no_progress=True, detail=detail)
+        return
 
     # Step 3: Build context & run selection. GitHub Issues are the sole TODO source.
     from .decision.context import build_in_flight, fetch_kanban_snapshot

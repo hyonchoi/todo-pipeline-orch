@@ -1345,3 +1345,217 @@ class TestTickLegacyPathPlan:
         assert create.called, caplog.text
         prepared = create.call_args.kwargs["prepared"]
         assert prepared, "the tick prepared no phase cards"
+
+
+class TestBlockedSelectionGate:
+    @pytest.fixture
+    def tick(self, tmp_path, mocker):
+        project = _create_project(tmp_path / "projects", "demo")
+        state = project / ".hermes"
+        config = Config(projects_dir=project.parent, state_dir=tmp_path / "state")
+        selection = mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        cb = mocker.patch("hermes_pipeline.cli._make_circuit_breaker").return_value
+        mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
+        mocker.patch("hermes_pipeline.todos_completion.reconcile_pending_deliveries")
+        reconcilers = [mocker.patch(name, return_value=True) for name in (
+            "hermes_pipeline.kanban_tasks.reconcile_plan_task_results",
+            "hermes_pipeline.review_reconciliation.reconcile_reviews",
+            "hermes_pipeline.todos_completion.reconcile_todo_completion",
+        )]
+        return state, config, selection, cb, reconcilers
+
+    def test_blocked_prior_tick_holds_selection_and_records_failure(self, tick, mocker):
+        state, config, selection, cb, _ = tick
+        (state / "current_tick_id.txt").write_text("01PRIOR")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                     return_value={"plan_task_1": "blocked"})
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_not_called()
+        outcomes = (state / "outcomes" / "01PRIOR-phases.json").read_text()
+        assert '"kanban_status": "blocked"' in outcomes
+        assert "all_phases_complete" not in outcomes
+        assert cb.observe.call_args.kwargs["counts_as_no_progress"] is True
+        assert "blocked" in cb.observe.call_args.kwargs["detail"]
+        assert (state / "current_tick_id.txt").read_text() == "01PRIOR"
+
+    @pytest.mark.parametrize("current_status", [None, "done", "running"])
+    @pytest.mark.parametrize("registration", ['{"schema_version": 2, "issue_number": 105}', '{broken'])
+    def test_older_unresolved_registration_holds_selection(
+        self, tick, mocker, current_status, registration
+    ):
+        state, config, selection, cb, reconcilers = tick
+        old = state / "runs" / "01OLD"
+        old.mkdir(parents=True)
+        (old / "registration.json").write_text(registration)
+        if current_status:
+            (state / "current_tick_id.txt").write_text("01CURRENT")
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+            side_effect=lambda tenant, tick_id: {
+                "plan_task_1": "blocked" if tick_id == "01OLD" else current_status
+            },
+        )
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_not_called()
+        if current_status:
+            for reconcile in reconcilers:
+                reconcile.assert_called_once()
+                assert reconcile.call_args.kwargs["tick_id"] == "01CURRENT"
+        if current_status != "running":
+            assert cb.observe.call_args.kwargs["counts_as_no_progress"] is True
+            assert "01OLD" in cb.observe.call_args.kwargs["detail"]
+
+    @pytest.mark.parametrize("marker", ["issue-closed", "abandoned"])
+    @pytest.mark.parametrize("current", [False, True])
+    def test_explicit_resolution_releases_registration_hold(self, tick, mocker, marker, current):
+        state, config, selection, _, _ = tick
+        old = state / "runs" / "01OLD"
+        old.mkdir(parents=True)
+        (old / "registration.json").write_text('{"schema_version": 2, "issue_number": 105}')
+        (old / marker).touch()
+        if current:
+            (state / "current_tick_id.txt").write_text("01OLD")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                     return_value={"plan_task_1": "blocked"})
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_called_once()
+
+    def test_unreadable_runs_directory_holds_selection(self, tick, mocker):
+        from pathlib import Path
+        state, config, selection, _, _ = tick
+        (state / "runs").mkdir()
+        original = Path.iterdir
+
+        def fail_runs(path):
+            if path == state / "runs":
+                raise PermissionError("private state")
+            return original(path)
+
+        mocker.patch.object(Path, "iterdir", fail_runs)
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_not_called()
+
+    def test_historical_verified_delivery_keeps_existing_retry_contract(self, tick, mocker):
+        state, config, selection, _, _ = tick
+        old = state / "runs" / "01OLD"
+        old.mkdir(parents=True)
+        (old / "registration.json").write_text('{"schema_version": 2, "issue_number": 105}')
+        (old / "finish-verified").touch()
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_called_once()
+        from hermes_pipeline.todos_completion import reconcile_pending_deliveries
+        reconcile_pending_deliveries.assert_called_once()
+
+    def test_resumed_legacy_block_releases_only_after_phase_completion(self, tick, mocker):
+        state, config, selection, _, _ = tick
+        (state / "current_tick_id.txt").write_text("01PRIOR")
+        status = mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                              return_value={"plan_task_1": "blocked"})
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_not_called()
+        status.return_value = {"plan_task_1": "done"}
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_called_once()
+
+    @pytest.mark.parametrize("component", ["run", "registration.json", "abandoned", "finish-verified"])
+    def test_unavailable_historical_components_hold_on_python314(self, tick, mocker, component):
+        import os
+        from pathlib import Path
+        state, config, selection, _, _ = tick
+        old = state / "runs" / "01OLD"
+        old.mkdir(parents=True)
+        (old / "registration.json").write_text("{}")
+        target = old if component == "run" else old / component
+        original_stat = os.stat
+        original_exists = Path.exists
+        original_is_dir = Path.is_dir
+
+        def denied(path, *args, **kwargs):
+            if Path(path) == target:
+                raise PermissionError("inaccessible state")
+            return original_stat(path, *args, **kwargs)
+
+        def suppressed(probe):
+            def wrapped(path):
+                try:
+                    return probe(path)
+                except OSError:
+                    return False
+            return wrapped
+
+        # Python 3.14's predicates suppress all OSError subclasses.
+        mocker.patch("os.stat", side_effect=denied)
+        mocker.patch.object(Path, "exists", suppressed(original_exists))
+        mocker.patch.object(Path, "is_dir", suppressed(original_is_dir))
+        assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_not_called()
+
+    @pytest.mark.parametrize("board, pr, released", [
+        ({"phase_8_finish_branch": "done"}, {"state": "MERGED", "headRefName": "feat/old"}, True),
+        ({"phase_8_finish_branch": "done"}, {"state": "OPEN", "headRefName": "feat/old"}, False),
+        ({"phase_8_finish_branch": "done"}, {"state": "MERGED", "headRefName": "feat/other"}, False),
+        ({"phase_8_finish_branch": "done", "extra": "blocked"}, {"state": "MERGED", "headRefName": "feat/old"}, False),
+        ({"phase_8_finish_branch": "blocked"}, {"state": "MERGED", "headRefName": "feat/old"}, False),
+        ({}, {"state": "MERGED", "headRefName": "feat/old"}, False),
+        ({"other": "done"}, {"state": "MERGED", "headRefName": "feat/old"}, False),
+        ({"phase_8_finish_branch": "done"}, {}, False),
+    ])
+    def test_completed_historical_legacy_handoff_is_read_only(
+        self, tick, mocker, board, pr, released
+    ):
+        from types import SimpleNamespace
+        state, config, selection, _, _ = tick
+        old = state / "runs" / "01OLD"
+        old.mkdir(parents=True)
+        (old / "registration.json").write_text('{"schema_version": 2, "issue_number": 105}')
+        (state / "current_tick_id.txt").write_text("01CURRENT")
+        (state / "pipeline_branch.txt").write_text("feat/current")
+        mocker.patch("hermes_pipeline.result_contract.load_validated_registration", return_value=SimpleNamespace(
+            manifest=None, step_keys=("phase_8_finish_branch",), branch="feat/old",
+        ))
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                     side_effect=lambda tenant, tick_id: board if tick_id == "01OLD" else {"worker": "done"})
+        mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value=pr)
+        sync = mocker.patch("hermes_pipeline.cli._sync_project_to_base_after_handoff")
+        clear = mocker.patch("hermes_pipeline.cli._clear_pr_handoff_state")
+        assert _cmd_tick(FakeArgs(), config) == 0
+        assert selection.call_count == int(released)
+        sync.assert_not_called()
+        clear.assert_not_called()
+        assert (state / "pipeline_branch.txt").read_text() == "feat/current"
+
+    def test_repeated_block_then_recovery_preserves_one_failure_and_success(self, tick, mocker):
+        state, config, selection, _, _ = tick
+        (state / "current_tick_id.txt").write_text("01PRIOR")
+        status = mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                              return_value={"plan_task_1": "blocked"})
+        for _ in range(3):
+            assert _cmd_tick(FakeArgs(), config) == 0
+        selection.assert_not_called()
+        path = state / "outcomes" / "01PRIOR-phases.json"
+        failures = [json.loads(line) for line in path.read_text().splitlines()]
+        assert len(failures) == 1
+        status.return_value = {"plan_task_1": "done"}
+        assert _cmd_tick(FakeArgs(), config) == 0
+        evidence = [json.loads(line) for line in path.read_text().splitlines()]
+        assert sum(e["outcome"] == "phase_complete" for e in evidence) == 1
+        assert sum(e["outcome"] == "failed_at_phase_plan_task_1" for e in evidence) == 1
+        selection.assert_called_once()
+
+    @pytest.mark.parametrize("manifest, released", [(None, True), (object(), False)])
+    def test_legacy_without_pr_phase_preserves_terminal_completion(
+        self, tick, mocker, manifest, released
+    ):
+        from types import SimpleNamespace
+        state, config, selection, _, _ = tick
+        old = state / "runs" / "01OLD"
+        old.mkdir(parents=True)
+        (old / "registration.json").write_text("{}")
+        mocker.patch("hermes_pipeline.result_contract.load_validated_registration", return_value=SimpleNamespace(
+            manifest=manifest, step_keys=("worker",), branch="feat/old",
+        ))
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={"worker": "failed"})
+        pr = mocker.patch("hermes_pipeline.ship.gh_pr_view")
+        assert _cmd_tick(FakeArgs(), config) == 0
+        assert selection.call_count == int(released)
+        pr.assert_not_called()
