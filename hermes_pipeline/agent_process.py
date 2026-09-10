@@ -22,6 +22,15 @@ Identity = dict[str, object]
 _IDENTITY_KEYS = ("pid", "start_ticks", "boot_id", "host")
 
 
+class ProcessLaunchError(RuntimeError):
+    """The client was provably not created; no process cleanup is outstanding."""
+
+    def __init__(self):
+        super().__init__("client_not_launched")
+        self.cleanup = "confirmed"
+        self.processes = []
+
+
 class ProcessOwnershipError(RuntimeError):
     """Sanitized acquisition failure carrying conservative recovery evidence."""
 
@@ -280,6 +289,9 @@ def _cleanup_owned_child(
 def run_process(
     argv: Sequence[str], *, cwd: Path, stdin_bytes: bytes, timeout: float,
     cleanup_timeout: float = 60,
+    env: dict[str, str] | None = None,
+    deadline_monotonic: float | None = None,
+    pass_fds: tuple[int, ...] = (),
     on_launch: Callable[[dict], None] | None = None,
     on_processes: Callable[[list[Identity]], None] | None = None,
 ) -> dict:
@@ -298,20 +310,32 @@ def run_process(
         raise ValueError("timeout must be positive and finite")
     if not math.isfinite(cleanup_timeout) or not 0 <= cleanup_timeout <= 60:
         raise ValueError("cleanup_timeout must be between zero and 60 seconds")
+    if deadline_monotonic is not None and (not math.isfinite(deadline_monotonic) or deadline_monotonic < 0):
+        raise ValueError("absolute deadline must be finite and nonnegative")
     # Establish support before admitting any external process.
-    if process_snapshot(os.getpid()) is None:
-        raise RuntimeError("process_identity_unconfirmed")
-    probe = _pidfd_open(os.getpid())
     try:
-        _pidfd_signal(probe, 0)
-    finally:
-        os.close(probe)
+        if process_snapshot(os.getpid()) is None:
+            raise RuntimeError("process_identity_unconfirmed")
+        probe = _pidfd_open(os.getpid())
+        try:
+            _pidfd_signal(probe, 0)
+        finally:
+            os.close(probe)
+    except (OSError, RuntimeError, ValueError):
+        raise ProcessLaunchError() from None
     started = time.monotonic()
     deadline = started + timeout
-    child = subprocess.Popen(
-        list(argv), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL, start_new_session=True,
-    )
+    if deadline_monotonic is not None:
+        deadline = min(deadline, deadline_monotonic)
+    if deadline <= started:
+        raise ProcessLaunchError()
+    try:
+        child = subprocess.Popen(
+            list(argv), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, env=env, pass_fds=pass_fds,
+        )
+    except OSError:
+        raise ProcessLaunchError() from None
     known = {}
     child_fd = None
     cleanup = {"cleanup": "cleanup_unconfirmed", "processes": []}

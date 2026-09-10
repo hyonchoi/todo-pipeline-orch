@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Literal
 
 from . import github_issues
+from .agent_git import run_git
 from .config import AgentPolicyMode
 from .github_issues import (
     IN_PROGRESS_LABEL,
@@ -78,9 +79,13 @@ class RunRegistration:
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(
-        ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
-    )
+    if args[0] == "worktree":
+        # This existing, explicit mutation is not an inspection operation.
+        result = subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False
+        )
+    else:
+        result = run_git(cwd, args, capture_output=True, text=True, check=False)
     if check and result.returncode != 0:
         raise RunRegistrationError("git_error", f"git {args[0]} failed")
     return result
@@ -116,9 +121,8 @@ def _tracked_bytes(
         )
         if diff.returncode != 0:
             raise RunRegistrationError("authority_drift", relative_path)
-    result = subprocess.run(
-        ["git", "show", f"{base_sha}:{relative_path}"],
-        cwd=project_dir,
+    result = run_git(
+        project_dir, ["show", f"{base_sha}:{relative_path}"],
         capture_output=True,
         check=False,
     )

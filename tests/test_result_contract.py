@@ -2500,6 +2500,9 @@ def test_a_broken_git_during_the_worktree_check_reports_a_git_failure(tmp_path, 
     """
     from hermes_pipeline.result_contract import _git_bytes
 
+    # Prevent discovery of the developer checkout when pytest's temporary
+    # directory is inside that checkout; this fixture is deliberately broken.
+    (tmp_path / ".git").write_text("invalid metadata pointer")
     with pytest.raises(ResultContractError) as exc_info:
         _git_bytes(tmp_path, "status", "--porcelain=v1")
     assert exc_info.value.code == "git_verification_failed"

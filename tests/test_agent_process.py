@@ -134,8 +134,26 @@ def test_unsupported_pidfds_block_before_launch(tmp_path, monkeypatch):
 
     monkeypatch.setattr(agent_process, "_pidfd_open", unavailable)
     monkeypatch.setattr(agent_process.subprocess, "Popen", lambda *a, **k: pytest.fail("launched"))
-    with pytest.raises(OSError, match="unsupported"):
+    with pytest.raises(agent_process.ProcessLaunchError, match="client_not_launched") as caught:
         run(tmp_path, "pass")
+    assert caught.value.cleanup == "confirmed"
+    assert caught.value.processes == []
+
+
+def test_absolute_attempt_deadline_cannot_be_refreshed_by_later_client(tmp_path):
+    deadline = time.monotonic() + 0.15
+    result = agent_process.run_process(
+        [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path,
+        stdin_bytes=b"", timeout=30, cleanup_timeout=1, deadline_monotonic=deadline)
+    assert result["deadline"] == deadline
+    assert result["outcome"] == "timed_out"
+
+
+def test_expired_shared_deadline_never_launches(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_process.subprocess, "Popen", lambda *a, **k: pytest.fail("expired client launched"))
+    with pytest.raises(agent_process.ProcessLaunchError):
+        agent_process.run_process([sys.executable, "-c", "pass"], cwd=tmp_path,
+                                  stdin_bytes=b"", timeout=1, deadline_monotonic=time.monotonic() - 1)
 
 
 def test_unobservable_process_scan_never_confirms_cleanup(tmp_path, monkeypatch):

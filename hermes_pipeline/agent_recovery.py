@@ -14,6 +14,7 @@ from pathlib import Path
 
 from .agent_checkpoint import ProgressJournal
 from .agent_execution import TERMINAL, ExecutionError, _atomic_write, _safe_read
+from .agent_git import run_git
 
 _LIMIT = 256 * 1024
 _PREVIEW_FIELDS = {'version', 'execution_id', 'event_id', 'generation', 'mode',
@@ -33,9 +34,8 @@ def _digest(value):
 
 def _git(tree, *arguments):
     try:
-        result = subprocess.run(['git', '-C', str(tree), *arguments], check=True,
-                                capture_output=True, timeout=30,
-                                env={**os.environ, 'GIT_OPTIONAL_LOCKS': '0'})
+        result = run_git(tree, arguments, check=True,
+                                capture_output=True, timeout=30)
     except (OSError, subprocess.SubprocessError) as exc:
         raise ExecutionError('recovery Git validation failed') from exc
     return result.stdout

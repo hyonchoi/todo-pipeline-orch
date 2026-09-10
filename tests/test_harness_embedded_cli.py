@@ -137,7 +137,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         if argv[0] == "gh":
             return fake_gh(argv, **kwargs)
         if argv[:2] != ["hermes", "kanban"]:
-            assert argv[0] == "git", f"unexpected executable: {argv}"
+            assert argv[0] == "git" or Path(argv[0]).resolve() == Path("/usr/bin/git").resolve(), f"unexpected executable: {argv}"
             assert argv[1] not in {"push", "fetch", "pull", "clone", "ls-remote"}
             return real_run(argv, **kwargs)
         command = argv[2]
@@ -196,10 +196,26 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     current_mode[0] = "inherit" if policy_mode == "delegated" else "delegated"
     assert json.loads(pinned)["plan_path"] is None
     implementation = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == phases.IMPLEMENTATION_KEY)
-    assert registration.plan_reference.value in implementation["body"]
+    from hermes_pipeline.agent_execution import ExecutionStore
+
+    executions = ExecutionStore(state / "agent-executions")
+    def pinned_prompt(card):
+        header = json.loads(card["body"].splitlines()[0])
+        record = executions.load(header["execution_id"])
+        prompt_bytes = executions.prompt(header["execution_id"])
+        assert hashlib.sha256(prompt_bytes).hexdigest() == record["registration"]["prompt_sha256"]
+        assert record["registration"]["client"]["name"] == client
+        assert record["registration"]["plan_identity"] == registration.plan_hash
+        assert "BEGIN EXTERNAL AGENT PROMPT" not in card["body"]
+        assert "tpo-agent-supervisor" in card["body"]
+        return prompt_bytes.decode("utf-8")
+
+    implementation_prompt = pinned_prompt(implementation)
+    assert registration.plan_reference.value in implementation_prompt
     assert cli.main(["tick", "sandbox"]) == 0
     assert registration_file.read_bytes() == pinned
     assert remote["body"] == published
+    assert pinned_prompt(implementation) == implementation_prompt
     assert _git(project, "rev-parse", "HEAD") == base
     assert _git(project, "ls-files") == ".gitignore\nREADME.md"
 
@@ -238,14 +254,14 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         review["status"] = "blocked"
         review["runs"] = [{"status": "failed", "metadata": {"external_agent_exit_code": 17}}]
         assert cli.main(["tick", "sandbox"]) == 0
-        workers = [c for c in cards if "BEGIN EXTERNAL AGENT PROMPT" in c["body"]]
+        workers = [c for c in cards if "execution_id" in json.loads(c["body"].splitlines()[0])]
         assert workers == [implementation, review]
         assert not (registration_file.parent / "accepted-review-head").exists()
         assert registration_file.read_bytes() == pinned
         outcomes = [json.loads(line) for line in (state / "outcomes" / f"{tick}-phases.json").read_text().splitlines()]
         assert any(o["outcome"] == "failed_at_phase_review:0" for o in outcomes)
         assert not any("finish" in o["outcome"] or "human" in o["outcome"] for o in outcomes)
-        _, _, worker_prompt = review["body"].partition("BEGIN EXTERNAL AGENT PROMPT\n")
+        worker_prompt = pinned_prompt(review)
         assert worker_prompt.startswith("AGENT-POLICY-MODE: delegated\n\n")
         return
     reviewed_parent = head
@@ -259,15 +275,15 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     worker_result(review, reviewed_parent, head, changed=changed_files)
     assert cli.main(["tick", "sandbox"]) == 0
     finish = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "finish")
-    assert registration.plan_reference.value in review["body"]
-    assert registration.plan_reference.value in finish["body"]
+    assert registration.plan_reference.value in pinned_prompt(review)
+    assert registration.plan_reference.value in pinned_prompt(finish)
     workers = [implementation, review, finish]
     for worker in workers:
-        dispatcher, _, worker_prompt = worker["body"].partition("BEGIN EXTERNAL AGENT PROMPT\n")
+        dispatcher, worker_prompt = worker["body"], pinned_prompt(worker)
         assert "AGENT-POLICY-MODE" not in dispatcher
         assert worker_prompt.startswith("AGENT-POLICY-MODE: delegated\n\n") == (policy_mode == "delegated")
     # The controller barrier gets no payload; no human-gate or remediation worker exists.
-    assert all(c in workers or "BEGIN EXTERNAL AGENT PROMPT" not in c["body"] for c in cards)
+    assert all(c in workers or "execution_id" not in json.loads(c["body"].splitlines()[0]) for c in cards)
     assert registration_file.read_bytes() == pinned
 
     pr_url = f"https://github.com/{REPO}/pull/17"
@@ -302,6 +318,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert (registration_file.parent / "issue-closed").exists()
     assert cli.main(["todos", "complete", "sandbox", "--todo", "42", "--pr", "17"]) == 0
     assert remote["body"] == published
+    assert pinned_prompt(implementation) == implementation_prompt
     assert registration_file.read_bytes() == pinned
     assert Path(registration.plan_reference.value).read_bytes() == GOLDEN.encode()
     assert _git(project, "ls-files") == ".gitignore\nREADME.md"

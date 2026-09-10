@@ -1,0 +1,525 @@
+"""Internal registered-execution interface used by thin Hermes workers.
+
+The installed launcher owns external processes; Kanban remains the authority
+for card transitions. No operation accepts a shell command or agent prompt.
+"""
+from __future__ import annotations
+
+import argparse
+import base64
+import hashlib
+import json
+import os
+import shlex
+import shutil
+import subprocess
+import time
+from dataclasses import asdict
+from pathlib import Path
+
+from .agent_execution import (
+    TERMINAL,
+    ExecutionError,
+    ExecutionStore,
+    LockUnconfirmed,
+    _atomic_write,
+    _open_directory,
+    _safe_read,
+    identity_matches,
+    process_identity,
+)
+from .agent_process import (
+    ProcessLaunchError,
+    ProcessOwnershipError,
+    cleanup_processes,
+    run_process,
+)
+from .result_contract import (
+    MAX_METADATA_BYTES,
+    ResultContractError,
+    _git,
+    _git_bytes,
+    _reject_unsafe_strings,
+    load_validated_registration,
+    manifest_acceptance_criteria,
+    parse_worker_result,
+    render_result_template,
+    verify_optional_single_commit,
+    verify_worker_git_result,
+)
+
+
+def installed_entrypoint() -> str:
+    executable = shutil.which("tpo-agent-supervisor")
+    if executable is None:
+        raise ExecutionError("supervisor_unavailable")
+    return str(Path(executable).absolute())
+
+
+def execution_id(tick_id: str, phase: str) -> str:
+    return hashlib.sha256((tick_id + "\0" + phase).encode()).hexdigest()
+
+
+def staging_directory(store: ExecutionStore, identity: str, generation: int) -> Path:
+    # Validate identity through the record reader before interpolating it.
+    store.load(identity)
+    if type(generation) is not int or generation < 1:
+        raise ExecutionError("invalid_generation")
+    path = store.root.parent / "agent-submissions" / identity / str(generation)
+    with _open_directory(path, create=True):
+        pass
+    return path
+
+
+def client_argv(registration: dict, staging: Path, *, authority_root: Path) -> list[str]:
+    from .agent_client import build_client_argv
+
+    return build_client_argv(registration, staging, authority_root=authority_root)
+
+
+def worker_instructions(identity: str, root: str) -> str:
+    return (
+        "You are the Hermes dispatcher. Invoke or reconnect to this registered execution:\n"
+        + shlex.join(["tpo-agent-supervisor", "run", "--root", root, "--execution", identity]) + "\n"
+        "Use only this installed interface. A missing supervisor blocks dispatch. "
+        "Automatic worker retry reconnects to the same generation; never authorize a new attempt. "
+        "The supervisor owns monitoring, deadline, cleanup and result validation. "
+        "While running_detached, poll the same command. For terminal outcomes, refresh this card "
+        "through supported Kanban worker tools and check its registered execution and generation. "
+        "Do not overwrite a completed card, a newer attempt, or an unrelated/manual block. "
+        "Require HERMES_KANBAN_TASK to identify this card and a valid HERMES_KANBAN_RUN_ID "
+        "before any worker transition. If either is unavailable, report and leave card state unchanged. "
+        "Only when completion_allowed is true, use the kanban_complete worker tool (which binds "
+        "the current worker run identity; never the unguarded CLI) with the returned "
+        "metadata.tpo_result unchanged. Otherwise report its structured status through Kanban "
+        "kanban_comment and kanban_block worker tools; retain interrupted, timed_out, cleanup_unconfirmed and lock_unconfirmed "
+        "as distinct reasons. Never infer completion from zero exit or missing processes.\n"
+    )
+
+
+def register_execution(*, project_dir: Path, state_dir: Path, root: Path, tick_id: str,
+                       phase: str, prompt: str, client: str, tools: str, worktree: Path,
+                       timeout: float, todo_id: str, result_template: str | None = None) -> str:
+    installed_entrypoint()
+    from .agent_client import git_metadata_identity
+
+    git_metadata = git_metadata_identity(worktree)
+    authority_path = state_dir / "runs" / tick_id / "registration.json"
+    registration = None
+    if authority_path.exists():
+        registration = load_validated_registration(project_dir, state_dir, tick_id)
+        if registration.worktree != worktree.resolve() or registration.prompt_client != client:
+            raise ExecutionError("registration_drift")
+        if (root.resolve() != (project_dir / ".hermes/agent-executions").resolve()
+                or state_dir.resolve() != (project_dir / ".hermes").resolve()):
+            raise ExecutionError("registration_root_mismatch")
+    else:
+        from .agent_authority import profile_root
+
+        if root.resolve() != profile_root(project_dir).resolve():
+            raise ExecutionError("profile_authority_root_unconfirmed: use trusted conventional configuration")
+    branch = _git(worktree, "branch", "--show-current")
+    identity = execution_id(tick_id, phase)
+    store = ExecutionStore(root)
+    if (root / identity / "record.json").exists():
+        base = store.load(identity)["registration"]["result_contract"]["base_sha"]
+    elif registration is not None and registration.manifest is not None and phase == "phase_4_development":
+        base = registration.base_sha
+    else:
+        base = _git(worktree, "rev-parse", "HEAD")
+    criteria = manifest_acceptance_criteria(registration.manifest) if registration and registration.manifest and phase == "phase_4_development" else ()
+    worker_result = bool(registration and registration.manifest and phase == "phase_4_development") or phase in {"review:0", "finish"}
+    contract = {
+        "kind": "registered" if registration else "profile", "project_dir": str(project_dir.resolve()),
+        "state_dir": str(state_dir.resolve()), "todo_id": todo_id, "tick_id": tick_id,
+        "phase": phase, "base_sha": base, "acceptance": list(criteria),
+        "registration_sha256": hashlib.sha256(_safe_read(authority_path)).hexdigest() if registration else None,
+        "expected_commits": len(registration.manifest.tasks) if criteria else None,
+        "result_kind": "worker" if worker_result else "phase",
+        "progress_version": 1,
+        "git_metadata": git_metadata,
+        "result_template": result_template or render_result_template(
+            tick_id=tick_id, todo_id=todo_id, step_key=phase, acceptance_criteria=criteria,
+            allow_no_changes=not bool(criteria)),
+    }
+    if not worker_result:
+        contract["result_template"] = "Write this bounded phase result, replacing placeholders:\n" + json.dumps({
+            "schema_version": 1, "execution_id": identity, "generation": "integer from TPO_ATTEMPT_GENERATION",
+            "tick_id": tick_id, "todo_id": todo_id, "step_key": phase,
+            "verdict": "success", "head_sha": "actual Git HEAD SHA",
+        }, sort_keys=True)
+    full_prompt = (prompt + "\n\nSupervisor result delivery:\n"
+                   "Write the filled tpo_result object from this template as JSON to the absolute path "
+                   "in environment variable TPO_RESULT_PATH. Do not publish provider output. "
+                   "TPO_CHECKPOINT_DIR is the only additional writable submission directory. "
+                   "If TPO_RECOVERY_CONTEXT_PATH is set, read it before working and preserve partial work.\n"
+                   + contract["result_template"] + "\n")
+    if registration and registration.manifest and phase == "phase_4_development":
+        full_prompt += (
+            "After each complete task commit, write checkpoint-TASK_ID.json in TPO_CHECKPOINT_DIR "
+            "with exactly this JSON schema, substituting the task ID and actual commit SHA: "
+            + json.dumps({"version": 1, "execution_id": identity,
+                          "generation": "integer from TPO_ATTEMPT_GENERATION",
+                          "plan_identity": registration.plan_hash, "task_id": "manifest task ID",
+                          "commit": "actual full commit SHA"}, sort_keys=True)
+            + ". These are submissions only; skip tasks only when recovery context lists them as accepted. "
+            "The supervisor runs pinned argv verification commands and independent review before acceptance.\n"
+        )
+    store.register(
+        identity, registration_id=tick_id, plan_identity=registration.plan_hash if registration else hashlib.sha256(full_prompt.encode()).hexdigest(),
+        phase=phase, prompt=full_prompt.encode("utf-8"), client={"name": client, "tools": [t.strip() for t in tools.split(",") if t.strip()]},
+        worktree=str(worktree.resolve()), branch=branch, result_contract=contract, timeout=timeout,
+        manifest=json.loads(json.dumps(asdict(registration.manifest))) if registration and registration.manifest and phase == "phase_4_development" else None,
+    )
+    from .agent_checkpoint import ProgressJournal
+
+    ProgressJournal(store, identity).initialize()
+    return identity
+
+
+def validate_registration(store: ExecutionStore, identity: str) -> None:
+    pinned = store.load(identity)["registration"]
+    from .agent_client import validate_git_metadata
+
+    validate_git_metadata(pinned)
+    contract = pinned["result_contract"]
+    if contract.get("kind") not in {"registered", "profile"}:
+        raise ExecutionError("registration_invalid")
+    if (contract["tick_id"] != pinned["registration_id"] or contract["phase"] != pinned["phase"]
+            or execution_id(contract["tick_id"], contract["phase"]) != identity):
+        raise ExecutionError("execution_identity_mismatch")
+    worktree = Path(pinned["worktree"])
+    store._outside_worktree(str(worktree))
+    if contract["kind"] == "profile":
+        from .agent_authority import profile_root
+
+        if store.root.resolve() != profile_root(Path(contract["project_dir"])).resolve():
+            raise ExecutionError("profile_authority_root_unconfirmed")
+    if _git(worktree, "branch", "--show-current") != pinned["branch"]:
+        raise ExecutionError("branch_drift")
+    if contract["kind"] == "registered":
+        state_dir = Path(contract["state_dir"])
+        if (store.root.resolve() != (Path(contract["project_dir"]) / ".hermes" / "agent-executions").resolve()
+                or state_dir.resolve() != (Path(contract["project_dir"]) / ".hermes").resolve()):
+            raise ExecutionError("registration_root_mismatch")
+        path = state_dir / "runs" / pinned["registration_id"] / "registration.json"
+        if hashlib.sha256(_safe_read(path)).hexdigest() != contract["registration_sha256"]:
+            raise ExecutionError("registration_drift")
+        validated = load_validated_registration(Path(contract["project_dir"]), state_dir, pinned["registration_id"])
+        if (str(validated.worktree) != pinned["worktree"] or validated.branch != pinned["branch"]
+                or validated.plan_hash != pinned["plan_identity"] or validated.prompt_client != pinned["client"]["name"]):
+            raise ExecutionError("registration_drift")
+        if pinned["phase"] not in {*validated.step_keys, "review:0", "finish"}:
+            raise ExecutionError("phase_identity_mismatch")
+
+
+def validated_result(store: ExecutionStore, identity: str, generation: int, *, promote: bool = False) -> dict:
+    validate_registration(store, identity)
+    from .agent_checkpoint import ProgressJournal
+
+    journal = ProgressJournal(store, identity)
+    journal._check_git(journal._load())
+    registration = store.load(identity)["registration"]
+    contract = registration["result_contract"]
+    if registration["manifest"] is not None:
+        progress = journal.recovery_context(generation)
+        if (progress["legacy_evidence_absent"]
+                or len(progress["accepted"]) != len(registration["manifest"]["tasks"])):
+            raise ExecutionError("checkpoint_evidence_incomplete")
+    path = (staging_directory(store, identity, generation) / "result.json" if promote
+            else store.root / identity / f"result-{generation}.json")
+    if path.stat().st_size > MAX_METADATA_BYTES:
+        raise ExecutionError("result_size_limit")
+    encoded = _safe_read(path)
+    if len(encoded) > MAX_METADATA_BYTES:
+        raise ExecutionError("result_size_limit")
+    raw = json.loads(encoded)
+    if contract["result_kind"] == "phase":
+        expected = {"schema_version": 1, "execution_id": identity, "generation": generation,
+                    "tick_id": contract["tick_id"], "todo_id": contract["todo_id"], "step_key": contract["phase"],
+                    "verdict": "success", "head_sha": _git(Path(registration["worktree"]), "rev-parse", "HEAD")}
+        if raw != expected or type(raw.get("schema_version")) is not int or type(raw.get("generation")) is not int:
+            raise ExecutionError("phase_result_invalid")
+        _reject_unsafe_strings(raw)
+        if _git_bytes(Path(registration["worktree"]), "status", "--porcelain=v1", "--untracked-files=all", "-z"):
+            raise ExecutionError("worktree_dirty")
+        _git(Path(registration["worktree"]), "merge-base", "--is-ancestor", contract["base_sha"], raw["head_sha"])
+    else:
+        _validate_worker_result(registration, contract, raw)
+    if promote:
+        with store._directory_handle(identity) as directory:
+            accepted = Path(f"result-{generation}.json")
+            try:
+                existing = json.loads(_safe_read(accepted, directory_fd=directory))
+            except FileNotFoundError:
+                _atomic_write(accepted, raw, directory_fd=directory)
+            else:
+                if existing != raw:
+                    raise ExecutionError("result_already_promoted")
+    return raw
+
+
+def _validate_worker_result(registration: dict, contract: dict, raw: dict) -> None:
+    result = parse_worker_result(
+        {"runs": [{"status": "completed", "metadata": {"tpo_result": raw}}]},
+        tick_id=contract["tick_id"], todo_id=contract["todo_id"], step_key=contract["phase"],
+        acceptance_criteria=tuple(contract["acceptance"]), allow_no_changes=not bool(contract["expected_commits"]),
+    )
+    if contract["expected_commits"]:
+        verify_worker_git_result(Path(registration["worktree"]), result.git,
+                                   expected_parent_sha=contract["base_sha"], expected_commits=contract["expected_commits"])
+    else:
+        verify_optional_single_commit(Path(registration["worktree"]), result.git, expected_parent_sha=contract["base_sha"])
+
+
+def status(store: ExecutionStore, identity: str) -> dict:
+    record = store.load(identity)
+    if not record["attempts"] or record["attempts"][-1]["status"] not in TERMINAL:
+        return _status(store, identity)
+    try:
+        with store.locked(identity):
+            return _status(store, identity)
+    except LockUnconfirmed:
+        record = store.load(identity)
+        attempt = record["attempts"][-1] if record["attempts"] else None
+        return {"version": 1, "execution_id": identity, "generation": attempt["generation"] if attempt else 0,
+                "status": "running_detached" if attempt and identity_matches(attempt["supervisor"]) else "lock_unconfirmed",
+                "completion_allowed": False}
+
+
+def _status(store: ExecutionStore, identity: str) -> dict:
+    record = store.load(identity)
+    report = {"version": 1, "execution_id": identity, "generation": 0,
+              "status": "registered", "completion_allowed": False}
+    if not record["attempts"]:
+        return report
+    attempt = record["attempts"][-1]
+    report.update(generation=attempt["generation"], status=attempt["status"],
+                  exit_code=attempt["exit_code"], signal=attempt["exit_signal"], cleanup=attempt["cleanup"])
+    if attempt["status"] not in TERMINAL:
+        report["status"] = "running_detached" if identity_matches(attempt["supervisor"]) else "lock_unconfirmed"
+    elif attempt["cleanup"] != "confirmed":
+        report["status"] = "cleanup_unconfirmed"
+    elif attempt["status"] == "exited" and attempt["exit_code"] == 0:
+        try:
+            raw = validated_result(store, identity, attempt["generation"])
+        except (ExecutionError, ResultContractError, OSError, ValueError, KeyError):
+            report["status"] = "result_invalid"
+        else:
+            report.update(status="completed", completion_allowed=True, metadata={"tpo_result": raw})
+    return report
+
+
+def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
+    with store.worktree_locked(identity), store.locked(identity):
+        validate_registration(store, identity)
+        from .agent_checkpoint import ProgressJournal
+
+        current = store.load(identity)
+        if current["attempts"] and recovery_event is None:
+            return status(store, identity)
+        if not current["attempts"]:
+            journal = ProgressJournal(store, identity)
+            journal.validate_fresh()
+        # Creating an empty candidate staging directory grants no launch
+        # authority. All deterministic client validation precedes admission.
+        staging = staging_directory(store, identity, len(current["attempts"]) + 1)
+        arguments = client_argv(current["registration"], staging, authority_root=store.root)
+        executable = shutil.which(arguments[0])
+        if executable is None:
+            raise ExecutionError("client_unavailable")
+        arguments[0] = executable
+        if recovery_event is not None:
+            from .agent_recovery import consume_recovery
+
+            preview = consume_recovery(store, identity, recovery_event)
+            store.authorize_retry(identity, expected_generation=preview["generation"], event_id=recovery_event,
+                                  recovery_context=json.dumps(preview["context"], sort_keys=True))
+        record, created = store.admit(identity, recovery_event=recovery_event)
+        if not created:
+            return status(store, identity)
+        generation = record["attempts"][-1]["generation"]
+        registration = record["registration"]
+        store.update_attempt(identity, generation, supervisor=process_identity(os.getpid()))
+        context_path = ""
+        if generation > 1:
+            from .agent_checkpoint import ProgressJournal
+
+            context = ProgressJournal(store, identity).recovery_context(generation)
+            context["approved_intent"] = record["attempts"][-1]["recovery_context"]
+            with _open_directory(staging) as directory:
+                _atomic_write(Path("recovery-context.json"), context, directory_fd=directory)
+            context_path = str(staging / "recovery-context.json")
+        try:
+            result = run_process(
+                arguments, cwd=Path(registration["worktree"]),
+                stdin_bytes=base64.b64decode(registration["prompt_base64"]), timeout=registration["timeout"],
+                env={**os.environ, "TPO_RESULT_PATH": str(staging / "result.json"), "TPO_CHECKPOINT_DIR": str(staging),
+                     "TPO_ATTEMPT_GENERATION": str(generation),
+                     "TPO_RECOVERY_CONTEXT_PATH": context_path},
+                on_launch=lambda receipt: store.update_attempt(
+                    identity, generation, status="running", client_process=receipt["identity"],
+                    started_monotonic=receipt["launched_monotonic"], deadline_monotonic=receipt["deadline"]),
+                on_processes=lambda processes: store.update_attempt(identity, generation, owned_processes=processes),
+            )
+        except ProcessLaunchError:
+            store.update_attempt(identity, generation, status="blocked", reason="client_not_launched", cleanup="confirmed")
+        except ProcessOwnershipError as exc:
+            store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable",
+                                 cleanup="unconfirmed", owned_processes=exc.processes)
+        except Exception:
+            store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable", cleanup="unconfirmed")
+        else:
+            collecting = result["outcome"] == "exited" and result["exit_code"] == 0 and result["cleanup"] == "confirmed"
+            store.update_attempt(identity, generation, status="running" if collecting else result["outcome"], exit_code=result["exit_code"],
+                                 exit_signal=result["signal"], cleanup="confirmed" if result["cleanup"] == "confirmed" else "unconfirmed",
+                                 owned_processes=result["processes"])
+            if collecting:
+                from .agent_collector import (
+                    CollectionInterrupted,
+                    CollectionTimedOut,
+                    collect_checkpoints,
+                )
+
+                try:
+                    collected = collect_checkpoints(store, identity, generation,
+                                                    deadline_monotonic=result["deadline"])
+                    if not collected["complete"]:
+                        raise ExecutionError("checkpoint_evidence_incomplete")
+                    validated_result(store, identity, generation, promote=True)
+                except CollectionTimedOut:
+                    store.update_attempt(identity, generation, status="timed_out", reason="checkpoint_deadline_exceeded")
+                except CollectionInterrupted:
+                    store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable")
+                except (ExecutionError, ResultContractError, OSError, ValueError, KeyError):
+                    store.update_attempt(identity, generation, status="exited", reason="result_invalid")
+                else:
+                    store.update_attempt(identity, generation, status="exited")
+        return status(store, identity)
+
+
+def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
+    record = store.load(identity)
+    if record["attempts"] and recovery_event is None:
+        return status(store, identity)
+    validate_registration(store, identity)
+    if recovery_event is not None:
+        from .agent_recovery import validate_recovery
+
+        validate_recovery(store, identity, recovery_event)
+    # Each daemon races only for kernel locks; only the winner admits a client.
+    command = [installed_entrypoint(), "_supervise", "--root", str(store.root), "--execution", identity]
+    if recovery_event is not None:
+        command += ["--recovery-event", recovery_event]
+    subprocess.Popen(command,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True, close_fds=True)
+    return {**status(store, identity), "status": "running_detached"}
+
+
+def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60) -> dict:
+    try:
+        worktree = Path(store.load(identity)["registration"]["worktree"]).resolve()
+        worktree_lock = "worktree-" + hashlib.sha256(os.fsencode(worktree)).hexdigest()
+        # Recovery serializes ownership without the launch-admission scan:
+        # unresolved peers must not mutually prevent their own cleanup.
+        with store.locked(worktree_lock), store.locked(identity):
+            record = store.load(identity)
+            if not record["attempts"]:
+                return status(store, identity)
+            attempt = record["attempts"][-1]
+            from .agent_collector import collector_launch_pending
+
+            pending_launch = collector_launch_pending(store, identity)
+            if attempt["status"] in TERMINAL and attempt["cleanup"] == "confirmed" and not pending_launch:
+                return status(store, identity)
+            if identity_matches(attempt["supervisor"]):
+                return {**status(store, identity), "status": "lock_unconfirmed"}
+            known = list(attempt["owned_processes"])
+            direct = attempt["client_process"]
+            if direct is not None and not any(
+                all(process.get(key) == direct.get(key) for key in ("pid", "start_ticks", "host", "boot_id"))
+                for process in known
+            ):
+                known.append(direct)
+            cleanup = cleanup_processes(known, cleanup_timeout=cleanup_timeout) if known else {"cleanup": "cleanup_unconfirmed", "processes": []}
+            changes = {"cleanup": "confirmed" if cleanup["cleanup"] == "confirmed" and not pending_launch else "unconfirmed", "owned_processes": cleanup["processes"]}
+            if attempt["status"] not in TERMINAL:
+                from .agent_collector import collector_timed_out
+
+                if collector_timed_out(store, identity, attempt["generation"]):
+                    changes.update(status="timed_out", reason="checkpoint_deadline_exceeded")
+                else:
+                    changes.update(status="interrupted", reason="exit_unobservable")
+            store.update_attempt(identity, attempt["generation"], **changes)
+            return status(store, identity)
+    except LockUnconfirmed:
+        report = status(store, identity)
+        return {**report, "status": "running_detached" if report["status"] == "running_detached" else "lock_unconfirmed"}
+
+
+def sweep(root: Path, *, cleanup_timeout: float = 0) -> list[dict]:
+    if not root.exists():
+        return []
+    store = ExecutionStore(root)
+    reports = []
+    for path in sorted(root.glob("*/record.json")):
+        try:
+            reports.append(recover(store, path.parent.name, cleanup_timeout=cleanup_timeout))
+        except (ExecutionError, OSError, ValueError):
+            reports.append({"execution_id": path.parent.name, "status": "lock_unconfirmed", "completion_allowed": False})
+    return reports
+
+
+def diagnostics(root: Path) -> list[dict]:
+    """Read-only status for existing TPO diagnostics; never signal processes."""
+    if not root.exists():
+        return []
+    store = ExecutionStore(root)
+    reports = []
+    for path in sorted(root.glob("*/record.json")):
+        try:
+            reports.append(status(store, path.parent.name))
+        except (ExecutionError, OSError, ValueError):
+            reports.append({"execution_id": path.parent.name, "status": "lock_unconfirmed", "completion_allowed": False})
+    return reports
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Internal TPO registered execution supervisor")
+    parser.add_argument("--version", action="version", version="tpo-agent-supervisor 1")
+    parser.add_argument("operation", choices=("run", "status", "_supervise", "prepare-recovery", "approve-recovery"))
+    parser.add_argument("--root", required=True, type=Path)
+    parser.add_argument("--execution", required=True)
+    parser.add_argument("--recovery-event")
+    parser.add_argument("--mode", choices=("recovery_only", "resume"), default="recovery_only")
+    parser.add_argument("--preview-file", type=Path)
+    args = parser.parse_args(argv)
+    try:
+        store = ExecutionStore(args.root)
+        if args.operation == "prepare-recovery":
+            from .agent_recovery import prepare_recovery
+
+            print(json.dumps(prepare_recovery(store, args.execution, mode=args.mode), sort_keys=True))
+            return 0
+        if args.operation == "approve-recovery":
+            from .agent_recovery import approve_recovery
+
+            if args.preview_file is None:
+                raise ExecutionError("recovery_preview_required")
+            event = approve_recovery(store, args.execution, json.loads(_safe_read(args.preview_file)))
+            print(json.dumps({"recovery_event": event}, sort_keys=True))
+            return 0
+        if args.operation == "status":
+            report = status(store, args.execution)
+        else:
+            report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event)
+        if args.operation == "run":
+            stop = time.monotonic() + 5
+            while report["status"] in {"running_detached", "registered", "lock_unconfirmed"} and time.monotonic() < stop:
+                time.sleep(0.1)
+                report = status(store, args.execution)
+    except (ExecutionError, ResultContractError, OSError, ValueError):
+        report = {"version": 1, "status": "lock_unconfirmed", "completion_allowed": False}
+    print(json.dumps(report, sort_keys=True))
+    return 0 if report["completion_allowed"] or report["status"] == "running_detached" else 1

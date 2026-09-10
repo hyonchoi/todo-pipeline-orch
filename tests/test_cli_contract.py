@@ -2222,7 +2222,7 @@ class TestDoctorMissingProfile:
         fake_gh,
     ):
         _seed_doctor_github(fake_gh)
-        """Default assignee skips profile show but still checks the skill registry."""
+        """Default assignee needs no profile lookup or obsolete dispatcher skill."""
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -2252,7 +2252,7 @@ class TestDoctorMissingProfile:
         result = _cmd_doctor(FakeArgs(project="demo"), config)
 
         assert result == 0
-        assert call_count["n"] == 2
+        assert call_count["n"] == 1
 
     def test_doctor_profile_check_success_returns_0(self, tmp_path, mocker, capsys, fake_gh):
         _seed_doctor_github(fake_gh)
@@ -2285,9 +2285,10 @@ class TestDoctorMissingProfile:
         assert result == 0
         assert "OK" in capsys.readouterr().out
 
-    def test_doctor_checks_hermes_skill_registry_prerequisite(
+    @pytest.mark.parametrize("profile", ["native-sdd", "gstack"])
+    def test_doctor_bundled_profiles_do_not_query_hermes_coding_skill(
         self, tmp_path, mocker, capsys,
-        fake_gh,
+        fake_gh, profile,
     ):
         _seed_doctor_github(fake_gh)
         projects_dir = tmp_path / "projects"
@@ -2295,15 +2296,13 @@ class TestDoctorMissingProfile:
         project_dir = _create_project(projects_dir, "demo")
         (project_dir / ".hermes").mkdir(parents=True)
         (project_dir / ".hermes" / "pipeline.toml").write_text(
-            'schema_version = 2\nassignee = "pipeline"\n'
+            f'schema_version = 2\nassignee = "pipeline"\nprofile = "{profile}"\n'
             'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
         )
 
         def run(cmd, **_kwargs):
             if cmd == ["hermes", "profile", "show", "pipeline"]:
                 return MagicMock(returncode=0, stderr="", stdout="")
-            if cmd == ["hermes", "-p", "pipeline", "skills", "list", "--enabled-only"]:
-                return MagicMock(returncode=0, stderr="", stdout="ai-coding-agents\n")
             if cmd == ["hermes", "--version"]:
                 return MagicMock(returncode=0, stderr="", stdout="Hermes Agent v0.19.0\n")
             raise AssertionError(f"unexpected command: {cmd}")
@@ -2315,12 +2314,23 @@ class TestDoctorMissingProfile:
 
         assert result == 0
         out = capsys.readouterr().out
-        assert "ai-coding-agents" in out
-        assert "verified locally" in out
+        assert "ai-coding-agents" not in out
+        assert "OK" in out
 
     def test_doctor_missing_hermes_skill_registry_prerequisite_returns_2(
         self, tmp_path, mocker, capsys
     ):
+        from hermes_pipeline.phases import (
+            ClientPrerequisite,
+            ProfilePrerequisites,
+            SkillPrerequisite,
+        )
+
+        mocker.patch("hermes_pipeline.phases.load_profile_prerequisites", return_value=ProfilePrerequisites(
+            1, "gstack", (SkillPrerequisite("custom-dispatch", "hermes", "Conditional", {
+                name: ClientPrerequisite("Hermes skill registry", "custom invocation")
+                for name in ("claude", "codex")
+            }),)))
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -2345,11 +2355,22 @@ class TestDoctorMissingProfile:
         assert result == 2
         out = capsys.readouterr().out
         assert "MISSING" in out
-        assert "ai-coding-agents" in out
+        assert "custom-dispatch" in out
 
     def test_doctor_missing_default_hermes_skill_registry_returns_2(
         self, tmp_path, mocker, capsys
     ):
+        from hermes_pipeline.phases import (
+            ClientPrerequisite,
+            ProfilePrerequisites,
+            SkillPrerequisite,
+        )
+
+        mocker.patch("hermes_pipeline.phases.load_profile_prerequisites", return_value=ProfilePrerequisites(
+            1, "gstack", (SkillPrerequisite("custom-dispatch", "hermes", "Conditional", {
+                name: ClientPrerequisite("Hermes skill registry", "custom invocation")
+                for name in ("claude", "codex")
+            }),)))
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -2371,7 +2392,7 @@ class TestDoctorMissingProfile:
         assert result == 2
         out = capsys.readouterr().out
         assert "MISSING" in out
-        assert "ai-coding-agents" in out
+        assert "custom-dispatch" in out
 
     def test_doctor_hermes_not_on_path_returns_2(self, tmp_path, mocker, capsys):
         projects_dir = tmp_path / "projects"

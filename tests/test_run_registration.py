@@ -308,9 +308,12 @@ def test_embedded_artifact_rejects_lstat_fstat_identity_swap(tmp_path, mocker):
     issue = _embedded_issue()
     _register(repo, issue=issue, plan_path=None)
     real_fstat = __import__("os").fstat
+    artifact_inode = (repo / ".hermes/runs/01TICK/plan.md").stat().st_ino
 
     def swapped(fd):
         value = real_fstat(fd)
+        if value.st_ino != artifact_inode:
+            return value
         fields = list(value)
         fields[1] += 1  # st_ino
         return __import__("os").stat_result(fields)

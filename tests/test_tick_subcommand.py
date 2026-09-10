@@ -693,6 +693,9 @@ class TestTickSubcommand:
     ):
         """No pipeline.toml -> the tick still prepares the legacy implicit
         profile's phases, independent of what new projects now default to."""
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         import hermes_pipeline.contract as contract_mod
         from hermes_pipeline.contract import DEFAULT_PROFILE, LEGACY_IMPLICIT_PROFILE
         from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
@@ -849,6 +852,9 @@ class TestTickSubcommand:
 
     def test_tick_kanban_registration_failure_project_error(self, tmp_path, mocker):
         """Kanban registration raises RuntimeError -> project error logged, tick returns 0."""
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         mocker.patch(
             "hermes_pipeline.cli.all_phases_complete", return_value=True
         )

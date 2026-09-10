@@ -37,7 +37,6 @@ def extract_bundled_skill_references(profile, phases):
     prompt_text = "\n".join(phase.prompt for phase in phases)
     if profile == "gstack":
         return {
-            "ai-coding-agents",
             *set(
             re.findall(
                 r"\{(?:skill_prefix|superpowers_skill_prefix)\}"
@@ -49,7 +48,7 @@ def extract_bundled_skill_references(profile, phases):
     if profile == "agent-skills":
         return set(re.findall(r"\bagent-skills:[a-z][a-z0-9-]*", prompt_text))
     if profile == "native-sdd":
-        return {"ai-coding-agents"}
+        return set()
     raise AssertionError(f"missing test-owned extraction pattern for {profile}")
 
 
@@ -60,8 +59,6 @@ def test_prerequisite_metadata_covers_every_bundled_skill_reference():
         phases = load_phases(resolve_profile_phases_path(profile))
         prompt_text = "\n".join(phase.prompt for phase in phases)
         for skill_id in declared:
-            if skill_id == "ai-coding-agents":
-                continue
             assert skill_id in prompt_text
         assert extract_bundled_skill_references(profile, phases) == declared
 
@@ -79,7 +76,6 @@ def test_gstack_prerequisites_are_conditional_and_verified():
     assert {
         item.skill_id: item.distribution_owner for item in metadata.skills
     } == {
-        "ai-coding-agents": "hermes",
         "autoplan": "gstack",
         "writing-plans": "superpowers",
         "subagent-driven-development": "superpowers",
@@ -92,12 +88,7 @@ def test_gstack_prerequisites_are_conditional_and_verified():
     }
     for item in metadata.skills:
         assert item.support == "Conditional"
-        if item.distribution_owner == "hermes":
-            assert item.clients["claude"].invocation == "claude -p"
-            assert item.clients["codex"].invocation == "codex exec"
-            assert item.clients["claude"].discovery_root == "Hermes skill registry"
-            assert item.clients["codex"].discovery_root == "Hermes skill registry"
-        elif item.distribution_owner == "gstack":
+        if item.distribution_owner == "gstack":
             assert item.clients["claude"].invocation == f"/{item.skill_id}"
             assert item.clients["codex"].invocation == f"${item.skill_id}"
             assert item.clients["claude"].discovery_root == ".claude/skills"
@@ -700,18 +691,14 @@ def test_native_sdd_profile_prompts_enforce_plan_tdd_sdd_and_pr_handoff():
     assert "agent-skills:" not in combined
 
 
-def test_native_sdd_prerequisites_only_require_hermes_dispatcher_skill():
+def test_native_sdd_dispatch_requires_no_hermes_coding_skill():
     metadata = load_profile_prerequisites("native-sdd")
 
     assert extract_bundled_skill_references(
         "native-sdd", load_phases(resolve_profile_phases_path("native-sdd"))
-    ) == {"ai-coding-agents"}
-    assert [item.skill_id for item in metadata.skills] == ["ai-coding-agents"]
-    skill = metadata.skills[0]
-    assert skill.distribution_owner == "hermes"
-    assert skill.support == "Conditional"
-    assert skill.clients["claude"].invocation == "claude -p"
-    assert skill.clients["codex"].invocation == "codex exec"
+    ) == set()
+    assert not metadata.skills
+    assert all(item.distribution_owner != "hermes" for item in load_profile_prerequisites("gstack").skills)
 
 
 

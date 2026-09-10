@@ -162,6 +162,8 @@ def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
 ):
     import subprocess
 
+    mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-review")
+
     state = tmp_path / ".hermes"
     (state / "runs" / "01TICK").mkdir(parents=True)
     (state / "runs" / "01TICK" / "registration.json").write_text("{}")

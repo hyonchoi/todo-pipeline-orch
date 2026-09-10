@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import github_issues
+from .agent_git import run_git
 from .config import AgentPolicyMode
 from .github_issues import (
     MAX_ISSUE_SNAPSHOT_CHARS,
@@ -1040,8 +1041,8 @@ def load_validated_registration(
 
 def _git(cwd: Path, *args: str) -> str:
     try:
-        result = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, timeout=60
+        result = run_git(
+            cwd, args, capture_output=True, text=True, check=False, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
         raise ResultContractError("git_verification_failed") from exc
@@ -1057,8 +1058,8 @@ def _git_predicate(cwd: Path, *args: str) -> bool:
     would collapse "false" (1) into "git is broken" (>= 2).
     """
     try:
-        result = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, timeout=60
+        result = run_git(
+            cwd, args, capture_output=True, text=True, check=False, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
         raise ResultContractError("git_verification_failed") from exc
@@ -1082,8 +1083,8 @@ def _git_bytes(cwd: Path, *args: str) -> bytes:
     not carry) translates it at its own call site.
     """
     try:
-        result = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, check=False, timeout=60
+        result = run_git(
+            cwd, args, capture_output=True, check=False, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ResultContractError("git_verification_failed") from exc

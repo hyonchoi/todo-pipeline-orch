@@ -10,8 +10,6 @@ from .kanban_tasks import (
     KANBAN_QUERY_TIMEOUT,
     PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS,
     _build_json_header,
-    _external_agent_prompt_block,
-    _external_client_delegation_block,
     _find_task_id_in_snapshot,
     _parse_task_id,
     _show_task_payload,
@@ -87,12 +85,6 @@ def _persist_accepted_head(state_dir: Path, tick_id: str, head_sha: str) -> None
     _atomic_write_text(path, head_sha + "\n")
 
 
-def _body(*, tick_id: str, todo_id: str, tenant: str, key: str, prompt: str) -> str:
-    return _build_json_header(
-        tick_id=tick_id, phase_key=key, todo_id=todo_id, project_slug=tenant
-    ) + "\n" + prompt
-
-
 def _create_task(
     *, project_dir: Path, tenant: str, tick_id: str, todo_id: str,
     key: str, title: str,
@@ -103,10 +95,9 @@ def _create_task(
 ) -> str:
     """Create one assigned worker card. ``parent`` omitted means immediately ready.
 
-    Every card this module and delivery create is a real worker: it publishes
-    the result template and its verdict is its own exit status. ``prompt`` is
-    the work instruction the external client receives verbatim; the dispatcher's
-    ``result_template`` stays outside that delimited block.
+    Every card invokes one registered supervisor execution. The supervisor pins
+    the profile prompt and result template before this function publishes the
+    thin dispatcher card, and validates collected exit and result evidence.
 
     ``tools``, ``turns`` and ``timeout`` come from the phase profile the card
     renders, never from a default here: the profile's ``phase_5_review`` needs
@@ -123,19 +114,20 @@ def _create_task(
     scope; ``load_validated_registration`` validated the registration's
     containment against exactly this value.
     """
-    task_prompt = (
-        _external_client_delegation_block(
-            prompt_client, timeout=timeout, tools=tools,
-            result_template=result_template,
-        )
-        + _external_agent_prompt_block(prompt)
+    from ._agent_supervisor import register_execution, worker_instructions
+
+    root = project_dir / ".hermes" / "agent-executions"
+    identity = register_execution(
+        project_dir=project_dir, state_dir=project_dir / ".hermes", root=root,
+        tick_id=tick_id, phase=key, prompt=prompt, client=prompt_client, tools=tools,
+        worktree=worktree, timeout=timeout, todo_id=todo_id, result_template=result_template,
     )
+    task_prompt = worker_instructions(identity, str(root))
+    header = json.loads(_build_json_header(tick_id=tick_id, phase_key=key, todo_id=todo_id, project_slug=tenant))
+    header["execution_id"] = identity
     cmd = [
         "hermes", "kanban", "create", "--tenant", tenant, title,
-        "--body", _body(
-            tick_id=tick_id, todo_id=todo_id, tenant=tenant, key=key,
-            prompt=task_prompt,
-        ),
+        "--body", json.dumps(header, sort_keys=True) + "\n" + task_prompt,
         "--workspace", f"dir:{worktree}", "--idempotency-key", f"{tick_id}:{key}",
         "--assignee", assignee or "default",
         "--json",

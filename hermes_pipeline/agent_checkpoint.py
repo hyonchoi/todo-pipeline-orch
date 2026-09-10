@@ -14,6 +14,7 @@ import subprocess
 from pathlib import Path
 
 from .agent_execution import ExecutionError, _atomic_write, _open_directory, _safe_read
+from .agent_git import run_git
 
 _DIGEST = re.compile(r'[0-9a-f]{64}\Z')
 _COMMIT = re.compile(r'[0-9a-f]{40}(?:[0-9a-f]{24})?\Z')
@@ -35,7 +36,7 @@ class ProgressJournal:
 
     def _git(self, *arguments):
         try:
-            result = subprocess.run(['git', '-C', self._registration()['worktree'], *arguments],
+            result = run_git(Path(self._registration()['worktree']), arguments,
                                     capture_output=True, timeout=30, check=True)
         except (OSError, subprocess.SubprocessError) as exc:
             raise ExecutionError('checkpoint Git validation failed') from exc
@@ -153,6 +154,11 @@ class ProgressJournal:
         return directory
 
     def _check_git(self, journal):
+        registration = self._registration()
+        if "git_metadata" in registration["result_contract"]:
+            from .agent_client import validate_git_metadata
+
+            validate_git_metadata(registration)
         if self._git('symbolic-ref', '--short', 'HEAD') != self._registration()['branch']:
             raise ExecutionError('checkpoint branch drift')
         if any(entry and (entry[0].islower() or entry[0] == 'S')

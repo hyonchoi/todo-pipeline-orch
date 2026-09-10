@@ -1750,6 +1750,9 @@ def _tick_project(
     Note:
         The caller holds this project's TickLock for the duration of this call.
     """
+    import hashlib
+
+    from ._agent_supervisor import sweep
     from .contract import (
         CONTRACT_SCHEMA_VERSION,
         LEGACY_IMPLICIT_PROFILE,
@@ -1763,6 +1766,14 @@ def _tick_project(
         missing_capabilities,
         required_capabilities,
     )
+    execution_roots = (
+        project_state / "agent-executions",
+        config.state_dir / "agent-executions" / hashlib.sha256(os.fsencode(project_dir.resolve())).hexdigest(),
+    )
+    for execution_root in execution_roots:
+        for report in sweep(execution_root):
+            if report["status"] in {"running_detached", "cleanup_unconfirmed", "lock_unconfirmed", "interrupted"}:
+                log.warning("project %s: execution %s %s", project_slug, report["execution_id"], report["status"])
     from .phases import (
         load_phase_profile,
         load_profile_prerequisites,
@@ -2515,6 +2526,22 @@ def _tick_project(
             log.error("project %s: phase prompt preparation failed: error_type=%s",
                       project_slug, type(exc).__name__)
             return
+
+    try:
+        from .kanban_tasks import bind_prepared_executions
+
+        prepared = bind_prepared_executions(
+            prepared, project_dir=project_dir, state_dir=project_state,
+            root=execution_roots[0] if registration else execution_roots[1],
+            tick_id=tick_id, worktree=registration.worktree if registration else project_dir,
+            todo_id=picked,
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        _abandon_run_if_registered(project_state, tick_id, "supervisor_registration_failed")
+        _record_failed_to_spawn(project_state, tick_id, picked, exc, reason="supervisor_registration_failed")
+        cb.observe(picked=None, counts_as_no_progress=True)
+        log.error("project %s: supervisor registration failed: error_type=%s", project_slug, type(exc).__name__)
+        return
 
     # Step 5: Persist immediately before the first Hermes mutation. The
     # tick_started sentinel preserves the existing registration-crash recovery.
@@ -3358,6 +3385,16 @@ def _cmd_doctor(args, config: Config) -> int:
         requires_plan=phase_profile.requires_plan,
         profile=contract.profile,
     )
+
+    import hashlib
+
+    from ._agent_supervisor import diagnostics
+    for root in (
+        project_state / "agent-executions",
+        config.state_dir / "agent-executions" / hashlib.sha256(os.fsencode(project_dir.resolve())).hexdigest(),
+    ):
+        for report in diagnostics(root):
+            print(f"Execution {report['execution_id']}: {report['status']}")
 
     if not _doctor_active_registration(project_dir, project_state) or not github_ok:
         return 1

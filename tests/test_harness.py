@@ -252,7 +252,11 @@ class TestHarnessProfileTopology:
         mkdtemp.assert_not_called()
 
     def test_missing_conditional_skill_fails_profile_preflight(self, mocker):
-        from hermes_pipeline.phases import load_profile_prerequisites
+        from hermes_pipeline.phases import (
+            ClientPrerequisite,
+            ProfilePrerequisites,
+            SkillPrerequisite,
+        )
 
         mocker.patch(
             "hermes_pipeline.harness.verify_hermes_skill_registry_prerequisite",
@@ -265,7 +269,12 @@ class TestHarnessProfileTopology:
             _validate_profile_prerequisites(
                 profile_name="gstack",
                 prompt_client="claude",
-                prerequisites=load_profile_prerequisites("gstack"),
+                prerequisites=ProfilePrerequisites(1, "gstack", (
+                    SkillPrerequisite("custom-dispatch", "hermes", "Conditional", {
+                        name: ClientPrerequisite("Hermes skill registry", "custom invocation")
+                        for name in ("claude", "codex")
+                    }),
+                )),
             )
 
 
