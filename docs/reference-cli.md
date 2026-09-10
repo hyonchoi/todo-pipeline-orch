@@ -333,21 +333,27 @@ See the [Plan template](templates/tpo-plan.md).
 
 ### `skills`
 
-Transactionally manage the bundled `todo-manager` skill:
+Transactionally manage the bundled `issue-planner` skill:
 
 ```bash
-tpo skills install todo-manager --target codex --scope user [--reinstall]
-tpo skills uninstall todo-manager --target claude --scope project --yes [--force]
-tpo skills recover todo-manager --target codex --scope user --finish
-tpo skills recover todo-manager --target codex --scope user --rollback
+tpo skills install issue-planner --target codex --scope user [--reinstall]
+tpo skills uninstall issue-planner --target claude --scope project --yes [--force]
+tpo skills recover issue-planner --target codex --scope user --finish
+tpo skills recover issue-planner --target codex --scope user --rollback
 ```
 
 `--target` is required and accepts `codex` or `claude`; scope defaults to
-`user`. Codex destinations are `.agents/skills/todo-manager`, and Claude
-destinations are `.claude/skills/todo-manager`, below the home directory or
+`user`. Codex destinations are `.agents/skills/issue-planner`, and Claude
+destinations are `.claude/skills/issue-planner`, below the home directory or
 Git top level. Adjacent lock, journal, and receipt files make each single-target
 operation recoverable. A pending journal blocks new mutations. Recovery can
 roll back only before the recorded commit point; afterward use `--finish`.
+
+All three operations still accept `todo-manager` with its original namespaces
+and recovery safeguards. New installs and explicit reinstalls of that name
+install a deprecation notice. Existing installed copies keep their old behavior
+until explicitly upgraded; installing `issue-planner` leaves them untouched.
+See [issue planning and migration](howto-github-issues-todos.md#publication-recovery-and-migration).
 
 ---
 
