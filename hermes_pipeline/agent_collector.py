@@ -127,16 +127,26 @@ def verification_filter():
 
     A mount namespace alone does not isolate pathname AF_UNIX sockets. The
     filter applies to bwrap's executed child, including all its descendants.
+    Anonymous AF_UNIX stream socketpairs support local runtime IPC without
+    allowing socket creation or connections to host pathname sockets. Datagram
+    pairs are denied because sendto could address a host pathname socket.
     """
     architecture = platform.machine()
-    policies = {'x86_64': (0xC000003E, (41, 42, 53)), 'aarch64': (0xC00000B7, (198, 199, 203))}
+    policies = {'x86_64': (0xC000003E, (41, 42), 53),
+                'aarch64': (0xC00000B7, (198, 203), 199)}
     if architecture not in policies:
         raise ExecutionError('checkpoint syscall sandbox architecture unsupported')
-    audit_arch, sockets = policies[architecture]
+    audit_arch, sockets, socketpair = policies[architecture]
     instructions = [(0x20, 0, 0, 4), (0x15, 1, 0, audit_arch), (0x06, 0, 0, 0x80000000),
                     (0x20, 0, 0, 0), (0x35, 0, 1, 0x40000000), (0x06, 0, 0, 0x80000000)]
     for syscall in (*sockets, 425, 426, 427):
         instructions.extend([(0x15, 0, 1, syscall), (0x06, 0, 0, 0x00050001)])
+    # Linux consumes the low 32 bits of domain/type at args[0]/args[1]. Both
+    # supported ABIs use AF_UNIX=SOCK_STREAM=1 and these CLOEXEC/NONBLOCK flags.
+    instructions.extend([(0x15, 0, 7, socketpair), (0x20, 0, 0, 16),
+                         (0x15, 1, 0, 1), (0x06, 0, 0, 0x00050001),
+                         (0x20, 0, 0, 24), (0x54, 0, 0, 0xFFFFFFFF ^ (0x80000 | 0x800)),
+                         (0x15, 1, 0, 1), (0x06, 0, 0, 0x00050001)])
     instructions.append((0x06, 0, 0, 0x7FFF0000))
     with tempfile.TemporaryFile() as policy:
         policy.write(b''.join(struct.pack('=HBBI', *instruction) for instruction in instructions))

@@ -1,6 +1,7 @@
 import json
 import os
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -220,7 +221,8 @@ def test_verification_sandbox_rejects_authority_overlap(tmp_path, monkeypatch):
             collector.verification_argv(['pytest'], snapshot, authority_root=authority, seccomp_fd=10)
 
 
-def test_actual_verification_sandbox_cannot_connect_host_unix_socket(tmp_path):
+@pytest.mark.parametrize('kind', [socket.SOCK_STREAM, socket.SOCK_DGRAM])
+def test_actual_verification_sandbox_cannot_connect_host_unix_socket(tmp_path, kind):
     from hermes_pipeline import agent_collector as collector
     snapshot = tmp_path / 'snapshot'
     snapshot.mkdir()
@@ -235,14 +237,20 @@ def test_actual_verification_sandbox_cannot_connect_host_unix_socket(tmp_path):
     if probe.returncode:
         pytest.skip('kernel sandbox unavailable; production fails closed')
     # Keep the address short and outside /tmp, which the sandbox masks.
-    with tempfile.TemporaryDirectory(prefix='tpo-socket-', dir='/var/tmp') as socket_dir, socket.socket(socket.AF_UNIX) as listener:
+    with tempfile.TemporaryDirectory(prefix='tpo-socket-', dir='/var/tmp') as socket_dir, socket.socket(socket.AF_UNIX, kind) as listener:
         socket_path = Path(socket_dir) / 'host.sock'
         listener.bind(str(socket_path))
-        listener.listen()
+        if kind == socket.SOCK_STREAM:
+            listener.listen()
         command = [sys.executable, '-c',
                    'import socket,sys\nfrom pathlib import Path\nassert Path(sys.argv[1]).is_socket()\n'
                    'try:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])\n'
                    'except OSError: pass\nelse: raise AssertionError("host socket reachable")', str(socket_path)]
+        if kind == socket.SOCK_DGRAM:
+            command = [sys.executable, '-c',
+                       'import socket,sys\nfrom pathlib import Path\nassert Path(sys.argv[1]).is_socket()\n'
+                       'try:\n a,b=socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM); a.sendto(b"probe", sys.argv[1])\n'
+                       'except OSError: pass\nelse: raise AssertionError("host datagram socket reachable")', str(socket_path)]
         with collector.verification_filter() as descriptor:
             argv = collector.verification_argv(command, snapshot, authority_root=authority, seccomp_fd=descriptor)
             outcome = collector.run_process(argv, cwd=snapshot, stdin_bytes=b'', timeout=5, cleanup_timeout=1,
@@ -288,3 +296,125 @@ def test_unsupported_verification_syscall_architecture_blocks_launch(monkeypatch
     monkeypatch.setattr(collector.platform, 'machine', lambda: 'unknown-platform')
     with pytest.raises(ExecutionError, match='architecture unsupported'), collector.verification_filter():
         pytest.fail('unsupported syscall architecture accepted')
+
+
+def test_actual_verification_sandbox_runs_uv_pytest_with_local_socketpairs(tmp_path):
+    from hermes_pipeline import agent_collector as collector
+    uv = collector.shutil.which('uv')
+    if uv is None:
+        pytest.skip('uv unavailable')
+    snapshot = tmp_path / 'snapshot'
+    snapshot.mkdir()
+    authority = tmp_path / 'authority'
+    authority.mkdir()
+    with collector.verification_filter() as descriptor:
+        try:
+            probe_argv = collector.verification_argv(['/usr/bin/true'], snapshot,
+                authority_root=authority, seccomp_fd=descriptor)
+        except ExecutionError:
+            pytest.skip('bwrap unavailable; production fails closed')
+        probe = subprocess.run(probe_argv, capture_output=True, pass_fds=(descriptor,), timeout=5)
+    if probe.returncode:
+        pytest.skip('kernel sandbox unavailable; production fails closed')
+    (snapshot / 'pyproject.toml').write_text(
+        '[project]\nname = "sandbox-probe"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n')
+    (snapshot / 'test_probe.py').write_text('''import errno
+import socket
+
+def test_anonymous_socketpair():
+    for flags in (0, socket.SOCK_CLOEXEC, socket.SOCK_NONBLOCK,
+                  socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK):
+        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM | flags)
+        with left, right:
+            assert left.family == right.family == socket.AF_UNIX
+            left.sendall(b"local")
+            assert right.recv(5) == b"local"
+
+def test_network_creation_denied():
+    for family in (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6):
+        for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
+            try:
+                connection = socket.socket(family, kind)
+            except OSError as exc:
+                assert exc.errno == errno.EPERM
+            else:
+                connection.close()
+                raise AssertionError("socket creation allowed")
+    for family in (socket.AF_INET, socket.AF_INET6):
+        try:
+            pair = socket.socketpair(family)
+        except OSError as exc:
+            assert exc.errno == errno.EPERM
+        else:
+            for connection in pair:
+                connection.close()
+            raise AssertionError("non-Unix socketpair allowed")
+    for kind in (socket.SOCK_DGRAM, socket.SOCK_SEQPACKET):
+        try:
+            pair = socket.socketpair(socket.AF_UNIX, kind)
+        except OSError as exc:
+            assert exc.errno == errno.EPERM
+        else:
+            for connection in pair:
+                connection.close()
+            raise AssertionError("non-stream socketpair allowed")
+''')
+    # Reuse pytest from the running interpreter; offline/no-sync prevents installs.
+    with collector.verification_filter() as descriptor:
+        argv = collector.verification_argv(
+            [uv, 'run', '--no-sync', '--offline', '--python', sys.executable,
+             'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'test_probe.py'],
+            snapshot, authority_root=authority, seccomp_fd=descriptor)
+        command_start = argv.index('--clearenv') + 1
+        argv[command_start:command_start] = [
+            '--setenv', 'UV_PROJECT_ENVIRONMENT', sys.prefix, '--setenv', 'UV_NO_SYNC', '1']
+        result = subprocess.run(argv, capture_output=True, text=True,
+                                pass_fds=(descriptor,), timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '2 passed' in result.stdout
+
+
+@pytest.mark.parametrize(('architecture', 'audit_arch', 'socket_syscall', 'connect', 'socketpair'), [
+    ('x86_64', 0xC000003E, 41, 42, 53),
+    ('aarch64', 0xC00000B7, 198, 203, 199),
+])
+def test_verification_filter_limits_socketpair_exception(
+        monkeypatch, architecture, audit_arch, socket_syscall, connect, socketpair):
+    from hermes_pipeline import agent_collector as collector
+    monkeypatch.setattr(collector.platform, 'machine', lambda: architecture)
+    with collector.verification_filter() as descriptor:
+        policy = list(struct.iter_unpack('=HBBI', os.read(descriptor, 4096)))
+
+    def verdict(syscall, family=0, arch=audit_arch, kind=socket.SOCK_STREAM):
+        # Evaluate classic BPF against the Linux seccomp_data byte layout so
+        # both supported architectures are checked on either test host.
+        data = struct.pack('=II7Q', syscall, arch, 0, family, kind, 0, 0, 0, 0)
+        pc = accumulator = 0
+        for _ in range(len(policy)):
+            opcode, yes, no, value = policy[pc]
+            if opcode == 0x20:  # BPF_LD | BPF_W | BPF_ABS
+                accumulator = struct.unpack_from('=I', data, value)[0]
+            elif opcode == 0x15:  # BPF_JMP | BPF_JEQ | BPF_K
+                pc += yes if accumulator == value else no
+            elif opcode == 0x35:  # BPF_JMP | BPF_JGE | BPF_K
+                pc += yes if accumulator >= value else no
+            elif opcode == 0x54:  # BPF_ALU | BPF_AND | BPF_K
+                accumulator &= value
+            elif opcode == 0x06:  # BPF_RET | BPF_K
+                return value
+            else:
+                pytest.fail(f'unexpected BPF opcode {opcode}')
+            pc += 1
+        pytest.fail('filter failed to terminate')
+
+    for flags in (0, 0x80000, 0x800, 0x80800):
+        assert verdict(socketpair, socket.AF_UNIX, kind=socket.SOCK_STREAM | flags) == 0x7FFF0000
+        for kind in (0, socket.SOCK_DGRAM, socket.SOCK_SEQPACKET, socket.SOCK_STREAM | 0x10000000):
+            assert verdict(socketpair, socket.AF_UNIX, kind=kind | flags) == 0x00050001
+    for family in (0, socket.AF_INET, socket.AF_INET6, 0xFFFFFFFF):
+        assert verdict(socketpair, family) == 0x00050001
+    for syscall in (socket_syscall, connect, 425, 426, 427):
+        assert verdict(syscall, socket.AF_UNIX) == 0x00050001
+    for syscall in (socketpair, socket_syscall, connect):
+        assert verdict(syscall | 0x40000000, socket.AF_UNIX) == 0x80000000
+        assert verdict(syscall, socket.AF_UNIX, arch=0x40000003) == 0x80000000
