@@ -56,6 +56,7 @@ _FAILURE_CODES = frozenset({
     "profile_authority_root_unconfirmed", "registration_root_mismatch", "branch_drift",
     "phase_identity_mismatch", "git_metadata_drift", "git_metadata_unconfirmed",
     "git_permissions_unconfirmed", "execution_invalid", "launch_unavailable",
+    "verification_sandbox_unavailable",
 })
 
 
@@ -118,6 +119,20 @@ def _prepare_launch(store: ExecutionStore, identity: str, record: dict) -> tuple
 
         ProgressJournal(store, identity).validate_fresh()
     confirm_process_capability()
+    if record["registration"]["manifest"] is not None:
+        from .agent_collector import confirm_verification_capability
+
+        try:
+            confirm_verification_capability()
+        except ExecutionError as error:
+            if error.args and isinstance(error.args[0], str) and error.args[0] in {
+                "checkpoint verification sandbox unavailable",
+                "checkpoint verification platform unsupported",
+                "checkpoint syscall sandbox unavailable",
+                "checkpoint syscall sandbox architecture unsupported",
+            }:
+                raise ExecutionError("verification_sandbox_unavailable") from None
+            raise
     staging = staging_directory(store, identity, len(record["attempts"]) + 1)
     arguments = client_argv(record["registration"], staging, authority_root=store.root)
     executable = shutil.which(arguments[0])

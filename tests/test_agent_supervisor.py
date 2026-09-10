@@ -78,6 +78,161 @@ def execution(tmp_path):
     return store, worktree
 
 
+@pytest.fixture
+def manifest_execution(execution):
+    from hermes_pipeline.agent_checkpoint import ProgressJournal
+
+    store, worktree = execution
+    registration = store.load("execution-1")["registration"]
+    store.register(
+        "manifest-1", registration_id="tick-manifest", plan_identity="b" * 64,
+        phase="development", prompt=b"manifest prompt", client=registration["client"],
+        worktree=str(worktree), branch="task", result_contract=registration["result_contract"],
+        timeout=30, manifest={"tasks": [{"id": "one", "verification": ["python check.py"]}]},
+    )
+    ProgressJournal(store, "manifest-1").initialize()
+    return store, worktree
+
+
+@pytest.mark.parametrize("operation", ["run", "_supervise"])
+@pytest.mark.parametrize("failure, expected", [
+    ("checkpoint verification sandbox unavailable", "verification_sandbox_unavailable"),
+    ("checkpoint verification platform unsupported", "verification_sandbox_unavailable"),
+    ("checkpoint syscall sandbox unavailable", "verification_sandbox_unavailable"),
+    ("provider secret payload", "execution_invalid"),
+])
+def test_manifest_verification_preflight_refuses_without_attempt_then_repairs(
+    manifest_execution, monkeypatch, capsys, operation, failure, expected,
+):
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "confirm_process_capability", lambda: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: pytest.fail("detached before preflight"))
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: pytest.fail("admitted before preflight"))
+    def unavailable():
+        raise ExecutionError(failure)
+    monkeypatch.setattr(agent_collector, "confirm_verification_capability", unavailable)
+    command = [operation, "--root", str(store.root), "--execution", "manifest-1"]
+    assert supervisor.main(command) == 1
+    output = capsys.readouterr().out
+    assert json.loads(output)["status"] == expected
+    assert failure not in output
+    assert store.load("manifest-1")["attempts"] == []
+    assert supervisor.status(store, "manifest-1")["status"] == expected
+    monkeypatch.setattr(agent_collector, "confirm_verification_capability", lambda: None)
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None,
+        "cleanup": "confirmed", "processes": [],
+    })
+    assert supervisor.supervise(store, "manifest-1")["status"] == "timed_out"
+    assert len(store.load("manifest-1")["attempts"]) == 1
+    assert not (store.root / "manifest-1" / "launch-refusal.json").exists()
+
+
+@pytest.mark.parametrize("operation", ["run", "_supervise"])
+def test_manifest_unsupported_linux_architecture_reports_sandbox_unavailable(
+    manifest_execution, monkeypatch, capsys, operation,
+):
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "confirm_process_capability", lambda: None)
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: pytest.fail("detached despite unsupported architecture"))
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: pytest.fail("admitted despite unsupported architecture"))
+    monkeypatch.setattr(agent_collector.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(agent_collector.platform, "machine", lambda: "riscv64")
+    assert supervisor.main([operation, "--root", str(store.root), "--execution", "manifest-1"]) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "verification_sandbox_unavailable"
+    assert store.load("manifest-1")["attempts"] == []
+    assert supervisor.status(store, "manifest-1")["status"] == "verification_sandbox_unavailable"
+
+
+def test_manifest_verification_is_rechecked_by_detached_daemon(manifest_execution, monkeypatch, capsys):
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "confirm_process_capability", lambda: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    probes = []
+    def probe():
+        probes.append(True)
+        if len(probes) > 1:
+            raise ExecutionError("checkpoint verification sandbox unavailable")
+    monkeypatch.setattr(agent_collector, "confirm_verification_capability", probe)
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: pytest.fail("admitted after failed probe"))
+    original_spawn = supervisor.subprocess.Popen
+    def spawn(argv, **kwargs):
+        if "_supervise" not in argv:
+            return original_spawn(argv, **kwargs)
+        supervisor.main(argv[1:])
+        capsys.readouterr()
+    monkeypatch.setattr(supervisor.subprocess, "Popen", spawn)
+    assert supervisor.main(["run", "--root", str(store.root), "--execution", "manifest-1"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "verification_sandbox_unavailable"
+    assert len(probes) == 2
+    assert store.load("manifest-1")["attempts"] == []
+
+
+def test_nonmanifest_launch_needs_no_verification_backend(execution, monkeypatch):
+    from hermes_pipeline import agent_collector
+
+    store, _ = execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "confirm_process_capability", lambda: None)
+    monkeypatch.setattr(agent_collector, "confirm_verification_capability", lambda: pytest.fail("legacy probe"))
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None,
+        "cleanup": "confirmed", "processes": [],
+    })
+    assert supervisor.supervise(store, "execution-1")["generation"] == 1
+
+
+def test_existing_manifest_attempt_attaches_without_verification_refresh(manifest_execution, monkeypatch):
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    store.admit("manifest-1")
+    store.update_attempt("manifest-1", 1, status="timed_out", cleanup="confirmed")
+    monkeypatch.setattr(agent_collector, "confirm_verification_capability", lambda: pytest.fail("attach probe"))
+    assert supervisor.attach(store, "manifest-1")["status"] == "timed_out"
+    assert supervisor.supervise(store, "manifest-1")["status"] == "timed_out"
+    assert len(store.load("manifest-1")["attempts"]) == 1
+
+
+def test_manifest_retry_probe_preserves_approved_recovery_until_repaired(manifest_execution, monkeypatch):
+    from hermes_pipeline import agent_collector
+    from hermes_pipeline.agent_recovery import approve_recovery, prepare_recovery
+
+    store, _ = manifest_execution
+    store.admit("manifest-1")
+    store.update_attempt("manifest-1", 1, status="timed_out", cleanup="confirmed")
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "confirm_process_capability", lambda: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    event = approve_recovery(store, "manifest-1", prepare_recovery(store, "manifest-1"))
+    def unavailable():
+        raise ExecutionError("checkpoint verification sandbox unavailable")
+    monkeypatch.setattr(agent_collector, "confirm_verification_capability", unavailable)
+    with pytest.raises(ExecutionError, match="verification_sandbox_unavailable"):
+        supervisor.supervise(store, "manifest-1", recovery_event=event)
+    assert len(store.load("manifest-1")["attempts"]) == 1
+    assert supervisor.status(store, "manifest-1")["status"] == "timed_out"
+    monkeypatch.setattr(agent_collector, "confirm_verification_capability", lambda: None)
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None,
+        "cleanup": "confirmed", "processes": [],
+    })
+    assert supervisor.supervise(store, "manifest-1", recovery_event=event)["generation"] == 2
+
+
 def test_codex_named_permissions_only_grant_git_and_staging(execution, tmp_path):
     store, worktree = execution
     staging = tmp_path / "staging"
