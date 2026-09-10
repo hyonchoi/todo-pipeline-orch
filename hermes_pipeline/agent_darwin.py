@@ -175,7 +175,12 @@ class Backend:
             estimated = capacity
         raise OSError('process enumeration changed repeatedly')
 
-    def signal(self, identity: dict, sig: int) -> bool:
+    def signal(self, identity: dict, sig: int) -> bool | None:
+        """None means delivery is pending for a reverified, unchanged birth.
+
+        It is not successful delivery or evidence of death. The cleanup caller
+        must retry within its deadline and independently establish termination.
+        """
         if sig <= 0:
             return False  # Darwin's audit-token API explicitly rejects signal 0.
         try:
@@ -200,6 +205,14 @@ class Backend:
                     return False
                 # Exec can replace idversion; revalidate stable uniqueid before
                 # obtaining another version. Reused PIDs never pass this check.
+            # After the final ESRCH, distinguish an exit/exec transition from
+            # lost ownership. Audit signaling can lose its live-process lookup
+            # while zombie-inclusive proc_pidinfo still observes this birth.
+            current = self._record(identity.get("pid"))
+            if current is None:
+                return True
+            if current["start_ticks"] != identity.get("start_ticks"):
+                return False
+            return True if current["state"] == "Z" else None
         except (OSError, ValueError, TypeError):
             return False
-        return False

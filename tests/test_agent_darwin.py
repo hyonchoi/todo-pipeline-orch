@@ -63,7 +63,7 @@ def native_diagnostics(monkeypatch):
 
     def send(identity, sig):
         result = original_signal(identity, sig)
-        counts['signal_ok' if result else 'signal_failed'] += 1
+        counts['signal_pending' if result is None else 'signal_ok' if result else 'signal_failed'] += 1
         events.append({'operation': 'signal', 'pid': identity['pid'],
                        'signal': int(sig), 'confirmed': result})
         return result
@@ -503,3 +503,78 @@ def test_native_public_discovery_can_inspect_system_owner():
     assert os.geteuid() != 0
     with pytest.raises(PermissionError):
         backend.snapshot(1)
+
+
+def test_exhausted_esrch_is_pending_only_for_verified_same_birth(api):
+    library, backend = api
+    identity = backend.snapshot(42)
+    library.signal_result = errno.ESRCH
+    assert backend.signal(identity, signal.SIGCONT) is None
+    library.signal_result = errno.EPERM
+    assert backend.signal(identity, signal.SIGCONT) is False
+    library.signal_result = errno.ESRCH
+    original_send = library.send
+    def reused_after_last_send(token, sig):
+        result = original_send(token, sig)
+        if len(library.signals) == 7:
+            library.data = record(unique=902)
+        return result
+    backend._send = reused_after_last_send
+    assert backend.signal(identity, signal.SIGCONT) is False
+
+
+@pytest.mark.parametrize('final', ['zombie', 'alive', 'reused', 'unreadable', 'discovery_gap', 'permission'])
+def test_continue_exit_race_requires_independent_final_death(api, monkeypatch, final):
+    from hermes_pipeline import agent_process
+    library, backend = api
+    identity = backend.snapshot(42)
+    sent_term = False
+    def send(token, sig):
+        nonlocal sent_term
+        library.signals.append((list(token), sig))
+        if sig == signal.SIGTERM:
+            sent_term = True
+            return 0
+        return errno.EPERM if final == 'permission' else errno.ESRCH
+    backend._send = send
+    def snapshot(pid):
+        if not sent_term or final == 'alive':
+            return identity
+        if final == 'reused':
+            return identity | {'start_ticks': 902}
+        if final == 'unreadable':
+            raise PermissionError('unavailable')
+        return identity | {'state': 'Z'}
+    monkeypatch.setattr(darwin, 'Backend', lambda: backend)
+    monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
+    monkeypatch.setattr(agent_process, 'process_snapshot', snapshot)
+    monkeypatch.setattr(agent_process, '_discover', lambda known: final != 'discovery_gap')
+    elapsed = [0.0]
+    monkeypatch.setattr(agent_process.time, 'monotonic', lambda: elapsed[0])
+    monkeypatch.setattr(agent_process.time, 'sleep', lambda delay: elapsed.__setitem__(0, elapsed[0] + delay))
+    result = agent_process.cleanup_processes([identity], cleanup_timeout=.06)
+    assert elapsed[0] <= .06
+    if final == 'alive':
+        assert sum(sig == signal.SIGCONT for _, sig in library.signals) >= 6
+        assert any(sig == signal.SIGKILL for _, sig in library.signals)
+    expected = 'confirmed' if final == 'zombie' else 'cleanup_unconfirmed'
+    assert result['cleanup'] == expected
+    assert library.signals[0][1] == signal.SIGTERM
+    assert library.signals[1][1] == signal.SIGCONT
+
+
+def test_exhausted_esrch_final_verification_error_is_not_pending(api):
+    library, backend = api
+    identity = backend.snapshot(42)
+    library.signal_result = errno.ESRCH
+    original = backend._record
+    reads = 0
+    def denied_final(pid):
+        nonlocal reads
+        reads += 1
+        if reads == 4:
+            raise PermissionError('unavailable')
+        return original(pid)
+    backend._record = denied_final
+    assert backend.signal(identity, signal.SIGCONT) is False
+    assert reads == 4

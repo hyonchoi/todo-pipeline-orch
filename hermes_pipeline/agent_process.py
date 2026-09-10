@@ -219,8 +219,8 @@ def _live(identity: Identity) -> bool | None:
     return current["state"] not in {"Z", "X"}
 
 
-def _signal(identity: Identity, sig: int) -> bool:
-    """Pin kernel identity before signaling, closing the verify/kill race."""
+def _signal(identity: Identity, sig: int) -> bool | None:
+    """Pin kernel identity; None is pending delivery, never proof of cleanup."""
     if sys.platform == "darwin":
         from .agent_darwin import Backend
         try:
@@ -286,12 +286,16 @@ def cleanup_processes(
         now = time.monotonic()
         sig = signal.SIGKILL if now >= graceful_end else signal.SIGTERM
         for identity in reversed(living):
-            key = (identity["pid"], sig)
-            if key not in sent:
-                uncertain |= not _signal(identity, sig)
-                if sig == signal.SIGTERM:
-                    uncertain |= not _signal(identity, signal.SIGCONT)
-                sent.add(key)
+            for action in ((sig, signal.SIGCONT) if sig == signal.SIGTERM else (sig,)):
+                key = (identity["pid"], action)
+                if key not in sent:
+                    delivered = _signal(identity, action)
+                    uncertain |= delivered is False
+                    # A reverified Darwin exit/exec transition can temporarily
+                    # reject audit signaling. Retry within this same deadline;
+                    # only a subsequent _live(False) establishes termination.
+                    if delivered is not None:
+                        sent.add(key)
         if now >= deadline:
             uncertain = True
             break
