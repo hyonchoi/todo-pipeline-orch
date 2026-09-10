@@ -64,15 +64,26 @@ Create a single harmless local task: write `policy-probe.txt` containing
 an isolated direct-client diagnostic, supply this task on stdin with no marker
 for `inherit`, then in a separate fresh fixture supply the exact marker and
 blank line before the same task for `delegated`. Bound each invocation to 120
-seconds using the fixture's subprocess runner. Use the production launch forms:
+seconds using the fixture's subprocess runner. For Claude, use the production
+launch form:
 
 ```bash
 # Run from the selected disposable Git fixture. Feed the prepared payload on stdin.
 claude -p --permission-mode dontAsk --allowedTools Read,Write,Bash
-
-TPO_GIT_COMMON_DIR=$(git rev-parse --path-format=absolute --git-common-dir)
-codex exec --sandbox workspace-write -c sandbox_workspace_write.network_access=true --add-dir "$TPO_GIT_COMMON_DIR" -
 ```
+
+For Codex, use the production-generated launch sequence from the source snapshot
+being qualified, running from the selected fixture and feeding the prepared
+payload on stdin. Require a client supporting named permission profiles
+(verified with 0.154.0), and record its version. The sequence must resolve both
+the absolute Git common directory and absolute per-worktree Git directory,
+serialize explicit write grants into a launch-local profile extending
+`:workspace`, enable network access, and pass the profile and its selection
+through CLI `-c` overrides. It must fail closed on resolution or serialization
+failure, without editing user/global Codex configuration or persisting a profile
+file. Use fresh registration for Hermes-dispatched checks: existing kanban cards
+retain their original launch instructions. See the
+[dispatcher prerequisites](howto-live-integration-test-harness.md#prerequisites).
 
 Capture exit status and sanitized stdout for all four cells. Every response
 must contain `USER_POLICY_RETAINED`; `inherit` must report `POLICY_INHERIT` and

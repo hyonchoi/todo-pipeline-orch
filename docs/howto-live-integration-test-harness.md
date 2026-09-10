@@ -31,15 +31,25 @@ and the prompt client are all real.
 - The selected prompt client (`claude` or `codex`) installed and authenticated.
   Preflight checks only the client selected by `prompt_client`.
 
-The Codex dispatcher uses `workspace-write` with the per-command setting
-`sandbox_workspace_write.network_access=true` so agents can fetch dependencies
-and access GitHub; it does not change global Codex configuration. It resolves
-the current worktree's absolute Git common directory with `git rev-parse` and
-grants access only to that directory with `--add-dir`, allowing commits in linked
-worktrees without granting access to the whole parent checkout. It preserves
-`workspace-write` and the network setting, and fails closed if the Git common
-directory cannot be resolved. The dispatcher copies only the content inside the
-prompt markers into its stdin file, excluding the marker lines. It assigns the
+The Codex dispatcher requires a Codex version that supports named permission
+profiles (verified with 0.154.0). The Hermes shell must also have Python 3.11+
+available as `python3` on PATH for permission serialization and validation;
+TPO's uv-managed Python environment does not ensure this prerequisite.
+At launch, it resolves the selected phase
+worktree's absolute Git common directory and absolute per-worktree Git directory
+with `git rev-parse`. It builds a launch-local named permission profile extending
+`:workspace` and explicitly grants write access to both Git directories. Linked
+worktrees need both grants because their index and HEAD live in a separate
+metadata directory within the common directory. This permits Git operations
+without granting write access to the whole parent checkout.
+
+The profile enables network access so agents can fetch dependencies and access
+GitHub. TPO passes the profile and its selection through CLI `-c` overrides;
+it neither edits user/global Codex configuration nor persists a profile file.
+The launch fails closed if either Git directory cannot be resolved or the
+permission configuration cannot be serialized. The dispatcher copies only the
+content inside the prompt markers into its stdin file, excluding the marker
+lines. It assigns the
 prompt variable before redirecting stdin and
 shell-quotes the literal file path. Existing kanban cards retain their original
 instructions, so start a new harness run to exercise these dispatcher fixes.
