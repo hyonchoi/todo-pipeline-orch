@@ -50,9 +50,13 @@ New executable TODOs are created from a private schema-v1 request file:
 tpo todos create <project> --request-file <project>/.hermes/todo-create-input/<uuid>.json
 ```
 
-The request contains exactly `schema_version`, a canonical lowercase UUIDv4
+The request contains `schema_version`, a canonical lowercase UUIDv4
 `transaction_id`, `title`, all new-form `fields`, `plan_markdown`, and strict
-Plan `tasks`. It cannot provide labels, issue/TODO IDs, `Plan`, or `Legacy ID`.
+Plan `tasks`, plus an optional top-level boolean `hold`. Omitted or `false`
+preserves legacy canonical request bytes; `true` appears in the request and
+preview and applies `tpo:on-hold` in the initial creation call. Hold does not
+change the rendered issue body. It cannot provide arbitrary labels, issue/TODO
+IDs, `Plan`, or `Legacy ID`.
 Use the bundled skill's `scripts/write_request.py PROJECT_ROOT UUID`, passing
 the JSON on standard input. With the project state directory at
 `<state-dir>` (normally `<project>/.hermes`), the writer exclusively creates
@@ -77,20 +81,85 @@ After an uncertain or partial result, rerun the identical request; transaction
 marker discovery resumes it. Use `--issue N` only after independently confirming
 that issue's matching marker. TPO never closes or deletes a partial issue.
 
-The bundled `todo-manager` skill selects the latest finalized plan-mode Plan,
-builds the request, shows the full preview, and requests explicit approval:
+The bundled `issue-planner` skill requires the latest finalized Codex Plan in
+the active conversation or an explicitly identified, readable Claude Plan-mode
+artifact. It researches and reviews Small/Medium executable issues while
+preserving the original goal, then shows a complete publication packet:
 
 ```bash
-tpo skills install todo-manager --target codex --scope user
-tpo skills install todo-manager --target claude --scope project
+tpo skills install issue-planner --target codex --scope user
+tpo skills install issue-planner --target claude --scope project
 ```
 
-Codex installs to `.agents/skills/todo-manager`; Claude installs to
-`.claude/skills/todo-manager`, relative to the home directory for user scope or
+Codex installs to `.agents/skills/issue-planner`; Claude installs to
+`.claude/skills/issue-planner`, relative to the home directory for user scope or
 the Git top level for project scope. See the [CLI reference](reference-cli.md#skills).
 
 `Depends on` is not a body field. Record dependencies as native issue
 dependencies (below) after both issues exist.
+
+### Split goals and delivery evidence
+
+A split plan has an ordinary parent issue, self-contained implementation
+children, and exactly one terminal goal-validation child. The parent has no
+`tpo:todo`, `ready-for-agent`, executable branch, or Plan manifest. Native
+sub-issues express hierarchy; separate native dependency edges express order.
+The parent is never an executable blocker. An unsplit issue needs no parent.
+
+The parent maps original acceptance criteria to children and tests. The terminal
+validator depends on every required child and assesses the combined result,
+recording tested code SHA, commands, outcomes, and acceptance-criterion coverage
+in its delivery PR. Report-only commits must be distinguished from tested code.
+Closed, canceled, reverted, or PR-open children do not prove goal completion.
+The parent remains open until verified deliveries and final validation reach
+the intended target branch and an authorized coordinator explicitly closes it.
+PRs reference the parent without closing keywords; closing references target
+only the corresponding child.
+
+Choose and confirm delivery strategy before independent Codex and Claude issue
+review. Incremental delivery is the default: each child must safely merge to
+the default branch. Before dependent work, verify prerequisite PR merges into
+the intended base, reachable merge commits, and continued promised behavior.
+Reverted, closed-but-unmerged, or unverifiable prerequisites stop implementation.
+Recheck relevant tests and reviews after head/base changes and verify behavior
+after conflict resolution; repository protections and human merge authorization
+still apply.
+
+When necessary, use an integration branch with literal child PR bases and a
+named final-delivery owner. TPO closeout currently requires the default PR base,
+so **all executable children in integration groups remain held and manual-only**.
+Manual execution does not make them eligible for unsupported TPO scheduling.
+The final validator works on its own branch into the group branch and prepares
+the group-to-default integration PR. Merges and parent closure need separate
+authorization. No aggregate-completion service or PR-base extension is provided.
+
+### Publication, recovery, and migration
+
+The skill obtains one exact `create` approval covering all previews, native
+relationships, dependencies, reviews, size exceptions, strategy, and release
+intent. It writes an immutable private batch record before any remote creation,
+including for an unsplit issue. Every child starts held. Incremental release
+requires fresh verification of the parent identity/body/non-executable state,
+every child's rendered body and hold, and all native relationships/dependencies.
+Integration groups release none. Release is not atomic: an interrupted or
+ambiguous release requires manual reconciliation.
+
+Batch records are evidence, never approval inferred from file existence. Keep
+records and requests after partial failure; do not delete or recreate issues.
+Recover parents through paginated issue enumeration and exact transaction
+markers, not search-index results. Uncertain creation, duplicate markers, or a
+resumed batch without a verifiable parent requires manual reconciliation.
+Post-publication rescoping reconciles the existing parent; it never creates a
+second parent for the same goal.
+
+Newly installed or explicitly reinstalled `todo-manager` is a deprecation
+notice directing users to `issue-planner`. Existing installed copies retain
+their old behavior until explicitly upgraded. Legacy install/uninstall/recover
+namespaces, receipts, journals, and request-writer resources remain supported.
+Installing `issue-planner` does not modify an existing `todo-manager` copy.
+For rollback, retain batch records, requests, and held resources for manual
+reconciliation; use installer recovery for interrupted installation. Reverting
+the package does not undo published issues or authorize releasing held work.
 
 ## Embedded Plan authority and legacy compatibility
 

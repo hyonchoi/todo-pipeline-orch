@@ -46,7 +46,7 @@ def _git_toplevel() -> Path:
 
 
 def _locations(name: str, target: str, scope: str) -> dict[str, Path]:
-    if name != "todo-manager" or target not in _TARGET_DIRS or scope not in {
+    if name not in {"issue-planner", "todo-manager"} or target not in _TARGET_DIRS or scope not in {
         "user",
         "project",
     }:

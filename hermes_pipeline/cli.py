@@ -865,14 +865,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     skills_install = skills_subparsers.add_parser("install")
-    skills_install.add_argument("skill", choices=["todo-manager"])
+    skills_install.add_argument("skill", choices=["issue-planner", "todo-manager"])
     skills_install.add_argument("--target", choices=["codex", "claude"], required=True)
     skills_install.add_argument("--scope", choices=["user", "project"], default="user")
     skills_install.add_argument("--reinstall", action="store_true")
     skills_install.set_defaults(func=_cmd_skills_install)
 
     skills_uninstall = skills_subparsers.add_parser("uninstall")
-    skills_uninstall.add_argument("skill", choices=["todo-manager"])
+    skills_uninstall.add_argument("skill", choices=["issue-planner", "todo-manager"])
     skills_uninstall.add_argument("--target", choices=["codex", "claude"], required=True)
     skills_uninstall.add_argument("--scope", choices=["user", "project"], default="user")
     skills_uninstall.add_argument("--yes", action="store_true")
@@ -880,7 +880,7 @@ def build_parser() -> argparse.ArgumentParser:
     skills_uninstall.set_defaults(func=_cmd_skills_uninstall)
 
     skills_recover = skills_subparsers.add_parser("recover")
-    skills_recover.add_argument("skill", choices=["todo-manager"])
+    skills_recover.add_argument("skill", choices=["issue-planner", "todo-manager"])
     skills_recover.add_argument("--target", choices=["codex", "claude"], required=True)
     skills_recover.add_argument("--scope", choices=["user", "project"], default="user")
     recovery_mode = skills_recover.add_mutually_exclusive_group(required=True)

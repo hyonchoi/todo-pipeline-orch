@@ -10,6 +10,85 @@ import pytest
 from hermes_pipeline.cli import build_parser
 
 
+@pytest.mark.parametrize("skill", ["issue-planner", "todo-manager"])
+@pytest.mark.parametrize("command", ["install", "uninstall", "recover"])
+def test_parser_accepts_canonical_and_legacy_skill_names(skill, command):
+    args = ["skills", command, skill, "--target", "claude"]
+    if command == "recover":
+        args.append("--finish")
+    assert build_parser().parse_args(args).skill == skill
+
+
+@pytest.mark.parametrize("target", ["codex", "claude"])
+def test_canonical_install_preserves_legacy_until_explicit_reinstall(tmp_path, monkeypatch, target):
+    from hermes_pipeline import skill_installer
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    legacy, _lock, journal, receipt = _paths(home, target)
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("# installed legacy workflow\n")
+    receipt.write_text('{"legacy": true}\n')
+    old_receipt = receipt.read_bytes()
+
+    assert skill_installer.install("issue-planner", target=target, scope="user") == 0
+    canonical = legacy.parent / "issue-planner"
+    assert "name: issue-planner" in (canonical / "SKILL.md").read_text()
+    assert (canonical / "scripts/write_request.py").is_file()
+    assert (legacy / "SKILL.md").read_text() == "# installed legacy workflow\n"
+    assert receipt.read_bytes() == old_receipt
+    assert not journal.exists()
+    assert skill_installer.install("todo-manager", target=target, scope="user") == 1
+    assert (legacy / "SKILL.md").read_text() == "# installed legacy workflow\n"
+
+    assert skill_installer.install("todo-manager", target=target, scope="user", reinstall=True) == 0
+    notice = (legacy / "SKILL.md").read_text()
+    assert "deprecated" in notice.lower()
+    assert "issue-planner" in notice
+    assert (legacy / "scripts/write_request.py").is_file()
+    assert skill_installer.uninstall("issue-planner", target=target, scope="user", yes=True) == 0
+    assert not canonical.exists()
+    assert (legacy / "SKILL.md").read_text() == notice
+
+
+@pytest.mark.parametrize("target", ["codex", "claude"])
+@pytest.mark.parametrize("action", ["finish", "rollback"])
+def test_canonical_install_does_not_consume_interrupted_legacy_transaction(
+    tmp_path, monkeypatch, target, action
+):
+    from hermes_pipeline import skill_installer
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    old_source = _source(tmp_path)
+    real_source = skill_installer._skill_source
+    monkeypatch.setattr(
+        skill_installer, "_skill_source",
+        lambda name: old_source if name == "todo-manager" else real_source(name),
+    )
+    legacy, _lock, journal, receipt = _paths(home, target)
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text("# previous install\n")
+
+    def crash(point):
+        if point == "activate:done":
+            raise skill_installer.InjectedCrash(point)
+
+    monkeypatch.setattr(skill_installer, "_checkpoint", crash)
+    with pytest.raises(skill_installer.InjectedCrash):
+        skill_installer.install("todo-manager", target=target, scope="user", reinstall=True)
+    saved_journal = journal.read_bytes()
+    monkeypatch.setattr(skill_installer, "_checkpoint", lambda point: None)
+    monkeypatch.setattr(skill_installer, "_skill_source", real_source)
+    assert skill_installer.install("issue-planner", target=target, scope="user") == 0
+    assert journal.read_bytes() == saved_journal
+    assert skill_installer.recover("todo-manager", target=target, scope="user", **{action: True}) == 0
+    assert not journal.exists()
+    expected = "# bundled\n" if action == "finish" else "# previous install\n"
+    assert (legacy / "SKILL.md").read_text() == expected
+    assert (legacy.parent / "issue-planner/SKILL.md").is_file()
+
+
 def _source(tmp_path: Path) -> Path:
     source = tmp_path / "bundle" / "todo-manager"
     source.mkdir(parents=True)
@@ -17,13 +96,15 @@ def _source(tmp_path: Path) -> Path:
     return source
 
 
-def _paths(home: Path, target: str = "codex") -> tuple[Path, Path, Path, Path]:
+def _paths(
+    home: Path, target: str = "codex", skill: str = "todo-manager"
+) -> tuple[Path, Path, Path, Path]:
     parent = home / (".agents/skills" if target == "codex" else ".claude/skills")
     return (
-        parent / "todo-manager",
-        parent / ".todo-manager.tpo-lock",
-        parent / ".todo-manager.tpo-journal.json",
-        parent / ".todo-manager.tpo-receipt.json",
+        parent / skill,
+        parent / f".{skill}.tpo-lock",
+        parent / f".{skill}.tpo-journal.json",
+        parent / f".{skill}.tpo-receipt.json",
     )
 
 
@@ -102,14 +183,16 @@ def test_project_scope_uses_git_toplevel(tmp_path, monkeypatch):
         "stage:done",
     ],
 )
+@pytest.mark.parametrize("skill", ["issue-planner", "todo-manager"])
+@pytest.mark.parametrize("target", ["codex", "claude"])
 def test_reinstall_recovers_from_each_durable_kill_point(
-    tmp_path, monkeypatch, kill_at
+    tmp_path, monkeypatch, kill_at, skill, target
 ):
     from hermes_pipeline import skill_installer
 
     source = _source(tmp_path)
     home = tmp_path / "home"
-    dest, _lock, journal, receipt = _paths(home)
+    dest, _lock, journal, receipt = _paths(home, target, skill)
     dest.mkdir(parents=True)
     (dest / "SKILL.md").write_text("old\n")
     monkeypatch.setattr(Path, "home", lambda: home)
@@ -122,12 +205,12 @@ def test_reinstall_recovers_from_each_durable_kill_point(
     monkeypatch.setattr(skill_installer, "_checkpoint", kill)
     with pytest.raises(skill_installer.InjectedCrash):
         skill_installer.install(
-            "todo-manager", target="codex", scope="user", reinstall=True
+            skill, target=target, scope="user", reinstall=True
         )
     assert journal.exists()
     monkeypatch.setattr(skill_installer, "_checkpoint", lambda _point: None)
     assert skill_installer.recover(
-        "todo-manager", target="codex", scope="user", finish=True
+        skill, target=target, scope="user", finish=True
     ) == 0
     assert (dest / "SKILL.md").read_text() == "# bundled\n"
     assert receipt.exists()

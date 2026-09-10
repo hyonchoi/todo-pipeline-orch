@@ -169,8 +169,8 @@ cd ~/my-projects/my-project
 tpo init my-project
 tpo todos labels sync my-project
 # copy .github/ISSUE_TEMPLATE/tpo-todo.yml from this repository into the project and commit it
-tpo skills install todo-manager --target codex --scope user
-# use the todo-manager skill to preview and approve `tpo todos create`
+tpo skills install issue-planner --target codex --scope user
+# use issue-planner with a finalized session plan to review and approve issues
 tpo doctor my-project
 ```
 
@@ -200,7 +200,7 @@ tpo tick my-project
 | `todos create` | Preview, create, or resume a validated TODO with an embedded Plan. |
 | `todos labels sync` | Create the missing pipeline label vocabulary in the project's repository. |
 | `todos audit` | Check TODO issue bodies against the backlog contract and normalize mirror labels. |
-| `skills install/uninstall/recover` | Transactionally manage the bundled `todo-manager` skill. |
+| `skills install/uninstall/recover` | Transactionally manage `issue-planner` and the deprecated `todo-manager` namespace. |
 | `plan validate` | Validate a TODO's Plan attachment and optional `tpo-plan` manifest. |
 | `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
 | `config` | Read and write global `tpo` configuration. |

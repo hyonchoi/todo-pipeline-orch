@@ -13,17 +13,9 @@ from hermes_pipeline.config import Config
 from tests.test_todos_create import request
 
 SKILL = files("hermes_pipeline").joinpath(
-    "data", "skills", "todo-manager", "SKILL.md"
+    "data", "skills", "issue-planner", "SKILL.md"
 )
 REQUEST_WRITER = SKILL.parent.joinpath("scripts", "write_request.py")
-
-
-def skill_text() -> str:
-    return SKILL.read_text(encoding="utf-8")
-
-
-def normalized_skill_text() -> str:
-    return " ".join(skill_text().split())
 
 
 def request_path(project: Path) -> Path:
@@ -54,65 +46,6 @@ def run_writer(project: Path, payload: dict) -> subprocess.CompletedProcess[str]
         capture_output=True,
         check=False,
     )
-
-
-def test_skill_selects_only_the_latest_finalized_plan_and_strips_outer_tags():
-    text = normalized_skill_text()
-    ordered = [
-        "latest complete `<proposed_plan>...</proposed_plan>` block",
-        "Ignore drafts, summaries, quoted examples, and incomplete blocks",
-        "Strip only that block's opening and closing tags",
-        "Preserve all inner Markdown",
-    ]
-    positions = [text.index(phrase) for phrase in ordered]
-    assert positions == sorted(positions)
-
-
-def test_skill_derives_the_strict_task_schema_without_inventing_plan_content():
-    text = normalized_skill_text()
-    for key in (
-        "`id`",
-        "`title`",
-        "`instructions`",
-        "`acceptance_criteria`",
-        "`verification`",
-        "`commit_message`",
-    ):
-        assert key in text
-    assert "one task per explicit implementation task" in text
-    assert "Do not invent task boundaries, acceptance criteria, verification commands, or commit messages" in text
-    assert "ask the user to finalize the Plan" in text
-
-
-def test_skill_researches_all_remaining_issue_fields_before_preview():
-    text = normalized_skill_text()
-    assert "Research the repository and current issue context" in text
-    assert "every field required by `tpo todos create`" in text
-    assert "Do not add `Plan`, `Legacy ID`, labels, an issue number, or a TODO ID" in text
-    assert "Resolve uncertainty with the user before preview" in text
-
-
-def test_skill_requires_full_preview_exact_approval_and_durable_recovery():
-    text = normalized_skill_text()
-    preview = text.index("Show the complete output")
-    approval = text.index("exact reply `create`")
-    mutation = text.index(
-        "tpo todos create PROJECT --request-file REQUEST --approved-repo OWNER/REPO --yes"
-    )
-    assert preview < approval < mutation
-    assert "Never invoke `--yes` before that approval" in text
-    assert "Keep this file until the CLI reports completion" in text
-    assert "first rerun the same command without `--issue`" in text
-    assert "only when the partial issue number and its matching transaction marker were independently confirmed" in text
-    assert "reuse the identical literal `PROJECT`, request path, and canonical repository binding" in text
-
-
-def test_skill_rejects_drafts_wrappers_and_secrets():
-    text = normalized_skill_text()
-    assert "Stop if no finalized block exists" in text
-    assert "Do not submit `<proposed_plan>` tags" in text
-    assert "Never place credentials, tokens, authorization data, provider responses, or secrets" in text
-    assert "redact the value and stop for user direction" in text
 
 
 def test_request_writer_creates_private_input_exclusively_in_fixed_namespace(tmp_path):
