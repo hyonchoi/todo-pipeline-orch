@@ -123,6 +123,7 @@ def test_implementation_head_revalidates_the_card_report_against_the_base(
 
     registration = SimpleNamespace(
         todo_id="TODO-42",
+        repository=tmp_path,
         worktree=tmp_path,
         base_sha="a" * 40,
         manifest=SimpleNamespace(

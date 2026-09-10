@@ -595,7 +595,7 @@ def register_pinned_run(
     branch = _validate_branch(project_dir, selected_issue, state_dir=state_dir)
     worktree = (repository / ".worktrees" / _slug(selected_issue)).resolve()
     registration = RunRegistration(
-        schema_version=4 if effective_mode == "delegated" else REGISTRATION_SCHEMA_VERSION,
+        schema_version=REGISTRATION_SCHEMA_VERSION,
         tick_id=tick_id,
         todo_id=selected_issue.todo_id,
         repository=repository,
@@ -633,6 +633,8 @@ def register_pinned_run(
                   and existing.get("agent_policy_mode") == "delegated"
                   and existing.get("profile") == "native-sdd"):
                 registration = replace(registration, schema_version=4, agent_policy_mode="delegated")
+            elif existing.get("schema_version") == 5 and existing.get("agent_policy_mode") in ("inherit", "delegated"):
+                registration = replace(registration, schema_version=5, agent_policy_mode=existing["agent_policy_mode"])
             payload = _json_payload(registration)
             if existing != payload:
                 raise RunRegistrationError("registration_mismatch")

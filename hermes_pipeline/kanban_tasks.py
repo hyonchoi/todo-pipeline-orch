@@ -16,6 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .authority_result import require_authorized_result
 from .config import PromptClient
 from .outcomes import (
     OUTCOME_ALL_COMPLETE,
@@ -1444,12 +1445,16 @@ def reconcile_plan_task_results(
             step_key=IMPLEMENTATION_KEY,
             acceptance_criteria=manifest_acceptance_criteria(registration.manifest),
         )
-        verify(
-            registration.worktree,
-            result.git,
-            expected_parent_sha=registration.base_sha,
-            expected_commits=len(registration.manifest.tasks),
-        )
+        with require_authorized_result(
+            registration=registration, state_dir=state_dir, tick_id=tick_id,
+            step_key=IMPLEMENTATION_KEY, result=result,
+        ):
+            verify(
+                registration.worktree,
+                result.git,
+                expected_parent_sha=registration.base_sha,
+                expected_commits=len(registration.manifest.tasks),
+            )
     except ResultContractError as exc:
         # No card is blocked here: the implementation card must never open a
         # human-input boundary mid-run. Returning False makes the tick report no

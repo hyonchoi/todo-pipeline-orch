@@ -772,7 +772,7 @@ def test_registration_rejects_unknown_keys_and_mutable_plan_drift(tmp_path):
 
 def _registered_repo(
     tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str | None = "plan.md",
-    embedded: bool = False, plan: str = PLAN,
+    embedded: bool = False, plan: str = PLAN, legacy: bool = False,
     step_keys: tuple[str, ...] = (IMPLEMENTATION_KEY,),
 ):
     from hermes_pipeline.plan_manifest import render_embedded_plan
@@ -805,6 +805,11 @@ def _registered_repo(
         review_assignee=None,
         step_keys=step_keys,
     )
+    if legacy:
+        # Explicitly model a pre-supervisor Hermes-only registration.
+        _rewrite_registration(state, lambda payload: (
+            payload.update(schema_version=3), payload.pop("agent_policy_mode")
+        ))
     return repo, registration.worktree, state, parent
 
 
@@ -1146,7 +1151,7 @@ def test_reconcile_completed_worker_validates_without_a_controller_gate(
     """A validated worker needs no gate card: nothing is completed or blocked."""
     from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
 
-    repo, worktree, state, parent = _registered_repo(tmp_path)
+    repo, worktree, state, parent = _registered_repo(tmp_path, legacy=True)
     head = _commit(worktree, "change.txt")
     mocker.patch(
         "hermes_pipeline.kanban_tasks.get_todo_kanban_tasks",
@@ -1186,7 +1191,7 @@ def test_reconcile_requires_exactly_one_commit_per_plan_task(tmp_path, mocker):
     """
     from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
 
-    repo, worktree, state, base = _registered_repo(tmp_path, plan=PLAN_TWO_TASKS)
+    repo, worktree, state, base = _registered_repo(tmp_path, legacy=True, plan=PLAN_TWO_TASKS)
     _commit(worktree, "one.txt")
     second = _commit(worktree, "two.txt")
     board = {
@@ -1246,7 +1251,7 @@ def test_reconcile_falls_back_to_topology_once_review_builds_on_the_chain(
     """Review-fix commits advance HEAD; the chain must stay reconcilable."""
     from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
 
-    repo, worktree, state, base = _registered_repo(tmp_path)
+    repo, worktree, state, base = _registered_repo(tmp_path, legacy=True)
     head = _commit(worktree, "change.txt")
     mocker.patch(
         "hermes_pipeline.kanban_tasks._show_task_payload",
@@ -1317,7 +1322,7 @@ def test_reconcile_rejects_a_discarded_commit_even_when_a_decoy_review_card_exis
     """
     from hermes_pipeline.kanban_tasks import KanbanTaskInfo, reconcile_plan_task_results
 
-    repo, worktree, state, parent = _registered_repo(tmp_path)
+    repo, worktree, state, parent = _registered_repo(tmp_path, legacy=True)
     head = _commit(worktree, "change.txt")
     _git(worktree, "reset", "--hard", "-q", parent)
     mocker.patch(
@@ -1355,7 +1360,7 @@ def test_reconcile_records_a_durable_blocked_marker_and_clears_it_on_success(
         reconcile_plan_task_results,
     )
 
-    repo, worktree, state, parent = _registered_repo(tmp_path)
+    repo, worktree, state, parent = _registered_repo(tmp_path, legacy=True)
     head = _commit(worktree, "change.txt")
     board = {
         IMPLEMENTATION_KEY: KanbanTaskInfo(
@@ -2576,6 +2581,7 @@ def test_legacy_registration_inherits_and_rejects_mode_field(tmp_path, schema_ve
 
     def legacy(payload):
         payload["schema_version"] = schema_version
+        payload.pop("agent_policy_mode")
         if schema_version == 2:
             del payload["plan_source_kind"]
             del payload["plan_artifact"]

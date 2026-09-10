@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import time
+from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
 from pathlib import Path
 
@@ -187,7 +189,11 @@ def worker_instructions(identity: str, root: str) -> str:
         "Use only this installed interface. A missing supervisor blocks dispatch. "
         "Automatic worker retry reconnects to the same generation; never authorize a new attempt. "
         "The supervisor owns monitoring, deadline, cleanup and result validation. "
-        "While running_detached, poll the same command. For terminal outcomes, refresh this card "
+        "While running_detached or waiting_for_admission, poll the same command without changing "
+        "card state. Never use kanban_block for waiting_for_admission. "
+        "waiting_for_admission is not a terminal failure: the command owns bounded "
+        "admission retries without allocating an attempt or refreshing its execution budget. "
+        "For terminal outcomes, refresh this card "
         "through supported Kanban worker tools and check its registered execution and generation. "
         "Do not overwrite a completed card, a newer attempt, or an unrelated/manual block. "
         "Require HERMES_KANBAN_TASK to identify this card and a valid HERMES_KANBAN_RUN_ID "
@@ -268,6 +274,10 @@ def register_execution(*, project_dir: Path, state_dir: Path, root: Path, tick_i
             + ". These are submissions only; skip tasks only when recovery context lists them as accepted. "
             "The supervisor runs pinned argv verification commands and independent review before acceptance.\n"
         )
+    if registration is not None:
+        from .authority_result import mark_supervised_run
+
+        mark_supervised_run(state_dir, tick_id)
     store.register(
         identity, registration_id=tick_id, plan_identity=registration.plan_hash if registration else hashlib.sha256(full_prompt.encode()).hexdigest(),
         phase=phase, prompt=full_prompt.encode("utf-8"), client={"name": client, "tools": [t.strip() for t in tools.split(",") if t.strip()]},
@@ -423,13 +433,40 @@ def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) ->
     return report
 
 
-def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
-    with store.worktree_locked(identity), store.locked(identity):
+
+class _AdmissionBusy(ExecutionError):
+    """Verified pre-admission worktree contention, rather than unknown ownership."""
+
+
+@contextmanager
+def _admission_worktree_lock(store: ExecutionStore, identity: str):
+    with ExitStack() as stack:
         try:
-            return _supervise_locked(store, identity, recovery_event=recovery_event)
-        except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
-            _remember_launch_refusal(store, identity, error)
+            stack.enter_context(store.worktree_locked(identity))
+        except LockUnconfirmed as exc:
+            cause = exc.__cause__
+            if isinstance(cause, OSError) and cause.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
+                raise _AdmissionBusy from exc
             raise
+        # Do not translate contention on the execution lock or inside preflight.
+        yield
+
+
+def _waiting_for_admission(store: ExecutionStore, identity: str, *, reason: str) -> dict:
+    record = store.load(identity)
+    return {"version": 1, "execution_id": identity, "generation": len(record["attempts"]),
+            "status": "waiting_for_admission", "reason": reason, "completion_allowed": False}
+
+def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
+    try:
+        with _admission_worktree_lock(store, identity), store.locked(identity):
+            try:
+                return _supervise_locked(store, identity, recovery_event=recovery_event)
+            except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
+                _remember_launch_refusal(store, identity, error)
+                raise
+    except _AdmissionBusy:
+        return _waiting_for_admission(store, identity, reason="worktree_busy")
 
 
 def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: str | None) -> dict:
@@ -522,19 +559,22 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
     record = store.load(identity)
     if record["attempts"] and recovery_event is None:
         return status(store, identity)
-    with store.worktree_locked(identity), store.locked(identity):
-        record = store.load(identity)
-        if record["attempts"] and recovery_event is None:
-            return status(store, identity)
-        try:
-            if recovery_event is not None:
-                from .agent_recovery import validate_recovery
+    try:
+        with _admission_worktree_lock(store, identity), store.locked(identity):
+            record = store.load(identity)
+            if record["attempts"] and recovery_event is None:
+                return status(store, identity)
+            try:
+                if recovery_event is not None:
+                    from .agent_recovery import validate_recovery
 
-                validate_recovery(store, identity, recovery_event)
-            _prepare_launch(store, identity, record)
-        except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
-            _remember_launch_refusal(store, identity, error)
-            raise
+                    validate_recovery(store, identity, recovery_event)
+                _prepare_launch(store, identity, record)
+            except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
+                _remember_launch_refusal(store, identity, error)
+                raise
+    except _AdmissionBusy:
+        return _waiting_for_admission(store, identity, reason="worktree_busy")
     # Each daemon races only for kernel locks; only the winner admits a client.
     try:
         command = [installed_entrypoint(), "_supervise", "--root", str(store.root), "--execution", identity]
@@ -558,8 +598,7 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
     ):
         # An explicitly requested recovery may still be waiting for admission.
         # Retain the existing generation's durable outcome while polling.
-        return {"version": 1, "execution_id": identity, "generation": report["generation"],
-                "status": "running_detached", "completion_allowed": False}
+        return _waiting_for_admission(store, identity, reason="launch_pending")
     return report
 
 
@@ -664,13 +703,22 @@ def main(argv: list[str] | None = None) -> int:
             report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event)
         if args.operation == "run":
             stop = time.monotonic() + 5
-            while report["status"] in {"running_detached", "registered", "lock_unconfirmed"} and time.monotonic() < stop:
+            while report["status"] in {"running_detached", "registered", "lock_unconfirmed", "waiting_for_admission"} and time.monotonic() < stop:
                 time.sleep(0.1)
+                if report["status"] == "waiting_for_admission" and report.get("reason") == "worktree_busy":
+                    # Only verified worktree contention is retried, without
+                    # admitting a generation or starting its execution budget.
+                    report = attach(store, args.execution, recovery_event=args.recovery_event)
+                    continue
                 observed = status(store, args.execution)
                 if (expected_generation is not None and observed["generation"] < expected_generation
-                        and report["status"] == "running_detached"):
+                        and report["status"] in {"running_detached", "waiting_for_admission"}):
                     # The previous terminal outcome remains authoritative for
                     # that generation, but cannot settle this requested retry.
+                    continue
+                if observed["status"] == "registered" and report["status"] == "waiting_for_admission":
+                    # A detached daemon has not admitted yet. Do not turn that
+                    # launch window into a terminal dispatcher refusal.
                     continue
                 report = observed
     except (ExecutionError, ProcessLaunchError, ResultContractError, OSError, ValueError) as error:
@@ -681,4 +729,4 @@ def main(argv: list[str] | None = None) -> int:
         except (ExecutionError, OSError, ValueError):
             pass
     print(json.dumps(report, sort_keys=True))
-    return 0 if report["completion_allowed"] or report["status"] == "running_detached" else 1
+    return 0 if report["completion_allowed"] or report["status"] in {"running_detached", "waiting_for_admission"} else 1

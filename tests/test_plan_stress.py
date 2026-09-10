@@ -10,7 +10,10 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from pathlib import Path
+
+import pytest
 
 TASK_COUNT = 50
 TICK_ID = "01STRESS"
@@ -42,6 +45,9 @@ def _manifest() -> str:
 def test_fifty_task_manifest_is_one_card_one_report_and_fifty_commits(
     tmp_path, mocker
 ):
+    from hermes_pipeline import _agent_supervisor as supervisor
+    from hermes_pipeline.agent_checkpoint import ProgressJournal
+    from hermes_pipeline.agent_execution import ExecutionStore
     from hermes_pipeline.kanban_tasks import (
         KanbanTaskInfo,
         prepare_todo_phases,
@@ -51,6 +57,7 @@ def test_fifty_task_manifest_is_one_card_one_report_and_fifty_commits(
     from hermes_pipeline.plan_manifest import legacy_plan_source
     from hermes_pipeline.result_contract import (
         MAX_METADATA_BYTES,
+        ResultContractError,
         manifest_acceptance_criteria,
         render_result_template,
     )
@@ -122,6 +129,16 @@ def test_fifty_task_manifest_is_one_card_one_report_and_fifty_commits(
     )
     assert len(template.encode()) < MAX_METADATA_BYTES
 
+    identity = supervisor.register_execution(
+        project_dir=repo, state_dir=state, root=state / "agent-executions",
+        tick_id=TICK_ID, phase=IMPLEMENTATION_KEY, prompt=prepared[0].rendered_prompt,
+        client="claude", tools="Read,Write,Edit,Bash", worktree=registration.worktree,
+        timeout=120, todo_id=TODO_ID,
+    )
+    executions = ExecutionStore(state / "agent-executions")
+    _, admitted = executions.admit(identity)
+    assert admitted
+    progress = ProgressJournal(executions, identity)
     base = _git(registration.worktree, "rev-parse", "HEAD")
     changed = []
     for number in range(1, TASK_COUNT + 1):
@@ -130,6 +147,26 @@ def test_fifty_task_manifest_is_one_card_one_report_and_fifty_commits(
         changed.append(path.name)
         _git(registration.worktree, "add", path.name)
         _git(registration.worktree, "commit", "-qm", f"change {number}")
+        commit = _git(registration.worktree, "rev-parse", "HEAD")
+        # Provider-free collector/reviewer fixture: observe each real committed
+        # change, then submit explicitly simulated reviewer acceptance.
+        argv = ["git", "show", f"{commit}:{path.name}"]
+        checked = subprocess.run(argv, cwd=registration.worktree, text=True,
+                                 capture_output=True, check=True, timeout=10)
+        assert checked.stdout == str(number)
+        task_id = f"task-{number}"
+        progress.record_receipt(1, task_id, commit, kind="verification", evidence={
+            "checks": [{"argv": argv, "exit_code": checked.returncode}]})
+        progress.record_receipt(1, task_id, commit, kind="review", evidence={
+            "reviewer": "stress-review-stub", "receipt_id": f"review-{number}",
+            "outcome": "accepted"})
+        checkpoint = progress.staging_directory(1) / f"checkpoint-{number}.json"
+        checkpoint.write_text(json.dumps({
+            "version": 1, "execution_id": identity, "generation": 1,
+            "plan_identity": registration.plan_hash, "task_id": task_id,
+            "commit": commit,
+        }))
+        progress.promote(1, checkpoint.name)
     head = _git(registration.worktree, "rev-parse", "HEAD")
 
     payload = {
@@ -159,6 +196,14 @@ def test_fifty_task_manifest_is_one_card_one_report_and_fifty_commits(
         ]
     }
     assert len(json.dumps(payload["runs"][0]["metadata"])) < MAX_METADATA_BYTES
+    stage = supervisor.staging_directory(executions, identity, 1)
+    stage.mkdir(parents=True, exist_ok=True)
+    result_path = stage / "result.json"
+    result_path.write_text(json.dumps(payload["runs"][0]["metadata"]["tpo_result"]))
+    supervisor.validated_result(executions, identity, 1, promote=True,
+                                deadline_monotonic=time.monotonic() + 30)
+    executions.update_attempt(identity, 1, status="exited", exit_code=0,
+                              cleanup="confirmed")
 
     cards = {
         IMPLEMENTATION_KEY: KanbanTaskInfo(
@@ -198,8 +243,12 @@ def test_fifty_task_manifest_is_one_card_one_report_and_fifty_commits(
         task_commit_sha=_git(registration.worktree, "rev-parse", "HEAD~1"),
         changed_files=changed[:-1],
     )
+    result_path.write_text(json.dumps(payload["runs"][0]["metadata"]["tpo_result"]))
+    with pytest.raises(ResultContractError, match="commit_count_mismatch"):
+        supervisor.validated_result(executions, identity, 1, promote=True,
+                                    deadline_monotonic=time.monotonic() + 30)
     assert not reconcile_plan_task_results(
         project_dir=repo, state_dir=state, tenant="stress", tick_id=TICK_ID
     )
     marker = state / "runs" / TICK_ID / "result-validation-blocked"
-    assert json.loads(marker.read_text())["code"] == "commit_count_mismatch"
+    assert json.loads(marker.read_text())["code"] == "supervisor_result_unconfirmed"

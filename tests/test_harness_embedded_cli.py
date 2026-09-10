@@ -5,6 +5,8 @@ import hashlib
 import json
 import runpy
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -191,7 +193,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert registration.plan_hash == hashlib.sha256(GOLDEN.encode()).hexdigest()
     assert Path(registration.plan_reference.value).read_text() == GOLDEN
     assert registration.base_sha == base
-    assert json.loads(pinned)["schema_version"] == (4 if policy_mode == "delegated" else 3)
+    assert json.loads(pinned)["schema_version"] == 5
     assert registration.agent_policy_mode == policy_mode
     current_mode[0] = "inherit" if policy_mode == "delegated" else "delegated"
     assert json.loads(pinned)["plan_path"] is None
@@ -220,6 +222,12 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert _git(project, "ls-files") == ".gitignore\nREADME.md"
 
     def worker_result(card, parent, head, *, changed=(), acceptance=(), delivery=None):
+        from hermes_pipeline import _agent_supervisor as supervisor
+        from hermes_pipeline.agent_checkpoint import ProgressJournal
+
+        identity = json.loads(card["body"].splitlines()[0])["execution_id"]
+        record, admitted = executions.admit(identity)
+        assert admitted
         value = {
             "schema_version": 1, "tick_id": tick, "todo_id": "TODO-42",
             "step_key": json.loads(card["body"].splitlines()[0])["phase_key"],
@@ -230,6 +238,45 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         }
         if delivery is not None:
             value["delivery"] = delivery
+
+        # Simulate the client and reviewer boundary, retaining real supervisor
+        # receipt, checkpoint, and result validation against the committed Git tree.
+        if record["registration"]["manifest"] is not None:
+            check = tmp_path / "verify_normalize.py"
+            check.write_text(
+                "import runpy\n"
+                "normalize = runpy.run_path('mock_transform.py')['normalize_names']\n"
+                "assert normalize([' Alice ', '', 'BOB']) == ['alice', 'bob']\n"
+                "assert normalize([' b ', '\\t', 'A']) == ['b', 'a']\n"
+                "assert normalize([]) == []\n"
+            )
+            argv = [sys.executable, str(check)]
+            checked = real_run(argv, cwd=registration.worktree, check=True,
+                               capture_output=True, text=True, timeout=10)
+            assert _git(registration.worktree, "status", "--porcelain") == ""
+            progress = ProgressJournal(executions, identity)
+            task_id = registration.manifest.tasks[0].id
+            progress.record_receipt(1, task_id, head, kind="verification", evidence={
+                "checks": [{"argv": argv, "exit_code": checked.returncode}]})
+            progress.record_receipt(1, task_id, head, kind="review", evidence={
+                "reviewer": "fixture-review-stub", "receipt_id": "fixture-review-1",
+                "outcome": "accepted"})
+            checkpoint = progress.staging_directory(1) / "checkpoint.json"
+            checkpoint.write_text(json.dumps({
+                "version": 1, "execution_id": identity, "generation": 1,
+                "plan_identity": registration.plan_hash, "task_id": task_id,
+                "commit": head,
+            }))
+            progress.promote(1, checkpoint.name)
+        stage = supervisor.staging_directory(executions, identity, 1)
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "result.json").write_text(json.dumps(value))
+        assert supervisor.validated_result(
+            executions, identity, 1, promote=True,
+            deadline_monotonic=time.monotonic() + 10,
+        ) == value
+        executions.update_attempt(identity, 1, status="exited", exit_code=0,
+                                  cleanup="confirmed")
         card["status"] = "done"
         card["runs"] = [{"status": "succeeded", "metadata": {"tpo_result": value}}]
 

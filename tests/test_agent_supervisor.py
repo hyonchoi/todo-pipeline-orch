@@ -488,7 +488,7 @@ def test_explicit_recovery_waits_for_daemon_without_rewriting_terminal_attempt(e
     result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1",
                               "--recovery-event", event])
     report = json.loads(capsys.readouterr().out)
-    assert report["status"] == ("timed_out" if daemon_admits else "running_detached")
+    assert report["status"] == ("timed_out" if daemon_admits else "waiting_for_admission")
     assert report["generation"] == (2 if daemon_admits else 1)
     assert result == (1 if daemon_admits else 0)
     assert report["completion_allowed"] is False
@@ -861,3 +861,81 @@ def test_supervisor_survives_worker_and_preserves_prompt_bytes(tmp_path, monkeyp
             worker.terminate()
             worker.wait(timeout=2)
         supervisor.recover(store, identity, cleanup_timeout=1)
+
+
+def test_worktree_admission_wait_retries_in_code_after_release(execution, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from hermes_pipeline.agent_execution import ExecutionStore, process_identity
+    store, _ = execution
+    owner = store.worktree_locked('execution-1')
+    owner.__enter__()
+    released = False
+    clock = [0.0]
+    def wait(interval):
+        nonlocal released
+        clock[0] += interval
+        if not released:
+            owner.__exit__(None, None, None)
+            released = True
+    monkeypatch.setattr(supervisor, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+    monkeypatch.setattr(supervisor, '_prepare_launch', lambda *a: ([], {}))
+    monkeypatch.setattr(supervisor, 'installed_entrypoint', lambda: '/fake/supervisor')
+    launches = []
+    def launch(*args, **kwargs):
+        launches.append(args)
+        another = ExecutionStore(store.root)
+        another.admit('execution-1')
+        another.update_attempt('execution-1', 1, status='running',
+                               supervisor=process_identity(os.getpid()), deadline_monotonic=123.0)
+    monkeypatch.setattr(supervisor.subprocess, 'Popen', launch)
+    try:
+        for _ in range(2):
+            assert supervisor.main(['run', '--root', str(store.root), '--execution', 'execution-1']) == 0
+            report = json.loads(capsys.readouterr().out)
+            assert report['status'] == 'running_detached'
+            assert report['generation'] == 1
+    finally:
+        if not released:
+            owner.__exit__(None, None, None)
+    assert len(launches) == 1
+    assert len(store.load('execution-1')['attempts']) == 1
+    assert store.load('execution-1')['attempts'][0]['deadline_monotonic'] == 123.0
+    assert clock[0] <= 10.3
+
+
+def test_unadmitted_daemon_window_stays_honestly_pending(execution, monkeypatch, capsys):
+    from types import SimpleNamespace
+    store, _ = execution
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+    monkeypatch.setattr(supervisor, '_prepare_launch', lambda *a: ([], {}))
+    monkeypatch.setattr(supervisor, 'installed_entrypoint', lambda: '/fake/supervisor')
+    monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: None)
+    assert supervisor.main(['run', '--root', str(store.root), '--execution', 'execution-1']) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report['status'] == 'waiting_for_admission'
+    assert report['reason'] == 'launch_pending'
+    assert report['generation'] == 0
+    assert not report['completion_allowed']
+    assert store.load('execution-1')['attempts'] == []
+    assert 5 <= clock[0] <= 5.1
+
+
+def test_unsupported_worktree_admission_lock_is_not_retryable(execution, monkeypatch, capsys):
+    import errno
+
+    from hermes_pipeline import agent_execution
+    store, _ = execution
+    def unsupported(*args):
+        raise OSError(errno.EOPNOTSUPP, 'unsupported locking')
+    monkeypatch.setattr(agent_execution.fcntl, 'flock', unsupported)
+    monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: pytest.fail('unsupported admission'))
+    monkeypatch.setattr(supervisor.time, 'sleep', lambda *a: pytest.fail('unsupported lock retried'))
+    assert supervisor.main(['run', '--root', str(store.root), '--execution', 'execution-1']) == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report['status'] == 'lock_unconfirmed'
+    assert not report['completion_allowed']
+    assert store.load('execution-1')['attempts'] == []

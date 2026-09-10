@@ -6,6 +6,11 @@ import logging
 import subprocess
 from pathlib import Path
 
+from .authority_result import (
+    RunAuthorityBusy,
+    locked_run_authority,
+    require_authorized_result,
+)
 from .kanban_tasks import (
     KANBAN_QUERY_TIMEOUT,
     PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS,
@@ -232,12 +237,16 @@ def _implementation_head(*, tasks: dict, registration, tick_id: str) -> str:
         todo_id=registration.todo_id, step_key=IMPLEMENTATION_KEY,
         acceptance_criteria=manifest_acceptance_criteria(registration.manifest),
     )
-    verify_worker_git_topology(
-        registration.worktree, result.git,
-        expected_parent_sha=registration.base_sha,
-        expected_commits=len(registration.manifest.tasks),
-    )
-    return result.git.resulting_head_sha
+    with require_authorized_result(
+        registration=registration, state_dir=registration.repository / ".hermes",
+        tick_id=tick_id, step_key=IMPLEMENTATION_KEY, result=result,
+    ):
+        verify_worker_git_topology(
+            registration.worktree, result.git,
+            expected_parent_sha=registration.base_sha,
+            expected_commits=len(registration.manifest.tasks),
+        )
+        return result.git.resulting_head_sha
 
 
 def _ensure_initial_review(*, project_dir: Path, tasks: dict, registration, tenant: str,
@@ -320,6 +329,19 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
     registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
     if getattr(registration, "manifest", object()) is None:
         return True
+    try:
+        with locked_run_authority(registration=registration, state_dir=state_dir, tick_id=tick_id):
+            return _reconcile_reviews_locked(project_dir=project_dir, state_dir=state_dir,
+                                              tenant=tenant, tick_id=tick_id, registration=registration)
+    except RunAuthorityBusy:
+        return True
+    except ResultContractError as exc:
+        log.error("tick %s: review reconciliation failed: %s", tick_id, exc.code)
+        return False
+
+
+def _reconcile_reviews_locked(*, project_dir: Path, state_dir: Path, tenant: str,
+                              tick_id: str, registration) -> bool:
     tasks = get_todo_kanban_tasks(tenant, tick_id)
     try:
         _ensure_initial_review(
@@ -348,22 +370,26 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
             todo_id=registration.todo_id, step_key=REVIEW_KEY,
             acceptance_criteria=(), allow_no_changes=True,
         )
-        # The profile's reviewer applies its own findings as one review-fix
-        # commit, so the reviewed head may legitimately have advanced by one.
-        # It may advance by no more than that, and it must still descend from
-        # the implementation chain this reconciler recomputed -- that is what
-        # keeps the accepted head an anchor rather than a worker's claim.
-        accepted = _accepted_head_path(state_dir, tick_id)
-        verify_optional_single_commit(
-            registration.worktree, result.git,
-            expected_parent_sha=expected_parent,
-            require_current=not accepted.exists(),
-        )
-        # Record the head the review actually left behind, not the head it
-        # started from: a review-fix commit is part of the reviewed work, and
-        # delivery anchors to what was blessed.
-        _persist_accepted_head(state_dir, tick_id, result.git.resulting_head_sha)
-        return True
+        with require_authorized_result(
+            registration=registration, state_dir=state_dir, tick_id=tick_id,
+            step_key=REVIEW_KEY, result=result,
+        ):
+            # The profile's reviewer applies its own findings as one review-fix
+            # commit, so the reviewed head may legitimately have advanced by one.
+            # It may advance by no more than that, and it must still descend from
+            # the implementation chain this reconciler recomputed -- that is what
+            # keeps the accepted head an anchor rather than a worker's claim.
+            accepted = _accepted_head_path(state_dir, tick_id)
+            verify_optional_single_commit(
+                registration.worktree, result.git,
+                expected_parent_sha=expected_parent,
+                require_current=not accepted.exists(),
+            )
+            # Record the head the review actually left behind, not the head it
+            # started from: a review-fix commit is part of the reviewed work, and
+            # delivery anchors to what was blessed.
+            _persist_accepted_head(state_dir, tick_id, result.git.resulting_head_sha)
+            return True
     except (ResultContractError, RuntimeError, OSError) as exc:
         log.error(
             "tick %s: review reconciliation failed: %s", tick_id,

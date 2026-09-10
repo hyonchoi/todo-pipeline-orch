@@ -195,6 +195,7 @@ class ValidatedRegistration:
     # the run's own profile, not whatever the project config says now.
     profile: str = ""
     agent_policy_mode: AgentPolicyMode = "inherit"
+    supervised_execution: bool = False
 
 
 def sanitize_result_text(value: object, *, maximum: int) -> str:
@@ -815,7 +816,7 @@ def load_validated_registration(
         raise ResultContractError("registration_invalid", "unsupported schema_version")
     _exact_keys(
         registration,
-        {2: _REGISTRATION_KEYS, 3: _REGISTRATION_V3_KEYS, 4: _REGISTRATION_V4_KEYS}[schema_version],
+        {2: _REGISTRATION_KEYS, 3: _REGISTRATION_V3_KEYS, 4: _REGISTRATION_V4_KEYS, 5: _REGISTRATION_V4_KEYS}[schema_version],
         code="registration_invalid",
     )
     agent_policy_mode: AgentPolicyMode = "inherit"
@@ -826,6 +827,11 @@ def load_validated_registration(
         ):
             raise ResultContractError("registration_invalid", "agent policy mode")
         agent_policy_mode = "delegated"
+    elif schema_version == 5:
+        mode = registration["agent_policy_mode"]
+        if mode not in ("inherit", "delegated") or (mode == "delegated" and registration["profile"] != "native-sdd"):
+            raise ResultContractError("registration_invalid", "agent policy mode")
+        agent_policy_mode = mode
     # The issue snapshot is hash-pinned authority content, not agent metadata:
     # bound its size instead of scanning it for secret-like text.
     _reject_unsafe_strings({key: value for key, value in registration.items() if key != "issue_snapshot"})
@@ -1036,6 +1042,7 @@ def load_validated_registration(
         resolved_source,
         registration["profile"],
         agent_policy_mode,
+        schema_version >= 5,
     )
 
 
