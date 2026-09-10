@@ -30,7 +30,7 @@ invocation metadata. `tpo doctor` loads both files unconditionally. Three
 profiles are bundled:
 
 - **`gstack`** (deprecated; see [ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md) and [Migrating from gstack](howto-native-sdd-profile.md#migrating-from-gstack)) — the gstack/superpowers workflow. Skills:
-  `ai-coding-agents`, `autoplan`, `writing-plans`,
+  `autoplan`, `writing-plans`,
   `subagent-driven-development`, `review`, `cso`, `qa`, `document-release`,
   `document-generate`, `ship`.
 - **`agent-skills`** — the agent-skills plugin workflow. Skills:
@@ -43,7 +43,7 @@ profiles are bundled:
   `agent-skills:ship`.
 - **`native-sdd`** (default) — Plan-gated native subagent TDD, independent review, PR
   creation, and a human gate, without gstack, superpowers, or client workflow
-  skills. Skills: `ai-coding-agents`.
+  skills. Skills: none; dispatch uses the installed supervisor.
 
 A project's `.hermes/pipeline.toml` contract records which profile it runs via the `profile` field. Switching profiles changes the prompts and required tool capabilities for every phase.
 

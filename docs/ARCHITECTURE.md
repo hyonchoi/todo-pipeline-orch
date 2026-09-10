@@ -94,12 +94,15 @@ Phase.timeout
   -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
 ```
 
-The final minute is cleanup-only: after the client deadline, the dispatcher
-terminates the external process tree and confirms it is no longer running.
-Only a zero external-agent exit may complete the phase. After a timeout or
-non-zero exit, the dispatcher comments the known external-agent failure
-metadata, then applies the supported `needs_input` block transition with the
-exact reason. Hermes cannot finish, inspect, or commit partial work.
+The final minute is cleanup-only. The installed `tpo-agent-supervisor` owns
+client launch, strict deadlines, durable exit collection, and best-effort owned
+process cleanup independently of the Hermes worker. Automatic worker re-entry
+attaches to the same attempt. Zero exit requires existing result-contract and
+current Git validation before completion. Unobservable exits and uncertain
+cleanup block another attempt. Hermes reports the structured outcome through
+its supported worker operations; it does not inspect or commit partial work.
+See [supervision and recovery](howto-agent-supervisor.md) for process ownership,
+checkpoint evidence, explicit retry admission, and portability limitations.
 
 ```
 cli._tick_project(config, contract)
@@ -112,6 +115,8 @@ cli._tick_project(config, contract)
     |       `-- any render error: failed_to_spawn, no tick persistence or Hermes calls
     |
     +-- _persist_tick_id() -- current_tick_id.txt + tick_started outcome
+    |
+    +-- bind prepared phases to pinned durable execution registrations
     |
     `-- create_prepared_todo_phases(...)
             +-- create unassigned registration barrier
@@ -137,40 +142,45 @@ come from the pinned issue snapshot; legacy paths are resolved at the pinned
 base commit. Failure records `failed_to_spawn` with `plan_validation_failed`
 and creates no kanban tasks.
 
-The `native-sdd` profile uses that gate. A manifest Plan compiles to NO cards:
-the profile's `phase_4_development` phase registers one card whatever the task
-count, and that card carries the phase's own prompt verbatim -- the prompt is
-what orders the Plan's tasks, runs a fresh native implementer subagent for each,
-and makes exactly one atomic commit per task. The manifest supplies the
-acceptance criteria that card must report and the commit-count bound TPO checks
-(`len(tasks)` first-parent commits from the pinned base SHA); TPO validates that
-report before the run advances, and no card stops the run for human input. A
-manifest-free embedded Plan is not selectable under a plan-gated profile:
-eligibility blocks the issue as `plan_invalid:manifest_required`. A
-manifest-free `Plan:` path stays selectable and gets the same single card, with
-no result template and no parsed result. Independent review uses
-a distinct session and applies every valid finding itself, committing them as
-one review-fix commit; the card reaching `done` is the pass and `blocked` is the
-profile's own nonzero exit. An accepted review enables verified PR creation,
-deterministic TODO closeout, and the open, unmerged pull request and its human
-merge decision as the run's terminal boundary; `phase_9_human_review` is a gate
-phase, so no card is ever registered for it.
-Only the Hermes `ai-coding-agents` dispatcher skill is required; client-side
-gstack, superpowers, and agent-skills workflows are not part of this profile.
+The `native-sdd` profile uses that gate. A manifest Plan compiles to no per-task
+cards: the profile's `phase_4_development` phase registers one execution and one
+thin Hermes card regardless of task count. Before publishing the card, TPO pins
+the rendered phase prompt together with deterministic result, checkpoint, and
+recovery instructions. The supervisor passes those exact pinned bytes to the
+configured external client through stdin. The phase orders the Plan's tasks,
+uses a fresh native implementer subagent for each, and makes one atomic commit
+per task. The supervisor collects verification and independent review evidence
+before accepting checkpoints and validates the final result before completion.
 
-Kanban is authoritative for live state and `metadata.tpo_result`. Local files
-under `.hermes/runs/<tick-id>/` contain immutable registration and crash-recovery
-evidence only. TPO validates identity, commit topology, changed files,
-acceptance statuses, and Git topology before a run advances. The contract asks
-only for facts the dispatcher can observe, and its template is published in the
-card's delegation block: the delimited external-agent prompt carries the phase
-profile's own words and nothing else -- no card kind appends, prepends, or
-substitutes a TPO-authored instruction.
+A manifest-free embedded Plan is not selectable under a plan-gated profile:
+eligibility blocks it as `plan_invalid:manifest_required`. A manifest-free
+`Plan:` path stays selectable with execution-attempt recovery and a bounded
+phase result, without a subtask-checkpoint guarantee. Independent review uses
+a distinct execution and may commit its valid findings as one review-fix
+commit. An accepted review enables verified PR creation and deterministic TODO
+closeout. The open, unmerged pull request and its human merge decision remain
+the terminal boundary; the `phase_9_human_review` gate creates no card.
+
+`native-sdd` requires no Hermes coding-agent skill or client-side gstack,
+superpowers, or agent-skills workflow. The installed supervisor and configured
+client capabilities are checked before external launch. Other profiles retain
+the client skills named by their own phase prompts.
+
+Kanban remains authoritative for card state and `metadata.tpo_result`. Thin
+cards instruct Hermes to invoke or reconnect to a registered execution and
+report its structured outcome through supported worker tools. Supervisor records
+outside the worktree pin registration and process evidence; promoted result and
+progress records preserve validated evidence separately from writable staging.
+TPO checks identity, acceptance, commit topology, changed files, and current Git
+state before accepting completion. A zero exit or process disappearance alone
+cannot complete a card. See [supervision and recovery](howto-agent-supervisor.md).
 
 ## Data Flow
 
 ### State Files
-All pipeline state lives under `<project>/.hermes/`:
+Project-local pipeline state lives under `<project>/.hermes/`. Non-manifest
+execution authority uses the trusted account state root described in the
+[supervisor guide](howto-agent-supervisor.md).
 
 ```
 <project>/.hermes/

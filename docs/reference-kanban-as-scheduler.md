@@ -66,13 +66,14 @@ Phase.timeout
   -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
 ```
 
-Delegated clients run as tracked background processes so Hermes's 600-second
-foreground terminal cap cannot shorten a phase configured for longer work.
-The final minute is cleanup-only: after the client deadline, the dispatcher
-terminates the external process tree and confirms it is no longer running.
-On timeout or non-zero exit, it writes known external-agent failure metadata
-through `kanban_comment`, then uses the supported
-`kanban_block(kind="needs_input", reason=...)` transition. It does not inspect,
+The installed deterministic supervisor runs independently of the Hermes worker
+and owns client launch, monitoring, and durable exit collection. Worker re-entry
+attaches to its registered attempt without refreshing the deadline. The final
+minute is cleanup-only; uncertain cleanup blocks another attempt. On failure,
+the worker reports structured supervisor status through `kanban_comment` and
+the supported `kanban_block(kind="needs_input", reason=...)` operation. Completion
+requires a validated result and current worker identity. See
+[supervision and recovery](howto-agent-supervisor.md); Hermes does not inspect,
 implement, or commit partial work.
 
 Use `hermes kanban show <task-id> --json` to inspect task state and
@@ -453,8 +454,9 @@ each prepared phase, it then runs `hermes kanban create` with:
 - `--parent <prev_task_id>` — dependency chain for every phase; the first phase
   uses the registration barrier and each later phase uses its predecessor
 - `--assignee -` for the barrier and gates; executable tasks use `assignee`
-- `--body <json_header>\n<phase_prompt>` — task body with JSON header on first
-  line
+- `--body <json_header>\n<registered_execution_instructions>` — task body with
+  JSON header and thin supervisor invocation instructions; the rendered prompt
+  is pinned in the durable registration
 - `--max-runtime <timeout + 60>` and `--max-retries 1` for executable tasks —
   the selected phase deadline plus cleanup-only grace and a terminal single
   attempt

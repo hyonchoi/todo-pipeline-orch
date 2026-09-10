@@ -64,9 +64,10 @@ tpo init <project> --profile native-sdd
 tpo doctor <project>
 ```
 
-The only skill prerequisite is Hermes `ai-coding-agents`. The selected worker
-client must still be installed and callable as `claude -p` or `codex exec`, but
-no gstack, superpowers, or client-side workflow skill is used.
+This profile has no skill prerequisite. The installed `tpo-agent-supervisor`
+launches the selected Claude or Codex client with its validated permissions;
+no gstack, superpowers, or client-side workflow skill is used. See the
+[supervisor prerequisites and recovery guide](howto-agent-supervisor.md).
 
 `tpo init` needs no `--profile` for a new project — `native-sdd` is the
 default; the flag above is explicit for clarity and is required only when
@@ -211,13 +212,14 @@ request and its human merge decision, which no card represents.
    not upgrade or downgrade across that release while a manifest run is active;
    drain the run first.
 2. The Plan gets exactly ONE implementation card — the profile's
-   `phase_4_development` — whatever the Plan's task count. The card carries that
-   phase's prompt verbatim and its declared `tools`, `turns` and `timeout`; the
-   prompt is what tells the agent to read the Plan, branch from main, preserve
-   unrelated tracked and untracked work, run one native implementer subagent per
-   Plan task, and make exactly one atomic commit per Plan task. TPO does not
-   restate any of that and does not fan the phase into per-task cards: the
-   profile is the specification. The card reports bounded
+   `phase_4_development` — whatever the Plan's task count. The card identifies a
+   durable supervisor registration that pins the rendered phase prompt, tool
+   permissions, worktree, branch, timeout, and result contract. Hermes invokes
+   or reconnects to that execution. The external agent reads the original Plan,
+   preserves partial work, runs one native implementer subagent per unfinished
+   task, and makes one atomic commit per task. The supervisor collects trusted
+   verification and review evidence before accepting checkpoints. TPO does not
+   fan the phase into per-task cards. The card reports bounded
    `metadata.tpo_result`; on the next tick TPO validates that metadata, every
    Plan task's acceptance criteria, and the Git topology — exactly
    `len(tasks)` commits on the first-parent mainline from the pinned base SHA —
