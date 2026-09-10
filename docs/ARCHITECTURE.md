@@ -103,6 +103,12 @@ cleanup block another attempt. Hermes reports the structured outcome through
 its supported worker operations; it does not inspect or commit partial work.
 See [supervision and recovery](howto-agent-supervisor.md) for process ownership,
 checkpoint evidence, explicit retry admission, and portability limitations.
+Linux process ownership uses `/proc` and pidfds; macOS uses `libproc` unique IDs
+and audit-token signaling, detected by capability rather than OS version.
+Manifest collectors use `bwrap`/seccomp on Linux and Seatbelt on macOS. Both
+permit anonymous stream IPC while denying network and host Unix-socket access.
+Process, client, and required collector capability checks precede admission; a
+refusal remains visible in status without consuming an attempt.
 
 ```
 cli._tick_project(config, contract)
@@ -172,8 +178,23 @@ report its structured outcome through supported worker tools. Supervisor records
 outside the worktree pin registration and process evidence; promoted result and
 progress records preserve validated evidence separately from writable staging.
 TPO checks identity, acceptance, commit topology, changed files, and current Git
-state before accepting completion. A zero exit or process disappearance alone
-cannot complete a card. See [supervision and recovery](howto-agent-supervisor.md).
+state before accepting completion. Supervised implementation, review, and finish
+results must match the latest attempt's promoted result, collected zero exit,
+confirmed cleanup, and trusted checkpoint evidence. A shared worktree guard spans
+prerequisite reads and review acceptance or finish delivery; execution locks
+protect each result. Finish revalidates current implementation and review
+authority, so an accepted marker cannot conceal a later failed retry. Verified
+lock contention makes polling wait; unsupported locking blocks acceptance.
+Historical topology validation allows a later review commit to advance HEAD
+without invalidating accepted implementation evidence. A zero exit or process
+disappearance alone cannot complete a card. See
+[supervision and recovery](howto-agent-supervisor.md).
+
+Before attempt admission, the launcher reports `waiting_for_admission` for
+verified worktree contention or a pending launch and returns zero for continued
+polling. Its five-second poll does not refresh the execution budget. Newly
+generated worker instructions preserve card state while waiting; existing card
+bodies are not rewritten.
 
 ## Data Flow
 
@@ -186,7 +207,7 @@ execution authority uses the trusted account state root described in the
 <project>/.hermes/
 ├── decisions/                 # Immutable selection decisions (write-once)
 ├── outcomes/                  # Phase completion/failure sidecars
-├── runs/<tick-id>/registration.json # Schema v3: pinned issue, tagged Plan source, branch/worktree
+├── runs/<tick-id>/registration.json # Schema v5: pinned Plan, required supervision
 ├── runs/<tick-id>/plan.md           # Verified mode-0600 artifact for embedded Plans
 ├── runs/<tick-id>/issue-closed    # Marker: run delivered, issue closed at closeout
 ├── runs/<tick-id>/abandoned       # Marker: operator abandoned the run (`touch`)
@@ -282,11 +303,13 @@ and `TODOS-archive.md` are retired (see
   block it. Decisions live in the issue body; labels are mirrors. See
   [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
   [triage labels](agents/triage-labels.md).
-- **Snapshot authority** — schema-v3 registration pins the issue identity,
-  hashed snapshot, `plan_source_kind`, `plan_hash`, and either a legacy
-  `plan_path` or verified embedded `plan_artifact`. Readers accept active
-  schema-v2 and v3 runs. Schema v1 remains unsupported, and versions without v3
-  support must not be installed while a v3 run is active.
+- **Snapshot authority** — new schema-v5 registrations pin the issue identity,
+  hashed snapshot, `plan_source_kind`, `plan_hash`, either a legacy `plan_path`
+  or verified embedded `plan_artifact`, and `agent_policy_mode`. They require
+  durable supervisor authority. Readers also accept supported legacy schema-v2,
+  v3, and v4 registrations; schema v1 remains unsupported. Drain active runs and
+  confirm process cleanup before installing a version that cannot read their
+  registration schema.
 - **Single-writer creation** — one host-local `<state-dir>/todo-create.lock`
   serializes issue creation. Durable approved requests and transaction markers
   resume partial GitHub mutations without deleting or closing issues.

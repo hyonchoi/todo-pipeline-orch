@@ -20,11 +20,24 @@ attaches to the same attempt and never refreshes its budget. Each explicitly
 admitted attempt receives `Phase.timeout` when its client launches. Hermes keeps
 its existing `timeout + 60` ceiling and one worker retry.
 
+Before admission, `waiting_for_admission` with reason `worktree_busy` or
+`launch_pending` is an ephemeral waiting response, not a stored terminal outcome.
+The launcher returns exit code zero so the worker can poll the same command.
+Each command polls for up to five seconds and retries attachment only for
+verified worktree contention. Waiting neither admits an attempt nor refreshes an
+execution deadline. Newly generated worker instructions prohibit card transitions,
+including `kanban_block`, while waiting. Existing card bodies are not rewritten;
+older workers may need an explicit operator refresh or recovery through supported
+Kanban operations.
+
 On timeout, the supervisor attempts graceful then forced termination within the
 60-second cleanup allowance, including stopped processes where supported. A
 deadline outcome remains `timed_out` even if a late exit is zero. An exit observed
 before the deadline remains eligible for result validation; zero exit alone
-never completes a card.
+never completes a card. Git inspection, snapshot collection, reviewer execution,
+revalidation, and checkpoint promotion all share the original attempt deadline.
+The terminal outcome is written once, after eligibility checks; a successful
+review cannot refresh the budget or override an expired attempt.
 
 Versioned records are atomically persisted outside the execution worktree.
 Kernel-held advisory locks serialize admission. Host, boot, and process birth
@@ -44,8 +57,13 @@ Portable process management cannot guarantee termination of every detached
 descendant. In particular, an escape can become unobservable while both the
 supervisor and recovery polling are unavailable. No systemd or cgroup service is
 required. Unsupported locking or ownership checks fail closed.
-The current verified process-identity implementation uses Linux `/proc` and
-pidfds; other platforms do not receive an unverified execution fallback.
+Linux ownership uses `/proc` birth identities and pidfds. macOS ownership uses
+`libproc` process unique IDs and audit-token signaling. Darwin support is
+detected from the installed library and kernel capabilities, including
+`proc_signal_with_audittoken`; an OS version string alone does not establish
+support. Missing capabilities fail closed without launching a client. Native
+qualification evidence and outstanding gates are tracked in the
+[validation report](operations/supervisor-validation-2026-09-10.md).
 
 ## Operator recovery
 
@@ -98,9 +116,9 @@ subtask checkpoint guarantee. Legacy evidence permits recovery-only validation.
 After the implementation client exits, the supervisor uses the attempt's
 remaining original deadline to validate candidate commits in order. It builds
 an isolated snapshot of each exact commit, runs its pinned verification commands
-inside a Linux `bwrap` sandbox, and invokes a fresh reviewer with read-only source
-access. Only successful checks and a matching structured review verdict produce
-receipts. Manifest implementation completion requires every task to be accepted.
+inside the platform verification sandbox, and invokes a fresh reviewer with
+read-only source access. Only successful checks and a matching structured review
+verdict produce receipts. Manifest implementation completion requires every task to be accepted.
 If the implementation consumes its entire deadline, collecting missing evidence
 requires a new explicitly approved recovery attempt.
 
@@ -109,11 +127,49 @@ excluding them. They omit Git metadata and reject symlinks and submodules;
 Git-dependent or unsupported checks fail closed. Commands are bounded argv
 commands rather than shell programs. Check processes have no network or host
 Unix-socket access, cannot read authoritative execution storage, and may write
-only their snapshot and temporary files. The syscall filter currently supports
-Linux x86-64 and AArch64; other architectures fail closed. An existing worktree `.venv` is
-used read-only with `uv` synchronization disabled; recovery does not install
-dependencies. Ensure the approved verification commands can run under these
-constraints before relying on automatic checkpoint acceptance.
+only their snapshot and temporary files. Anonymous Unix stream socketpairs are
+allowed for local runtime IPC (including `uv`); opening network or host Unix
+socket endpoints remains denied. Linux uses `bwrap` plus a seccomp filter on
+x86-64 and AArch64. macOS uses a Seatbelt policy through `sandbox-exec`, with
+resolved snapshot and authority paths and private temporary runtime storage.
+Unsupported platforms or unavailable sandbox capabilities fail closed. An
+existing worktree `.venv` is used read-only with `uv` synchronization disabled;
+recovery does not install dependencies. Ensure the approved verification
+commands can run under these constraints before relying on automatic checkpoint
+acceptance.
+
+## Client and platform prerequisites
+
+Install and authenticate the selected client before dispatch. Both clients need
+working process ownership and, for manifest checkpoint collection, the platform
+verification sandbox. No dependency or authentication setup runs automatically.
+
+| Client / platform | Client launch requirements | Checkpoint verification requirements |
+|---|---|---|
+| Claude / Linux | Qualified Claude `2.1.267`, native Bash sandbox, `bwrap` and `socat` | `bwrap`, supported seccomp architecture, functioning sandbox probe |
+| Claude / macOS | Qualified Claude `2.1.267`, native macOS Bash sandbox; no Linux `bwrap` or `socat` requirement | `sandbox-exec` Seatbelt policy and functioning sandbox probe |
+| Codex / Linux | Named permission profile support | `bwrap`, supported seccomp architecture, functioning sandbox probe |
+| Codex / macOS | Named permission profile support | `sandbox-exec` Seatbelt policy and functioning sandbox probe |
+
+Codex named profiles have been exercised with `0.154.0`; this is not a live
+qualification of every client/platform pair. Claude's native file tools have
+separate grants from its Bash sandbox. The `native-sdd` implementation phase
+enables the native `Agent` tool so its client can delegate to fresh subagents.
+Default phase tools and the separate collector review tools remain unchanged.
+Hooks, additional MCP tools, and user/project settings cannot broaden the
+generated grants. An unqualified Claude upgrade blocks launch. Codex receives an explicit
+named permission profile with authority denial and scoped worktree/Git metadata
+access. The installed clients and administrator-managed policy remain trusted;
+these settings do not contain a malicious client executable.
+
+Pre-admission checks report bounded reasons through the launcher and `status`:
+`client_unavailable`, `client_sandbox_unavailable`,
+`client_sandbox_unconfirmed`, `process_capability_unavailable`, or
+`verification_sandbox_unavailable`. A pre-admission refusal consumes no attempt;
+repair the prerequisite and retry the registered launch. Once an attempt has
+been admitted, worker re-entry retains its original budget; a new recovery
+attempt requires the preview and approval above. A successful capability probe
+establishes local availability, not complete native or live-provider qualification.
 
 ## Storage, compatibility, and rollback
 
@@ -131,16 +187,8 @@ ignores repository-specific encoding and line-ending transformations, and
 submodule cleanliness or unsupported Git metadata formats fail closed; these
 repositories need separate supported validation before automatic continuation.
 
-Claude uses its native Linux Bash sandbox plus separately scoped native file
-tools. It requires `bwrap`, `socat`, and the explicitly qualified Claude version
-(`2.1.267` in this release); missing prerequisites or an unqualified upgrade block
-launch. Hooks, additional MCP tools, and user/project settings cannot broaden
-the generated grants. The installed client and administrator-managed policy
-remain trusted; this does not contain a malicious client executable. Codex uses
-an explicit named permission profile with authority denial. No client dependency
-or authentication setup is performed automatically.
-
-Non-manifest execution roots are derived from the operating-system account home
+Execution roots for profile runs without a pinned run registration are derived
+from the operating-system account home
 and conventional `.config/tpo/config.yaml`, `.tpo/config.yaml`, or
 `.hermes/tpo.yaml` configuration. A `state_dir` configured there is supported.
 Environment-only configuration overrides cannot establish execution authority;
@@ -148,8 +196,28 @@ an unconfirmed custom root blocks registration before publishing a card. Move
 the intended configuration into a trusted conventional location explicitly;
 the supervisor does not silently relocate state.
 
-Existing registrations remain available for recovery validation; new dispatches
-use supervision. Issue 103's separate historical evidence and unresolved gates
+New run registrations use schema v5, pin `agent_policy_mode` (`inherit` or
+`delegated`), and require durable supervisor authority. Supported legacy v2/v3/v4
+registrations remain readable. Before dispatching a supervised phase for an older
+registration, TPO durably records enrollment in `supervisor-required.json`. Missing
+execution records cannot then make that run fall back to unsupervised acceptance.
+Only older runs without enrollment or execution evidence retain legacy handling;
+this does not bootstrap them into supervised recovery. The pipeline contract
+schema is a separate versioned format and is unchanged.
+
+Implementation, review, and finish consumers require the latest attempt to have
+a collected zero exit, no exit signal, confirmed cleanup, a matching promoted
+result, and trusted journal evidence. A shared worktree lock spans prerequisite
+reads and review acceptance or finish delivery, alongside the execution locks.
+Finish revalidates current implementation and review authority; an earlier
+accepted-review marker cannot hide a later failed retry. Verified lock contention
+(`EAGAIN`/`EWOULDBLOCK`) makes controller polling wait; unsupported or unconfirmed
+locking blocks acceptance. Historical commit-topology checks let review advance
+HEAD while retaining accepted implementation evidence. A Hermes completion claim
+cannot authorize a timed-out, interrupted, or unconfirmed supervisor result.
+
+Existing registrations remain available for recovery validation. Issue 103's
+separate historical evidence and unresolved gates
 are recorded in [its recovery report](operations/issue-103-recovery-2026-09-10.md).
 
 Before downgrading, pause the TPO tick/scan scheduler and new Hermes worker

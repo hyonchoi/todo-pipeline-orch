@@ -31,35 +31,39 @@ and the prompt client are all real.
 - The selected prompt client (`claude` or `codex`) installed and authenticated.
   Preflight checks only the client selected by `prompt_client`.
 
-The Codex dispatcher requires a Codex version that supports named permission
-profiles (verified with 0.154.0). The Hermes shell must also have Python 3.11+
-available as `python3` on PATH for permission serialization and validation;
-TPO's uv-managed Python environment does not ensure this prerequisite.
-At launch, it resolves the selected phase
-worktree's absolute Git common directory and absolute per-worktree Git directory
-with `git rev-parse`. It builds a launch-local named permission profile extending
-`:workspace` and explicitly grants write access to both Git directories. Linked
-worktrees need both grants because their index and HEAD live in a separate
-metadata directory within the common directory. This permits Git operations
-without granting write access to the whole parent checkout.
+New cards invoke the installed `tpo-agent-supervisor` launcher. Install it with
+TPO in its Python 3.12+ environment; the Hermes shell does not need a separate
+Python interpreter for permission serialization. The supervisor delivers pinned
+prompt bytes directly through stdin and owns launch, deadlines, exit collection,
+and result validation. There is no Hermes prompt-marker extraction or unmanaged
+shell client launch in a new card. Historical cards retain their old instructions;
+start a new harness run to exercise current dispatch and admission-waiting
+instructions. Existing workers may require an explicit operator refresh or
+recovery through supported Kanban operations; upgrading does not rewrite them.
 
-The profile enables network access so agents can fetch dependencies and access
-GitHub. TPO passes the profile and its selection through CLI `-c` overrides;
-it neither edits user/global Codex configuration nor persists a profile file.
-The launch fails closed if either Git directory cannot be resolved or the
-permission configuration cannot be serialized. The dispatcher copies only the
-content inside the prompt markers into its stdin file, excluding the marker
-lines. It assigns the
-prompt variable before redirecting stdin and
-shell-quotes the literal file path. Existing kanban cards retain their original
-instructions, so start a new harness run to exercise these dispatcher fixes.
+The selected client must satisfy the
+[client and platform prerequisites](howto-agent-supervisor.md#client-and-platform-prerequisites).
+Claude `2.1.267` needs `bwrap` and `socat` on Linux; macOS uses Claude's native
+sandbox. Codex must support named permission profiles (exercised with `0.154.0`).
+Linux process supervision requires `/proc` and pidfds; macOS requires available
+`libproc` identity and audit-token signaling capabilities. Manifest verification
+uses Linux `bwrap`/seccomp or macOS Seatbelt via `sandbox-exec`. Capability
+refusals occur before attempt admission and are available from supervisor status.
 
-After a successful external-client run, Hermes collects result metadata using
-the client's reported gate and test evidence and read-only Git inspection. It
-does not rerun tests, builds, or dependency installation during collection,
-because those commands can recreate files such as `uv.lock`. A final clean-tree
-check follows collection; missing evidence or a dirty tree blocks completion.
-The dispatcher does not clean up files or create a commit to resolve that block.
+The generated client grants include the selected worktree and both resolved Git
+metadata directories, plus the attempt submission directory, while denying
+authoritative execution storage and private Git inspection data. Client network
+access supports approved GitHub and dependency work. Permission serialization
+runs in the installed supervisor; no user/global client configuration is edited.
+
+After the client exits, the supervisor validates results against current Git
+state. Manifest checkpoints also require pinned verification commands in an
+isolated exact-commit snapshot and a fresh review within the attempt's remaining
+deadline. Verification snapshots have no network or host Unix-socket access,
+but permit anonymous stream socketpairs for runtime IPC. Hermes reports the
+structured outcome through supported worker tools. A zero exit without valid
+result and checkpoint evidence cannot complete a card. Preserve partial work;
+collection does not clean or commit the original worktree to force acceptance.
 
 ## One-time sandbox setup
 
@@ -170,14 +174,16 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    recheck the final issue before running production `tpo tick` as a subprocess
    with an isolated `TPO_CONFIG_FILE` (log at `artifacts/tick.log`). Recover its
    `tick_id` and expected phase keys. For a plan-gated profile, use the production
-   registration loader, then require embedded schema-v3 authority with
-   `plan_path=None`, the expected repository, issue, branch, `run_base_sha`, and
+   registration loader, then require embedded Plan authority in the current
+   schema-v5 registration with `plan_path=None`, the expected repository, issue,
+   branch, `run_base_sha`, and
    Plan digest (`registration_invalid`, `unexpected_registration`,
    `registration_base_mismatch`, `registration_plan_mismatch`). Hash only the
    Plan document as UTF-8, normalize line endings to LF and exactly one trailing
    newline, and retain the assigned issue number. Issue fields and the folding
    wrapper are excluded. The issue manifest remains schema-v1; production
-   registration readers still support v2 and v3 and legacy repository Plans.
+   registration readers also support legacy v2, v3, and v4 registrations and
+   legacy repository Plans. New v5 registrations require supervisor authority.
    The `tick_registered` event records `tick_id`, `phase_keys` and, for a pinned
    run, `pinned`, `worktree`, and `branch`.
 5. **Poll / drive** — a non-plan profile polls the registered kanban cards once

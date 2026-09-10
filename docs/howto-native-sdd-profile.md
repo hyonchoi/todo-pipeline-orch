@@ -98,10 +98,11 @@ and result metadata stay outside that payload. Implementation, unified review
 (including its optional fix commit), and finish workers receive it; controller
 reconciliation and human gates do not run delegated workers.
 
-Registration pins the effective mode: new opted-in native-SDD runs use schema
-v4 with `agent_policy_mode: delegated`; other new runs keep v3. Existing v2/v3
-runs mean `inherit`. Changing the global setting cannot change an active run's
-initial or later workers.
+Registration pins the effective mode: all new runs use schema v5 with
+`agent_policy_mode: inherit` or `delegated` and require durable supervisor
+authority. Existing v2/v3 runs mean `inherit`; v4 pins `delegated`. These legacy
+registrations remain readable. Changing the global setting cannot change an
+active run's initial or later workers.
 
 TPO rejects pre-existing standalone mode declarations before publishing the
 corresponding worker card, including duplicates, conflicting or malformed
@@ -137,10 +138,14 @@ for path in Path(".hermes/runs").glob("*/registration.json"):
 PYCODE
 ```
 
-Inspect their active-run state and drain opted-in runs before reverting code.
-Preserve registration files: pre-v4 code rejects v4; restore compatible code to
-finish such runs, never reinterpret or edit their pinned mode. If a run must
-change mode, abandon it through the recovery workflow and register a new run.
+Inspect active-run state and drain all supervised runs before reverting code,
+including new schema-v5 runs in `inherit` mode. Confirm owned-process cleanup
+using the
+[supervisor rollback procedure](howto-agent-supervisor.md#storage-compatibility-and-rollback).
+Preserve registrations and journals: pre-v5 code cannot read v5, and pre-v4 code
+cannot read v4. Restore compatible code to finish such runs; never reinterpret
+or edit their pinned mode. If a run must change mode, abandon it through the
+recovery workflow and register a new run.
 
 ## Migrating from gstack
 
@@ -197,11 +202,11 @@ request and its human merge decision, which no card represents.
 
 ## Run sequence
 
-1. TPO records schema-v3 (or opted-in schema-v4)
-   `.hermes/runs/<tick-id>/registration.json`, including
+1. TPO records schema-v5 `.hermes/runs/<tick-id>/registration.json`, including
    the tagged Plan source, pinned base SHA, TODO and Plan hashes, branch,
-   linked worktree, roles, and step keys. Schema-v2 active runs remain readable;
-   do not downgrade while a schema-v3 run is active. The same applies to the
+   linked worktree, roles, step keys, and policy mode; supervision is required.
+   Supported schema-v2/v3/v4 active registrations remain readable. Do not
+   downgrade to a version that cannot read an active registration. The same applies to the
    step keys themselves: a manifest run registered after the per-Plan-task
    fan-out was deleted lists one `phase_4_development` step key, which an older
    TPO rejects as `registration_invalid` on every tick because it looks for
