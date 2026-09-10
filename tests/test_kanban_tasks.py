@@ -5,6 +5,7 @@ import json
 import os
 import shlex
 import subprocess
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -335,9 +336,9 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
     [
         (
             "codex",
-            'codex exec --sandbox workspace-write '
-            '-c sandbox_workspace_write.network_access=true '
-            '--add-dir "$TPO_GIT_COMMON_DIR" - < "$PROMPT_FILE"',
+            "codex exec -c 'approval_policy=\"never\"' "
+            "-c 'default_permissions=\"tpo-worktree\"' "
+            '-c "$TPO_CODEX_PERMISSIONS" - < "$PROMPT_FILE"',
             "claude -p",
         ),
         (
@@ -429,9 +430,9 @@ _HOSTILE_PROMPT = (
     [
         (
             "codex",
-            'codex exec --sandbox workspace-write '
-            '-c sandbox_workspace_write.network_access=true '
-            '--add-dir "$TPO_GIT_COMMON_DIR" - < "$PROMPT_FILE"',
+            "codex exec -c 'approval_policy=\"never\"' "
+            "-c 'default_permissions=\"tpo-worktree\"' "
+            '-c "$TPO_CODEX_PERMISSIONS" - < "$PROMPT_FILE"',
         ),
         (
             "claude",
@@ -583,7 +584,7 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
         PATH=f"{fake_bin}:{env['PATH']}",
         CAPTURE_ARGS=str(args_file), CAPTURE_STDIN=str(stdin_file),
     )
-    repository = tmp_path / "repo spaces-$PAYLOAD-`false`-apostrophe's"
+    repository = tmp_path / 'repo spaces-$PAYLOAD-`false`-apostrophe\'s-"-\\-é-😀-\x7f'
     subprocess.run(["git", "init", str(repository)], check=True, capture_output=True)
     launch_dir = repository
     if linked_worktree:
@@ -606,23 +607,46 @@ def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
     assert stdin_file.read_bytes() == payload.encode()
     assert "BEGIN EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
     assert "END EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
-    expected_args = (
-        ["exec", "--sandbox", "workspace-write", "-c",
-         "sandbox_workspace_write.network_access=true",
-         "--add-dir", str(repository.resolve() / ".git"), "-"]
-        if prompt_client == "codex"
-        else ["-p", "--permission-mode", "dontAsk", "--allowedTools", "Read,Bash"]
-    )
-    assert args_file.read_text().splitlines() == expected_args
+    actual_args = args_file.read_text().splitlines()
+    if prompt_client == "codex":
+        assert actual_args[:6] == [
+            "exec", "-c", 'approval_policy="never"', "-c",
+            'default_permissions="tpo-worktree"', "-c",
+        ]
+        assert actual_args[7:] == ["-"]
+        config = tomllib.loads(actual_args[6])
+        git_dir = subprocess.check_output(
+            ["git", "rev-parse", "--absolute-git-dir"], cwd=launch_dir, text=True,
+        ).strip()
+        assert config == {"permissions": {"tpo-worktree": {
+            "extends": ":workspace",
+            "filesystem": {str(repository.resolve() / ".git"): "write", git_dir: "write"},
+            "network": {"enabled": True},
+        }}}
+    else:
+        assert actual_args == [
+            "-p", "--permission-mode", "dontAsk", "--allowedTools", "Read,Bash",
+        ]
 
 
 @pytest.mark.parametrize(
     ("git_output", "git_status"),
-    [("", 1), ("", 0), ("/does-not-exist/tpo-git-metadata", 0), (".", 0)],
+    [
+        ("", 1), ("", 0), ("/does-not-exist/tpo-git-metadata", 0), (".", 0),
+        ("unencodable-path", 0),
+    ],
 )
-def test_codex_dispatch_refuses_unresolved_git_metadata(tmp_path, git_output, git_status):
+@pytest.mark.parametrize("failed_resolution", ["common", "worktree"])
+def test_codex_dispatch_refuses_unresolved_git_metadata(
+    tmp_path, git_output, git_status, failed_resolution,
+):
     from hermes_pipeline.kanban_tasks import _external_client_delegation_block
 
+    if git_output == "unencodable-path":
+        # A valid filesystem path can still be impossible to serialize as TOML.
+        raw_directory = os.fsencode(tmp_path) + b"/invalid-\xff"
+        os.mkdir(raw_directory)
+        git_output = os.fsdecode(raw_directory)
     block = _external_client_delegation_block("codex", timeout=1800, tools="")
     snippet = block.partition("```sh\n")[2].partition("```\n")[0]
     prompt_file = tmp_path / "prompt.txt"
@@ -635,6 +659,10 @@ def test_codex_dispatch_refuses_unresolved_git_metadata(tmp_path, git_output, gi
     git = fake_bin / "git"
     git.write_text(
         "#!/bin/sh\n"
+        'if [ "$FAILED_RESOLUTION" = worktree ] && [ "$3" = --git-common-dir ]; then\n'
+        '  printf "%s\\n" "$VALID_COMMON_DIR"\n'
+        '  exit 0\n'
+        'fi\n'
         'printf "%s\\n" "$GIT_OUTPUT"\n'
         'exit "$GIT_STATUS"\n'
     )
@@ -647,6 +675,8 @@ def test_codex_dispatch_refuses_unresolved_git_metadata(tmp_path, git_output, gi
     env.update(
         PATH=f"{fake_bin}:{env['PATH']}", GIT_OUTPUT=git_output,
         GIT_STATUS=str(git_status), CLIENT_STARTED=str(started),
+        FAILED_RESOLUTION=failed_resolution, VALID_COMMON_DIR=str(tmp_path),
+        TPO_CODEX_PERMISSIONS='permissions.tpo-worktree={extends=":workspace"}',
         TPO_GIT_COMMON_DIR=str(tmp_path),  # Stale inherited values cannot authorize launch.
     )
     completed = subprocess.run(

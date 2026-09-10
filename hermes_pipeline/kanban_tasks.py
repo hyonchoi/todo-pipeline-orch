@@ -172,22 +172,55 @@ def _external_client_delegation_block(
         # explicitly because a prompt argument *plus* piped stdin makes Codex
         # append the stdin as a separate ``<stdin>`` block instead.
         command = (
-            "codex exec --sandbox workspace-write "
-            "-c sandbox_workspace_write.network_access=true "
-            '--add-dir "$TPO_GIT_COMMON_DIR" -'
+            "codex exec -c 'approval_policy=\"never\"' "
+            "-c 'default_permissions=\"tpo-worktree\"' "
+            '-c "$TPO_CODEX_PERMISSIONS" -'
         )
         launch_setup = (
-            'TPO_GIT_COMMON_DIR="$(git rev-parse --path-format=absolute '
-            '--git-common-dir)" || exit 1\n'
-            'case "$TPO_GIT_COMMON_DIR" in /*) ;; *) exit 1 ;; esac\n'
-            '[ -d "$TPO_GIT_COMMON_DIR" ] || exit 1\n'
+            'TPO_CODEX_PERMISSIONS="$(python3 - <<\'TPO_CODEX_PERMISSIONS_PY\'\n'
+            'import json\n'
+            'import os\n'
+            'import subprocess\n'
+            'import sys\n'
+            'import tomllib\n'
+            '\n'
+            'try:\n'
+            '    directories = []\n'
+            '    for option in ("--git-common-dir", "--absolute-git-dir"):\n'
+            '        result = subprocess.run(\n'
+            '            ["git", "rev-parse", "--path-format=absolute", option],\n'
+            '            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,\n'
+            '        )\n'
+            '        directory = os.fsdecode(result.stdout.removesuffix(b"\\n"))\n'
+            '        if not os.path.isabs(directory) or not os.path.isdir(directory):\n'
+            '            raise ValueError("Invalid Git metadata directory")\n'
+            '        directories.append(directory)\n'
+            '    # JSON basic-string escapes are TOML-compatible, except literal DEL.\n'
+            '    grants = ",".join(\n'
+            '        json.dumps(directory, ensure_ascii=False).replace("\\x7f", "\\\\u007f") + \'= "write"\'\n'
+            '        for directory in dict.fromkeys(directories)\n'
+            '    )\n'
+            '    override = (\n'
+            '        \'permissions.tpo-worktree={extends=":workspace",filesystem={\'\n'
+            "        + grants + '},network={enabled=true}}'\n"
+            '    )\n'
+            '    tomllib.loads(override)\n'
+            '    override.encode("utf-8")\n'
+            'except Exception:\n'
+            '    sys.exit("Cannot resolve or encode Git metadata permissions; Codex was not launched.")\n'
+            'print(override)\n'
+            'TPO_CODEX_PERMISSIONS_PY\n'
+            ')" || exit 1\n'
         )
         launch_guidance = (
             "Run the entire launch sequence from the selected phase worktree. "
-            "Resolve its absolute Git common directory there immediately before "
-            "launch; stop if resolution fails. Grant only that metadata directory "
-            "with `--add-dir`, retaining workspace-write and the network override. "
-            "Do not grant the parent checkout or broader filesystem access.\n"
+            "Resolve its absolute Git common and worktree metadata directories "
+            "there immediately before launch; stop if either resolution or "
+            "permission serialization fails. Pass both explicit write grants "
+            "in the launch-local named permissions profile extending `:workspace`, "
+            "with network access enabled. Do not mix legacy sandbox flags with "
+            "this profile, write Codex configuration, or grant the parent checkout "
+            "or broader filesystem access. Python 3.11+ is required for this setup.\n"
         )
     elif prompt_client == "claude":
         tool_names = [tool.strip() for tool in tools.split(",") if tool.strip()]
