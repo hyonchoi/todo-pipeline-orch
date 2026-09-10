@@ -53,6 +53,7 @@ class CreateRequest:
     plan_markdown: str
     tasks: tuple[dict[str, object], ...]
     canonical_json: str
+    hold: bool = False
 
 
 def _object(pairs):
@@ -112,8 +113,11 @@ def load_create_request(path: Path) -> CreateRequest:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    if not isinstance(value, dict) or set(value) != REQUEST_KEYS:
+    if not isinstance(value, dict) or set(value) not in (REQUEST_KEYS, REQUEST_KEYS | {"hold"}):
         raise TodoCreateError("unknown_keys")
+    hold = value.get("hold", False)
+    if type(hold) is not bool:
+        raise TodoCreateError("invalid_hold")
     if type(value["schema_version"]) is not int or value["schema_version"] != 1:
         raise TodoCreateError("schema_version")
     transaction = value["transaction_id"]
@@ -184,8 +188,11 @@ def load_create_request(path: Path) -> CreateRequest:
         "plan_markdown": plan,
         "tasks": normalized_tasks,
     }
+    # False is the legacy contract, including its exact persisted bytes.
+    if hold:
+        normalized["hold"] = True
     canonical = json.dumps(normalized, indent=2, ensure_ascii=False) + "\n"
-    return CreateRequest(str(parsed), title, clean_fields, plan, normalized_tasks, canonical)
+    return CreateRequest(str(parsed), title, clean_fields, plan, normalized_tasks, canonical, hold)
 
 
 def creation_marker(transaction_id: str) -> str:
@@ -251,8 +258,10 @@ def render_create_preview(
             '  "todo_id": "TODO-<assigned-by-github>",',
             1,
         )
+    hold_line = f"Hold: true ({github_issues.ON_HOLD_LABEL})\n" if request.hold else ""
     return (
         f"Project: {project}\nRepository: {repository}\n"
+        f"{hold_line}"
         f"Title:\n{request.title}\n\nBody:\n{body}"
     )
 
@@ -358,7 +367,8 @@ def execute_create(
             try:
                 issue_number = github_issues.create_issue(
                     project_dir, title=request.title, body=_render_fields(request),
-                    labels=(github_issues.TODO_LABEL, "needs-triage"), repo=repo,
+                    labels=(github_issues.TODO_LABEL, "needs-triage")
+                    + ((github_issues.ON_HOLD_LABEL,) if request.hold else ()), repo=repo,
                 )
             except github_issues.GitHubIssuesError:
                 matches = _matching_issues(project_dir, repo, marker)
@@ -367,6 +377,15 @@ def execute_create(
                 issue_number = matches[0].number
             issue = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
         assert issue_number is not None
+        def assert_hold(snapshot) -> None:
+            # A missing hold is external drift, never permission to release or
+            # silently re-hold an issue that may already have been selected.
+            if request.hold and github_issues.ON_HOLD_LABEL not in {
+                label.lower() for label in snapshot.labels
+            }:
+                raise TodoCreateError("hold_drift")
+
+        assert_hold(issue)
         final_body = render_create_body(request, issue_number=issue_number)
         if issue.title != request.title or issue.state != "open":
             raise TodoCreateError("issue_drift")
@@ -375,10 +394,12 @@ def execute_create(
                 raise TodoCreateError("issue_drift")
             github_issues.update_issue_body(project_dir, issue_number, final_body, repo=repo)
             issue = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
+            assert_hold(issue)
             if issue.body != final_body:
                 raise TodoCreateError("late_drift")
         # Every label mutation is conditional on a fresh authoritative snapshot.
         issue = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
+        assert_hold(issue)
         if issue.title != request.title or issue.state != "open" or issue.body != final_body:
             raise TodoCreateError("late_drift")
         from .cli import _audit_default_branch, _audit_issue, _audit_phase_options
@@ -391,6 +412,7 @@ def execute_create(
             raise TodoCreateError("audit_failed")
         def assert_fresh() -> None:
             fresh = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
+            assert_hold(fresh)
             if fresh.title != request.title or fresh.state != "open" or fresh.body != final_body:
                 raise TodoCreateError("late_drift")
 
@@ -413,6 +435,7 @@ def execute_create(
             assert_fresh()
             github_issues.remove_label(project_dir, issue_number, "needs-triage", repo=repo)
         complete = github_issues.fetch_issue(project_dir, issue_number, repo=repo)
+        assert_hold(complete)
         final_findings, _final_add, _final_remove = _audit_issue(
             project_dir, complete, phase_options=_audit_phase_options(project_dir),
             default_branch=_audit_default_branch(project_dir), branch_cache={}, require_todo_label=True,

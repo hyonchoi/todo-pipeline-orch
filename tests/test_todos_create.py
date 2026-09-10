@@ -223,6 +223,120 @@ def _patch_machine(mocker, req, issues, *, audit=None):
     )
 
 
+def test_hold_canonical_compatibility_and_preview(tmp_path):
+    from hermes_pipeline.todos_create import render_create_preview
+
+    legacy = load_create_request(_write(tmp_path / "legacy.json", request()))
+    explicit_false = load_create_request(_write(tmp_path / "false.json", {**request(), "hold": False}))
+    held = load_create_request(_write(tmp_path / "held.json", {**request(), "hold": True}))
+    assert explicit_false.canonical_json == legacy.canonical_json
+    assert not legacy.hold and not explicit_false.hold and held.hold
+    assert json.loads(held.canonical_json)["hold"] is True
+    assert render_create_body(held, issue_number=42) == render_create_body(legacy, issue_number=42)
+    assert "Hold: true (tpo:on-hold)" in render_create_preview(
+        held, project="local", repository="acme/repo", issue_number=None,
+    )
+
+
+@pytest.mark.parametrize("hold", [None, 0, 1, "true", [], {}])
+def test_hold_requires_strict_boolean(tmp_path, hold):
+    with pytest.raises(TodoCreateError, match="invalid_hold"):
+        load_create_request(_write(tmp_path / "request.json", {**request(), "hold": hold}))
+
+
+def test_held_creation_sets_initial_hold_and_keeps_it_through_completion(tmp_path, mocker):
+    from hermes_pipeline import github_issues
+    from hermes_pipeline.todos_create import _render_fields
+
+    req = load_create_request(_write(tmp_path / "request.json", {**request(), "hold": True}))
+    issues = []
+    _patch_machine(mocker, req, issues)
+    def create(_project, *, title, body, labels, repo):
+        assert github_issues.ON_HOLD_LABEL in labels
+        issues.append(_issue(req, body, labels))
+        return 42
+    create_mock = mocker.patch.object(github_issues, "create_issue", side_effect=create)
+    def body_update(_project, _number, body, **kwargs):
+        assert issues[0].body == _render_fields(req)
+        issues[0] = _issue(req, body, issues[0].labels)
+    mocker.patch.object(github_issues, "update_issue_body", side_effect=body_update)
+    def add(_project, _number, label, **kwargs):
+        assert github_issues.ON_HOLD_LABEL in issues[0].labels
+        issues[0] = _issue(req, issues[0].body, (*issues[0].labels, label))
+    def remove(_project, _number, label, **kwargs):
+        assert label != github_issues.ON_HOLD_LABEL
+        issues[0] = _issue(req, issues[0].body, tuple(x for x in issues[0].labels if x != label))
+    mocker.patch.object(github_issues, "add_label", side_effect=add)
+    mocker.patch.object(github_issues, "remove_label", side_effect=remove)
+    assert execute_create(tmp_path, tmp_path / "state", req, approved_repo="acme/repo") == 42
+    assert github_issues.ON_HOLD_LABEL in issues[0].labels
+    assert github_issues.READY_LABEL in issues[0].labels
+    assert create_mock.call_count == 1
+
+
+@pytest.mark.parametrize("lost_at", [1, 2, 3, 4, 5])
+def test_missing_or_concurrently_removed_hold_stops_and_retains_request(tmp_path, mocker, lost_at):
+    from hermes_pipeline import github_issues
+
+    req = load_create_request(_write(tmp_path / "request.json", {**request(), "hold": True}))
+    body = render_create_body(req, issue_number=42)
+    held = _issue(req, body, ("tpo:todo", "needs-triage", "tpo:on-hold"))
+    issues = [held]
+    _patch_machine(mocker, req, issues)
+    count = 0
+    def fetch(*args, **kwargs):
+        nonlocal count
+        count += 1
+        if count >= lost_at:
+            return _issue(req, body, ("tpo:todo", "ready-for-agent"))
+        return held
+    github_issues.fetch_issue.side_effect = fetch
+    add = mocker.patch.object(github_issues, "add_label")
+    remove = mocker.patch.object(github_issues, "remove_label")
+    with pytest.raises(TodoCreateError, match="hold_drift"):
+        execute_create(tmp_path, tmp_path / "state", req, approved_repo="acme/repo", issue_number=42)
+    assert (tmp_path / "state" / "todo-create" / f"{req.transaction_id}.json").exists()
+    assert add.call_count + remove.call_count <= max(0, lost_at - 3)
+
+
+def test_hold_changes_same_transaction_are_drift(tmp_path):
+    from hermes_pipeline.todos_create import persist_create_request
+
+    legacy = load_create_request(_write(tmp_path / "legacy.json", request()))
+    held = load_create_request(_write(tmp_path / "held.json", {**request(), "hold": True}))
+    persist_create_request(tmp_path / "state", legacy)
+    with pytest.raises(TodoCreateError, match="request_drift"):
+        persist_create_request(tmp_path / "state", held)
+
+
+def test_initial_missing_hold_stops_before_body_update(tmp_path, mocker):
+    from hermes_pipeline import github_issues
+    from hermes_pipeline.todos_create import _render_fields
+
+    req = load_create_request(_write(tmp_path / "request.json", {**request(), "hold": True}))
+    issues = [_issue(req, _render_fields(req))]
+    _patch_machine(mocker, req, issues)
+    update = mocker.patch.object(github_issues, "update_issue_body")
+    with pytest.raises(TodoCreateError, match="hold_drift"):
+        execute_create(tmp_path, tmp_path / "state", req, approved_repo="acme/repo")
+    update.assert_not_called()
+
+
+def test_completed_held_issue_retry_has_no_remote_mutations(tmp_path, mocker):
+    from hermes_pipeline import github_issues
+
+    req = load_create_request(_write(tmp_path / "request.json", {**request(), "hold": True}))
+    issues = [_issue(req, render_create_body(req, issue_number=42),
+                     ("tpo:todo", "ready-for-agent", "tpo:on-hold"))]
+    _patch_machine(mocker, req, issues)
+    mutations = [mocker.patch.object(github_issues, name) for name in (
+        "create_issue", "update_issue_body", "add_label", "remove_label",
+    )]
+    assert execute_create(tmp_path, tmp_path / "state", req, approved_repo="acme/repo") == 42
+    for mutation in mutations:
+        mutation.assert_not_called()
+
+
 def test_marker_discovery_is_unfiltered_and_fully_paginated(tmp_path, mocker):
     from hermes_pipeline import github_issues
     from hermes_pipeline.todos_create import _matching_issues, creation_marker
@@ -251,13 +365,15 @@ def test_duplicate_transaction_markers_across_issues_fail_closed(tmp_path, mocke
         execute_create(tmp_path, tmp_path / "state", req, approved_repo="acme/repo")
 
 
-def test_unknown_create_outcome_recovers_marker_without_second_create(tmp_path, mocker):
+@pytest.mark.parametrize("hold", [False, True])
+def test_unknown_create_outcome_recovers_marker_without_second_create(tmp_path, mocker, hold):
     from hermes_pipeline import github_issues
     from hermes_pipeline.todos_create import _render_fields
 
-    req = load_create_request(_write(tmp_path / "request.json", request()))
-    partial = _issue(req, _render_fields(req))
-    complete = _issue(req, render_create_body(req, issue_number=42), ("tpo:todo", "ready-for-agent"))
+    req = load_create_request(_write(tmp_path / "request.json", {**request(), "hold": hold}))
+    hold_labels = (github_issues.ON_HOLD_LABEL,) if hold else ()
+    partial = _issue(req, _render_fields(req), ("tpo:todo", "needs-triage", *hold_labels))
+    complete = _issue(req, render_create_body(req, issue_number=42), ("tpo:todo", "ready-for-agent", *hold_labels))
     issues = []
     _patch_machine(mocker, req, issues)
     create = mocker.patch.object(
