@@ -1,5 +1,6 @@
 import json
 import os
+import platform
 import socket
 import struct
 import subprocess
@@ -155,6 +156,9 @@ def test_real_subprocess_checks_and_fresh_reviewer_create_receipts(candidate, mo
 
 def test_verification_sandbox_cannot_write_authority_or_use_network(tmp_path, monkeypatch):
     from hermes_pipeline import agent_collector as collector
+    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, 'exists', lambda path: True if str(path) == '/proc/self/ns/user' else original_exists(path))
     monkeypatch.setattr(collector.shutil, 'which', lambda name: '/usr/bin/bwrap')
     snapshot = tmp_path / 'snapshot'
     snapshot.mkdir()
@@ -175,6 +179,7 @@ def test_verification_sandbox_cannot_write_authority_or_use_network(tmp_path, mo
         collector.verification_argv(['pytest'], snapshot, authority_root=authority, seccomp_fd=10)
 
 
+@pytest.mark.skipif(platform.system() != 'Linux', reason='Linux bwrap/seccomp enforcement; separate native Darwin suite')
 def test_actual_verification_sandbox_preserves_host_files(tmp_path):
     from hermes_pipeline import agent_collector as collector
     snapshot = tmp_path / 'snapshot'
@@ -213,6 +218,9 @@ def test_actual_verification_sandbox_preserves_host_files(tmp_path):
 
 def test_verification_sandbox_rejects_authority_overlap(tmp_path, monkeypatch):
     from hermes_pipeline import agent_collector as collector
+    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
+    original_exists = Path.exists
+    monkeypatch.setattr(Path, 'exists', lambda path: True if str(path) == '/proc/self/ns/user' else original_exists(path))
     monkeypatch.setattr(collector.shutil, 'which', lambda name: '/usr/bin/bwrap')
     snapshot = tmp_path / 'snapshot'
     snapshot.mkdir()
@@ -222,6 +230,7 @@ def test_verification_sandbox_rejects_authority_overlap(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('kind', [socket.SOCK_STREAM, socket.SOCK_DGRAM])
+@pytest.mark.skipif(platform.system() != 'Linux', reason='Linux bwrap/seccomp enforcement; separate native Darwin suite')
 def test_actual_verification_sandbox_cannot_connect_host_unix_socket(tmp_path, kind):
     from hermes_pipeline import agent_collector as collector
     snapshot = tmp_path / 'snapshot'
@@ -293,11 +302,13 @@ def test_unknown_collector_marker_schema_blocks_cleanup(candidate):
 
 def test_unsupported_verification_syscall_architecture_blocks_launch(monkeypatch):
     from hermes_pipeline import agent_collector as collector
+    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
     monkeypatch.setattr(collector.platform, 'machine', lambda: 'unknown-platform')
     with pytest.raises(ExecutionError, match='architecture unsupported'), collector.verification_filter():
         pytest.fail('unsupported syscall architecture accepted')
 
 
+@pytest.mark.skipif(platform.system() != 'Linux', reason='Linux bwrap/seccomp enforcement; separate native Darwin suite')
 def test_actual_verification_sandbox_runs_uv_pytest_with_local_socketpairs(tmp_path):
     from hermes_pipeline import agent_collector as collector
     uv = collector.shutil.which('uv')
@@ -381,6 +392,7 @@ def test_network_creation_denied():
 def test_verification_filter_limits_socketpair_exception(
         monkeypatch, architecture, audit_arch, socket_syscall, connect, socketpair):
     from hermes_pipeline import agent_collector as collector
+    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
     monkeypatch.setattr(collector.platform, 'machine', lambda: architecture)
     with collector.verification_filter() as descriptor:
         policy = list(struct.iter_unpack('=HBBI', os.read(descriptor, 4096)))

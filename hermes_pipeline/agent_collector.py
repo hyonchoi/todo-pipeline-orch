@@ -15,6 +15,7 @@ import shlex
 import shutil
 import struct
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import contextmanager
@@ -131,6 +132,12 @@ def verification_filter():
     allowing socket creation or connections to host pathname sockets. Datagram
     pairs are denied because sendto could address a host pathname socket.
     """
+    system = platform.system()
+    if system == 'Darwin':
+        yield None
+        return
+    if system != 'Linux':
+        raise ExecutionError('checkpoint verification platform unsupported')
     architecture = platform.machine()
     policies = {'x86_64': (0xC000003E, (41, 42), 53),
                 'aarch64': (0xC00000B7, (198, 203), 199)}
@@ -156,7 +163,12 @@ def verification_filter():
 
 
 def verification_argv(argv, snapshot, *, authority_root, seccomp_fd, worktree=None):
-    """Linux mount/PID/network isolation; checks can only write their snapshot."""
+    """Isolate verification with the native fail-closed platform backend."""
+    if platform.system() == 'Darwin':
+        from .agent_darwin_sandbox import verification_argv as darwin_argv
+        return darwin_argv(argv, snapshot, authority_root=authority_root, worktree=worktree)
+    if platform.system() != 'Linux':
+        raise ExecutionError('checkpoint verification platform unsupported')
     executable = shutil.which('bwrap')
     if not executable or not Path('/proc/self/ns/user').exists():
         raise ExecutionError('checkpoint verification sandbox unavailable')
@@ -186,6 +198,41 @@ def verification_argv(argv, snapshot, *, authority_root, seccomp_fd, worktree=No
             '--setenv', 'UV_CACHE_DIR', '/tmp/uv-cache', '--setenv', 'UV_OFFLINE', '1',
             '--setenv', 'PYTHONPATH', str(snapshot), *environment,
             '--chdir', str(snapshot), '--', *argv]
+
+
+def confirm_verification_capability():
+    """Probe the actual platform sandbox before launching untrusted work.
+
+    This bounded, provider-free probe establishes runtime availability, not the
+    full native adversarial qualification covered by the platform test suite.
+    """
+    try:
+        with tempfile.TemporaryDirectory(prefix='tpo-sandbox-probe-') as temporary:
+            root = Path(temporary).resolve()
+            snapshot, authority = root / 'snapshot', root / 'authority'
+            snapshot.mkdir()
+            authority.mkdir()
+            (authority / 'private').write_text('private')
+            script = (
+                "from pathlib import Path; import socket, sys; "
+                "Path('output').write_text('ok'); "
+                "left,right=socket.socketpair(); left.sendall(b'x'); "
+                "assert right.recv(1)==b'x'; left.close(); right.close(); "
+                "\ntry: Path(sys.argv[1]).read_text()\n"
+                "except OSError: pass\n"
+                "else: raise AssertionError('authority readable')\n"
+            )
+            with verification_filter() as descriptor:
+                argv = verification_argv([sys.executable, '-c', script, str(authority / 'private')],
+                                         snapshot, authority_root=authority, seccomp_fd=descriptor)
+                result = subprocess.run(argv, cwd=snapshot, env={}, stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                        timeout=5, close_fds=True,
+                                        pass_fds=(() if descriptor is None else (descriptor,)))
+            if result.returncode != 0 or (snapshot / 'output').read_text() != 'ok':
+                raise ExecutionError('checkpoint verification sandbox unavailable')
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ExecutionError('checkpoint verification sandbox unavailable') from exc
 
 
 def review_argv(client, snapshot, staging, authority, *, private_paths=None):
@@ -351,7 +398,7 @@ def collect_checkpoints(store, identity, generation, *, deadline_monotonic):
                     _run_owned(store, identity, generation,
                                verification_argv(command, snapshot, authority_root=store.root,
                                                  seccomp_fd=descriptor, worktree=worktree), cwd=snapshot,
-                               stdin_bytes=b'', env={}, deadline=deadline_monotonic, pass_fds=(descriptor,), task_id=task['id'])
+                               stdin_bytes=b'', env={}, deadline=deadline_monotonic, pass_fds=(() if descriptor is None else (descriptor,)), task_id=task['id'])
             # Recreate the pristine commit snapshot so checks cannot alter the
             # implementation presented to the independent reviewer.
             shutil.rmtree(snapshot)
