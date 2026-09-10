@@ -31,4 +31,4 @@ jobs:
       - name: Install test dependencies
         run: uv sync --locked --python 3.13
       - name: Check native ownership and process cleanup
-        run: uv run --python 3.13 pytest -q tests/test_agent_darwin.py --basetemp .hermes/pytest-darwin
+        run: uv run --python 3.13 pytest -q tests/test_agent_darwin.py --basetemp "$RUNNER_TEMP/pytest-darwin"
