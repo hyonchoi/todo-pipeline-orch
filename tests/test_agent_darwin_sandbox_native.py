@@ -100,7 +100,7 @@ def test_native_darwin_host_unix_endpoints_and_socketpair_sendto(tmp_path, kind)
             server.bind(endpoint)
             if kind == socket.SOCK_STREAM:
                 server.listen(1)
-            script = 'import socket, sys\n' + DENIED + '''
+            script = 'import errno, socket, sys\n' + DENIED + '''
 def host_connection():
     with socket.socket(socket.AF_UNIX, int(sys.argv[2])) as connection:
         connection.connect(sys.argv[1])
@@ -115,7 +115,15 @@ if int(sys.argv[2]) == socket.SOCK_DGRAM:
     else:
         left, right = pair
         with left, right:
-            denied(lambda: left.sendto(b'forged', sys.argv[1]))
+            try:
+                left.sendto(b'forged', sys.argv[1])
+            except OSError as exc:
+                # Darwin can reject an addressed send on an already connected
+                # pair before Seatbelt evaluates the destination. The host
+                # listener must still receive no data in either denial case.
+                assert exc.errno in (errno.EPERM, errno.EACCES, errno.EISCONN)
+            else:
+                raise AssertionError('socketpair sent to host endpoint')
 '''
             run_sandbox(snapshot, authority, script, endpoint, int(kind))
             server.settimeout(0.05)
@@ -207,6 +215,9 @@ assert lib.bootstrap_look_up(bootstrap, b'com.apple.cfprefsd.daemon', ctypes.byr
     # sandbox_check distinguishes actual policy denial from an absent service.
     script += '''
 sandbox = ctypes.CDLL('/usr/lib/libsandbox.dylib')
+# Apple ARM64 uses a distinct variadic ABI. Declare only the fixed arguments:
+# https://docs.python.org/3/library/ctypes.html#calling-variadic-functions
+sandbox.sandbox_check.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int]
 sandbox.sandbox_check.restype = ctypes.c_int
 # SANDBOX_FILTER_GLOBAL_NAME = 2: WebKit Source/WTF/wtf/spi/darwin/SandboxSPI.h.
 assert sandbox.sandbox_check(os.getpid(), b'mach-lookup', 2, b'com.apple.cfprefsd.daemon') == 1
