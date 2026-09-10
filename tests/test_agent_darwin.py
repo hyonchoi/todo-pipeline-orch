@@ -11,97 +11,6 @@ import pytest
 from hermes_pipeline import agent_darwin as darwin
 
 
-@pytest.fixture
-def native_diagnostics(monkeypatch):
-    """Bounded scalar diagnostics for native CI; no process argv or output."""
-    from collections import Counter, deque
-
-    from hermes_pipeline import agent_process
-
-    events = deque(maxlen=24)
-    owned = set()
-    counts = Counter()
-    report = {'counts': counts, 'events': events}
-    fields = ('pid', 'start_ticks', 'ppid', 'pgrp', 'session', 'state')
-
-    def safe_identity(value):
-        if not isinstance(value, dict):
-            return value
-        if value.get('pid') not in owned:
-            return {'state': value.get('state')}
-        return {key: value.get(key) for key in fields}
-
-    def observe_method(name):
-        original = getattr(darwin.Backend, name)
-        def observe(self, pid):
-            try:
-                return original(self, pid)
-            except (OSError, ValueError, IndexError) as error:
-                counts[name + '_error'] += 1
-                trace = error.__traceback__
-                while trace.tb_next is not None:
-                    trace = trace.tb_next
-                events.append({'operation': name, 'pid': pid if pid in owned else None,
-                               'error': type(error).__name__,
-                               'errno': getattr(error, 'errno', None),
-                               'line': trace.tb_lineno})
-                raise
-        monkeypatch.setattr(darwin.Backend, name, observe)
-
-    for name in ('snapshot', 'discovery_snapshot'):
-        observe_method(name)
-    original_live = agent_process._live
-    original_signal = agent_process._signal
-    original_discover = agent_process._discover
-
-    def live(identity):
-        result = original_live(identity)
-        if result is None:
-            counts['live_unconfirmed'] += 1
-            events.append({'operation': 'live', 'identity': safe_identity(identity)})
-        return result
-
-    def send(identity, sig):
-        result = original_signal(identity, sig)
-        counts['signal_pending' if result is None else 'signal_ok' if result else 'signal_failed'] += 1
-        events.append({'operation': 'signal', 'pid': identity['pid'],
-                       'signal': int(sig), 'confirmed': result})
-        return result
-
-    def discover(known):
-        # Capture only this function's return location and narrow proof inputs.
-        # Profiling does not record subprocess strings or arbitrary locals.
-        owned.update(known)
-        previous = sys.getprofile()
-        def profile(frame, event, result):
-            if frame.f_code is original_discover.__code__ and event == 'return' and result is False:
-                local = frame.f_locals
-                evidence = {key: safe_identity(local.get(key)) for key in
-                            ('pid', 'relation', 'anchor_pid', 'snapshot', 'current', 'anchor')}
-                for key in ('pid', 'anchor_pid'):
-                    if evidence[key] not in owned:
-                        evidence[key] = None
-                events.append({'operation': 'discover', 'line': frame.f_lineno,
-                               'proof': evidence, 'owned': list(known)[:16]})
-        sys.setprofile(profile)
-        try:
-            result = original_discover(known)
-        finally:
-            sys.setprofile(previous)
-        if not result:
-            counts['discover_unconfirmed'] += 1
-        return result
-
-    monkeypatch.setattr(agent_process, '_live', live)
-    monkeypatch.setattr(agent_process, '_signal', send)
-    monkeypatch.setattr(agent_process, '_discover', discover)
-    yield report
-    import json
-    print('native cleanup diagnostic counts: ' + json.dumps(dict(counts), sort_keys=True))
-    for event in events:
-        print('native cleanup diagnostic event: ' + json.dumps(event, sort_keys=True))
-
-
 def record(pid=42, unique=901, version=7):
     value = bytearray(192)
     struct.pack_into('=IIII', value, 4, 2, 12345, pid, 1)
@@ -216,7 +125,7 @@ def test_missing_audit_capability_blocks_backend(monkeypatch):
 
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='native Darwin required')
-def test_native_identity_and_timeout(tmp_path, native_diagnostics):
+def test_native_identity_and_timeout(tmp_path):
     from hermes_pipeline.agent_process import process_snapshot, run_process
     identity = process_snapshot(os.getpid())
     assert identity['start_ticks'] > 0
@@ -224,7 +133,7 @@ def test_native_identity_and_timeout(tmp_path, native_diagnostics):
     result = run_process([sys.executable, '-c', 'import time; time.sleep(30)'],
                          cwd=tmp_path.resolve(), stdin_bytes=b'', timeout=.2, cleanup_timeout=2)
     assert result['outcome'] == 'timed_out'
-    assert result['cleanup'] == 'confirmed', native_diagnostics
+    assert result['cleanup'] == 'confirmed'
 
 
 def test_native_ci_requires_darwin():
@@ -318,7 +227,7 @@ def test_native_exec_preserves_birth_rejects_stale_audit_token(tmp_path):
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='native Darwin required')
 @pytest.mark.parametrize('stopped', [False, True])
-def test_native_owned_tree_timeout_and_sibling_survives(tmp_path, stopped, native_diagnostics):
+def test_native_owned_tree_timeout_and_sibling_survives(tmp_path, stopped):
     import subprocess
     import time
 
@@ -340,7 +249,7 @@ def test_native_owned_tree_timeout_and_sibling_survives(tmp_path, stopped, nativ
                              cwd=tmp_path.resolve(), stdin_bytes=b'', timeout=1, cleanup_timeout=3)
         assert time.monotonic() - started < 6
         assert result['outcome'] == 'timed_out'
-        assert result['cleanup'] == 'confirmed', native_diagnostics
+        assert result['cleanup'] == 'confirmed'
         assert len(result['processes']) >= 3
         assert sibling.poll() is None
         for identity in result['processes']:
