@@ -189,6 +189,7 @@ def test_zero_exit_without_contract_is_not_completion(execution):
 def test_supervisor_persists_timeout_even_with_late_zero_exit(execution, monkeypatch, tmp_path):
     store, _ = execution
     monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *args, **kwargs: [sys.executable, "-c", "pass"])
     (tmp_path / "staging").mkdir()
     monkeypatch.setattr(supervisor, "staging_directory", lambda *args, **kwargs: tmp_path / "staging")
     def run(argv, **kwargs):

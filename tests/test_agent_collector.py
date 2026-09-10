@@ -3,6 +3,7 @@ import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -225,18 +226,27 @@ def test_actual_verification_sandbox_cannot_connect_host_unix_socket(tmp_path):
     snapshot.mkdir()
     authority = tmp_path / 'authority'
     authority.mkdir()
-    socket_path = Path.cwd() / '.hermes' / f'cs-{os.getpid()}'
-    with socket.socket(socket.AF_UNIX) as listener:
+    with collector.verification_filter() as descriptor:
+        try:
+            probe_argv = collector.verification_argv(['/usr/bin/true'], snapshot, authority_root=authority, seccomp_fd=descriptor)
+        except ExecutionError:
+            pytest.skip('bwrap unavailable; production fails closed')
+        probe = subprocess.run(probe_argv, capture_output=True, pass_fds=(descriptor,), timeout=5)
+    if probe.returncode:
+        pytest.skip('kernel sandbox unavailable; production fails closed')
+    # Keep the address short and outside /tmp, which the sandbox masks.
+    with tempfile.TemporaryDirectory(prefix='tpo-socket-', dir='/var/tmp') as socket_dir, socket.socket(socket.AF_UNIX) as listener:
+        socket_path = Path(socket_dir) / 'host.sock'
         listener.bind(str(socket_path))
         listener.listen()
         command = [sys.executable, '-c',
-                   'import socket,sys\ntry:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])\n'
+                   'import socket,sys\nfrom pathlib import Path\nassert Path(sys.argv[1]).is_socket()\n'
+                   'try:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])\n'
                    'except OSError: pass\nelse: raise AssertionError("host socket reachable")', str(socket_path)]
         with collector.verification_filter() as descriptor:
             argv = collector.verification_argv(command, snapshot, authority_root=authority, seccomp_fd=descriptor)
             outcome = collector.run_process(argv, cwd=snapshot, stdin_bytes=b'', timeout=5, cleanup_timeout=1,
                                             env={}, pass_fds=(descriptor,))
-    socket_path.unlink()
     assert outcome['exit_code'] == 0
 
 
