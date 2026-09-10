@@ -2104,13 +2104,8 @@ class TestObserveOutcomes:
     def test_blocked_phase_writes_failed_outcome(self, state_dir):
         """A sticky ``blocked`` card must be recorded, not silently abandoned.
 
-        ``all_phases_complete`` treats ``blocked`` as complete on purpose -- a
-        sticky block is terminal and the tick must not spin on it -- so the prior
-        tick reads as finished, the project lock is released and the scan moves
-        to the next TODO, abandoning the branch and worktree. Writing no outcome
-        line on top of that left the circuit breaker with NEITHER a success nor a
-        failure for the run, which is a run reporting a success it did not earn.
-        The record is the fix; the completion semantics are not the defect.
+        Holding selection must still leave durable failure evidence for the
+        blocked phase, without reporting the run as successfully completed.
         """
         from hermes_pipeline.kanban_tasks import observe_outcomes
 

@@ -1224,6 +1224,9 @@ class TestTickGitHubSource:
         (project_state / "runs" / "01OLD" / "registration.json").write_text(
             json.dumps(_registration_payload(project_dir, 13))
         )
+        # A verified historical handoff permits selection while retaining its
+        # issue claim; unresolved execution is covered by the recovery gate.
+        (project_state / "runs" / "01OLD" / "finish-verified").touch()
         claimed = ("tpo:todo", "ready-for-agent", "tpo:in-progress")
         seed_project_issues(
             fake_gh,
@@ -1377,7 +1380,7 @@ def _git_project(tmp_path):
 
 
 class TestTickCrashRecovery:
-    def test_crash_between_registration_and_tick_persist_recovers_on_next_tick(
+    def test_crash_between_registration_and_tick_persist_holds_next_tick(
         self, tmp_path, mocker, fake_gh
     ):
         project_dir = _git_project(tmp_path)
@@ -1414,8 +1417,8 @@ class TestTickCrashRecovery:
         create.assert_not_called()
         assert not any(call[:2] == ["issue", "edit"] for call in fake_gh.gh_calls())
 
-        # Next tick: the orphaned registration is ownership proof — #10 is in_flight
-        # (no worktree_mismatch loop); a different eligible issue proceeds instead.
+        # Next tick: the orphaned execution holds the project, even if another
+        # issue is eligible. Recovery requires an explicit operator resolution.
         (project_dir / "docs" / "plan-11.md").write_text(MANIFEST_PLAN.replace("TODO-10", "TODO-11"))
         for command in (("add", "docs/plan-11.md"), ("commit", "-qm", "plan 11")):
             subprocess.run(["git", *command], cwd=project_dir, check=True, capture_output=True)
@@ -1434,17 +1437,15 @@ class TestTickCrashRecovery:
             tick_id="01RETRY", mocker=mocker, patch_registration=False, picked="TODO-11",
         )
 
-        context = selection.call_args.kwargs["ctx"]
-        assert context.candidate_ids == ("TODO-11",)
-        assert (project_state / "runs" / "01RETRY" / "registration.json").exists()
-        assert json.loads(
-            (project_state / "runs" / "01RETRY" / "registration.json").read_text()
-        )["issue_number"] == 11
-        create.assert_called_once()
-        assert (project_state / "current_tick_id.txt").read_text().strip() == "01RETRY"
-        label_calls = [call for call in fake_gh.gh_calls() if call[:2] == ["issue", "edit"]]
-        assert label_calls == [["issue", "edit", "11", "--repo", REPO, "--add-label", "tpo:in-progress"]]
-        selection.cb.observe.assert_called_once_with(picked="TODO-11", counts_as_no_progress=False)
+        selection.assert_not_called()
+        create.assert_not_called()
+        assert not (project_state / "runs" / "01RETRY").exists()
+        assert not (project_state / "current_tick_id.txt").exists()
+        assert not any(call[:2] == ["issue", "edit"] for call in fake_gh.gh_calls())
+        selection.cb.observe.assert_called_once_with(
+            picked=None, counts_as_no_progress=True,
+            detail="unresolved historical execution runs: 01CRASH",
+        )
 
     def test_orphaned_registration_blocks_its_issue_even_after_new_commits(
         self, tmp_path, mocker, fake_gh
@@ -1482,8 +1483,11 @@ class TestTickCrashRecovery:
 
         selection.assert_not_called()
         create.assert_not_called()
-        decision = json.loads((project_state / "decisions" / "01AFTER.json").read_text())
-        assert decision["blocked_reasons"] == {"TODO-10": "in_flight"}
+        assert not (project_state / "decisions" / "01AFTER.json").exists()
+        selection.cb.observe.assert_called_once_with(
+            picked=None, counts_as_no_progress=True,
+            detail="unresolved historical execution runs: 01CRASH",
+        )
         assert not (project_state / "runs" / "01AFTER").exists()
 
 
