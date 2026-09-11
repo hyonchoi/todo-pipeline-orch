@@ -183,10 +183,17 @@ def _discover(known: dict[int, Identity]) -> bool:
                     anchor = process_snapshot(anchor_pid)
                 except (OSError, ValueError, IndexError):
                     return False
-                if (current is None or anchor is None
-                        or not _same(snapshot, current)
-                        or not _same(known[anchor_pid], anchor)
-                        or current[relation] != anchor_pid
+                if anchor is None or not _same(known[anchor_pid], anchor):
+                    return False
+                if current is None or not _same(snapshot, current):
+                    # A scanned session member may exit or reuse its PID before
+                    # revalidation. Its unchanged owned anchor makes that race
+                    # harmless, but the replacement is never adopted.
+                    if (snapshot["session"] in sessions
+                            and snapshot["start_ticks"] >= anchor["start_ticks"]):
+                        continue
+                    return False
+                if (current[relation] != anchor_pid
                         or current["start_ticks"] < anchor["start_ticks"]):
                     return False
                 known[pid] = snapshot

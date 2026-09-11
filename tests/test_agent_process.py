@@ -171,6 +171,93 @@ def test_untracked_session_descendant_after_parent_exit_blocks_cleanup(monkeypat
     assert agent_process._discover({991: parent}) is False
 
 
+def test_discovery_ignores_candidate_that_exits_after_owned_session_scan(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    candidate = dict(parent, pid=992, ppid=991, start_ticks=20)
+    reads = {991: 0, 992: 0}
+
+    def snapshot(pid):
+        reads[pid] += 1
+        if pid == 991:
+            return parent
+        return candidate if reads[pid] == 1 else None
+
+    monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/992")]))
+    monkeypatch.setattr(agent_process, "process_snapshot", snapshot)
+    known = {991: parent}
+    assert agent_process._discover(known) is True
+    assert known == {991: parent}
+    assert reads == {991: 2, 992: 2}
+
+
+def test_disappeared_candidate_older_than_owned_anchor_blocks_discovery(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    candidate = dict(parent, pid=992, ppid=991, start_ticks=5)
+    reads = {991: 0, 992: 0}
+
+    def snapshot(pid):
+        reads[pid] += 1
+        if pid == 991:
+            return parent
+        return candidate if reads[pid] == 1 else None
+
+    monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/992")]))
+    monkeypatch.setattr(agent_process, "process_snapshot", snapshot)
+    assert agent_process._discover({991: parent}) is False
+
+
+def test_discovery_ignores_candidate_pid_reuse_after_owned_session_scan(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    candidate = dict(parent, pid=992, ppid=991, start_ticks=20)
+    replacement = dict(candidate, start_ticks=30, ppid=1, session=999)
+    reads = {991: 0, 992: 0}
+
+    def snapshot(pid):
+        reads[pid] += 1
+        if pid == 991:
+            return parent
+        return candidate if reads[pid] == 1 else replacement
+
+    monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/992")]))
+    monkeypatch.setattr(agent_process, "process_snapshot", snapshot)
+    known = {991: parent}
+    assert agent_process._discover(known) is True
+    assert known == {991: parent}
+    assert reads == {991: 2, 992: 2}
+
+
+def test_disappeared_candidate_still_requires_live_owned_anchor(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    candidate = dict(parent, pid=992, ppid=991, start_ticks=20)
+    reads = {991: 0, 992: 0}
+
+    def snapshot(pid):
+        reads[pid] += 1
+        if pid == 991:
+            return parent if reads[pid] == 1 else None
+        return candidate if reads[pid] == 1 else None
+
+    monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/992")]))
+    monkeypatch.setattr(agent_process, "process_snapshot", snapshot)
+    assert agent_process._discover({991: parent}) is False
+
+
+def test_disappeared_detached_session_leader_still_blocks_discovery(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    detached = dict(parent, pid=992, ppid=991, session=992, start_ticks=20)
+    reads = {991: 0, 992: 0}
+
+    def snapshot(pid):
+        reads[pid] += 1
+        if pid == 991:
+            return parent
+        return detached if reads[pid] == 1 else None
+
+    monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/992")]))
+    monkeypatch.setattr(agent_process, "process_snapshot", snapshot)
+    assert agent_process._discover({991: parent}) is False
+
+
 def test_scan_parent_reuse_cannot_adopt_unrelated_child(monkeypatch):
     parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
     unrelated = dict(parent, pid=992, ppid=991, session=999, start_ticks=30)
