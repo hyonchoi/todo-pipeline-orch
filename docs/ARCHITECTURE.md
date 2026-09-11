@@ -105,10 +105,14 @@ See [supervision and recovery](howto-agent-supervisor.md) for process ownership,
 checkpoint evidence, explicit retry admission, and portability limitations.
 Linux process ownership uses `/proc` and pidfds; macOS uses `libproc` unique IDs
 and audit-token signaling, detected by capability rather than OS version.
-Manifest collectors use `bwrap`/seccomp on Linux and Seatbelt on macOS. Both
-permit anonymous stream IPC while denying network and host Unix-socket access.
-Process, client, and required collector capability checks precede admission; a
-refusal remains visible in status without consuming an attempt.
+Clients and checkpoint verification commands run as the invoking OS user,
+without supervisor sandbox restrictions or storage isolation. Codex uses
+`--dangerously-bypass-approvals-and-sandbox`; Claude uses
+`--dangerously-skip-permissions` with the configured tools. Collectors execute
+pinned command argv directly in exact-commit snapshots, inheriting the
+environment and using the existing worktree virtual environment when available.
+Process ownership and client availability checks precede admission; a refusal
+remains visible in status without consuming an attempt.
 
 ```
 cli._tick_project(config, contract)
@@ -192,9 +196,12 @@ disappearance alone cannot complete a card. See
 
 Before attempt admission, the launcher reports `waiting_for_admission` for
 verified worktree contention or a pending launch and returns zero for continued
-polling. Its five-second poll does not refresh the execution budget. Newly
-generated worker instructions preserve card state while waiting; existing card
-bodies are not rewritten.
+polling. Plain `run` polls for five seconds; newly generated workers use
+`run --wait`, await its command or background tool session, and reconnect if
+bounded waiting returns a nonterminal state. Waiting is capped by phase timeout
+plus cleanup and, on the same host and boot, the original attempt deadline plus
+cleanup. It never refreshes the execution budget. Worker instructions preserve
+card state while waiting; existing card bodies are not rewritten.
 
 ## Data Flow
 

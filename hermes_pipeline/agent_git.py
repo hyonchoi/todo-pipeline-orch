@@ -133,7 +133,7 @@ def metadata_paths(cwd: Path) -> tuple[Path, Path, Path]:
 
 
 def inspection_root(common: Path) -> Path:
-    """Reserved private path that client sandboxes must deny explicitly."""
+    """Reserved path for the supervisor's Git inspection metadata."""
     return common / 'tpo-inspection'
 
 

@@ -33,37 +33,35 @@ and the prompt client are all real.
 
 New cards invoke the installed `tpo-agent-supervisor` launcher. Install it with
 TPO in its Python 3.12+ environment; the Hermes shell does not need a separate
-Python interpreter for permission serialization. The supervisor delivers pinned
+Python interpreter for client launch settings. The supervisor delivers pinned
 prompt bytes directly through stdin and owns launch, deadlines, exit collection,
 and result validation. There is no Hermes prompt-marker extraction or unmanaged
 shell client launch in a new card. Historical cards retain their old instructions;
 start a new harness run to exercise current dispatch and admission-waiting
-instructions. Existing workers may require an explicit operator refresh or
+instructions. New cards use `run --wait` to await a bounded terminal response;
+if it returns a nonterminal status, they reconnect without changing card state.
+Existing workers may require an explicit operator refresh or
 recovery through supported Kanban operations; upgrading does not rewrite them.
 
 The selected client must satisfy the
 [client and platform prerequisites](howto-agent-supervisor.md#client-and-platform-prerequisites).
-Claude `2.1.267` needs `bwrap` and `socat` on Linux; macOS uses Claude's native
-sandbox. Codex must support named permission profiles (exercised with `0.154.0`).
 Linux process supervision requires `/proc` and pidfds; macOS requires available
-`libproc` identity and audit-token signaling capabilities. Manifest verification
-uses Linux `bwrap`/seccomp or macOS Seatbelt via `sandbox-exec`. Capability
-refusals occur before attempt admission and are available from supervisor status.
+`libproc` identity and audit-token signaling capabilities. Capability refusals
+occur before attempt admission and are available from supervisor status.
 
-The generated client grants include the selected worktree and both resolved Git
-metadata directories, plus the attempt submission directory, while denying
-authoritative execution storage and private Git inspection data. Client network
-access supports approved GitHub and dependency work. Permission serialization
-runs in the installed supervisor; no user/global client configuration is edited.
+Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses
+`--dangerously-skip-permissions` with its configured tools. Clients and checks
+run as the invoking OS user, without supervisor sandbox restrictions or storage
+isolation. No user/global client configuration is edited.
 
 After the client exits, the supervisor validates results against current Git
-state. Manifest checkpoints also require pinned verification commands in an
-isolated exact-commit snapshot and a fresh review within the attempt's remaining
-deadline. Verification snapshots have no network or host Unix-socket access,
-but permit anonymous stream socketpairs for runtime IPC. Hermes reports the
-structured outcome through supported worker tools. A zero exit without valid
-result and checkpoint evidence cannot complete a card. Preserve partial work;
-collection does not clean or commit the original worktree to force acceptance.
+state. Manifest checkpoints require pinned verification commands executed as
+direct argv in exact-commit snapshots, using the inherited environment and
+available worktree virtual environment, plus a fresh review within the attempt's
+remaining deadline. Hermes reports the structured outcome through supported
+worker tools. A zero exit without valid result and checkpoint evidence cannot
+complete a card. Preserve partial work; collection does not clean or commit the
+original worktree to force acceptance.
 
 ## One-time sandbox setup
 

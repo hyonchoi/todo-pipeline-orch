@@ -10,7 +10,7 @@ implementation and review. This is an internal Hermes interface, not a public
 The launcher is installed with the package by `uv tool install` and uses that
 environment's interpreter. Do not replace it with an ambient `python -m` call.
 Plan/profile validation and prompt rendering precede card registration. The
-execution record pins the Plan identity, prompt, client permissions, original
+execution record pins the Plan identity, prompt, client launch settings, original
 worktree and branch, timeout, and result contract.
 
 ## Ownership and deadlines
@@ -22,13 +22,17 @@ its existing `timeout + 60` ceiling and one worker retry.
 
 Before admission, `waiting_for_admission` with reason `worktree_busy` or
 `launch_pending` is an ephemeral waiting response, not a stored terminal outcome.
-The launcher returns exit code zero so the worker can poll the same command.
-Each command polls for up to five seconds and retries attachment only for
-verified worktree contention. Waiting neither admits an attempt nor refreshes an
-execution deadline. Newly generated worker instructions prohibit card transitions,
-including `kanban_block`, while waiting. Existing card bodies are not rewritten;
-older workers may need an explicit operator refresh or recovery through supported
-Kanban operations.
+The launcher returns exit code zero so the worker can reconnect. Plain `run`
+polls for up to five seconds; new worker cards use `run --wait` and await the
+command, including any background tool session. `--wait` is bounded by the phase
+timeout plus 60 seconds from the call, and by the original attempt deadline plus
+60 seconds when its host and boot match. It retries attachment only for verified
+worktree contention. Waiting neither admits an attempt nor refreshes its budget.
+If bounded waiting returns a nonterminal state, the worker reconnects without
+changing card state. Newly generated instructions prohibit `kanban_block` for
+`running_detached` or `waiting_for_admission`. Existing card bodies are not
+rewritten; older workers may need an explicit operator refresh or recovery
+through supported Kanban operations.
 
 On timeout, the supervisor attempts graceful then forced termination within the
 60-second cleanup allowance, including stopped processes where supported. A
@@ -81,7 +85,7 @@ tpo-agent-supervisor prepare-recovery --root "$execution_root" --execution "$exe
 # Inspect the complete preview before approving it.
 tpo-agent-supervisor approve-recovery --root "$execution_root" --execution "$execution_id" \
   --preview-file recovery-preview.json
-tpo-agent-supervisor run --root "$execution_root" --execution "$execution_id" \
+tpo-agent-supervisor run --wait --root "$execution_root" --execution "$execution_id" \
   --recovery-event "$approved_event"
 ```
 
@@ -115,66 +119,45 @@ subtask checkpoint guarantee. Legacy evidence permits recovery-only validation.
 
 After the implementation client exits, the supervisor uses the attempt's
 remaining original deadline to validate candidate commits in order. It builds
-an isolated snapshot of each exact commit, runs its pinned verification commands
-inside the platform verification sandbox, and invokes a fresh reviewer with
-read-only source access. Only successful checks and a matching structured review
-verdict produce receipts. Manifest implementation completion requires every task to be accepted.
-If the implementation consumes its entire deadline, collecting missing evidence
-requires a new explicitly approved recovery attempt.
+a snapshot of each exact commit, runs its pinned verification commands directly,
+and invokes a fresh reviewer. Only successful checks and a matching structured
+review verdict produce receipts. Manifest implementation completion requires
+every task to be accepted. If the implementation consumes its entire deadline,
+collecting missing evidence requires a new explicitly approved recovery attempt.
 
-Verification snapshots preserve the original worktree's partial changes by
-excluding them. They omit Git metadata and reject symlinks and submodules;
-Git-dependent or unsupported checks fail closed. Commands are bounded argv
-commands rather than shell programs. Check processes have no network or host
-Unix-socket access, cannot read authoritative execution storage, and may write
-only their snapshot and temporary files. Anonymous Unix stream socketpairs are
-allowed for local runtime IPC (including `uv`); opening network or host Unix
-socket endpoints remains denied. Linux uses `bwrap` plus a seccomp filter on
-x86-64 and AArch64. macOS uses a Seatbelt policy through `sandbox-exec`, with
-resolved snapshot and authority paths and private temporary runtime storage.
-Unsupported platforms or unavailable sandbox capabilities fail closed. An
-existing worktree `.venv` is used read-only with `uv` synchronization disabled;
-recovery does not install dependencies. Ensure the approved verification
-commands can run under these constraints before relying on automatic checkpoint
-acceptance.
+Verification snapshots exclude the original worktree's partial changes. They
+omit Git metadata and reject symlinks and submodules; Git-dependent or
+unsupported checks fail closed. Commands execute as bounded argv, without a
+shell wrapper, and inherit the environment and available worktree virtual
+environment. Clients and checks run as the invoking OS user, with that user's
+filesystem and network access. Snapshot construction is not storage isolation.
+The supervisor still owns process cleanup, deadline enforcement, checkpoint
+validation, and result promotion.
 
 ## Client and platform prerequisites
 
-Install and authenticate the selected client before dispatch. Both clients need
-working process ownership and, for manifest checkpoint collection, the platform
-verification sandbox. No dependency or authentication setup runs automatically.
+Install and authenticate the selected client before dispatch. Linux requires
+`/proc` birth identities and pidfds; macOS requires `libproc` unique IDs and
+audit-token signaling. Process ownership and client availability are checked
+before admission. No dependency or authentication setup runs automatically.
 
-| Client / platform | Client launch requirements | Checkpoint verification requirements |
-|---|---|---|
-| Claude / Linux | Qualified Claude `2.1.267`, native Bash sandbox, `bwrap` and `socat` | `bwrap`, supported seccomp architecture, functioning sandbox probe |
-| Claude / macOS | Qualified Claude `2.1.267`, native macOS Bash sandbox; no Linux `bwrap` or `socat` requirement | `sandbox-exec` Seatbelt policy and functioning sandbox probe |
-| Codex / Linux | Named permission profile support | `bwrap`, supported seccomp architecture, functioning sandbox probe |
-| Codex / macOS | Named permission profile support | `sandbox-exec` Seatbelt policy and functioning sandbox probe |
+Codex launches with `--dangerously-bypass-approvals-and-sandbox`; Claude launches
+with `--dangerously-skip-permissions` and retains the configured tools. The
+`native-sdd` implementation phase includes Claude's native `Agent` tool for
+subagent delegation. The supervisor adds no client or verification sandbox;
+clients, reviewers, and checks are trusted as the invoking OS user.
 
-Codex named profiles have been exercised with `0.154.0`; this is not a live
-qualification of every client/platform pair. Claude's native file tools have
-separate grants from its Bash sandbox. The `native-sdd` implementation phase
-enables the native `Agent` tool so its client can delegate to fresh subagents.
-Default phase tools and the separate collector review tools remain unchanged.
-Hooks, additional MCP tools, and user/project settings cannot broaden the
-generated grants. An unqualified Claude upgrade blocks launch. Codex receives an explicit
-named permission profile with authority denial and scoped worktree/Git metadata
-access. The installed clients and administrator-managed policy remain trusted;
-these settings do not contain a malicious client executable.
-
-Pre-admission checks report bounded reasons through the launcher and `status`:
-`client_unavailable`, `client_sandbox_unavailable`,
-`client_sandbox_unconfirmed`, `process_capability_unavailable`, or
-`verification_sandbox_unavailable`. A pre-admission refusal consumes no attempt;
-repair the prerequisite and retry the registered launch. Once an attempt has
-been admitted, worker re-entry retains its original budget; a new recovery
-attempt requires the preview and approval above. A successful capability probe
-establishes local availability, not complete native or live-provider qualification.
+Pre-admission checks report bounded reasons such as `client_unavailable` or
+`process_capability_unavailable` through the launcher and `status`. A refusal
+consumes no attempt; repair the prerequisite and retry the registered launch.
+Once admitted, worker re-entry retains the attempt's original budget; a new
+recovery attempt requires the preview and approval above. Capability checks
+establish availability, not successful live-provider execution.
 
 ## Storage, compatibility, and rollback
 
-Clients receive narrowly scoped worktree, Git metadata, and submission access;
-the authoritative registration/journal directory is protected. Checkpoint input
+Registrations and journals remain authoritative protocol records, but are not
+isolated from clients or checks running as the same OS user. Checkpoint input
 rejects symlinks, path escapes, unknown fields or versions, wrong attempt
 identities, and oversized evidence. Do not store raw provider responses or
 credentials in execution evidence.
@@ -182,8 +165,8 @@ credentials in execution evidence.
 Supervisor Git reads use a private metadata view with trusted configuration.
 Repository-controlled hooks, filesystem monitors, clean filters, external diff
 programs, replacement objects, and grafts cannot change the inspection behavior.
-The reserved Git `tpo-inspection` directory is denied to clients. Inspection
-ignores repository-specific encoding and line-ending transformations, and
+Inspection uses the reserved Git `tpo-inspection` directory and ignores
+repository-specific encoding and line-ending transformations, and
 submodule cleanliness or unsupported Git metadata formats fail closed; these
 repositories need separate supported validation before automatic continuation.
 

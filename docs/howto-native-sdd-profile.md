@@ -65,7 +65,7 @@ tpo doctor <project>
 ```
 
 This profile has no skill prerequisite. The installed `tpo-agent-supervisor`
-launches the selected Claude or Codex client with its validated permissions;
+launches the selected Claude or Codex client without sandbox restrictions;
 no gstack, superpowers, or client-side workflow skill is used. See the
 [supervisor prerequisites and recovery guide](howto-agent-supervisor.md).
 
@@ -86,9 +86,10 @@ tpo config set agent_policy_mode delegated
 This is your compatibility assertion, not automatic policy detection. Only the
 exact `native-sdd` profile uses it; other profiles, including custom profiles
 with `requires_plan`, keep inherited behavior. There is no project override or
-launch flag. TPO retains normal user and project instruction loading, client
-arguments, permissions, sandboxing, and tools. It does not use Claude safe mode
-or override Codex instruction files. The policy decides which obligations to
+launch flag. Delegated mode retains normal user and project instruction loading
+and configured tools. The supervisor launches clients without sandbox
+restrictions in either policy mode; it does not override Codex instruction
+files. The policy decides which obligations to
 waive and keeps obligations it does not waive. An incompatible policy can still
 block or time out; TPO cannot guarantee delegated behavior.
 
@@ -219,7 +220,7 @@ request and its human merge decision, which no card represents.
 2. The Plan gets exactly ONE implementation card — the profile's
    `phase_4_development` — whatever the Plan's task count. The card identifies a
    durable supervisor registration that pins the rendered phase prompt, tool
-   permissions, worktree, branch, timeout, and result contract. Hermes invokes
+   settings, worktree, branch, timeout, and result contract. Hermes invokes
    or reconnects to that execution. The external agent reads the original Plan,
    preserves partial work, runs one native implementer subagent per unfinished
    task, and makes one atomic commit per task. The supervisor collects trusted

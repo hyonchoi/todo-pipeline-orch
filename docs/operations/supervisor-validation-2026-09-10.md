@@ -1,218 +1,125 @@
-# Supervisor implementation validation — 2026-09-10
+# Supervisor validation — 2026-09-10
 
-The approved supervisor plan was implemented on `feat/agent-supervisor` in
-`.worktrees/agent-supervisor`. This is standard Tier C work: persisted authority,
-concurrent admission, process termination, and crash recovery require adversarial
-verification. Runtime head `2303485` passed independent whole-change review,
-full CI, native platform checks, and isolated packaging validation. Live client
-completion remains unqualified, and the operational recovery of issue 103
-remains blocked; those limits are separate from the passing provider-free gates.
+The user revised the scope: remove the supervisor sandbox and establish live
+execution before adding further isolation. This report supersedes the earlier
+sandbox qualification on this branch; those historical results remain in Git.
 
-## Scope and review
+## Implemented behavior
 
-The branch adds durable execution/admission records, an installed internal
-supervisor, strict deadlines and recovery sweeping, pinned client permissions
-and prompts, validated progress journals, isolated evidence collection, and
-explicit recovery approval. Thin Hermes cards retain the existing worker
-ceiling and retry setting. Result-contract checks remain mandatory.
+Claude and Codex launch directly with their noninteractive permission-bypass
+flags. Checkpoint commands execute their pinned argv in an exact-commit snapshot,
+using the existing worktree virtual environment and snapshot source paths.
+There is no supervisor-added bwrap, seccomp, Seatbelt, client-version gate, or
+permission-profile generation. Clients and checks are trusted as the invoking
+OS user; journals are not isolated from that user.
 
-Implementation subagents and separate storage, concurrency, and contract
-adversarial reviewers examined the consequential scopes. Additional collector
-containment and Git-inspection probes exercised real subprocesses. Bounded
-coordinator fixes were necessary when the harness refused further subagent
-resumption; those fixes subsequently received independent review.
+Process ownership, original attempt deadlines, cleanup, atomic execution
+records, checkpoint validation, and downstream completion authority remain.
+New worker cards use `run --wait` and await terminal command completion instead
+of interpreting repeated short status responses. Reconnection does not admit a
+new generation or refresh its deadline.
 
-One consolidated whole-change remediation wave addressed repository-controlled
-Git configuration execution, Git metadata substitution, and stale unmanaged
-dispatch instructions. Scoped independent re-review of that earlier wave returned
-**READY** with no remaining actionable findings at that point. Subsequent bounded
-regressions also covered metadata path parsing, collection deadline outcomes,
-original manifest base pinning, and affected harness fixtures. Review approval does not establish live
-provider behavior or successful issue recovery.
+The independent reviewer receives an explicit response path, observed original
+worktree HEAD/cleanliness, and completed verification results. Its output still
+must match the task, commit, Plan identity, diff digest, and accepted verdict.
 
-The final independent whole-change review is **READY**, including the final
-admission-waiting fix and **83 passing tests**. The P1 deadline finding was
-resolved by `e027e2f`: Git collection, review, revalidation, and checkpoint
-promotion share the original deadline, and the immutable terminal outcome is
-written after eligibility checks. That scoped review also returned **READY**,
-with **123 passing tests**. Subsequent fixes addressed downstream acceptance of
-Hermes completion claims, cross-phase locking, stale delivery authority after a
-failed retry, and publication races. The final review covers the shared
-worktree guard, finish prerequisite revalidation, and admission-waiting behavior
-in runtime head `2303485`.
+## Review and deterministic checks
 
-## Validation
+This is a Tier C change. Three independent discovery lenses checked waiting and
+process lifetime, command/result contracts, and snapshot/environment behavior.
+A reproduced source-layout issue was corrected: snapshot `src/` imports and the
+worktree virtual environment now take precedence over editable live source and
+ambient executables. The reviewer-handoff changes also received scoped review.
+Final independent code review returned **READY**, with live completion tracked
+separately below.
 
-### Earlier full gates and packaging
+- Client/checkpoint tests: **42 passed**, including real argv execution,
+  editable source-layout handling, partial-work preservation, and reviewer
+  response delivery. New regressions failed before their fixes.
+- Supervisor tests: **50 passed**, including original-deadline waiting,
+  reconnection, previous-boot clocks, recovery generations, and the complete
+  `metadata={"tpo_result": ...}` envelope required by the installed Kanban tool.
+- Independent reviewer checks: **115 passed** before the environment fix,
+  **40 passed** afterward, and **7 passed** for the final handoff scope.
+- Earlier full suite after sandbox removal: **3275 passed, 17 skipped** in
+  480.43 seconds. It preceded the environment and handoff follow-ups.
+- Full suite after the environment and handoff fixes: **3279 passed, 17 skipped**
+  in 491.78 seconds. The later worker metadata instruction and its new regression
+  passed the 50-test supervisor suite. CI at `eb2d998` passed **3280 tests,
+  17 skipped** on each of Python 3.12, 3.13, and 3.14.
+  [CI run](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34548087643).
+  Final collection is 3297 cases versus 3069 at the branch baseline: **net +228**;
+  the sandbox removal reduced the preceding branch suite by 38 cases.
+- Ruff, release metadata at 1.1.0, and diff whitespace checks: passed.
+- Updated documentation checks: **17 passed** with
+  `uv run pytest tests/test_harness_docs.py tests/test_docs_links.py -q`.
+  An initial invocation named a nonexistent native-doc test file and exited
+  during collection; the corrected command above passed.
+- Clean-export sdist/wheel build and installation of the project command:
+  passed. The installed collector matches the source hash; the installed CLI
+  exposes `--wait` and direct client arguments without an ambient project import.
+  A separate `uv tool install` into disposable tool/bin directories also passed;
+  both installed CLIs ran from `/tmp` with `PYTHONPATH` unset.
+- Installed-Hermes registration dry run: **1 passed** in 1.80 seconds with
+  `TPO_RUN_LIVE_HERMES_CONTRACT=1 uv run pytest tests/test_hermes_registration_contract.py -q`.
+  This uses temporary state and no model execution.
+- Native macOS CI at `eb2d998`: **50 passed** on each of ARM macOS 15
+  (43.34 seconds) and Intel macOS 15 (98.05 seconds), covering native process
+  ownership and direct checkpoint verification.
+  [CI run](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34548087658).
 
-An early full run (`rtk proxy uv run --no-sync pytest -q --basetemp .hermes/t`)
-reported **3199 passed, 10 skipped, 6 failed** in 301.75 seconds. The six failures
-were CLI/deprecation fixtures writing below read-only `~/.hermes`. Separately,
-`9d5e4eb` corrected the original CI fixture assumptions about missing directories
-and mocked Codex availability. A subsequent local full suite passed with
-**3205 passed, 10 skipped**. These results precede the later IPC,
-Darwin, client-tool, and preflight changes and do not certify the current head.
+## Live execution
 
-The unchanged baseline had collected 3069 cases: 3049 passed, 10 skipped, and
-10 failed (six account-home writes and four Git diagnostics/fixture cases).
-Obsolete unmanaged-shell tests were migrated to registered supervisor contracts;
-case counts include parametrization. Final CI collected 3335 cases, a net
-increase of **266** over the 3069-case baseline.
+Repository: `hyonchoi/tpo-mock-project`. Commands use the globally installed
+project build with separate client configuration and an empty Slack channel:
 
-The earlier implementation gates also passed Ruff, release metadata validation
-(at version 1.1.0), and `git diff --check`. A clean source export built both sdist
-and wheel with `rtk uv build`; a direct dirty-worktree build had failed on ignored
-scratch filenames. Isolated wheel installation succeeded: from `/tmp`, with
-`PYTHONPATH` unset and `PATH=/usr/bin:/bin`, the installed launcher returned
-`tpo-agent-supervisor 1` and `tpo --version` returned `tpo 1.1.0`. A more recent
-clean-export build and isolated wheel installation also passed, but preceded
-the final review fixes. Final packaging evidence is recorded below.
+```sh
+tpo test --repo hyonchoi/tpo-mock-project --profile native-sdd --timeout 1800 --keep
+```
 
-### Native macOS evidence
+Earlier reinstalled runs #39 (Claude) and #40 (Codex) proved that the old
+installation/schema mismatch was resolved. Both then failed sandboxed
+`uv run pytest` with EPERM. After sandbox removal, Claude #41 passed verification
+and exited zero with confirmed cleanup, but its review response was not accepted.
+Its exact cause was not established; the subsequent handoff fix makes the output
+path and already-collected facts explicit.
 
-The first native process run exposed an exit-transition signaling race. Fix
-`59499cd` added bounded retries against verified process identity; `49eee5f`
-corrected native socket and variadic ABI test probes.
-[Native CI run 34537125223](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34537125223)
-at `49eee5f` then passed **44 tests with zero skips on each runner**: macOS ARM
-in 8.47 seconds and Intel in 10.86 seconds. The retained local log is
-`.hermes/darwin-ci-green.log`.
+Claude #42 completed its supervised implementation, verification, and checkpoint
+review, but the harness stalled because the worker flattened the result metadata.
+The worker now passes the complete returned metadata envelope to Kanban.
 
-After cleanup instrumentation was removed in `7579cce`,
-[native CI run 34538092799](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34538092799)
-at `49c1947` passed on both Mac runners.
+Claude completed the full live harness: **3/3 phases passed, exit 0**, including
+implementation, independent review, and PR creation. Run `re7hhk2x`, issue #43,
+produced [PR #44](https://github.com/hyonchoi/tpo-mock-project/pull/44). The harness
+validated its PR invariant and confirmed all tasks terminal during shutdown.
+Each supervised phase exited zero with confirmed cleanup. Evidence is retained
+at `~/.hermes/tmp/harness-gsm06azk/artifacts/reports/report.json`; the disposable
+issue was then closed so the next client could run. Its PR and worktree remain.
 
-After deadline fix `e027e2f`,
-[native CI run 34538978497](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34538978497)
-also passed on both Mac runners. It precedes the downstream authority changes.
+Codex #45 passed implementation and independent review but failed delivery:
+plain HTTPS `git push` could not obtain a username. The existing `gh` login
+worked with a per-command Git credential helper, confirmed by a successful
+`git -c credential.https://github.com.helper='!gh auth git-credential' push --dry-run`.
+The failed run is preserved with confirmed cleanup. Hermes workers did not inherit
+the harness process helper environment. The fresh Codex disposable clone therefore
+sets `credential.https://github.com.helper` locally to `!gh auth git-credential`;
+ordinary `git push --dry-run` then passed. No credentials are stored, and no login
+or global Git configuration is changed. Later results from that run are maintained
+in [PR #111’s Validation section](https://github.com/hyonchoi/todo-pipeline-orch/pull/111),
+which is updated as live checks finish without rewriting qualification records.
 
-Final [native CI run 34540494058](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34540494058)
-at `2303485` passed on macOS 15 ARM and Intel, with **44 provider-free tests on
-each runner**.
+Live macOS client execution is unavailable from this Linux session and remains
+unqualified.
 
-These provider-free checks exercise native process ownership and cleanup,
-Seatbelt file/authority containment, network and host Unix-socket denial,
-Mach/signaling restrictions, and offline `uv`/pytest execution. The sandbox
-`uv`/pytest, file-authority, and network checks had also passed on both Mac
-architectures before the fixture correction. This evidence qualifies those
-native test scopes at the recorded commit; it does not establish live Claude
-or Codex execution on macOS or certify subsequent integration changes.
+## Preserved state and rollback
 
-### Live client findings
+Historical failed-run workspaces and commits are preserved. Disposable issues
+are closed only after card quiescence and supervisor cleanup are confirmed.
+The primary checkout and issue 103 worktree are unchanged. Issue 103 recovery
+and generic bootstrap of unsupervised historical cards remain incomplete; see
+[the issue 103 report](issue-103-recovery-2026-09-10.md).
 
-Live Claude run #35 exited zero but failed result validation. Missing native
-`Agent` tool permission is a likely contributor to the incomplete review/result
-contract, not a proven explanation of all agent behavior. Live Codex run #36
-produced commit `ca832b28` but checkpoint collection was blocked when Tokio
-needed a stream socketpair. Neither run established successful completion.
-
-`4079c09` permits anonymous Unix stream IPC inside verification while retaining
-endpoint denial. `70559d3` enables Claude's native `Agent` tool for `native-sdd`
-implementation subagents and reports pre-admission launch refusals.
-
-The latest Claude run, #37 in workspace `harness-frfvhgy4`, returned
-`lock_unconfirmed` before any attempt was admitted (generation zero). The cause
-has not been established, and this run does not establish execution of the latest
-code. Its cards are archived and the run is quiescent, with no active worker; issue #37
-was closed after that confirmation. The workspace is preserved. Codex retry #38 in workspace `harness-xx542g19` also returned
-`lock_unconfirmed` at generation zero. Its cards are archived, cancellation and
-quiescence are confirmed, and its issue was closed; its workspace is preserved.
-Both retries used the fresh isolated installation first on the harness PATH,
-but the executable selected inside the Hermes worker has not been established.
-Historical Codex run #36's commit `ca832b28` and untracked `uv.lock` remain
-preserved; its issue was closed after quiescence. Neither client has a
-successful final live completion result.
-Provider-free checks cannot substitute for that evidence, and macOS live
-Claude/Codex execution remains unqualified.
-No raw model/provider payloads are included in this report.
-
-### Current integration gates
-
-Preflight integration `c15d6d8` passed **48 focused tests**. It checks required
-process/client/collector capabilities before admission and reports bounded
-refusal reasons without consuming an attempt.
-
-The run in `.hermes/findings-full-pytest.log` completed with **28 failed,
-3238 passed, 26 skipped**. Of those failures, 26 were `Agent` capability-contract
-regressions fixed in `49c1947`. Focused validation recorded 332 passing tests in
-independent review and implementer runs of 197 and 221 passing tests. The other
-two failures involved Git diagnostic assertions under a long pytest base path;
-the affected scope passed 91 tests with a short base path. These focused results
-do not turn the failed full run into a passing one.
-
-[CI run 34538092850](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34538092850)
-at `49c1947` passed all five jobs, and the native run linked above passed both
-Mac jobs. The newer local full run (`rtk proxy uv run --no-sync pytest -q
---basetemp .hermes/t`) completed with **3269 passed, 26 skipped** in 327.70
-seconds; its log is `.hermes/ci-fix-full.log`. That run started at `49c1947`,
-before the deadline edits. These earlier local and CI results do not certify
-later integration changes; final runtime evidence follows.
-
-A later authority integration run reported **19 failed, 3274 passed, 26 skipped**.
-All 19 failures were in two fixture files, which have been corrected. Focused
-reruns passed **18 embedded harness tests in 50.20 seconds** and **1 stress test
-in 33.42 seconds**. Those fixtures exercise real admission, checkpoint handling,
-and result promotion with explicit provider-free review stubs; they do not
-establish live reviewer or provider behavior. The full snapshot run recorded in
-`.hermes/authority-final-full.log` passed **3303 tests, with 26 skipped**, in
-488.14 seconds. It predates the final admission-waiting edits and does not
-certify those edits.
-
-Final [CI run 34540494094](https://github.com/hyonchoi/todo-pipeline-orch/actions/runs/34540494094)
-at `2303485` passed all five jobs. Each supported Python suite reported
-**3305 passed, 30 skipped**: Python 3.12 in 259.98 seconds, 3.13 in 231.75
-seconds, and 3.14 in 199.86 seconds. The final native run above also passed
-both Mac jobs. These results cover the final runtime changes.
-
-A final clean export of `2303485` built both sdist and wheel with `uv build`.
-Isolated `uv tool install` into `.hermes/release-tool` passed. From `/tmp`, with
-`PYTHONPATH` unset and `PATH=/usr/bin:/bin`, the installed
-`tpo-agent-supervisor --version`, `tpo --version`, and `python -I` import of the
-new authority module all passed. This supersedes the earlier successful build
-of the authority snapshot before admission-waiting changes.
-
-The opt-in installed-Hermes registration contract check, run with
-`TPO_RUN_LIVE_HERMES_CONTRACT=1`, passed **1 test in 2.41 seconds** on the
-final rerun. It exercises
-installed registration with temporary state and dry-run dispatch, without model
-or provider execution. It does not qualify live Claude/Codex completion.
-
-## Documentation, recovery, and rollback
-
-README, architecture, profile guides, scheduler guidance, and generated worker
-identity instructions now describe supervised dispatch. The
-[supervisor guide](../howto-agent-supervisor.md) documents process ownership,
-operator approval, checkpoint constraints, supported platform/client bounds,
-and rollback. A patch changeset records release intent; versions were not
-manually changed.
-
-Rollback requires pausing new dispatch, allowing owned attempts to finish or
-reach their deadline, and confirming cleanup before downgrade. Preserve
+Rollback pauses admission, confirms cleanup of owned processes, and preserves
 execution records, journals, and worktrees. Unknown schemas or unresolved
-ownership block downgrade.
-
-Portable cleanup cannot guarantee every detached descendant stops. Unsupported
-ownership, locking, Git metadata, or sandbox capabilities fail closed. Generic
-bootstrap of unsupervised historical cards into supervisor recovery is not
-implemented; existing registrations remain inspectable. This is an explicit
-remaining plan limitation, not a claim of legacy recovery certification.
-
-[Issue 103's report](issue-103-recovery-2026-09-10.md) records the original
-registration, HEAD and diff digest, nine candidate commits, missing Plan
-criteria, independent rejection, and unavailable supported board snapshots.
-Its historical monitor exit remains unknown. No issue 103 card transition, Plan
-edit, direct database write, or implementation rerun was performed as part of
-this documentation update. Its separate report is preserved.
-
-The primary checkout and issue 103 worktree were preserved. The implementation
-worktree is retained for review; it is not removed by closeout.
-
-The implementation commits are `32c5602` (durable attempts and owned processes),
-`3a2ec8c` (progress and recovery intent), and `a8c0644` (registered dispatch,
-client containment, and evidence collection), followed by the fixes and platform
-work identified above. The branch has been pushed for
-[PR #111](https://github.com/hyonchoi/todo-pipeline-orch/pull/111); it has not been
-merged. Runtime head `2303485`, including the final review fixes, has been
-pushed. This report records that runtime's completed validation and the remaining
-live and legacy-recovery limitations. The existing patch release intent covers
-this work; no manual version bump is required.
+ownership block downgrade. Portable process handling cannot guarantee observing
+every detached descendant. No merge or issue 103 state transition is included.
