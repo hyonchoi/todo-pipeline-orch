@@ -62,10 +62,22 @@ Unknown ownership or cleanup blocks another attempt. Worker transitions use the
 supported Kanban worker tools and their current run identity, preserving newer
 attempts and unrelated or manual blocks.
 
+Cleanup confirmation requires every previously observed or known owned identity
+to be positively dead and an error-free current discovery scan. Cleanup always
+permits one initial observation pass, including when `cleanup_timeout=0`; only
+retries must both start and finish before their applicable deadline. Live-owner
+polling uses the full cleanup allowance. Once no known owner remains live,
+inventory-only retries are limited by a two-second deadline measured from cleanup
+entry and by the remaining cleanup allowance. Transient host PID churn does not
+permanently latch `cleanup_unconfirmed`. Ownership ambiguity involving a known
+identity or an observed candidate remains `cleanup_unconfirmed` and blocks
+another attempt, even after a later error-free scan.
+
 Portable process management cannot guarantee termination of every detached
-descendant. In particular, an escape can become unobservable while both the
-supervisor and recovery polling are unavailable. No systemd or cgroup service is
-required. Unsupported locking or ownership checks fail closed.
+descendant. Without containment, a completely unobserved detached descendant
+can escape portable polling, even while the supervisor is running. Cleanup
+confirmation does not prove that no such descendant exists. No systemd or cgroup
+service is required. Unsupported locking or ownership checks fail closed.
 Linux ownership uses `/proc` birth identities and pidfds. macOS ownership uses
 `libproc` process unique IDs and audit-token signaling. Darwin support is
 detected from the installed library and kernel capabilities, including
