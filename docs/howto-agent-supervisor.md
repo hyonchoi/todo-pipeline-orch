@@ -8,7 +8,10 @@ implementation and review. This is an internal Hermes interface, not a public
 `tpo agent-run` command. A missing launcher blocks dispatch.
 
 The launcher is installed with the package by `uv tool install` and uses that
-environment's interpreter. Do not replace it with an ambient `python -m` call.
+environment's interpreter. New cards pin the absolute launcher path selected
+beside the current interpreter; nonstandard layouts fall back to a launcher
+found on `PATH`. Existing card bodies are unchanged. Do not replace the launcher
+with an ambient `python -m` call.
 Plan/profile validation and prompt rendering precede card registration. The
 execution record pins the Plan identity, prompt, client launch settings, original
 worktree and branch, timeout, and result contract, including `phase_role`.
@@ -62,29 +65,56 @@ Unknown ownership or cleanup blocks another attempt. Worker transitions use the
 supported Kanban worker tools and their current run identity, preserving newer
 attempts and unrelated or manual blocks.
 
-Cleanup confirmation requires every previously observed or known owned identity
-to be positively dead and an error-free current discovery scan. Cleanup always
-permits one initial observation pass, including when `cleanup_timeout=0`; only
-retries must both start and finish before their applicable deadline. Live-owner
-polling uses the full cleanup allowance. Once no known owner remains live,
-inventory-only retries are limited by a two-second deadline measured from cleanup
-entry and by the remaining cleanup allowance. Transient host PID churn does not
-permanently latch `cleanup_unconfirmed`. Ownership ambiguity involving a known
-identity or an observed candidate remains `cleanup_unconfirmed` and blocks
-another attempt, even after a later error-free scan.
+### Linux cgroup v2 ownership
 
-Portable process management cannot guarantee termination of every detached
-descendant. Without containment, a completely unobserved detached descendant
-can escape portable polling, even while the supervisor is running. Cleanup
-confirmation does not prove that no such descendant exists. No systemd or cgroup
-service is required. Unsupported locking or ownership checks fail closed.
-Linux ownership uses `/proc` birth identities and pidfds. macOS ownership uses
-`libproc` process unique IDs and audit-token signaling. Darwin support is
-detected from the installed library and kernel capabilities, including
-`proc_signal_with_audittoken`; an OS version string alone does not establish
-support. Missing capabilities fail closed without launching a client. Native
-qualification evidence and outstanding gates are tracked in the
-[validation report](operations/supervisor-validation-2026-09-10.md).
+New Linux launches use a delegated cgroup v2 scope for both Codex and Claude,
+including checkpoint verification commands and independent reviewers. The
+supervisor starts an inert helper through `systemd-run --user --scope` with
+`Delegate=yes`. It verifies scope ownership and writable `cgroup.kill`, persists
+the cgroup receipt and process evidence through the launch callbacks, then
+releases the helper to execute the exact client or check argv with its original
+stdin. Spawn and scope setup overhead conservatively consume the existing deadline; no budget is added.
+
+Cleanup signals current group members with TERM and CONT, pinning each process
+with a pidfd and rechecking membership before graceful signaling. Forced cleanup
+uses `cgroup.kill` and requires `cgroup.events` to report `populated=0`. Native
+cgroup cleanup does not scan the host process inventory or infer descendants
+from ancestry. Forked, detached, and reparented descendants remain in the scope
+unless they deliberately migrate out of it.
+
+Crash recovery uses retained receipts containing the host, boot identity, cgroup
+path, device, inode, and UUID scope unit. Changed identity leaves cleanup
+unconfirmed. A missing scope on the same host and boot confirms emptiness under
+the trusted same-user contract: clients do not deliberately migrate processes
+out of their owned cgroup. Cgroups provide process ownership, not a filesystem
+sandbox or a boundary against hostile same-user code. Cleanup confirmation never
+reconstructs an unobserved exit or bypasses existing result validators.
+
+### Portable and legacy ownership
+
+macOS and recovery of legacy Linux PID-only attempts retain the portable
+backend. Its cleanup confirmation requires every previously observed or known
+owned identity to be positively dead and an error-free current discovery scan.
+Cleanup always permits one initial observation pass, including when
+`cleanup_timeout=0`; only retries must both start and finish before their
+applicable deadline. Live-owner polling uses the full cleanup allowance. Once
+no known owner remains live, inventory-only retries are limited by a two-second
+deadline measured from cleanup entry and by the remaining cleanup allowance.
+Transient host PID churn does not permanently latch `cleanup_unconfirmed`.
+Ownership ambiguity involving a known identity or observed candidate remains
+`cleanup_unconfirmed`, even after a later error-free scan.
+
+The portable backend cannot guarantee termination of every detached descendant:
+a completely unobserved detached descendant can escape polling, even while the
+supervisor is running. Portable cleanup confirmation does not prove that no such
+descendant exists. Legacy Linux PID recovery uses `/proc` birth identities and
+pidfds. macOS uses `libproc` unique IDs and audit-token signaling, including
+`proc_signal_with_audittoken`, detected by installed capabilities rather than OS
+version. Missing capabilities fail closed. macOS does not require systemd or
+cgroups; its backend is unchanged and new macOS live testing is deferred.
+Historical qualification evidence and its outstanding gates remain in the
+[validation report](operations/supervisor-validation-2026-09-10.md); that report
+does not qualify the new Linux cgroup backend.
 
 ## Operator recovery
 
@@ -154,9 +184,16 @@ validation, and result promotion.
 ## Client and platform prerequisites
 
 Install and authenticate the selected client before dispatch. Linux requires
-`/proc` birth identities and pidfds; macOS requires `libproc` unique IDs and
-audit-token signaling. Process ownership and client availability are checked
-before admission. No dependency or authentication setup runs automatically.
+cgroup v2 with `cgroup.kill`, `/proc` birth identities, pidfds, and an existing
+systemd user manager that permits `systemd-run --user --scope` with
+`Delegate=yes`. Preflight checks the kernel interfaces, required commands, and
+reachable user manager before admission. Scope creation and writable
+`cgroup.kill` are confirmed during the gated launch before releasing the helper.
+A failure blocks execution; new Linux launches never fall back to portable PID
+polling.
+macOS requires `libproc` unique IDs and audit-token signaling. Client availability
+is also checked before admission. No dependency installation, service setup, or
+authentication configuration runs automatically.
 
 Codex launches with `--dangerously-bypass-approvals-and-sandbox`; Claude launches
 with `--dangerously-skip-permissions` and retains the configured tools. The
@@ -172,6 +209,14 @@ recovery attempt requires the preview and approval above. Capability checks
 establish availability, not successful live-provider execution.
 
 ## Storage, compatibility, and rollback
+
+Execution records now use schema 2 with append-only `owned_cgroups` receipts.
+The reader upgrades schema-1 records in memory with an empty cgroup inventory,
+persisting schema 2 on the next write without inventing containment evidence for
+legacy processes. Legacy PID recovery remains available. Collector launch marker
+version 2 records the cgroup inventory baseline so a pending launch can be bound
+to exactly one later durable receipt and its confirmed cleanup; an older receipt
+cannot clear that pending launch.
 
 Registrations and journals remain authoritative protocol records, but are not
 isolated from clients or checks running as the same OS user. Checkpoint input
@@ -232,5 +277,8 @@ Before downgrading, pause the TPO tick/scan scheduler and new Hermes worker
 dispatch. Let existing supervisors finish or reach their deadline, then inspect
 all owned attempts and confirm cleanup. Preserve registrations, result receipts,
 journals, and original worktrees. Unknown schemas or unresolved owned processes
-block downgrade; pre-v6 code cannot consume active v6 registrations. Reverting
-package code is not a process-cleanup operation and must not erase recovery evidence.
+block downgrade; pre-v6 code cannot consume active v6 registrations, and a
+schema-1-only execution reader cannot consume schema-2 records. Keep a compatible
+recovery reader available. Do not downgrade schemas or edit records to hide
+cgroup receipts. Reverting package code is not a process-cleanup operation and
+must not erase recovery evidence.

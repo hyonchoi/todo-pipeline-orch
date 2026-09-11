@@ -95,16 +95,35 @@ Phase.timeout
 ```
 
 The final minute is cleanup-only. The installed `tpo-agent-supervisor` owns
-client launch, strict deadlines, durable exit collection, and best-effort owned
-process cleanup independently of the Hermes worker. Automatic worker re-entry
+client launch, strict deadlines, durable exit collection, and owned process
+cleanup independently of the Hermes worker. Automatic worker re-entry
 attaches to the same attempt. Zero exit requires existing result-contract and
 current Git validation before completion. Unobservable exits and uncertain
 cleanup block another attempt. Hermes reports the structured outcome through
 its supported worker operations; it does not inspect or commit partial work.
 See [supervision and recovery](howto-agent-supervisor.md) for process ownership,
 checkpoint evidence, explicit retry admission, and portability limitations.
-Linux process ownership uses `/proc` and pidfds; macOS uses `libproc` unique IDs
-and audit-token signaling, detected by capability rather than OS version.
+New Linux Codex and Claude launches, checkpoint checks, and reviewers share a
+cgroup v2 backend using an existing systemd user manager and
+`systemd-run --user --scope` with `Delegate=yes`. Missing cgroup v2,
+`cgroup.kill`, or delegation support fails closed without a portable fallback or
+automatic installation. An inert helper waits for durable cgroup and process
+receipts before executing the exact argv and stdin; setup consumes the existing
+deadline. Graceful cleanup uses pidfds with a membership recheck, then
+`cgroup.kill` forces termination and `populated=0` confirms emptiness. Native
+cleanup uses retained group identity rather than host inventory scans, including
+after supervisor loss. This trusts same-user clients not to migrate processes
+out of their groups; cgroups do not provide a filesystem sandbox.
+
+Execution schema 2 retains append-only `owned_cgroups` receipts. Schema-1 records
+are read-upgraded without invented group evidence and persisted on the next
+write; collector marker version 2 binds pending launches to their receipt
+inventory baseline. Recovery retains legacy Linux PID ownership. macOS retains
+its portable `libproc` unique-ID and audit-token backend, detected by capability
+rather than OS version; live testing of the unchanged macOS backend is deferred.
+New worker cards pin the selected absolute launcher beside the current
+interpreter, with `PATH` fallback for nonstandard layouts; existing cards remain
+unchanged.
 Clients and checkpoint verification commands run as the invoking OS user,
 without supervisor sandbox restrictions or storage isolation. Codex uses
 `--dangerously-bypass-approvals-and-sandbox`; Claude uses
