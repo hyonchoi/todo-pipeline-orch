@@ -103,32 +103,23 @@ cleanup block another attempt. Hermes reports the structured outcome through
 its supported worker operations; it does not inspect or commit partial work.
 See [supervision and recovery](howto-agent-supervisor.md) for process ownership,
 checkpoint evidence, explicit retry admission, and portability limitations.
-New Linux Codex and Claude launches, checkpoint checks, and reviewers share a
-cgroup v2 backend using an existing systemd user manager and
-`systemd-run --user --scope` with `Delegate=yes`. Missing cgroup v2,
-`cgroup.kill`, or delegation support fails closed without a portable fallback or
-automatic installation. An inert helper waits for durable cgroup and process
-receipts before executing the exact argv and stdin. A bounded private anonymous
-pipe carries the exact client environment separately from the manager
-environment without persisting it. Setup consumes the existing deadline;
-pre-exec failures may report a bootstrap exit status, never client success.
-Graceful cleanup uses pidfds with a membership recheck, then
-`cgroup.kill` forces termination and `populated=0` confirms emptiness. Native
-cleanup uses retained group identity rather than host inventory scans, including
-after supervisor loss. Cgroup receipt version 2 pins root device and inode as
-well as scope identity; a changed mount view cannot establish cleanup from a
-missing scope. Legacy version-1 receipts can clean matching existing scopes but
-cannot newly confirm a missing scope. Existing terminal records remain intact
-without invented migration evidence. This trusts same-user clients not to
-migrate processes out of their groups; cgroups do not provide a filesystem
-sandbox.
+Linux and macOS share direct-process supervision for Claude, Codex, checkpoint
+checks, and reviewers. Each launch uses the exact argv, stdin, and environment,
+and persists the launched PID with its native birth identity. Linux uses
+`/proc` and pidfds; macOS uses `libproc` unique IDs and audit-token signaling.
+Neither platform uses cgroups, systemd scopes, process-group signaling, or
+descendant discovery. TERM/CONT and bounded KILL escalation target only the
+verified direct process. Its confirmed death satisfies cleanup, under the
+operational assumption that client termination ends its code changes and
+operations. Clients own their subprocess lifecycle.
 
-Execution schema 2 retains append-only `owned_cgroups` receipts. Schema-1 records
-are read-upgraded without invented group evidence and persisted on the next
-write; collector marker version 2 binds pending launches to their receipt
-inventory baseline. Recovery retains legacy Linux PID ownership. macOS retains
-its portable `libproc` unique-ID and audit-token backend, detected by capability
-rather than OS version; live testing of the unchanged macOS backend is deferred.
+Execution schema 3 records explicit `direct_processes`. Schema-1 and schema-2
+records remain readable, preserving historical descendant and cgroup receipts
+as inert metadata. Recovery uses direct receipts and the recorded main client
+identity; it never promotes legacy descendant inventories into direct ownership.
+Collector marker version 3 binds pending launches to their direct receipt
+baseline; unknown launches remain unconfirmed. Native identity support remains
+a prerequisite, but Linux no longer needs a systemd user manager or cgroup v2.
 New worker cards pin the selected absolute launcher beside the current
 interpreter. Isolated `uv tool install` pairs the launcher and helper interpreter
 and package version; the `PATH` fallback for nonstandard layouts cannot guarantee

@@ -48,6 +48,9 @@ The selected client must satisfy the
 Linux process supervision requires `/proc` and pidfds; macOS requires available
 `libproc` identity and audit-token signaling capabilities. Capability refusals
 occur before attempt admission and are available from supervisor status.
+Both platforms supervise only directly launched processes. Confirmed client
+termination satisfies process cleanup; the client owns its descendants. Neither
+cgroup v2 nor a systemd user manager is required.
 
 Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses
 `--dangerously-skip-permissions` with its configured tools. Clients and checks

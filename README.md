@@ -79,11 +79,12 @@ refuses to select or register work for that unsupported profile/client pair.
 Worker skill prerequisites remain operator-provisioned. Bundled profiles dispatch
 through the installed `tpo-agent-supervisor`; they do not require a Hermes coding
 agent skill. `native-sdd` has no external skill prerequisite. Its configured client
-and process ownership capabilities must be available before launch. Linux
-requires `/proc`, pidfds, cgroup v2 with `cgroup.kill`, and an existing systemd
-user manager permitting delegated scopes for both Codex and Claude. Missing
-capabilities fail closed without a portable fallback or automatic setup. macOS
-retains its `libproc` identity and audit-token signaling backend. Both clients
+and process identity capabilities must be available before launch. Linux
+requires `/proc` and pidfds; macOS requires `libproc` identity and audit-token
+signaling. Both platforms supervise only the directly launched client PID and
+use the same bounded cleanup contract. Client exit is treated as the end of its
+operations; its subprocesses remain the client's responsibility. No cgroup or
+systemd setup is required. Missing identity capabilities fail closed. Both clients
 and verification commands run without supervisor sandbox restrictions, as the
 invoking OS user. See the
 [platform prerequisites](docs/howto-agent-supervisor.md#client-and-platform-prerequisites)
