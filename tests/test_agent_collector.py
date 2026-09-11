@@ -1,13 +1,8 @@
 import json
 import os
-import platform
-import socket
-import struct
 import subprocess
 import sys
-import tempfile
 import time
-from pathlib import Path
 
 import pytest
 
@@ -20,7 +15,7 @@ def git(work, *args):
 
 
 @pytest.fixture
-def candidate(tmp_path):
+def candidate(tmp_path, request):
     work = tmp_path / 'work'
     work.mkdir()
     git(work, 'init', '-b', 'task')
@@ -33,12 +28,17 @@ def candidate(tmp_path):
                    worktree=str(work), branch='task', result_contract={'progress_version': 1,
                        'git_metadata': {'common_dir': str(work / '.git'), 'worktree_git_dir': str(work / '.git')}}, timeout=30,
                    manifest={'tasks': [{'id': 'one', 'instructions': 'Create file',
-                                        'verification': ['python check.py'],
+                                        'verification': getattr(request, 'param', ['python check.py']),
                                         'acceptance_criteria': ['File exists']} ]})
     journal = ProgressJournal(store, 'execution')
     journal.initialize()
     store.admit('execution')
     (work / 'check.py').write_text('assert True\n')
+    if getattr(request, 'param', None) == ['uv run pytest']:
+        (work / '.venv').symlink_to(sys.prefix, target_is_directory=True)
+        (work / 'pyproject.toml').write_text('[project]\nname="checkpoint-probe"\nversion="0.0.0"\n')
+        (work / 'test_probe.py').write_text('import socket\ndef test_network_available():\n    with socket.socket() as connection:\n        connection.bind(("127.0.0.1", 0))\n')
+        git(work, 'add', 'pyproject.toml', 'test_probe.py')
     git(work, 'add', 'check.py')
     git(work, 'commit', '-m', 'task one')
     return store, journal, work
@@ -47,8 +47,7 @@ def candidate(tmp_path):
 def fake_clients(monkeypatch, *, verification_exit=0, verdict='accepted', mutate=None):
     from hermes_pipeline import agent_collector as collector
     calls = []
-    monkeypatch.setattr(collector, 'verification_argv', lambda argv, snapshot, **kwargs: ['check', *argv])
-    monkeypatch.setattr(collector, 'review_argv', lambda client, snapshot, staging, authority, **kwargs: ['review'])
+    monkeypatch.setattr(collector, 'review_argv', lambda client, snapshot, staging, **kwargs: ['review'])
 
     def run(argv, **kwargs):
         calls.append((argv, kwargs))
@@ -60,7 +59,7 @@ def fake_clients(monkeypatch, *, verification_exit=0, verdict='accepted', mutate
                 mutate(response)
             from pathlib import Path
             Path(kwargs['env']['TPO_REVIEW_RESULT_PATH']).write_text(json.dumps(response))
-        return {'outcome': 'exited', 'exit_code': verification_exit if argv[0] == 'check' else 0,
+        return {'outcome': 'exited', 'exit_code': verification_exit if argv[0] != 'review' else 0,
                 'signal': None, 'cleanup': 'confirmed', 'processes': []}
 
     monkeypatch.setattr(collector, 'run_process', run)
@@ -188,9 +187,7 @@ def test_manifest_completion_rejects_missing_authoritative_checkpoints(candidate
 def test_real_subprocess_checks_and_fresh_reviewer_create_receipts(candidate, monkeypatch):
     from hermes_pipeline import agent_collector as collector
     store, journal, _ = candidate
-    # This exercises real process ownership/exit collection, with fake provider
-    # executables. OS sandbox construction has its own argument/fail-closed tests.
-    monkeypatch.setattr(collector, 'verification_argv', lambda argv, snapshot, **kwargs: [sys.executable, *argv[1:]])
+    # Real process ownership and exit collection with a provider-free reviewer.
     reviewer = (
         "import json,os,sys; from pathlib import Path; request=json.load(sys.stdin); "
         "out={key:request[key] for key in ('version','task_id','commit','plan_identity','diff_sha256')}; "
@@ -203,119 +200,6 @@ def test_real_subprocess_checks_and_fresh_reviewer_create_receipts(candidate, mo
     attempt = store.load('execution')['attempts'][-1]
     assert attempt['cleanup'] == 'confirmed'
     assert len(attempt['owned_processes']) >= 2
-
-
-def test_verification_sandbox_cannot_write_authority_or_use_network(tmp_path, monkeypatch):
-    from hermes_pipeline import agent_collector as collector
-    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
-    original_exists = Path.exists
-    monkeypatch.setattr(Path, 'exists', lambda path: True if str(path) == '/proc/self/ns/user' else original_exists(path))
-    monkeypatch.setattr(collector.shutil, 'which', lambda name: '/usr/bin/bwrap')
-    snapshot = tmp_path / 'snapshot'
-    snapshot.mkdir()
-    authority = tmp_path / 'authority'
-    authority.mkdir()
-    work = tmp_path / 'work'
-    (work / '.venv').mkdir(parents=True)
-    argv = collector.verification_argv(['uv', 'run', 'pytest'], snapshot, authority_root=authority, seccomp_fd=10, worktree=work)
-    assert '--unshare-all' in argv
-    assert argv[argv.index('--ro-bind') + 1:argv.index('--ro-bind') + 3] == ['/', '/']
-    assert argv.count('--bind') == 1
-    assert argv[argv.index('--bind') + 1:argv.index('--bind') + 3] == [str(snapshot), str(snapshot)]
-    assert 'UV_NO_SYNC' in argv
-    assert str(work / '.venv') in argv
-    assert argv[argv.index('--remount-ro') + 1] == str(authority)
-    monkeypatch.setattr(collector.shutil, 'which', lambda name: None)
-    with pytest.raises(ExecutionError, match='sandbox unavailable'):
-        collector.verification_argv(['pytest'], snapshot, authority_root=authority, seccomp_fd=10)
-
-
-@pytest.mark.skipif(platform.system() != 'Linux', reason='Linux bwrap/seccomp enforcement; separate native Darwin suite')
-def test_actual_verification_sandbox_preserves_host_files(tmp_path):
-    from hermes_pipeline import agent_collector as collector
-    snapshot = tmp_path / 'snapshot'
-    snapshot.mkdir()
-    authority_root = tmp_path / 'authority'
-    authority_root.mkdir()
-    authority = authority_root / 'authority.json'
-    authority.write_text('trusted')
-    command = [sys.executable, '-c',
-               "from pathlib import Path; import sys; "
-               "Path('output').write_text('allowed'); "
-               "\ntry: Path(sys.argv[1]).read_text()\n"
-               "except OSError: pass\n"
-               "else: raise AssertionError('authority readable')\n"
-               "\ntry: Path(sys.argv[1]).write_text('forged')\n"
-               "except OSError as exc: assert exc.errno in (1, 13, 30)\n"
-               "else: raise AssertionError('authority writable')\n", str(authority)]
-    with collector.verification_filter() as descriptor:
-        try:
-            probe_argv = collector.verification_argv(['/usr/bin/true'], snapshot, authority_root=authority_root, seccomp_fd=descriptor)
-        except ExecutionError:
-            pytest.skip('bwrap unavailable; production fails closed')
-        probe = subprocess.run(probe_argv, capture_output=True, pass_fds=(descriptor,))
-    if probe.returncode:
-        pytest.skip('kernel sandbox unavailable; production fails closed')
-    with collector.verification_filter() as descriptor:
-        argv = collector.verification_argv(command, snapshot, authority_root=authority_root, seccomp_fd=descriptor)
-        outcome = collector.run_process(argv, cwd=snapshot, stdin_bytes=b'', timeout=5,
-                                        cleanup_timeout=1, env={}, pass_fds=(descriptor,))
-    assert outcome['outcome'] == 'exited'
-    assert outcome['exit_code'] == 0
-    assert outcome['cleanup'] == 'confirmed'
-    assert authority.read_text() == 'trusted'
-    assert (snapshot / 'output').read_text() == 'allowed'
-
-
-def test_verification_sandbox_rejects_authority_overlap(tmp_path, monkeypatch):
-    from hermes_pipeline import agent_collector as collector
-    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
-    original_exists = Path.exists
-    monkeypatch.setattr(Path, 'exists', lambda path: True if str(path) == '/proc/self/ns/user' else original_exists(path))
-    monkeypatch.setattr(collector.shutil, 'which', lambda name: '/usr/bin/bwrap')
-    snapshot = tmp_path / 'snapshot'
-    snapshot.mkdir()
-    for authority in (snapshot, tmp_path, snapshot / 'private'):
-        with pytest.raises(ExecutionError, match='containment'):
-            collector.verification_argv(['pytest'], snapshot, authority_root=authority, seccomp_fd=10)
-
-
-@pytest.mark.parametrize('kind', [socket.SOCK_STREAM, socket.SOCK_DGRAM])
-@pytest.mark.skipif(platform.system() != 'Linux', reason='Linux bwrap/seccomp enforcement; separate native Darwin suite')
-def test_actual_verification_sandbox_cannot_connect_host_unix_socket(tmp_path, kind):
-    from hermes_pipeline import agent_collector as collector
-    snapshot = tmp_path / 'snapshot'
-    snapshot.mkdir()
-    authority = tmp_path / 'authority'
-    authority.mkdir()
-    with collector.verification_filter() as descriptor:
-        try:
-            probe_argv = collector.verification_argv(['/usr/bin/true'], snapshot, authority_root=authority, seccomp_fd=descriptor)
-        except ExecutionError:
-            pytest.skip('bwrap unavailable; production fails closed')
-        probe = subprocess.run(probe_argv, capture_output=True, pass_fds=(descriptor,), timeout=5)
-    if probe.returncode:
-        pytest.skip('kernel sandbox unavailable; production fails closed')
-    # Keep the address short and outside /tmp, which the sandbox masks.
-    with tempfile.TemporaryDirectory(prefix='tpo-socket-', dir='/var/tmp') as socket_dir, socket.socket(socket.AF_UNIX, kind) as listener:
-        socket_path = Path(socket_dir) / 'host.sock'
-        listener.bind(str(socket_path))
-        if kind == socket.SOCK_STREAM:
-            listener.listen()
-        command = [sys.executable, '-c',
-                   'import socket,sys\nfrom pathlib import Path\nassert Path(sys.argv[1]).is_socket()\n'
-                   'try:\n s=socket.socket(socket.AF_UNIX); s.connect(sys.argv[1])\n'
-                   'except OSError: pass\nelse: raise AssertionError("host socket reachable")', str(socket_path)]
-        if kind == socket.SOCK_DGRAM:
-            command = [sys.executable, '-c',
-                       'import socket,sys\nfrom pathlib import Path\nassert Path(sys.argv[1]).is_socket()\n'
-                       'try:\n a,b=socket.socketpair(socket.AF_UNIX, socket.SOCK_DGRAM); a.sendto(b"probe", sys.argv[1])\n'
-                       'except OSError: pass\nelse: raise AssertionError("host datagram socket reachable")', str(socket_path)]
-        with collector.verification_filter() as descriptor:
-            argv = collector.verification_argv(command, snapshot, authority_root=authority, seccomp_fd=descriptor)
-            outcome = collector.run_process(argv, cwd=snapshot, stdin_bytes=b'', timeout=5, cleanup_timeout=1,
-                                            env={}, pass_fds=(descriptor,))
-    assert outcome['exit_code'] == 0
 
 
 def test_recovery_cannot_confirm_cleanup_after_pending_collector_launch(candidate, monkeypatch):
@@ -351,133 +235,92 @@ def test_unknown_collector_marker_schema_blocks_cleanup(candidate):
     assert collector.collector_launch_pending(store, 'execution')
 
 
-def test_unsupported_verification_syscall_architecture_blocks_launch(monkeypatch):
+def test_pinned_check_is_executed_directly(candidate, monkeypatch):
     from hermes_pipeline import agent_collector as collector
-    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
-    monkeypatch.setattr(collector.platform, 'machine', lambda: 'unknown-platform')
-    with pytest.raises(ExecutionError, match='architecture unsupported'), collector.verification_filter():
-        pytest.fail('unsupported syscall architecture accepted')
+    store, _, work = candidate
+    calls = fake_clients(monkeypatch)
+    collector.collect_checkpoints(store, 'execution', 1, deadline_monotonic=time.monotonic() + 10)
+    assert calls[0][0] == ['python', 'check.py']
+    assert calls[0][1]['env']['PYTHONPATH'] == str(calls[0][1]['cwd'])
 
 
-@pytest.mark.skipif(platform.system() != 'Linux', reason='Linux bwrap/seccomp enforcement; separate native Darwin suite')
-def test_actual_verification_sandbox_runs_uv_pytest_with_local_socketpairs(tmp_path):
+
+
+@pytest.mark.parametrize('candidate', [['uv run pytest']], indirect=True)
+def test_exact_pinned_uv_run_pytest_collects_real_evidence(candidate, monkeypatch):
     from hermes_pipeline import agent_collector as collector
-    uv = collector.shutil.which('uv')
-    if uv is None:
-        pytest.skip('uv unavailable')
-    snapshot = tmp_path / 'snapshot'
-    snapshot.mkdir()
-    authority = tmp_path / 'authority'
-    authority.mkdir()
-    with collector.verification_filter() as descriptor:
-        try:
-            probe_argv = collector.verification_argv(['/usr/bin/true'], snapshot,
-                authority_root=authority, seccomp_fd=descriptor)
-        except ExecutionError:
-            pytest.skip('bwrap unavailable; production fails closed')
-        probe = subprocess.run(probe_argv, capture_output=True, pass_fds=(descriptor,), timeout=5)
-    if probe.returncode:
-        pytest.skip('kernel sandbox unavailable; production fails closed')
-    (snapshot / 'pyproject.toml').write_text(
-        '[project]\nname = "sandbox-probe"\nversion = "0.0.0"\nrequires-python = ">=3.12"\n')
-    (snapshot / 'test_probe.py').write_text('''import errno
-import socket
-
-def test_anonymous_socketpair():
-    for flags in (0, socket.SOCK_CLOEXEC, socket.SOCK_NONBLOCK,
-                  socket.SOCK_CLOEXEC | socket.SOCK_NONBLOCK):
-        left, right = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM | flags)
-        with left, right:
-            assert left.family == right.family == socket.AF_UNIX
-            left.sendall(b"local")
-            assert right.recv(5) == b"local"
-
-def test_network_creation_denied():
-    for family in (socket.AF_UNIX, socket.AF_INET, socket.AF_INET6):
-        for kind in (socket.SOCK_STREAM, socket.SOCK_DGRAM):
-            try:
-                connection = socket.socket(family, kind)
-            except OSError as exc:
-                assert exc.errno == errno.EPERM
-            else:
-                connection.close()
-                raise AssertionError("socket creation allowed")
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            pair = socket.socketpair(family)
-        except OSError as exc:
-            assert exc.errno == errno.EPERM
-        else:
-            for connection in pair:
-                connection.close()
-            raise AssertionError("non-Unix socketpair allowed")
-    for kind in (socket.SOCK_DGRAM, socket.SOCK_SEQPACKET):
-        try:
-            pair = socket.socketpair(socket.AF_UNIX, kind)
-        except OSError as exc:
-            assert exc.errno == errno.EPERM
-        else:
-            for connection in pair:
-                connection.close()
-            raise AssertionError("non-stream socketpair allowed")
-''')
-    # Reuse pytest from the running interpreter; offline/no-sync prevents installs.
-    with collector.verification_filter() as descriptor:
-        argv = collector.verification_argv(
-            [uv, 'run', '--no-sync', '--offline', '--python', sys.executable,
-             'python', '-m', 'pytest', '-q', '-p', 'no:cacheprovider', 'test_probe.py'],
-            snapshot, authority_root=authority, seccomp_fd=descriptor)
-        command_start = argv.index('--clearenv') + 1
-        argv[command_start:command_start] = [
-            '--setenv', 'UV_PROJECT_ENVIRONMENT', sys.prefix, '--setenv', 'UV_NO_SYNC', '1']
-        result = subprocess.run(argv, capture_output=True, text=True,
-                                pass_fds=(descriptor,), timeout=20)
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert '2 passed' in result.stdout
+    store, journal, _ = candidate
+    reviewer = (
+        "import json,os,sys; from pathlib import Path; request=json.load(sys.stdin); "
+        "out={key:request[key] for key in ('version','task_id','commit','plan_identity','diff_sha256')}; "
+        "out['outcome']='accepted'; Path(os.environ['TPO_REVIEW_RESULT_PATH']).write_text(json.dumps(out))"
+    )
+    monkeypatch.setattr(collector, 'review_argv', lambda *args, **kwargs: [sys.executable, '-c', reviewer])
+    result = collector.collect_checkpoints(store, 'execution', 1, deadline_monotonic=time.monotonic() + 20)
+    assert result['complete']
+    verification = next(receipt for receipt in journal._load()['receipts'] if receipt['kind'] == 'verification')
+    assert verification['evidence']['checks'] == [{'argv': ['uv', 'run', 'pytest'], 'exit_code': 0}]
+    assert store.load('execution')['attempts'][-1]['cleanup'] == 'confirmed'
 
 
-@pytest.mark.parametrize(('architecture', 'audit_arch', 'socket_syscall', 'connect', 'socketpair'), [
-    ('x86_64', 0xC000003E, 41, 42, 53),
-    ('aarch64', 0xC00000B7, 198, 203, 199),
-])
-def test_verification_filter_limits_socketpair_exception(
-        monkeypatch, architecture, audit_arch, socket_syscall, connect, socketpair):
+@pytest.mark.parametrize('candidate', [['python check.py'], ['pytest check.py']], indirect=True)
+def test_checks_use_project_environment_and_snapshot_src(candidate, monkeypatch):
+    import venv
+
     from hermes_pipeline import agent_collector as collector
-    monkeypatch.setattr(collector.platform, 'system', lambda: 'Linux')
-    monkeypatch.setattr(collector.platform, 'machine', lambda: architecture)
-    with collector.verification_filter() as descriptor:
-        policy = list(struct.iter_unpack('=HBBI', os.read(descriptor, 4096)))
+    store, journal, work = candidate
+    environment = work / '.venv'
+    venv.EnvBuilder(with_pip=False).create(environment)
+    source = work / 'src' / 'checkpoint_probe'
+    source.mkdir(parents=True)
+    (source / '__init__.py').write_text('VALUE = "committed"\n')
+    site_packages = next((environment / 'lib').glob('python*/site-packages'))
+    (site_packages / 'editable-probe.pth').write_text(str(work / 'src') + '\n')
+    # A project-local console script also verifies bare command PATH selection.
+    runner = environment / 'bin' / 'pytest'
+    runner.write_text(f'#!{environment / "bin" / "python"}\nimport runpy,sys\nrunpy.run_path(sys.argv[1])\n')
+    runner.chmod(0o755)
+    (work / 'check.py').write_text(
+        'import sys\nfrom pathlib import Path\nimport checkpoint_probe\n'
+        f'assert Path(sys.prefix) == Path({str(environment)!r})\n'
+        'assert checkpoint_probe.VALUE == "committed"\n'
+        'assert Path(checkpoint_probe.__file__).is_relative_to(Path.cwd() / "src")\n')
+    git(work, 'add', 'src', 'check.py')
+    git(work, 'commit', '--amend', '--no-edit')
+    # The existing editable environment points here; checks must prefer the snapshot.
+    (source / '__init__.py').write_text('VALUE = "unfinished"\n')
+    reviewer = (
+        "import json,os,sys; from pathlib import Path; request=json.load(sys.stdin); "
+        "out={key:request[key] for key in ('version','task_id','commit','plan_identity','diff_sha256')}; "
+        "out['outcome']='accepted'; Path(os.environ['TPO_REVIEW_RESULT_PATH']).write_text(json.dumps(out))"
+    )
+    monkeypatch.setattr(collector, 'review_argv', lambda *args, **kwargs: [sys.executable, '-c', reviewer])
+    result = collector.collect_checkpoints(store, 'execution', 1, deadline_monotonic=time.monotonic() + 20)
+    assert result['complete']
+    assert journal.recovery_context(1)['accepted']
+    assert (source / '__init__.py').read_text() == 'VALUE = "unfinished"\n'
 
-    def verdict(syscall, family=0, arch=audit_arch, kind=socket.SOCK_STREAM):
-        # Evaluate classic BPF against the Linux seccomp_data byte layout so
-        # both supported architectures are checked on either test host.
-        data = struct.pack('=II7Q', syscall, arch, 0, family, kind, 0, 0, 0, 0)
-        pc = accumulator = 0
-        for _ in range(len(policy)):
-            opcode, yes, no, value = policy[pc]
-            if opcode == 0x20:  # BPF_LD | BPF_W | BPF_ABS
-                accumulator = struct.unpack_from('=I', data, value)[0]
-            elif opcode == 0x15:  # BPF_JMP | BPF_JEQ | BPF_K
-                pc += yes if accumulator == value else no
-            elif opcode == 0x35:  # BPF_JMP | BPF_JGE | BPF_K
-                pc += yes if accumulator >= value else no
-            elif opcode == 0x54:  # BPF_ALU | BPF_AND | BPF_K
-                accumulator &= value
-            elif opcode == 0x06:  # BPF_RET | BPF_K
-                return value
-            else:
-                pytest.fail(f'unexpected BPF opcode {opcode}')
-            pc += 1
-        pytest.fail('filter failed to terminate')
 
-    for flags in (0, 0x80000, 0x800, 0x80800):
-        assert verdict(socketpair, socket.AF_UNIX, kind=socket.SOCK_STREAM | flags) == 0x7FFF0000
-        for kind in (0, socket.SOCK_DGRAM, socket.SOCK_SEQPACKET, socket.SOCK_STREAM | 0x10000000):
-            assert verdict(socketpair, socket.AF_UNIX, kind=kind | flags) == 0x00050001
-    for family in (0, socket.AF_INET, socket.AF_INET6, 0xFFFFFFFF):
-        assert verdict(socketpair, family) == 0x00050001
-    for syscall in (socket_syscall, connect, 425, 426, 427):
-        assert verdict(syscall, socket.AF_UNIX) == 0x00050001
-    for syscall in (socketpair, socket_syscall, connect):
-        assert verdict(syscall | 0x40000000, socket.AF_UNIX) == 0x80000000
-        assert verdict(syscall, socket.AF_UNIX, arch=0x40000003) == 0x80000000
+@pytest.mark.parametrize('dirty', [False, True])
+def test_review_handoff_supplies_response_path_git_facts_and_passed_checks(candidate, monkeypatch, dirty):
+    from hermes_pipeline import agent_collector as collector
+    store, journal, work = candidate
+    if dirty:
+        (work / 'unfinished.txt').write_text('preserve this')
+    expected_head = git(work, 'rev-parse', 'HEAD')
+    reviewer = (
+        "import json,sys; from pathlib import Path; request=json.load(sys.stdin); "
+        f"assert request['original_worktree'] == {{'head': {expected_head!r}, 'clean': {not dirty!r}}}; "
+        "assert request['verification'] == [{'argv': ['python', 'check.py'], 'exit_code': 0}]; "
+        "assert 'Do not rerun' in request['instruction']; "
+        "assert 'no Git metadata' in request['instruction']; "
+        "response=Path(request['response_path']); assert response.is_absolute(); "
+        "out={key:request[key] for key in ('version','task_id','commit','plan_identity','diff_sha256')}; "
+        "out['outcome']='accepted'; response.write_text(json.dumps(out))"
+    )
+    monkeypatch.setattr(collector, 'review_argv', lambda *args, **kwargs: [sys.executable, '-c', reviewer])
+    result = collector.collect_checkpoints(store, 'execution', 1, deadline_monotonic=time.monotonic() + 20)
+    assert result['complete']
+    assert journal.recovery_context(1)['accepted'][0]['commit'] == expected_head
+    if dirty:
+        assert (work / 'unfinished.txt').read_text() == 'preserve this'

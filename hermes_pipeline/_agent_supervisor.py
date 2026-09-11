@@ -122,22 +122,8 @@ def _prepare_launch(store: ExecutionStore, identity: str, record: dict) -> tuple
 
         ProgressJournal(store, identity).validate_fresh()
     confirm_process_capability()
-    if record["registration"]["manifest"] is not None:
-        from .agent_collector import confirm_verification_capability
-
-        try:
-            confirm_verification_capability()
-        except ExecutionError as error:
-            if error.args and isinstance(error.args[0], str) and error.args[0] in {
-                "checkpoint verification sandbox unavailable",
-                "checkpoint verification platform unsupported",
-                "checkpoint syscall sandbox unavailable",
-                "checkpoint syscall sandbox architecture unsupported",
-            }:
-                raise ExecutionError("verification_sandbox_unavailable") from None
-            raise
     staging = staging_directory(store, identity, len(record["attempts"]) + 1)
-    arguments = client_argv(record["registration"], staging, authority_root=store.root)
+    arguments = client_argv(record["registration"], staging)
     executable = shutil.which(arguments[0])
     if executable is None:
         raise ExecutionError("client_unavailable")
@@ -176,21 +162,23 @@ def staging_directory(store: ExecutionStore, identity: str, generation: int) -> 
     return path
 
 
-def client_argv(registration: dict, staging: Path, *, authority_root: Path) -> list[str]:
+def client_argv(registration: dict, staging: Path) -> list[str]:
     from .agent_client import build_client_argv
 
-    return build_client_argv(registration, staging, authority_root=authority_root)
+    return build_client_argv(registration, staging)
 
 
 def worker_instructions(identity: str, root: str) -> str:
     return (
         "You are the Hermes dispatcher. Invoke or reconnect to this registered execution:\n"
-        + shlex.join(["tpo-agent-supervisor", "run", "--root", root, "--execution", identity]) + "\n"
+        + shlex.join(["tpo-agent-supervisor", "run", "--wait", "--root", root, "--execution", identity]) + "\n"
         "Use only this installed interface. A missing supervisor blocks dispatch. "
         "Automatic worker retry reconnects to the same generation; never authorize a new attempt. "
         "The supervisor owns monitoring, deadline, cleanup and result validation. "
-        "While running_detached or waiting_for_admission, poll the same command without changing "
-        "card state. Never use kanban_block for waiting_for_admission. "
+        "Await this command until it finishes; if the terminal tool returns a background session, "
+        "keep polling that session until the command exits. Do not end the worker while it runs. "
+        "Never use kanban_block for running_detached or waiting_for_admission. "
+        "If its bounded wait returns either status, reconnect using the same command without changing card state. "
         "waiting_for_admission is not a terminal failure: the command owns bounded "
         "admission retries without allocating an attempt or refreshing its execution budget. "
         "For terminal outcomes, refresh this card "
@@ -199,8 +187,10 @@ def worker_instructions(identity: str, root: str) -> str:
         "Require HERMES_KANBAN_TASK to identify this card and a valid HERMES_KANBAN_RUN_ID "
         "before any worker transition. If either is unavailable, report and leave card state unchanged. "
         "Only when completion_allowed is true, use the kanban_complete worker tool (which binds "
-        "the current worker run identity; never the unguarded CLI) with the returned "
-        "metadata.tpo_result unchanged. Otherwise report its structured status through Kanban "
+        "the current worker run identity; never the unguarded CLI) and set its metadata argument to the entire returned report.metadata object: "
+        'metadata={"tpo_result": <validated result>}. '
+        "Keep the nested tpo_result unchanged. Never pass report.metadata.tpo_result alone as the metadata argument. "
+        "Otherwise report its structured status through Kanban "
         "kanban_comment and kanban_block worker tools; retain interrupted, timed_out, cleanup_unconfirmed and lock_unconfirmed "
         "as distinct reasons. Never infer completion from zero exit or missing processes.\n"
     )
@@ -677,10 +667,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", required=True, type=Path)
     parser.add_argument("--execution", required=True)
     parser.add_argument("--recovery-event")
+    parser.add_argument("--wait", action="store_true", help="Wait for the registered attempt within its existing deadline and cleanup allowance")
     parser.add_argument("--mode", choices=("recovery_only", "resume"), default="recovery_only")
     parser.add_argument("--preview-file", type=Path)
     args = parser.parse_args(argv)
     try:
+        started = time.monotonic()
         store = ExecutionStore(args.root)
         if args.operation == "prepare-recovery":
             from .agent_recovery import prepare_recovery
@@ -702,9 +694,19 @@ def main(argv: list[str] | None = None) -> int:
                                    if args.operation == "run" and args.recovery_event is not None else None)
             report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event)
         if args.operation == "run":
-            stop = time.monotonic() + 5
+            stop = started + (store.load(args.execution)["registration"]["timeout"] + 60 if args.wait else 5)
+            caller = process_identity(os.getpid()) if args.wait else None
             while report["status"] in {"running_detached", "registered", "lock_unconfirmed", "waiting_for_admission"} and time.monotonic() < stop:
-                time.sleep(0.1)
+                if args.wait:
+                    attempts = store.load(args.execution)["attempts"]
+                    attempt = attempts[-1] if attempts else None
+                    if (attempt is not None and (expected_generation is None or attempt["generation"] >= expected_generation)
+                            and attempt["deadline_monotonic"] is not None and attempt["supervisor"] is not None
+                            and all(attempt["supervisor"][key] == caller[key] for key in ("host", "boot_id"))):
+                        stop = min(stop, attempt["deadline_monotonic"] + 60)
+                    if time.monotonic() >= stop:
+                        break
+                time.sleep(min(0.1, max(0, stop - time.monotonic())))
                 if report["status"] == "waiting_for_admission" and report.get("reason") == "worktree_busy":
                     # Only verified worktree contention is retried, without
                     # admitting a generation or starting its execution budget.
