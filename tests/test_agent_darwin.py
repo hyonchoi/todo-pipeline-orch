@@ -457,12 +457,12 @@ def test_discovery_uses_public_metadata_but_verifies_owned_candidates(api, monke
     monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
     root = backend.snapshot(42)
     known = {42: root}
-    assert agent_process._discover(known)
+    assert agent_process._discover(known) is agent_process.DiscoveryOutcome.CLEAN
     assert set(known) == {42, 43}
     assert 1 not in strict_reads
     deny_child = True
-    assert not agent_process._discover({42: root})
-    assert not agent_process._discover(known)
+    assert agent_process._discover({42: root}) is agent_process.DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
+    assert agent_process._discover(known) is agent_process.DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
 
 
 def test_public_discovery_short_record_is_birth_guarded(api, monkeypatch):
@@ -634,7 +634,9 @@ def test_continue_exit_race_requires_independent_final_death(api, monkeypatch, f
     monkeypatch.setattr(darwin, 'Backend', lambda: backend)
     monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
     monkeypatch.setattr(agent_process, 'process_snapshot', snapshot)
-    monkeypatch.setattr(agent_process, '_discover', lambda known: final != 'discovery_gap')
+    discovery = (agent_process.DiscoveryOutcome.TRANSIENT if final == 'discovery_gap'
+                 else agent_process.DiscoveryOutcome.CLEAN)
+    monkeypatch.setattr(agent_process, '_discover', lambda known: discovery)
     elapsed = [0.0]
     monkeypatch.setattr(agent_process.time, 'monotonic', lambda: elapsed[0])
     monkeypatch.setattr(agent_process.time, 'sleep', lambda delay: elapsed.__setitem__(0, elapsed[0] + delay))

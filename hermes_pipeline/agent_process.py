@@ -3,7 +3,7 @@
 Linux birth identities/pidfds and Darwin unique IDs/audit tokens prevent
 signaling reused PIDs. Other platforms fail closed. Discovery cannot guarantee
 capture of a descendant which escapes its session and ancestry between samples; this is not a containment
-boundary. Missing observations or unverifiable known owners block cleanup.
+boundary. Unresolved observations or unverifiable known owners block cleanup.
 """
 
 from __future__ import annotations
@@ -17,10 +17,17 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Sequence
+from enum import Enum
 from pathlib import Path
 
 Identity = dict[str, object]
 _IDENTITY_KEYS = ("pid", "start_ticks", "boot_id", "host")
+
+
+class DiscoveryOutcome(Enum):
+    CLEAN = "clean"
+    TRANSIENT = "transient"
+    OWNERSHIP_AMBIGUOUS = "ownership_ambiguous"
 
 
 class ProcessLaunchError(RuntimeError):
@@ -125,7 +132,7 @@ def process_snapshot(pid: int) -> Identity | None:
     boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
     try:
         stat = Path(f"/proc/{pid}/stat").read_text()
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return None
     fields = stat[stat.rfind(")") + 2:].split()
     return {
@@ -139,25 +146,38 @@ def _same(left: Identity, right: Identity) -> bool:
     return all(key in left and left[key] == right.get(key) for key in _IDENTITY_KEYS)
 
 
-def _discover(known: dict[int, Identity]) -> bool:
-    """Capture descendants and members of still-verified owned sessions."""
+def _discover(known: dict[int, Identity]) -> DiscoveryOutcome:
+    """Capture verified owners, distinguishing host churn from ownership doubt."""
     snapshots = {}
+    outcome = DiscoveryOutcome.CLEAN
     try:
         if sys.platform == "darwin":
             from .agent_darwin import Backend
             backend = Backend()
             pids = set(backend.pids()) | set(known)
         else:
-            pids = [int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdecimal()]
-        for pid in pids:
+            pids = {int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdecimal()} | set(known)
+    except (OSError, ValueError, IndexError):
+        pids = set(known)
+        outcome = DiscoveryOutcome.TRANSIENT
+    for pid in pids:
+        try:
             if sys.platform == "darwin" and pid not in known:
                 snapshot = backend.discovery_snapshot(pid)
             else:
                 snapshot = process_snapshot(pid)
             if snapshot is not None:
                 snapshots[pid] = snapshot
-    except (OSError, ValueError, IndexError):
-        return False
+                if pid in known and not _same(known[pid], snapshot):
+                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
+            elif pid not in known:
+                outcome = DiscoveryOutcome.TRANSIENT
+        except (OSError, ValueError, IndexError):
+            if pid in known:
+                return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
+            # This PID has no established relation to an owner. Keep scanning:
+            # host churn must not hide a later, ownership-relevant ambiguity.
+            outcome = DiscoveryOutcome.TRANSIENT
     live = {pid for pid, old in known.items() if pid in snapshots and _same(old, snapshots[pid])}
     sessions = {pid for pid in live if snapshots[pid]["session"] == pid}
     former_sessions = {pid for pid, old in known.items() if old.get("session") == pid} - sessions
@@ -165,14 +185,12 @@ def _discover(known: dict[int, Identity]) -> bool:
            for pid, snapshot in snapshots.items()):
         # A leader can exit before its child is observed. Do not assert cleanup
         # or adopt an unverified orphan solely from a historical numeric SID.
-        return False
+        return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
     changed = True
     while changed:
         changed = False
         for pid, snapshot in snapshots.items():
             if pid not in live and (snapshot["ppid"] in live or snapshot["session"] in sessions):
-                if pid in known and not _same(known[pid], snapshot):
-                    return False
                 relation = "ppid" if snapshot["ppid"] in live else "session"
                 anchor_pid = snapshot[relation]
                 try:
@@ -182,9 +200,9 @@ def _discover(known: dict[int, Identity]) -> bool:
                     current = process_snapshot(pid)
                     anchor = process_snapshot(anchor_pid)
                 except (OSError, ValueError, IndexError):
-                    return False
+                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
                 if anchor is None or not _same(known[anchor_pid], anchor):
-                    return False
+                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
                 if (current is None and snapshot["session"] == pid
                         and snapshot["start_ticks"] >= anchor["start_ticks"]):
                     # Retain a newly detached leader that exited after the scan.
@@ -193,7 +211,7 @@ def _discover(known: dict[int, Identity]) -> bool:
                     if any(other_pid != pid and other_pid not in live
                            and other["session"] == pid
                            for other_pid, other in snapshots.items()):
-                        return False
+                        return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
                     continue
                 if current is None or not _same(snapshot, current):
                     # A scanned session member may exit or reuse its PID before
@@ -202,14 +220,14 @@ def _discover(known: dict[int, Identity]) -> bool:
                     if (snapshot["session"] in sessions
                             and snapshot["start_ticks"] >= anchor["start_ticks"]):
                         continue
-                    return False
+                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
                 if (current[relation] != anchor_pid
                         or current["start_ticks"] < anchor["start_ticks"]):
-                    return False
+                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
                 known[pid] = snapshot
                 live.add(pid)
                 changed = True
-    return True
+    return outcome
 
 
 def _live(identity: Identity) -> bool | None:
@@ -281,11 +299,22 @@ def cleanup_processes(
     uncertain = len(known) != len(identities)
     started = time.monotonic()
     deadline = started + cleanup_timeout
+    # Extra observation passes for host churn have a short shared allowance;
+    # terminating verified live owners still uses the full cleanup deadline.
+    discovery_deadline = min(deadline, started + 2)
     graceful_end = started + min(5, cleanup_timeout / 2)
     sent = set()
+    retry_deadline = None
     while True:
+        # Always allow the initial pass, including a zero-timeout request.
+        # A sleep can exhaust the allowance or overshoot it, so recheck before
+        # starting another scan rather than only before sleeping.
+        if retry_deadline is not None and time.monotonic() >= retry_deadline:
+            uncertain = True
+            break
         previous = len(known)
-        uncertain |= not _discover(known)
+        discovery = _discover(known)
+        uncertain |= discovery is DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
         if on_processes is not None and len(known) != previous:
             try:
                 on_processes(list(known.values()))
@@ -298,9 +327,20 @@ def cleanup_processes(
             uncertain |= live is None
             if live:
                 living.append(identity)
-        if not living:
-            break
         now = time.monotonic()
+        # A scan that began on time can finish after its retry allowance. Its
+        # inventory is retained, but a late observation cannot prove cleanup.
+        if retry_deadline is not None and now >= retry_deadline:
+            uncertain = True
+            break
+        if not living:
+            if (discovery is not DiscoveryOutcome.TRANSIENT
+                    or uncertain or now >= discovery_deadline):
+                uncertain |= discovery is not DiscoveryOutcome.CLEAN
+                break
+            retry_deadline = discovery_deadline
+            time.sleep(min(0.02, max(0, discovery_deadline - now)))
+            continue
         sig = signal.SIGKILL if now >= graceful_end else signal.SIGTERM
         for identity in reversed(living):
             for action in ((sig, signal.SIGCONT) if sig == signal.SIGTERM else (sig,)):
@@ -316,6 +356,7 @@ def cleanup_processes(
         if now >= deadline:
             uncertain = True
             break
+        retry_deadline = deadline
         time.sleep(min(0.02, max(0, deadline - time.monotonic())))
     return {"cleanup": "cleanup_unconfirmed" if uncertain else "confirmed",
             "processes": list(known.values())}
@@ -453,7 +494,7 @@ def run_process(
                 outcome = "timed_out"
                 break
             previous = len(known)
-            uncertain |= not _discover(known)
+            uncertain |= _discover(known) is DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
             if on_processes and len(known) != previous:
                 on_processes(list(known.values()))
             if exit_code is not None:
