@@ -108,12 +108,20 @@ cgroup v2 backend using an existing systemd user manager and
 `systemd-run --user --scope` with `Delegate=yes`. Missing cgroup v2,
 `cgroup.kill`, or delegation support fails closed without a portable fallback or
 automatic installation. An inert helper waits for durable cgroup and process
-receipts before executing the exact argv and stdin; setup consumes the existing
-deadline. Graceful cleanup uses pidfds with a membership recheck, then
+receipts before executing the exact argv and stdin. A bounded private anonymous
+pipe carries the exact client environment separately from the manager
+environment without persisting it. Setup consumes the existing deadline;
+pre-exec failures may report a bootstrap exit status, never client success.
+Graceful cleanup uses pidfds with a membership recheck, then
 `cgroup.kill` forces termination and `populated=0` confirms emptiness. Native
 cleanup uses retained group identity rather than host inventory scans, including
-after supervisor loss. This trusts same-user clients not to migrate processes
-out of their groups; cgroups do not provide a filesystem sandbox.
+after supervisor loss. Cgroup receipt version 2 pins root device and inode as
+well as scope identity; a changed mount view cannot establish cleanup from a
+missing scope. Legacy version-1 receipts can clean matching existing scopes but
+cannot newly confirm a missing scope. Existing terminal records remain intact
+without invented migration evidence. This trusts same-user clients not to
+migrate processes out of their groups; cgroups do not provide a filesystem
+sandbox.
 
 Execution schema 2 retains append-only `owned_cgroups` receipts. Schema-1 records
 are read-upgraded without invented group evidence and persisted on the next
@@ -122,8 +130,9 @@ inventory baseline. Recovery retains legacy Linux PID ownership. macOS retains
 its portable `libproc` unique-ID and audit-token backend, detected by capability
 rather than OS version; live testing of the unchanged macOS backend is deferred.
 New worker cards pin the selected absolute launcher beside the current
-interpreter, with `PATH` fallback for nonstandard layouts; existing cards remain
-unchanged.
+interpreter. Isolated `uv tool install` pairs the launcher and helper interpreter
+and package version; the `PATH` fallback for nonstandard layouts cannot guarantee
+that pairing. Existing cards remain unchanged.
 Clients and checkpoint verification commands run as the invoking OS user,
 without supervisor sandbox restrictions or storage isolation. Codex uses
 `--dangerously-bypass-approvals-and-sandbox`; Claude uses

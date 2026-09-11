@@ -7,11 +7,12 @@ exit status, and validates its result. External agents still perform the
 implementation and review. This is an internal Hermes interface, not a public
 `tpo agent-run` command. A missing launcher blocks dispatch.
 
-The launcher is installed with the package by `uv tool install` and uses that
-environment's interpreter. New cards pin the absolute launcher path selected
-beside the current interpreter; nonstandard layouts fall back to a launcher
-found on `PATH`. Existing card bodies are unchanged. Do not replace the launcher
-with an ambient `python -m` call.
+A supported isolated `uv tool install` pairs the launcher and helper with that
+environment's interpreter and package version. New cards pin the absolute
+launcher path selected beside the current interpreter. Nonstandard layouts
+fall back to a launcher found on `PATH`, which cannot guarantee that pairing.
+Existing card bodies are unchanged. Do not replace the launcher with an ambient
+`python -m` call.
 Plan/profile validation and prompt rendering precede card registration. The
 execution record pins the Plan identity, prompt, client launch settings, original
 worktree and branch, timeout, and result contract, including `phase_role`.
@@ -73,7 +74,11 @@ supervisor starts an inert helper through `systemd-run --user --scope` with
 `Delegate=yes`. It verifies scope ownership and writable `cgroup.kill`, persists
 the cgroup receipt and process evidence through the launch callbacks, then
 releases the helper to execute the exact client or check argv with its original
-stdin. Spawn and scope setup overhead conservatively consume the existing deadline; no budget is added.
+stdin. The exact client environment mapping travels through a bounded private
+anonymous pipe, separately from the manager environment, and is not persisted.
+Spawn and scope setup overhead conservatively consume the existing deadline;
+no budget is added. Launch or timeout failures before client exec may include
+the bootstrap exit status; that status never establishes client success.
 
 Cleanup signals current group members with TERM and CONT, pinning each process
 with a pidfd and rechecking membership before graceful signaling. Forced cleanup
@@ -83,12 +88,18 @@ from ancestry. Forked, detached, and reparented descendants remain in the scope
 unless they deliberately migrate out of it.
 
 Crash recovery uses retained receipts containing the host, boot identity, cgroup
-path, device, inode, and UUID scope unit. Changed identity leaves cleanup
-unconfirmed. A missing scope on the same host and boot confirms emptiness under
-the trusted same-user contract: clients do not deliberately migrate processes
-out of their owned cgroup. Cgroups provide process ownership, not a filesystem
-sandbox or a boundary against hostile same-user code. Cleanup confirmation never
-reconstructs an unobserved exit or bypasses existing result validators.
+path, device, inode, and UUID scope unit. Receipt version 2 also pins the cgroup
+root device and inode (`root_device` and `root_inode`). Changed identity leaves
+cleanup unconfirmed: a changed mount view cannot turn a missing scope into
+confirmed cleanup. A missing version-2 scope confirms emptiness only with the
+same host, boot, and root identity, under the trusted same-user contract that
+clients do not deliberately migrate processes out of their owned cgroup.
+Legacy version-1 receipts can still clean an existing scope with matching
+identity, but a missing scope cannot newly confirm cleanup. Existing terminal
+records are preserved; migration does not invent missing root evidence. Cgroups
+provide process ownership, not a filesystem sandbox or a boundary against hostile
+same-user code. Cleanup confirmation never reconstructs an unobserved exit or
+bypasses existing result validators.
 
 ### Portable and legacy ownership
 
