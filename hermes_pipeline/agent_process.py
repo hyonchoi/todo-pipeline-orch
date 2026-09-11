@@ -1,9 +1,8 @@
-"""Best-effort owned process supervision; no shell or provider output capture.
+"""Owned process supervision with Linux cgroups and a portable legacy backend.
 
-Linux birth identities/pidfds and Darwin unique IDs/audit tokens prevent
-signaling reused PIDs. Other platforms fail closed. Discovery cannot guarantee
-capture of a descendant which escapes its session and ancestry between samples; this is not a containment
-boundary. Unresolved observations or unverifiable known owners block cleanup.
+New Linux launches use a delegated cgroup v2 scope. Darwin and legacy recovery
+retain verified birth identities and best-effort process-tree discovery.
+Unresolved observations or unverifiable owners block confirmed cleanup.
 """
 
 from __future__ import annotations
@@ -117,6 +116,9 @@ def confirm_process_capability() -> None:
                 _pidfd_signal(probe, 0)
             finally:
                 os.close(probe)
+        if sys.platform == "linux":
+            from .agent_cgroup import confirm_cgroup_capability
+            confirm_cgroup_capability()
     except (OSError, RuntimeError, ValueError):
         raise ProcessLaunchError() from None
 
@@ -417,6 +419,7 @@ def run_process(
     pass_fds: tuple[int, ...] = (),
     on_launch: Callable[[dict], None] | None = None,
     on_processes: Callable[[list[Identity]], None] | None = None,
+    on_cgroup: Callable[[dict], None] | None = None,
 ) -> dict:
     """Launch one internally constructed argv and exclusively collect its exit.
 
@@ -442,11 +445,21 @@ def run_process(
         deadline = min(deadline, deadline_monotonic)
     if deadline <= started:
         raise ProcessLaunchError()
+    cgroup = None
+    release_fd = None
+    exec_fd = None
     try:
-        child = subprocess.Popen(
-            list(argv), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True, env=env, pass_fds=pass_fds,
-        )
+        if sys.platform == "linux":
+            from .agent_cgroup import launch
+            child, cgroup, release_fd, exec_fd = launch(
+                argv, cwd=cwd, env=env, pass_fds=pass_fds, deadline=deadline,
+                on_cgroup=on_cgroup,
+            )
+        else:
+            child = subprocess.Popen(
+                list(argv), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, start_new_session=True, env=env, pass_fds=pass_fds,
+            )
     except OSError:
         raise ProcessLaunchError() from None
     known = {}
@@ -483,6 +496,16 @@ def run_process(
             on_processes(list(known.values()))
         if child_fd is None:
             raise ProcessOwnershipError(list(known.values()))
+        if release_fd is not None:
+            if time.monotonic() < deadline:
+                os.write(release_fd, b"1")
+            os.close(release_fd)
+            release_fd = None
+        if exec_fd is not None:
+            from .agent_cgroup import await_exec
+            await_exec(exec_fd, deadline)
+            os.close(exec_fd)
+            exec_fd = None
         os.set_blocking(child.stdin.fileno(), False)
         offset = 0
         while True:
@@ -497,7 +520,8 @@ def run_process(
                 outcome = "exited"
                 break
             previous = len(known)
-            uncertain |= _discover(known) is DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
+            if cgroup is None:
+                uncertain |= _discover(known) is DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
             if on_processes and len(known) != previous:
                 on_processes(list(known.values()))
             if not child.stdin.closed:
@@ -513,16 +537,27 @@ def run_process(
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
     finally:
         cleanup_deadline = time.monotonic() + cleanup_timeout
+        if release_fd is not None:
+            os.close(release_fd)
+        if exec_fd is not None:
+            os.close(exec_fd)
         if child.stdin is not None:
             child.stdin.close()
         try:
             if not known or child_fd is None:
                 _cleanup_owned_child(child, child_fd, cleanup_deadline, known.get(child.pid))
-            cleanup = cleanup_processes(
-                list(known.values()),
-                cleanup_timeout=max(0, cleanup_deadline - time.monotonic()),
-                on_processes=on_processes,
-            )
+            if cgroup is not None:
+                from .agent_cgroup import cleanup_cgroup
+                cleanup = cleanup_cgroup(
+                    cgroup, cleanup_timeout=max(0, cleanup_deadline - time.monotonic()),
+                )
+                cleanup["processes"] = list(known.values())
+            else:
+                cleanup = cleanup_processes(
+                    list(known.values()),
+                    cleanup_timeout=max(0, cleanup_deadline - time.monotonic()),
+                    on_processes=on_processes,
+                )
             # Never block beyond cleanup; a live child leaves exit unobservable.
             exit_code = child.poll()
         finally:
@@ -531,7 +566,7 @@ def run_process(
     if uncertain or not known:
         cleanup["cleanup"] = "cleanup_unconfirmed"
     return {
-        "outcome": outcome, "exit_code": exit_code,
+        "cgroup": cgroup, "outcome": outcome, "exit_code": exit_code,
         "signal": -exit_code if exit_code is not None and exit_code < 0 else None,
         "cleanup": cleanup["cleanup"], "processes": cleanup["processes"],
         "launched_monotonic": started, "deadline": deadline,

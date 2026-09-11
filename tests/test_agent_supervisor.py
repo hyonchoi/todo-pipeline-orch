@@ -13,6 +13,21 @@ from hermes_pipeline import _agent_supervisor as supervisor
 from hermes_pipeline.agent_execution import ExecutionError, ExecutionStore
 
 
+@pytest.fixture(autouse=True)
+def portable_process_backend(monkeypatch):
+    """Exercise supervisor contracts without requiring a Linux user manager.
+
+    Native cgroup launch/cleanup is covered separately in test_agent_cgroup.
+    Keep the real legacy process implementation for these provider-free tests.
+    """
+    from types import SimpleNamespace
+
+    from hermes_pipeline import agent_process
+
+    if sys.platform == 'linux':
+        monkeypatch.setattr(agent_process, 'sys', SimpleNamespace(platform='legacy'))
+
+
 @pytest.mark.parametrize('failure', ['timeout', 'supervisor_loss', 'loss_after_timeout_receipt'])
 def test_collection_preserves_primary_exit_and_owns_attempt_outcome(execution, monkeypatch, failure):
     from hermes_pipeline import agent_collector as collector
@@ -398,7 +413,7 @@ def test_proven_spawn_failure_has_confirmed_cleanup_but_never_automatic_retry(ex
     monkeypatch.setattr(supervisor, "client_argv", lambda *args, **kwargs: [sys.executable, "-c", "pass"])
     original_spawn = agent_process.subprocess.Popen
     def failed_spawn(args, **kwargs):
-        if args[0] == sys.executable:
+        if args[0] in {sys.executable, "systemd-run"}:
             raise FileNotFoundError("executable vanished")
         return original_spawn(args, **kwargs)
     monkeypatch.setattr(agent_process.subprocess, "Popen", failed_spawn)
@@ -426,7 +441,10 @@ def test_internal_cli_rejects_arbitrary_command(capsys):
     assert "error" in capsys.readouterr().err
 
 
-def test_missing_installed_supervisor_blocks_dispatch(monkeypatch):
+def test_missing_installed_supervisor_blocks_dispatch(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(supervisor, "sys", SimpleNamespace(executable=str(tmp_path / "missing-python")))
     monkeypatch.setattr(supervisor.shutil, "which", lambda name: None)
     with pytest.raises(ExecutionError, match="supervisor_unavailable"):
         supervisor.installed_entrypoint()
@@ -683,9 +701,13 @@ def test_supervisor_survives_worker_and_preserves_prompt_bytes(tmp_path, monkeyp
     # The separate packaging smoke exercises the unmodified installed launcher.
     executable = bindir / "tpo-agent-supervisor"
     executable.write_text(f"#!{sys.executable}\nimport sys\nfrom pathlib import Path\n"
-                          "from hermes_pipeline import agent_authority\n"
+                          "from hermes_pipeline import agent_authority, agent_process\n"
+                          "from types import SimpleNamespace\n"
+                          "if sys.platform == 'linux': agent_process.sys = SimpleNamespace(platform='legacy')\n"
                           f"agent_authority.account_home = lambda: Path({str(tmp_path / 'account')!r})\n"
-                          "from hermes_pipeline._agent_supervisor import main\nsys.exit(main())\n")
+                          "from hermes_pipeline import _agent_supervisor as supervisor\n"
+                          "supervisor.installed_entrypoint = lambda: str(Path(__file__).absolute())\n"
+                          "sys.exit(supervisor.main())\n")
     executable.chmod(0o700)
     client = bindir / "codex"
     captured = tmp_path / "stdin.bin"
@@ -889,3 +911,113 @@ def test_worker_completion_passes_metadata_envelope_to_kanban_tool():
     assert 'metadata={"tpo_result": <validated result>}' in body
     assert 'Never pass report.metadata.tpo_result alone as the metadata argument' in body
     assert 'Keep the nested tpo_result unchanged' in body
+
+
+def _cgroup_receipt(letter='a'):
+    unit = 'tpo-' + letter * 32 + '.scope'
+    return dict(version=1, unit=unit, path='/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/' + unit,
+                device=1, inode=2, boot_id='boot', host='host')
+
+
+def test_supervisor_persists_group_before_client_launch(execution, monkeypatch):
+    from hermes_pipeline.agent_execution import process_identity
+    store, _ = execution
+    receipt = _cgroup_receipt()
+    process = process_identity(os.getpid())
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *a: None)
+    monkeypatch.setattr(supervisor, 'confirm_process_capability', lambda: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *a, **k: [sys.executable])
+    def run(*args, **kwargs):
+        kwargs['on_cgroup'](receipt)
+        assert store.load('execution-1')['attempts'][-1]['owned_cgroups'] == [receipt]
+        kwargs['on_launch']({'identity': process, 'launched_monotonic': 10., 'deadline': 40.})
+        kwargs['on_processes']([process])
+        raise supervisor.ProcessOwnershipError([process])
+    monkeypatch.setattr(supervisor, 'run_process', run)
+    supervisor.supervise(store, 'execution-1')
+    attempt = store.load('execution-1')['attempts'][-1]
+    assert attempt['client_process']['cgroup'] == receipt['unit']
+    assert attempt['owned_processes'] == [{**process, 'cgroup': receipt['unit']}]
+
+
+@pytest.mark.parametrize('confirmed', [True, False])
+def test_recovery_cleans_groups_without_pid_scan_or_inventing_exit(execution, monkeypatch, confirmed):
+    from hermes_pipeline import agent_cgroup
+    from hermes_pipeline.agent_execution import process_identity
+    store, _ = execution
+    store.admit('execution-1')
+    receipt = _cgroup_receipt()
+    process = {**process_identity(os.getpid()), 'cgroup': receipt['unit']}
+    store.update_attempt('execution-1', 1, status='running', owned_cgroups=[receipt], client_process=process,
+                         owned_processes=[process])
+    observed = []
+    def cleanup(group, **kwargs):
+        observed.append(group)
+        return {'cleanup': 'confirmed' if confirmed else 'cleanup_unconfirmed', 'processes': []}
+    monkeypatch.setattr(agent_cgroup, 'cleanup_cgroup', cleanup)
+    monkeypatch.setattr(supervisor, 'cleanup_processes', lambda *a, **k: pytest.fail('cgroup members must not use PID recovery'))
+    supervisor.recover(store, 'execution-1', cleanup_timeout=0)
+    attempt = store.load('execution-1')['attempts'][-1]
+    assert observed == [receipt]
+    assert attempt['cleanup'] == ('confirmed' if confirmed else 'unconfirmed')
+    assert attempt['status'] == 'interrupted'
+    assert attempt['exit_code'] is None
+
+
+@pytest.mark.parametrize('receipt_exists', [True, False])
+def test_recovery_resolves_only_receipt_for_pending_collector_launch(execution, monkeypatch, receipt_exists):
+    from hermes_pipeline import agent_cgroup, agent_collector
+    store, _ = execution
+    store.admit('execution-1')
+    previous, current = _cgroup_receipt('a'), _cgroup_receipt('b')
+    store.update_attempt('execution-1', 1, status='running', owned_cgroups=[previous])
+    agent_collector._launch_marker(store, 'execution-1', 1, True)
+    if receipt_exists:
+        store.update_attempt('execution-1', 1, owned_cgroups=[previous, current])
+    monkeypatch.setattr(agent_cgroup, 'cleanup_cgroup', lambda *a, **k: {'cleanup': 'confirmed', 'processes': []})
+    for _ in range(2):
+        supervisor.recover(store, 'execution-1', cleanup_timeout=0)
+        attempt = store.load('execution-1')['attempts'][-1]
+        assert attempt['cleanup'] == ('confirmed' if receipt_exists else 'unconfirmed')
+        assert agent_collector.collector_launch_pending(store, 'execution-1') is not receipt_exists
+
+
+def test_worker_command_pins_interpreter_sibling_across_changed_path(tmp_path, monkeypatch):
+    import shlex
+    from types import SimpleNamespace
+
+    installed = tmp_path / 'new install with spaces' / 'bin'
+    stale = tmp_path / 'old-bin'
+    installed.mkdir(parents=True)
+    stale.mkdir()
+    interpreter = installed / 'python'
+    interpreter.symlink_to(sys.executable)
+    marker = tmp_path / 'selected'
+    for directory, label in ((installed, 'pinned'), (stale, 'stale')):
+        helper = directory / 'tpo-agent-supervisor'
+        helper.write_text(f'#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).write_text({label!r})\n')
+        helper.chmod(0o700)
+    monkeypatch.setattr(supervisor, 'sys', SimpleNamespace(executable=str(interpreter)), raising=False)
+    monkeypatch.setenv('PATH', str(stale))
+    body = supervisor.worker_instructions('execution-1', '/state with spaces/executions')
+    command = shlex.split(body.splitlines()[1])
+    subprocess.run(command, check=True, timeout=5)
+    assert marker.read_text() == 'pinned'
+    assert command == [str(installed / 'tpo-agent-supervisor'), 'run', '--wait', '--root',
+                       '/state with spaces/executions', '--execution', 'execution-1']
+
+
+@pytest.mark.parametrize('sibling_exists', [False, True])
+def test_entrypoint_path_fallback_requires_no_executable_sibling(tmp_path, monkeypatch, sibling_exists):
+    from types import SimpleNamespace
+
+    installed = tmp_path / 'environment'
+    installed.mkdir()
+    if sibling_exists:
+        sibling = installed / 'tpo-agent-supervisor'
+        sibling.write_text('not executable')
+        sibling.chmod(0o600)
+    fallback = tmp_path / 'fallback' / 'tpo-agent-supervisor'
+    monkeypatch.setattr(supervisor, 'sys', SimpleNamespace(executable=str(installed / 'python')))
+    monkeypatch.setattr(supervisor.shutil, 'which', lambda _: str(fallback))
+    assert supervisor.installed_entrypoint() == str(fallback)

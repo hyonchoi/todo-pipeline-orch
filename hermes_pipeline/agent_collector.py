@@ -122,10 +122,12 @@ def review_argv(client, snapshot, staging):
 def _launch_marker(store, identity, generation, pending):
     with store._directory_handle(identity) as directory:
         _atomic_write(Path('collector-launch.json'),
-                      {'version': 1, 'generation': generation, 'pending': pending}, directory_fd=directory)
+                      {'version': 2, 'generation': generation, 'pending': pending,
+                       'cgroups_before': len(store.load(identity)['attempts'][-1]['owned_cgroups'])},
+                      directory_fd=directory)
 
 
-def collector_launch_pending(store, identity):
+def collector_launch_pending(store, identity, *, cleaned_cgroups=()):
     """A missing birth receipt can never be repaired from older process PIDs."""
     try:
         with store._directory_handle(identity) as directory:
@@ -134,11 +136,26 @@ def collector_launch_pending(store, identity):
         return False
     try:
         marker = json.loads(raw)
-        if (not isinstance(marker, dict) or set(marker) != {'version', 'generation', 'pending'}
-                or type(marker['version']) is not int or marker['version'] != 1
-                or type(marker['generation']) is not int or marker['generation'] < 1
-                or type(marker['pending']) is not bool):
+        if (not isinstance(marker, dict) or type(marker.get('version')) is not int
+                or marker['version'] not in (1, 2)):
             return True
+        fields = {'version', 'generation', 'pending'} | ({'cgroups_before'} if marker['version'] == 2 else set())
+        if (set(marker) != fields
+                or type(marker['generation']) is not int or marker['generation'] < 1
+                or type(marker['pending']) is not bool
+                or (marker['version'] == 2 and (type(marker['cgroups_before']) is not int
+                                               or not 0 <= marker['cgroups_before'] <= 2048))):
+            return True
+        if marker['pending'] and marker['version'] == 2 and cleaned_cgroups:
+            attempt = store.load(identity)['attempts'][-1]
+            groups = attempt['owned_cgroups']
+            # The append-only inventory binds this launch intent to exactly
+            # one later receipt, even if death occurs between receipt writes.
+            if (marker['generation'] == attempt['generation']
+                    and len(groups) == marker['cgroups_before'] + 1
+                    and groups[-1]['unit'] in cleaned_cgroups):
+                _launch_marker(store, identity, attempt['generation'], False)
+                return False
         return marker['pending']
     except (ValueError, UnicodeError):
         return True
@@ -189,8 +206,17 @@ def _record_collector_exit(store, identity, generation, outcome, role, task_id):
 
 def _run_owned(store, identity, generation, argv, *, cwd, stdin_bytes, env, deadline, role='verification', task_id=None):
     existing = store.load(identity)['attempts'][-1]['owned_processes']
+    current_group = None
+
+    def cgroup_launched(receipt):
+        nonlocal current_group
+        groups = store.load(identity)['attempts'][-1]['owned_cgroups']
+        store.update_attempt(identity, generation, owned_cgroups=[*groups, receipt], cleanup='unconfirmed')
+        current_group = receipt['unit']
 
     def inventory(processes):
+        if current_group:
+            processes = [{**process, 'cgroup': current_group} for process in processes]
         combined = {json.dumps(process, sort_keys=True): process for process in [*existing, *processes]}
         store.update_attempt(identity, generation, owned_processes=list(combined.values()), cleanup='unconfirmed')
 
@@ -210,10 +236,10 @@ def _run_owned(store, identity, generation, argv, *, cwd, stdin_bytes, env, dead
                               timeout=remaining, deadline_monotonic=deadline,
                               cleanup_timeout=min(60, max(0, deadline + 60 - time.monotonic())),
                               on_launch=launched,
-                              on_processes=inventory)
+                              on_processes=inventory, on_cgroup=cgroup_launched)
     except ProcessLaunchError as exc:
         _launch_marker(store, identity, generation, False)
-        store.update_attempt(identity, generation, cleanup='confirmed')
+        store.update_attempt(identity, generation, cleanup='unconfirmed' if current_group else 'confirmed')
         _remaining(deadline)
         raise ExecutionError('checkpoint process launch failed') from exc
     except ProcessOwnershipError as exc:

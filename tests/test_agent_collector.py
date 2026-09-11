@@ -10,6 +10,21 @@ from hermes_pipeline.agent_checkpoint import ProgressJournal
 from hermes_pipeline.agent_execution import ExecutionError, ExecutionStore
 
 
+@pytest.fixture(autouse=True)
+def portable_process_backend(monkeypatch):
+    """Exercise supervisor contracts without requiring a Linux user manager.
+
+    Native cgroup launch/cleanup is covered separately in test_agent_cgroup.
+    Keep the real legacy process implementation for these provider-free tests.
+    """
+    from types import SimpleNamespace
+
+    from hermes_pipeline import agent_process
+
+    if sys.platform == 'linux':
+        monkeypatch.setattr(agent_process, 'sys', SimpleNamespace(platform='legacy'))
+
+
 def git(work, *args):
     return subprocess.check_output(['git', '-C', str(work), *args], text=True).strip()
 
@@ -324,3 +339,26 @@ def test_review_handoff_supplies_response_path_git_facts_and_passed_checks(candi
     assert journal.recovery_context(1)['accepted'][0]['commit'] == expected_head
     if dirty:
         assert (work / 'unfinished.txt').read_text() == 'preserve this'
+
+
+def test_collector_retains_each_group_and_tags_only_new_processes(candidate, monkeypatch):
+    from hermes_pipeline import agent_collector as collector
+    from hermes_pipeline.agent_execution import process_identity
+    store, _, work = candidate
+    process = process_identity(os.getpid())
+    store.update_attempt('execution', 1, owned_processes=[process])
+    groups = []
+    def run(*args, **kwargs):
+        unit = 'tpo-' + ('a' if not groups else 'b') * 32 + '.scope'
+        group = dict(version=1, unit=unit, path='/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/' + unit,
+                     device=1, inode=2, boot_id='boot', host='host')
+        groups.append(group)
+        kwargs['on_cgroup'](group)
+        assert store.load('execution')['attempts'][-1]['owned_cgroups'] == groups
+        kwargs['on_launch']({'identity': process})
+        return dict(outcome='exited', exit_code=0, signal=None, cleanup='confirmed', processes=[process])
+    monkeypatch.setattr(collector, 'run_process', run)
+    for _ in range(2):
+        collector._run_owned(store, 'execution', 1, ['fake'], cwd=work, stdin_bytes=b'', env={}, deadline=time.monotonic() + 30)
+    attempt = store.load('execution')['attempts'][-1]
+    assert attempt['owned_processes'] == [process, *[{**process, 'cgroup': group['unit']} for group in groups]]

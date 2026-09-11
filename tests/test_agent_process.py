@@ -3,12 +3,19 @@
 import os
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_pipeline import agent_process
 
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="verified Linux identity")
+
+
+@pytest.fixture(autouse=True)
+def legacy_process_backend(monkeypatch):
+    """Retain process-tree backend coverage used by legacy recovery and Darwin."""
+    monkeypatch.setattr(agent_process, "sys", SimpleNamespace(platform="legacy"))
 
 
 def run(tmp_path, source, **kwargs):

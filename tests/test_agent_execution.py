@@ -231,3 +231,41 @@ def test_registration_requires_durable_parent_directory_entries(execution, tmp_p
         with pytest.raises(ExecutionError):
             store.register("new-execution", **arguments)
     assert not (store.root / "new-execution" / "record.json").exists()
+
+
+def test_cgroup_receipts_persist_and_cannot_be_dropped(execution):
+    store, _ = execution
+    store.admit('execution-1')
+    receipt = dict(version=1, path='/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/tpo-' + 'a' * 32 + '.scope',
+                   unit='tpo-' + 'a' * 32 + '.scope', device=1, inode=42,
+                   host='host', boot_id='boot')
+    store.update_attempt('execution-1', 1, owned_cgroups=[receipt])
+    assert store.load('execution-1')['attempts'][0]['owned_cgroups'] == [receipt]
+    with pytest.raises(ExecutionError):
+        store.update_attempt('execution-1', 1, owned_cgroups=[])
+
+
+def test_legacy_record_upgrades_without_inventing_cgroup_evidence(execution):
+    store, _ = execution
+    record, _ = store.admit('execution-1')
+    record['version'] = 1
+    record['attempts'][0].pop('owned_cgroups', None)
+    path = store.root / 'execution-1' / 'record.json'
+    path.write_text(json.dumps(record))
+    upgraded = store.load('execution-1')
+    assert upgraded['version'] == 2
+    assert upgraded['attempts'][0]['owned_cgroups'] == []
+    assert json.loads(path.read_text())['version'] == 1  # reads do not rewrite
+
+
+@pytest.mark.parametrize('change', [dict(path='/sys/fs/cgroup'), dict(inode=True),
+                                   dict(version=99), dict(path='/sys/fs/cgroup/../other'),
+                                   dict(unknown='field')])
+def test_cgroup_receipt_schema_rejects_unsafe_evidence(execution, change):
+    store, _ = execution
+    store.admit('execution-1')
+    receipt = dict(version=1, path='/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/tpo-' + 'a' * 32 + '.scope',
+                   unit='tpo-' + 'a' * 32 + '.scope', device=1, inode=42,
+                   host='host', boot_id='boot')
+    with pytest.raises(ExecutionError):
+        store.update_attempt('execution-1', 1, owned_cgroups=[{**receipt, **change}])

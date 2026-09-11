@@ -14,6 +14,7 @@ import os
 import shlex
 import shutil
 import subprocess
+import sys
 import time
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict
@@ -141,6 +142,11 @@ def _prepare_launch(store: ExecutionStore, identity: str, record: dict) -> tuple
 
 
 def installed_entrypoint() -> str:
+    # Keep the launcher paired with this package's environment even when Hermes
+    # supplies a different PATH. Do not resolve the interpreter's venv symlink.
+    sibling = Path(sys.executable).absolute().parent / "tpo-agent-supervisor"
+    if sibling.is_file() and os.access(sibling, os.X_OK):
+        return str(sibling)
     executable = shutil.which("tpo-agent-supervisor")
     if executable is None:
         raise ExecutionError("supervisor_unavailable")
@@ -171,7 +177,7 @@ def client_argv(registration: dict, staging: Path) -> list[str]:
 def worker_instructions(identity: str, root: str) -> str:
     return (
         "You are the Hermes dispatcher. Invoke or reconnect to this registered execution:\n"
-        + shlex.join(["tpo-agent-supervisor", "run", "--wait", "--root", root, "--execution", identity]) + "\n"
+        + shlex.join([installed_entrypoint(), "run", "--wait", "--root", root, "--execution", identity]) + "\n"
         "Use only this installed interface. A missing supervisor blocks dispatch. "
         "Automatic worker retry reconnects to the same generation; never authorize a new attempt. "
         "The supervisor owns monitoring, deadline, cleanup and result validation. "
@@ -499,6 +505,17 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
         with _open_directory(staging) as directory:
             _atomic_write(Path("recovery-context.json"), context, directory_fd=directory)
         context_path = str(staging / "recovery-context.json")
+    current_group = None
+
+    def cgroup_launched(receipt):
+        nonlocal current_group
+        groups = store.load(identity)["attempts"][-1]["owned_cgroups"]
+        store.update_attempt(identity, generation, owned_cgroups=[*groups, receipt], cleanup="unconfirmed")
+        current_group = receipt["unit"]
+
+    def tagged(process):
+        return {**process, "cgroup": current_group} if current_group else process
+
     try:
         result = run_process(
             arguments, cwd=Path(registration["worktree"]),
@@ -507,22 +524,24 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
                  "TPO_ATTEMPT_GENERATION": str(generation),
                  "TPO_RECOVERY_CONTEXT_PATH": context_path},
             on_launch=lambda receipt: store.update_attempt(
-                identity, generation, status="running", client_process=receipt["identity"],
+                identity, generation, status="running", client_process=tagged(receipt["identity"]),
                 started_monotonic=receipt["launched_monotonic"], deadline_monotonic=receipt["deadline"]),
-            on_processes=lambda processes: store.update_attempt(identity, generation, owned_processes=processes),
+            on_processes=lambda processes: store.update_attempt(identity, generation, owned_processes=[tagged(p) for p in processes]),
+            on_cgroup=cgroup_launched,
         )
     except ProcessLaunchError:
-        store.update_attempt(identity, generation, status="blocked", reason="client_not_launched", cleanup="confirmed")
+        store.update_attempt(identity, generation, status="blocked", reason="client_not_launched",
+                             cleanup="unconfirmed" if current_group else "confirmed")
     except ProcessOwnershipError as exc:
         store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable",
-                             cleanup="unconfirmed", owned_processes=exc.processes)
+                             cleanup="unconfirmed", owned_processes=[tagged(p) for p in exc.processes])
     except Exception:
         store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable", cleanup="unconfirmed")
     else:
         collecting = result["outcome"] == "exited" and result["exit_code"] == 0 and result["cleanup"] == "confirmed"
         store.update_attempt(identity, generation, status="running" if collecting else result["outcome"], exit_code=result["exit_code"],
                              exit_signal=result["signal"], cleanup="confirmed" if result["cleanup"] == "confirmed" else "unconfirmed",
-                             owned_processes=result["processes"])
+                             owned_processes=[tagged(p) for p in result["processes"]])
         if collecting:
             from .agent_collector import (
                 CollectionInterrupted,
@@ -631,8 +650,29 @@ def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60
                 for process in known
             ):
                 known.append(direct)
-            cleanup = cleanup_processes(known, cleanup_timeout=cleanup_timeout) if known else {"cleanup": "cleanup_unconfirmed", "processes": []}
-            changes = {"cleanup": "confirmed" if cleanup["cleanup"] == "confirmed" and not pending_launch else "unconfirmed", "owned_processes": cleanup["processes"]}
+            from .agent_cgroup import cleanup_cgroup
+
+            # Group members must never fall back to PID-tree discovery. Keep
+            # legacy processes separately for attempts upgraded during recovery.
+            groups = attempt["owned_cgroups"]
+            legacy = [process for process in known if "cgroup" not in process]
+            stop = time.monotonic() + cleanup_timeout
+            confirmed = bool(groups or legacy)
+            recovered = [process for process in known if "cgroup" in process]
+            cleaned_groups = []
+            for group in groups:
+                outcome = cleanup_cgroup(group, cleanup_timeout=max(0, stop - time.monotonic()))
+                confirmed = confirmed and outcome["cleanup"] == "confirmed"
+                if outcome["cleanup"] == "confirmed":
+                    cleaned_groups.append(group["unit"])
+            if pending_launch:
+                pending_launch = collector_launch_pending(store, identity, cleaned_cgroups=cleaned_groups)
+            if legacy:
+                outcome = cleanup_processes(legacy, cleanup_timeout=max(0, stop - time.monotonic()))
+                confirmed = confirmed and outcome["cleanup"] == "confirmed"
+                recovered.extend(outcome["processes"])
+            changes = {"cleanup": "confirmed" if confirmed and not pending_launch else "unconfirmed",
+                       "owned_processes": recovered}
             if attempt["status"] not in TERMINAL:
                 from .agent_collector import collector_timed_out
 

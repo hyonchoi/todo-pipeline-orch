@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - Windows fails closed
     fcntl = None
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_RECORD_BYTES = 8 * 1024 * 1024
 TERMINAL = {"exited", "timed_out", "interrupted", "blocked"}
 STATUSES = TERMINAL | {"admitted", "running", "running_detached", "cleanup_unconfirmed", "lock_unconfirmed"}
@@ -41,7 +41,7 @@ _REGISTRATION_FIELDS = {
 _ATTEMPT_FIELDS = {
     "generation", "status", "host", "boot_id", "supervisor", "client_process",
     "started_monotonic", "deadline_monotonic", "exit_code", "exit_signal", "cleanup",
-    "reason", "recovery_event", "recovery_context", "owned_processes",
+    "reason", "recovery_event", "recovery_context", "owned_processes", "owned_cgroups",
 }
 
 
@@ -164,7 +164,7 @@ def _atomic_write(path: Path, record: dict, *, directory_fd: int) -> None:
 
 
 def _validate(record: dict) -> None:
-    if not isinstance(record, dict) or set(record) != _RECORD_FIELDS or type(record["version"]) is not int or record["version"] != SCHEMA_VERSION:
+    if not isinstance(record, dict) or set(record) != _RECORD_FIELDS or type(record["version"]) is not int or record["version"] not in (1, SCHEMA_VERSION):
         raise ExecutionError("unsupported execution record schema")
     _identifier(record["execution_id"])
     registration = record["registration"]
@@ -192,7 +192,7 @@ def _validate(record: dict) -> None:
     if not isinstance(record["attempts"], list):
         raise ExecutionError("invalid attempt journal")
     for generation, attempt in enumerate(record["attempts"], 1):
-        if not isinstance(attempt, dict) or set(attempt) != _ATTEMPT_FIELDS or type(attempt["generation"]) is not int or attempt["generation"] != generation:
+        if not isinstance(attempt, dict) or set(attempt) != (_ATTEMPT_FIELDS if record["version"] == 2 else _ATTEMPT_FIELDS - {"owned_cgroups"}) or type(attempt["generation"]) is not int or attempt["generation"] != generation:
             raise ExecutionError("invalid attempt generation or schema")
         if attempt["status"] not in STATUSES or attempt["cleanup"] not in {"pending", "confirmed", "unconfirmed"}:
             raise ExecutionError("invalid attempt outcome")
@@ -216,12 +216,27 @@ def _validate(record: dict) -> None:
                 raise ExecutionError("invalid attempt identity or recovery context")
         if not isinstance(attempt["owned_processes"], list) or len(attempt["owned_processes"]) > 4096:
             raise ExecutionError("invalid owned process inventory")
+        groups = attempt.get("owned_cgroups", [])
+        if not isinstance(groups, list) or len(groups) > 2048:
+            raise ExecutionError("invalid cgroup inventory")
+        from .agent_cgroup import validate_receipt
+
+        try:
+            for group in groups:
+                validate_receipt(group)
+        except ValueError as exc:
+            raise ExecutionError("invalid cgroup receipt") from exc
+        units = [group["unit"] for group in groups]
+        if len(set(units)) != len(units):
+            raise ExecutionError("duplicate cgroup receipt")
         for identity in [attempt["supervisor"], attempt["client_process"], *attempt["owned_processes"]]:
             if identity is None:
                 continue
             core = {"pid", "start_ticks", "boot_id", "host"}
-            if not isinstance(identity, dict) or not core <= set(identity) or not set(identity) <= core | {"ppid", "pgrp", "session", "state"}:
+            if not isinstance(identity, dict) or not core <= set(identity) or not set(identity) <= core | {"ppid", "pgrp", "session", "state", "cgroup"}:
                 raise ExecutionError("invalid process identity schema")
+            if "cgroup" in identity and identity["cgroup"] not in units:
+                raise ExecutionError("process cgroup is not recorded")
             if type(identity["pid"]) is not int or identity["pid"] <= 0 or any(identity[key] is not None and not isinstance(identity[key], str) for key in ("boot_id", "host")) or (identity["start_ticks"] is not None and (type(identity["start_ticks"]) is not int or identity["start_ticks"] < 0)):
                 raise ExecutionError("invalid process identity")
     approval = record["approved_recovery"]
@@ -310,6 +325,10 @@ class ExecutionStore:
         except (OSError, ValueError) as exc:
             raise ExecutionError("execution record unavailable or invalid") from exc
         _validate(record)
+        if record["version"] == 1:
+            record["version"] = SCHEMA_VERSION
+            for attempt in record["attempts"]:
+                attempt["owned_cgroups"] = []
         if record["execution_id"] != execution_id:
             raise ExecutionError("execution identity mismatch")
         self._outside_worktree(record["registration"]["worktree"])
@@ -382,7 +401,7 @@ class ExecutionStore:
                 deadline_monotonic=None, exit_code=None, exit_signal=None,
                 cleanup="pending", reason=None, recovery_event=recovery_event,
                 recovery_context=record["approved_recovery"]["recovery_context"] if record["approved_recovery"] else None,
-                owned_processes=[],
+                owned_processes=[], owned_cgroups=[],
             ))
             record["approved_recovery"] = None
             self._write(execution_id, record)
@@ -416,6 +435,11 @@ class ExecutionStore:
             for field in ("exit_code", "exit_signal", "started_monotonic", "deadline_monotonic", "supervisor", "client_process"):
                 if field in changes and attempt[field] is not None and changes[field] != attempt[field]:
                     raise ExecutionError("collected exit and launch identity are immutable")
+            if "owned_cgroups" in changes:
+                new_groups = changes["owned_cgroups"]
+                old_groups = attempt["owned_cgroups"]
+                if not isinstance(new_groups, list) or new_groups[:len(old_groups)] != old_groups:
+                    raise ExecutionError("cgroup ownership receipts are append-only")
             attempt.update(changes)
             _validate(record)
             self._write(execution_id, record)
