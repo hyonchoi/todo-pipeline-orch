@@ -1409,6 +1409,67 @@ class TestRunHarness:
         assert len(keys) == len(set(keys))
         assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
 
+    @pytest.mark.parametrize("snapshot_status, valid_sentinel, cancel_confirmed, quiescent", [
+        ("archived", True, True, True),
+        ("running", True, True, False),
+        ("unknown", True, True, False),
+        ("archived", False, True, False),
+        ("archived", True, False, False),
+    ])
+    def test_profile_shutdown_waits_only_for_created_workers(
+        self, live, mocker, snapshot_status, valid_sentinel, cancel_confirmed, quiescent
+    ):
+        from types import SimpleNamespace
+
+        phases = (Phase("build", "Build", role="implementation"),
+                  Phase("audit", "Audit", role="review"),
+                  Phase("publish", "Publish", role="delivery"))
+        keys = tuple(p.phase_key for p in phases)
+        live.pinned_registration = dataclasses.replace(live.pinned_registration,
+            phase_keys=keys, authority=SimpleNamespace(phase_definitions=phases, step_keys=keys))
+        live.pin([{"build": "blocked"}])
+        prior_tick = live.tick
+
+        def tick(*args, **kwargs):
+            result = prior_tick(*args, **kwargs)
+            outcomes = live.pinned_registration.worktree / ".hermes" / "outcomes"
+            outcomes.mkdir(parents=True)
+            (outcomes / "expected-phases.json").write_text(json.dumps(
+                ["build"] if valid_sentinel else ["publish"]))
+            return result
+
+        live.tick = tick
+        clock = {"time": 0.0}
+        sleeps = []
+        reports = []
+        calls = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["time"] += seconds
+
+        def shutdown(*args, **kwargs):
+            calls.append(kwargs)
+            report = shutdown_run(*args, **kwargs, quiescence_timeout=2,
+                poll_interval=1, sleep=sleep, now=lambda: clock["time"])
+            reports.append(report)
+            return report
+
+        mocker.patch.object(harness_mod, "shutdown_run", side_effect=shutdown)
+        mocker.patch.object(harness_mod, "_cancel_registered_tasks", return_value=cancel_confirmed)
+        mocker.patch.object(harness_mod, "_archived_status_map", return_value={"build": snapshot_status})
+        mocker.patch.object(harness_mod, "cleanup_remote", return_value=(True, ()))
+        mocker.patch.object(harness_mod, "_close_issue_leftover", return_value=[])
+        if quiescent:
+            result = live.run(profile_name="native-sdd")
+            assert result.exit_code != 0
+        else:
+            with pytest.raises(HarnessCleanupError):
+                live.run(profile_name="native-sdd")
+        assert reports[0].kanban_quiescent is quiescent
+        assert calls[0]["expected_phase_keys"] == (("build",) if valid_sentinel else keys)
+        assert bool(sleeps) is (cancel_confirmed and not quiescent)
+
     def test_native_sdd_accepts_a_pr_from_the_registered_branch(self, live):
         """The head invariant's referent is the registration, not the issue.
 

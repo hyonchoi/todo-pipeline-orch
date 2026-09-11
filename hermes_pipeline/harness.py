@@ -3798,7 +3798,10 @@ def shutdown_run(
 
     *tick_id* and *expected_phase_keys* are what the caller learned from
     :func:`recover_tick_registration` (never re-derived from disk here): on success
-    pass ``registration.tick_id`` and ``registration.phase_keys``. When it raised
+    pass ``registration.tick_id`` and the created-card completeness set. Modern
+    schedules use their validated created prefix plus every observed card;
+    uncreated deferred workers belong only to the completion requirement.
+    Legacy runs retain ``registration.phase_keys`` plus observed cards. When it raised
     ``HarnessTickError`` with a non-``None`` ``exc.tick_id`` (``tick_not_started``,
     ``failed_to_spawn``, ``expected_phases_missing``, or ``unexpected_registration``
     after registration), cards may exist for that tick: pass ``exc.tick_id`` with
@@ -4272,13 +4275,27 @@ def run_harness(
         shutdown_keys: tuple[str, ...] | None = (
             registration.phase_keys if registration is not None else None
         )
+        modern_schedule = registration is not None and bool(
+            getattr(registration.authority, "phase_definitions", ())
+        )
+        if modern_schedule and registration.worktree is not None:
+            try:
+                created = _read_expected_phases(
+                    registration.worktree / ".hermes" / "outcomes", registration.tick_id
+                )
+                if created != registration.phase_keys[:len(created)]:
+                    raise HarnessTickError("unexpected_registration", tick_id=registration.tick_id)
+            except HarnessTickError:
+                # An unreadable or invalid created-card sentinel cannot reduce
+                # the completeness check. Keep the full pinned set fail-closed.
+                log.warning("harness shutdown: created phase prefix unavailable for tick %s", registration.tick_id)
+            else:
+                shutdown_keys = created
         if shutdown_keys is not None and observed_keys:
-            # A pinned run's reconcilers add cards that are not registered step
-            # keys (``review:0``, ``finish``). Requiring those
-            # too is what stops shutdown from reading a board that is still
-            # missing a dynamic card as quiescent. Registered order first, then
-            # the extras, so the value stays deterministic; a non-pinned drive
-            # observes no keys and its registered tuple passes through unchanged.
+            # Legacy reconcilers can add cards whose keys are not in the old
+            # registration (``review:0``, ``finish``). Require every observed
+            # card too, so shutdown cannot call a partially observed board
+            # quiescent. Registered order comes first and extras are sorted.
             shutdown_keys = (*shutdown_keys, *sorted(observed_keys - set(shutdown_keys)))
         if tick_error is not None:
             shutdown_tick_id = tick_error.tick_id or shutdown_tick_id
@@ -4290,7 +4307,8 @@ def run_harness(
                 # quiescence could not be proven, the whole timeout would be
                 # burned and remote cleanup skipped -- leaving the branch and an
                 # open PR on the sandbox. Require exactly what was observed.
-                shutdown_keys = tuple(sorted(observed_keys)) or None
+                if not modern_schedule:
+                    shutdown_keys = tuple(sorted(observed_keys)) or None
             else:
                 # A partial registration (``tick_not_started``,
                 # ``failed_to_spawn``, ``registration_*``, ...): cards may exist
