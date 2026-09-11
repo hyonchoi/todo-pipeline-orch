@@ -19,6 +19,19 @@ def record(pid=42, unique=901, version=7):
     return bytes(value)
 
 
+def public_info(pid, flavor, arg, buf, size, *, unique):
+    assert arg == 1
+    data = bytearray(size)
+    if flavor == 17:
+        assert size == 56
+        struct.pack_into('=QQi', data, 16, unique, 100, 7)
+    else:
+        assert (flavor, size) == (13, 64)
+        struct.pack_into('=IIII', data, 0, pid, 1, pid, 2)
+    ctypes.memmove(buf, bytes(data), size)
+    return size
+
+
 class Operation:
     def __init__(self, call):
         self.call = call
@@ -382,6 +395,58 @@ def test_public_discovery_short_record_is_birth_guarded(api, monkeypatch):
         unique = 902
         return pid
     monkeypatch.setattr(os, 'getsid', reused)
+    with pytest.raises(OSError, match='changed during discovery'):
+        backend.discovery_snapshot(42)
+
+
+def test_public_discovery_retries_transient_sid_for_same_birth(api, monkeypatch):
+    _, backend = api
+    backend._info = lambda pid, flavor, arg, buf, size: public_info(
+        pid, flavor, arg, buf, size, unique=901)
+    calls = 0
+    def getsid(pid):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ProcessLookupError
+        return pid
+    monkeypatch.setattr(os, 'getsid', getsid)
+    snapshot = backend.discovery_snapshot(42)
+    assert snapshot is not None
+    assert snapshot['start_ticks'] == 901
+    assert snapshot['session'] == 42
+    assert calls == 2
+
+
+def test_public_discovery_persistent_sid_failure_for_live_birth_fails_closed(api, monkeypatch):
+    _, backend = api
+    backend._info = lambda pid, flavor, arg, buf, size: public_info(
+        pid, flavor, arg, buf, size, unique=901)
+    calls = 0
+    def getsid(pid):
+        nonlocal calls
+        calls += 1
+        raise ProcessLookupError
+    monkeypatch.setattr(os, 'getsid', getsid)
+    with pytest.raises(OSError, match='session identity unavailable'):
+        backend.discovery_snapshot(42)
+    assert calls == 2
+
+
+def test_public_discovery_sid_retry_rejects_changed_birth(api, monkeypatch):
+    _, backend = api
+    unique = 901
+    backend._info = lambda pid, flavor, arg, buf, size: public_info(
+        pid, flavor, arg, buf, size, unique=unique)
+    calls = 0
+    def getsid(pid):
+        nonlocal calls, unique
+        calls += 1
+        if calls == 1:
+            raise ProcessLookupError
+        unique = 902
+        return pid
+    monkeypatch.setattr(os, 'getsid', getsid)
     with pytest.raises(OSError, match='changed during discovery'):
         backend.discovery_snapshot(42)
 

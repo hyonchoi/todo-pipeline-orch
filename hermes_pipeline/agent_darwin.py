@@ -143,6 +143,16 @@ class Backend:
         if not unique or unique != struct.unpack_from('=Q', second, 16)[0]:
             raise OSError('process changed during discovery')
         if session is None:
+            try:
+                session = os.getsid(pid)
+            except ProcessLookupError:
+                session = None
+            retry_end = self._public_info(pid, 17, 56)
+            if retry_end is None:
+                return None
+            if unique != struct.unpack_from('=Q', retry_end, 16)[0]:
+                raise OSError('process changed during discovery')
+        if session is None:
             short = self._public_info(pid, 13, 64)
             final = self._public_info(pid, 17, 56)
             if short is None or final is None:
