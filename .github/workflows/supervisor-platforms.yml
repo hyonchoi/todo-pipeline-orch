@@ -14,27 +14,18 @@ concurrency:
 
 jobs:
   linux:
-    name: supervisor (native Linux cgroup)
+    name: supervisor (native Linux PID)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      REQUIRE_NATIVE_CGROUP: '1'
-      NATIVE_CGROUP_NAMESPACE_SUDO: '1'
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
       - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf
         with:
           enable-cache: true
-      - name: Prepare runner user manager
-        run: |
-          sudo loginctl enable-linger "$(id -un)"
-          sudo systemctl start "user@$(id -u).service"
-          echo "XDG_RUNTIME_DIR=/run/user/$(id -u)" >> "$GITHUB_ENV"
-          echo "DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus" >> "$GITHUB_ENV"
       - name: Install test dependencies
         run: uv sync --locked --python 3.13
-      - name: Check native ownership and registered client execution
-        run: uv run --python 3.13 pytest -q tests/test_agent_cgroup.py tests/test_agent_cgroup_integration.py --basetemp "$RUNNER_TEMP/pytest-cgroup"
+      - name: Check native PID ownership, cleanup, and recovery
+        run: uv run --python 3.13 pytest -q tests/test_agent_process.py tests/test_agent_supervisor.py tests/test_agent_collector.py tests/test_agent_execution.py --basetemp "$RUNNER_TEMP/pytest-pid"
   darwin:
     name: supervisor (${{ matrix.runner }})
     runs-on: ${{ matrix.runner }}

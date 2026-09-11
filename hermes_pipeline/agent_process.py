@@ -1,9 +1,4 @@
-"""Owned process supervision with Linux cgroups and a portable legacy backend.
-
-New Linux launches use a delegated cgroup v2 scope. Darwin and legacy recovery
-retain verified birth identities and best-effort process-tree discovery.
-Unresolved observations or unverifiable owners block confirmed cleanup.
-"""
+"""Supervise directly launched processes using native birth identity and safe signals."""
 
 from __future__ import annotations
 
@@ -16,17 +11,10 @@ import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
-from enum import Enum
 from pathlib import Path
 
 Identity = dict[str, object]
 _IDENTITY_KEYS = ("pid", "start_ticks", "boot_id", "host")
-
-
-class DiscoveryOutcome(Enum):
-    CLEAN = "clean"
-    TRANSIENT = "transient"
-    OWNERSHIP_AMBIGUOUS = "ownership_ambiguous"
 
 
 class ProcessLaunchError(RuntimeError):
@@ -116,9 +104,6 @@ def confirm_process_capability() -> None:
                 _pidfd_signal(probe, 0)
             finally:
                 os.close(probe)
-        if sys.platform == "linux":
-            from .agent_cgroup import confirm_cgroup_capability
-            confirm_cgroup_capability()
     except (OSError, RuntimeError, ValueError):
         raise ProcessLaunchError() from None
 
@@ -146,90 +131,6 @@ def process_snapshot(pid: int) -> Identity | None:
 
 def _same(left: Identity, right: Identity) -> bool:
     return all(key in left and left[key] == right.get(key) for key in _IDENTITY_KEYS)
-
-
-def _discover(known: dict[int, Identity]) -> DiscoveryOutcome:
-    """Capture verified owners, distinguishing host churn from ownership doubt."""
-    snapshots = {}
-    outcome = DiscoveryOutcome.CLEAN
-    try:
-        if sys.platform == "darwin":
-            from .agent_darwin import Backend
-            backend = Backend()
-            pids = set(backend.pids()) | set(known)
-        else:
-            pids = {int(entry.name) for entry in Path("/proc").iterdir() if entry.name.isdecimal()} | set(known)
-    except (OSError, ValueError, IndexError):
-        pids = set(known)
-        outcome = DiscoveryOutcome.TRANSIENT
-    for pid in pids:
-        try:
-            if sys.platform == "darwin" and pid not in known:
-                snapshot = backend.discovery_snapshot(pid)
-            else:
-                snapshot = process_snapshot(pid)
-            if snapshot is not None:
-                snapshots[pid] = snapshot
-                if pid in known and not _same(known[pid], snapshot):
-                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-            elif pid not in known:
-                outcome = DiscoveryOutcome.TRANSIENT
-        except (OSError, ValueError, IndexError):
-            if pid in known:
-                return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-            # This PID has no established relation to an owner. Keep scanning:
-            # host churn must not hide a later, ownership-relevant ambiguity.
-            outcome = DiscoveryOutcome.TRANSIENT
-    live = {pid for pid, old in known.items() if pid in snapshots and _same(old, snapshots[pid])}
-    sessions = {pid for pid in live if snapshots[pid]["session"] == pid}
-    former_sessions = {pid for pid, old in known.items() if old.get("session") == pid} - sessions
-    if any(snapshot["session"] in former_sessions and pid not in live
-           for pid, snapshot in snapshots.items()):
-        # A leader can exit before its child is observed. Do not assert cleanup
-        # or adopt an unverified orphan solely from a historical numeric SID.
-        return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-    changed = True
-    while changed:
-        changed = False
-        for pid, snapshot in snapshots.items():
-            if pid not in live and (snapshot["ppid"] in live or snapshot["session"] in sessions):
-                relation = "ppid" if snapshot["ppid"] in live else "session"
-                anchor_pid = snapshot[relation]
-                try:
-                    # Read the child, then reverify its previously sampled
-                    # ancestry anchor. A numeric PPID/SID from a non-atomic
-                    # /proc scan is insufficient authority to own a process.
-                    current = process_snapshot(pid)
-                    anchor = process_snapshot(anchor_pid)
-                except (OSError, ValueError, IndexError):
-                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-                if anchor is None or not _same(known[anchor_pid], anchor):
-                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-                if (current is None and snapshot["session"] == pid
-                        and snapshot["start_ticks"] >= anchor["start_ticks"]):
-                    # Retain a newly detached leader that exited after the scan.
-                    # It is history, not a live anchor for adopting processes.
-                    known[pid] = snapshot
-                    if any(other_pid != pid and other_pid not in live
-                           and other["session"] == pid
-                           for other_pid, other in snapshots.items()):
-                        return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-                    continue
-                if current is None or not _same(snapshot, current):
-                    # A scanned session member may exit or reuse its PID before
-                    # revalidation. Its unchanged owned anchor makes that race
-                    # harmless, but the replacement is never adopted.
-                    if (snapshot["session"] in sessions
-                            and snapshot["start_ticks"] >= anchor["start_ticks"]):
-                        continue
-                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-                if (current[relation] != anchor_pid
-                        or current["start_ticks"] < anchor["start_ticks"]):
-                    return DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-                known[pid] = snapshot
-                live.add(pid)
-                changed = True
-    return outcome
 
 
 def _live(identity: Identity) -> bool | None:
@@ -288,7 +189,6 @@ def _signal(identity: Identity, sig: int) -> bool | None:
 
 def cleanup_processes(
     identities: Sequence[Identity], *, cleanup_timeout: float = 60,
-    on_processes: Callable[[list[Identity]], None] | None = None,
 ) -> dict:
     """Terminate verified owners, including stopped processes, within the allowance.
 
@@ -297,52 +197,44 @@ def cleanup_processes(
     """
     if not math.isfinite(cleanup_timeout) or not 0 <= cleanup_timeout <= 60:
         raise ValueError("cleanup_timeout must be between zero and 60 seconds")
-    known = {item.get("pid"): dict(item) for item in identities}
-    uncertain = len(known) != len(identities)
+    known = [dict(item) for item in identities]
+    uncertain = not known
+    # Sequential launches can reuse a PID. A later durable birth receipt on
+    # the same boot proves the earlier process ended, but never authorizes
+    # signaling an otherwise unrecorded replacement.
+    active = [identity for identity in known if not any(
+        identity.get("pid") == other.get("pid")
+        and all(identity.get(key) == other.get(key) for key in ("host", "boot_id"))
+        and type(identity.get("start_ticks")) is int
+        and type(other.get("start_ticks")) is int
+        and identity["start_ticks"] < other["start_ticks"]
+        for other in known
+    )]
     started = time.monotonic()
     deadline = started + cleanup_timeout
-    # Extra observation passes for host churn have a short shared allowance;
-    # terminating verified live owners still uses the full cleanup deadline.
-    discovery_deadline = min(deadline, started + 2)
     graceful_end = started + min(5, cleanup_timeout / 2)
     sent = set()
     retry_deadline = None
     while True:
         # Always allow the initial pass, including a zero-timeout request.
         # A sleep can exhaust the allowance or overshoot it, so recheck before
-        # starting another scan rather than only before sleeping.
+        # starting another observation rather than only before sleeping.
         if retry_deadline is not None and time.monotonic() >= retry_deadline:
             uncertain = True
             break
-        previous = len(known)
-        discovery = _discover(known)
-        uncertain |= discovery is DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-        if on_processes is not None and len(known) != previous:
-            try:
-                on_processes(list(known.values()))
-            except Exception:
-                # Failed evidence persistence must not interrupt termination.
-                uncertain = True
         living = []
-        for identity in known.values():
+        for identity in active:
             live = _live(identity)
             uncertain |= live is None
             if live:
                 living.append(identity)
         now = time.monotonic()
-        # A scan that began on time can finish after its retry allowance. Its
-        # inventory is retained, but a late observation cannot prove cleanup.
+        # A late observation cannot prove cleanup within this allowance.
         if retry_deadline is not None and now >= retry_deadline:
             uncertain = True
             break
         if not living:
-            if (discovery is not DiscoveryOutcome.TRANSIENT
-                    or uncertain or now >= discovery_deadline):
-                uncertain |= discovery is not DiscoveryOutcome.CLEAN
-                break
-            retry_deadline = discovery_deadline
-            time.sleep(min(0.02, max(0, discovery_deadline - now)))
-            continue
+            break
         sig = signal.SIGKILL if now >= graceful_end else signal.SIGTERM
         for identity in reversed(living):
             for action in ((sig, signal.SIGCONT) if sig == signal.SIGTERM else (sig,)):
@@ -361,7 +253,7 @@ def cleanup_processes(
         retry_deadline = deadline
         time.sleep(min(0.02, max(0, deadline - time.monotonic())))
     return {"cleanup": "cleanup_unconfirmed" if uncertain else "confirmed",
-            "processes": list(known.values())}
+            "processes": known}
 
 
 def _cleanup_owned_child(
@@ -370,9 +262,9 @@ def _cleanup_owned_child(
 ) -> None:
     """Use the unreaped child's retained kernel handle if birth lookup failed.
 
-    This does not establish descendant cleanup or create a durable birth
-    receipt. The original exception still reaches the supervisor, which must
-    retain an interrupted attempt with unconfirmed cleanup.
+    This does not create a durable birth receipt. The original exception still
+    reaches the supervisor, which must retain an interrupted attempt with
+    unconfirmed cleanup.
     """
     if child.poll() is not None:
         return
@@ -419,7 +311,6 @@ def run_process(
     pass_fds: tuple[int, ...] = (),
     on_launch: Callable[[dict], None] | None = None,
     on_processes: Callable[[list[Identity]], None] | None = None,
-    on_cgroup: Callable[[dict], None] | None = None,
 ) -> dict:
     """Launch one internally constructed argv and exclusively collect its exit.
 
@@ -445,27 +336,16 @@ def run_process(
         deadline = min(deadline, deadline_monotonic)
     if deadline <= started:
         raise ProcessLaunchError()
-    cgroup = None
-    release_fd = None
-    exec_fd = None
     try:
-        if sys.platform == "linux":
-            from .agent_cgroup import launch
-            child, cgroup, release_fd, exec_fd = launch(
-                argv, cwd=cwd, env=env, pass_fds=pass_fds, deadline=deadline,
-                on_cgroup=on_cgroup,
-            )
-        else:
-            child = subprocess.Popen(
-                list(argv), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL, start_new_session=True, env=env, pass_fds=pass_fds,
-            )
+        child = subprocess.Popen(
+            list(argv), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True, env=env, pass_fds=pass_fds,
+        )
     except OSError:
         raise ProcessLaunchError() from None
     known = {}
     child_fd = None
     cleanup = {"cleanup": "cleanup_unconfirmed", "processes": []}
-    uncertain = False
     launch_error = None
     try:
         # Before polling/waiting, this direct child has not been reaped and its
@@ -485,11 +365,6 @@ def run_process(
             raise
         if identity is None:
             raise ProcessOwnershipError([])
-        if sys.platform == "darwin" and identity["state"] == "Z":
-            # Popen completed setsid before exec. Preserve this historical SID
-            # even when the child exits before the first birth receipt; unknown
-            # surviving session members must still block confirmed cleanup.
-            identity["session"] = child.pid
         known[child.pid] = identity
         if on_launch:
             on_launch({"identity": identity, "launched_monotonic": started, "deadline": deadline})
@@ -497,16 +372,6 @@ def run_process(
             on_processes(list(known.values()))
         if child_fd is None:
             raise ProcessOwnershipError(list(known.values()))
-        if release_fd is not None:
-            if time.monotonic() < deadline:
-                os.write(release_fd, b"1")
-            os.close(release_fd)
-            release_fd = None
-        if exec_fd is not None:
-            from .agent_cgroup import await_exec
-            await_exec(exec_fd, deadline)
-            os.close(exec_fd)
-            exec_fd = None
         os.set_blocking(child.stdin.fileno(), False)
         offset = 0
         while True:
@@ -520,11 +385,6 @@ def run_process(
             if exit_code is not None:
                 outcome = "exited"
                 break
-            previous = len(known)
-            if cgroup is None:
-                uncertain |= _discover(known) is DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-            if on_processes and len(known) != previous:
-                on_processes(list(known.values()))
             if not child.stdin.closed:
                 try:
                     if offset < len(stdin_bytes):
@@ -541,27 +401,15 @@ def run_process(
         raise
     finally:
         cleanup_deadline = time.monotonic() + cleanup_timeout
-        if release_fd is not None:
-            os.close(release_fd)
-        if exec_fd is not None:
-            os.close(exec_fd)
         if child.stdin is not None:
             child.stdin.close()
         try:
             if not known or child_fd is None:
                 _cleanup_owned_child(child, child_fd, cleanup_deadline, known.get(child.pid))
-            if cgroup is not None:
-                from .agent_cgroup import cleanup_cgroup
-                cleanup = cleanup_cgroup(
-                    cgroup, cleanup_timeout=max(0, cleanup_deadline - time.monotonic()),
-                )
-                cleanup["processes"] = list(known.values())
-            else:
-                cleanup = cleanup_processes(
-                    list(known.values()),
-                    cleanup_timeout=max(0, cleanup_deadline - time.monotonic()),
-                    on_processes=on_processes,
-                )
+            cleanup = cleanup_processes(
+                list(known.values()),
+                cleanup_timeout=max(0, cleanup_deadline - time.monotonic()),
+            )
             if launch_error is not None:
                 launch_error.cleanup = cleanup["cleanup"]
                 launch_error.processes = cleanup["processes"]
@@ -570,10 +418,10 @@ def run_process(
         finally:
             if child_fd is not None:
                 _close_handle(child_fd)
-    if uncertain or not known:
+    if not known:
         cleanup["cleanup"] = "cleanup_unconfirmed"
     return {
-        "cgroup": cgroup, "outcome": outcome, "exit_code": exit_code,
+        "outcome": outcome, "exit_code": exit_code,
         "signal": -exit_code if exit_code is not None and exit_code < 0 else None,
         "cleanup": cleanup["cleanup"], "processes": cleanup["processes"],
         "launched_monotonic": started, "deadline": deadline,

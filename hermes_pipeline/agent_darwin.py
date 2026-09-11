@@ -23,7 +23,6 @@ class Backend:
         library = ctypes.CDLL("/usr/lib/libproc.dylib", use_errno=True)
         try:
             self._info = library.proc_pidinfo
-            self._list = library.proc_listpids
             self._send = library.proc_signal_with_audittoken
             self._sysctl = ctypes.CDLL(None, use_errno=True).sysctlbyname
         except AttributeError:
@@ -31,8 +30,6 @@ class Backend:
         self._info.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_uint64,
                                ctypes.c_void_p, ctypes.c_int]
         self._info.restype = ctypes.c_int
-        self._list.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_int]
-        self._list.restype = ctypes.c_int
         self._send.argtypes = [ctypes.POINTER(ctypes.c_uint32), ctypes.c_int]
         self._send.restype = ctypes.c_int
         self._sysctl.argtypes = [ctypes.c_char_p, ctypes.c_void_p,
@@ -109,91 +106,6 @@ class Backend:
                 raise OSError('process changed during session lookup')
             session = pid if second['_session_leader'] else 0
         return self._snapshot(second, boot, session)
-
-    def _public_info(self, pid: int, flavor: int, size: int) -> bytes | None:
-        buffer = ctypes.create_string_buffer(size)
-        ctypes.set_errno(0)
-        count = self._info(pid, flavor, 1, buffer, size)
-        if count == 0 and ctypes.get_errno() == errno.ESRCH:
-            return None
-        if count != size:
-            raise OSError(ctypes.get_errno(), 'process discovery unavailable')
-        return buffer.raw
-
-    def discovery_snapshot(self, pid: int) -> dict | None:
-        """Public metadata selects candidates; it never authorizes signals.
-
-        Flavors 13 and 17 permit cross-user inspection, unlike flavor 18.
-        Bracket the short BSD record and SID with globally readable unique IDs
-        to reject PID reuse. Every owned/candidate process still needs a strict
-        flavor-18 snapshot before adoption or signaling.
-        """
-        boot = self.boot_id()
-        first = self._public_info(pid, 17, 56)
-        short = self._public_info(pid, 13, 64)
-        if first is None or short is None:
-            return None
-        actual, parent, group, state = struct.unpack_from('=IIII', short)
-        flags = struct.unpack_from('=I', short, 32)[0]
-        if actual != pid:
-            raise OSError('process changed during discovery')
-        if state == 5:
-            session = pid if flags & _PROC_FLAG_SLEADER else 0
-        else:
-            try:
-                session = os.getsid(pid)
-            except ProcessLookupError:
-                # A dying unrelated process is not an ownership gap; verify its
-                # disappearance/zombie state and unchanged birth below.
-                session = None
-        second = self._public_info(pid, 17, 56)
-        if second is None:
-            return None
-        unique = struct.unpack_from('=Q', first, 16)[0]
-        if not unique or unique != struct.unpack_from('=Q', second, 16)[0]:
-            raise OSError('process changed during discovery')
-        if session is None:
-            try:
-                session = os.getsid(pid)
-            except ProcessLookupError:
-                session = None
-            retry_end = self._public_info(pid, 17, 56)
-            if retry_end is None:
-                return None
-            if unique != struct.unpack_from('=Q', retry_end, 16)[0]:
-                raise OSError('process changed during discovery')
-        if session is None:
-            short = self._public_info(pid, 13, 64)
-            final = self._public_info(pid, 17, 56)
-            if short is None or final is None:
-                return None
-            actual, parent, group, state = struct.unpack_from('=IIII', short)
-            flags = struct.unpack_from('=I', short, 32)[0]
-            if (actual != pid or (state != 5 and not (flags & _PROC_FLAG_INEXIT))
-                    or unique != struct.unpack_from('=Q', final, 16)[0]):
-                raise OSError('session identity unavailable')
-            session = pid if flags & _PROC_FLAG_SLEADER else 0
-        return {'pid': pid, 'start_ticks': unique, 'ppid': parent, 'pgrp': group,
-                'state': 'Z' if state == 5 else 'T' if state == 4 else 'R',
-                'boot_id': boot, 'host': socket.gethostname(), 'session': session}
-
-    def pids(self) -> list[int]:
-        estimated = self._list(1, 0, None, 0)
-        if estimated <= 0 or estimated % 4:
-            raise OSError('process enumeration unavailable')
-        for _ in range(3):
-            capacity = estimated + max(4096, estimated // 4)
-            if capacity > 16 * 1024 * 1024:
-                raise OSError('process enumeration exceeds bound')
-            capacity = (capacity + 3) // 4 * 4
-            buffer = (ctypes.c_int * (capacity // 4))()
-            count = self._list(1, 0, buffer, capacity)
-            if count <= 0 or count > capacity or count % 4:
-                raise OSError('invalid process enumeration')
-            if count < capacity:
-                return [pid for pid in buffer[:count // 4] if pid > 0]
-            estimated = capacity
-        raise OSError('process enumeration changed repeatedly')
 
     def signal(self, identity: dict, sig: int) -> bool | None:
         """None means delivery is pending for a reverified, unchanged birth.

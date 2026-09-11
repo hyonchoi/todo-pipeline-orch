@@ -10,21 +10,6 @@ from hermes_pipeline.agent_checkpoint import ProgressJournal
 from hermes_pipeline.agent_execution import ExecutionError, ExecutionStore
 
 
-@pytest.fixture(autouse=True)
-def portable_process_backend(monkeypatch):
-    """Exercise supervisor contracts without requiring a Linux user manager.
-
-    Native cgroup launch/cleanup is covered separately in test_agent_cgroup.
-    Keep the real legacy process implementation for these provider-free tests.
-    """
-    from types import SimpleNamespace
-
-    from hermes_pipeline import agent_process
-
-    if sys.platform == 'linux':
-        monkeypatch.setattr(agent_process, 'sys', SimpleNamespace(platform='legacy'))
-
-
 def git(work, *args):
     return subprocess.check_output(['git', '-C', str(work), *args], text=True).strip()
 
@@ -214,7 +199,7 @@ def test_real_subprocess_checks_and_fresh_reviewer_create_receipts(candidate, mo
     assert {receipt['kind'] for receipt in journal._load()['receipts']} == {'verification', 'review'}
     attempt = store.load('execution')['attempts'][-1]
     assert attempt['cleanup'] == 'confirmed'
-    assert len(attempt['owned_processes']) >= 2
+    assert len(attempt['direct_processes']) >= 2
 
 
 def test_recovery_cannot_confirm_cleanup_after_pending_collector_launch(candidate, monkeypatch):
@@ -223,7 +208,7 @@ def test_recovery_cannot_confirm_cleanup_after_pending_collector_launch(candidat
     from hermes_pipeline.agent_execution import process_identity
     store, _, work = candidate
     known = [process_identity(os.getpid())]
-    store.update_attempt('execution', 1, status='interrupted', cleanup='confirmed', owned_processes=known)
+    store.update_attempt('execution', 1, status='interrupted', cleanup='confirmed', direct_processes=known)
     monkeypatch.setattr(collector, 'run_process', lambda *args, **kwargs: (_ for _ in ()).throw(SystemExit()))
     with pytest.raises(SystemExit):
         collector._run_owned(store, 'execution', 1, ['fake'], cwd=work, stdin_bytes=b'', env={}, deadline=time.monotonic() + 10)
@@ -259,8 +244,6 @@ def test_pinned_check_is_executed_directly(candidate, monkeypatch):
     assert calls[0][1]['env']['PYTHONPATH'] == str(calls[0][1]['cwd'])
 
 
-
-
 @pytest.mark.parametrize('candidate', [['uv run pytest']], indirect=True)
 def test_exact_pinned_uv_run_pytest_collects_real_evidence(candidate, monkeypatch):
     from hermes_pipeline import agent_collector as collector
@@ -285,7 +268,7 @@ def test_checks_use_project_environment_and_snapshot_src(candidate, monkeypatch)
     from hermes_pipeline import agent_collector as collector
     store, journal, work = candidate
     environment = work / '.venv'
-    venv.EnvBuilder(with_pip=False).create(environment)
+    venv.EnvBuilder(with_pip=False, symlinks=True).create(environment)
     source = work / 'src' / 'checkpoint_probe'
     source.mkdir(parents=True)
     (source / '__init__.py').write_text('VALUE = "committed"\n')
@@ -341,36 +324,30 @@ def test_review_handoff_supplies_response_path_git_facts_and_passed_checks(candi
         assert (work / 'unfinished.txt').read_text() == 'preserve this'
 
 
-def test_collector_retains_each_group_and_tags_only_new_processes(candidate, monkeypatch):
+def test_collector_retains_each_direct_launch(candidate, monkeypatch):
     from hermes_pipeline import agent_collector as collector
     from hermes_pipeline.agent_execution import process_identity
     store, _, work = candidate
     process = process_identity(os.getpid())
-    store.update_attempt('execution', 1, owned_processes=[process])
-    groups = []
+    store.update_attempt('execution', 1, direct_processes=[process])
+    roots = [process]
     def run(*args, **kwargs):
-        unit = 'tpo-' + ('a' if not groups else 'b') * 32 + '.scope'
-        group = dict(version=1, unit=unit, path='/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/' + unit,
-                     device=1, inode=2, boot_id='boot', host='host')
-        groups.append(group)
-        kwargs['on_cgroup'](group)
-        assert store.load('execution')['attempts'][-1]['owned_cgroups'] == groups
-        kwargs['on_launch']({'identity': process})
-        return dict(outcome='exited', exit_code=0, signal=None, cleanup='confirmed', processes=[process])
+        root = dict(process, pid=990 + len(roots))
+        roots.append(root)
+        kwargs['on_launch']({'identity': root})
+        assert store.load('execution')['attempts'][-1]['direct_processes'] == roots
+        return dict(outcome='exited', exit_code=0, signal=None, cleanup='confirmed', processes=[root])
     monkeypatch.setattr(collector, 'run_process', run)
     for _ in range(2):
         collector._run_owned(store, 'execution', 1, ['fake'], cwd=work, stdin_bytes=b'', env={}, deadline=time.monotonic() + 30)
-    attempt = store.load('execution')['attempts'][-1]
-    assert attempt['owned_processes'] == [process, *[{**process, 'cgroup': group['unit']} for group in groups]]
+    assert store.load('execution')['attempts'][-1]['direct_processes'] == roots
 
 
 @pytest.mark.parametrize('cleanup', ['confirmed', 'cleanup_unconfirmed'])
 def test_collector_launch_error_keeps_proven_cleanup(candidate, monkeypatch, cleanup):
     from hermes_pipeline import agent_collector as collector
-    from tests.test_agent_supervisor import _cgroup_receipt
     store, _, work = candidate
     def fail(*args, **kwargs):
-        kwargs['on_cgroup'](_cgroup_receipt())
         raise collector.ProcessLaunchError(cleanup=cleanup)
     monkeypatch.setattr(collector, 'run_process', fail)
     with pytest.raises(ExecutionError, match='checkpoint process launch failed'):

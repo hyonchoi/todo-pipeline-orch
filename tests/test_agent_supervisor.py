@@ -13,21 +13,6 @@ from hermes_pipeline import _agent_supervisor as supervisor
 from hermes_pipeline.agent_execution import ExecutionError, ExecutionStore
 
 
-@pytest.fixture(autouse=True)
-def portable_process_backend(monkeypatch):
-    """Exercise supervisor contracts without requiring a Linux user manager.
-
-    Native cgroup launch/cleanup is covered separately in test_agent_cgroup.
-    Keep the real legacy process implementation for these provider-free tests.
-    """
-    from types import SimpleNamespace
-
-    from hermes_pipeline import agent_process
-
-    if sys.platform == 'linux':
-        monkeypatch.setattr(agent_process, 'sys', SimpleNamespace(platform='legacy'))
-
-
 @pytest.mark.parametrize('failure', ['timeout', 'supervisor_loss', 'loss_after_timeout_receipt'])
 def test_collection_preserves_primary_exit_and_owns_attempt_outcome(execution, monkeypatch, failure):
     from hermes_pipeline import agent_collector as collector
@@ -919,46 +904,41 @@ def _cgroup_receipt(letter='a'):
                 device=1, inode=2, boot_id='boot', host='host')
 
 
-def test_supervisor_persists_group_before_client_launch(execution, monkeypatch):
+def test_supervisor_persists_direct_launch_receipt(execution, monkeypatch):
     from hermes_pipeline.agent_execution import process_identity
     store, _ = execution
-    receipt = _cgroup_receipt()
     process = process_identity(os.getpid())
     monkeypatch.setattr(supervisor, 'validate_registration', lambda *a: None)
     monkeypatch.setattr(supervisor, 'confirm_process_capability', lambda: None)
     monkeypatch.setattr(supervisor, 'client_argv', lambda *a, **k: [sys.executable])
     def run(*args, **kwargs):
-        kwargs['on_cgroup'](receipt)
-        assert store.load('execution-1')['attempts'][-1]['owned_cgroups'] == [receipt]
         kwargs['on_launch']({'identity': process, 'launched_monotonic': 10., 'deadline': 40.})
         kwargs['on_processes']([process])
         raise supervisor.ProcessOwnershipError([process])
     monkeypatch.setattr(supervisor, 'run_process', run)
     supervisor.supervise(store, 'execution-1')
     attempt = store.load('execution-1')['attempts'][-1]
-    assert attempt['client_process']['cgroup'] == receipt['unit']
-    assert attempt['owned_processes'] == [{**process, 'cgroup': receipt['unit']}]
+    assert attempt['client_process'] == process
+    assert attempt['direct_processes'] == [process]
 
 
 @pytest.mark.parametrize('confirmed', [True, False])
-def test_recovery_cleans_groups_without_pid_scan_or_inventing_exit(execution, monkeypatch, confirmed):
-    from hermes_pipeline import agent_cgroup
+def test_recovery_ignores_legacy_inventory_without_inventing_exit(execution, monkeypatch, confirmed):
     from hermes_pipeline.agent_execution import process_identity
     store, _ = execution
     store.admit('execution-1')
     receipt = _cgroup_receipt()
     process = {**process_identity(os.getpid()), 'cgroup': receipt['unit']}
     store.update_attempt('execution-1', 1, status='running', owned_cgroups=[receipt], client_process=process,
-                         owned_processes=[process])
+                         owned_processes=[process, dict(process, pid=991)])
     observed = []
-    def cleanup(group, **kwargs):
-        observed.append(group)
+    def cleanup(roots, **kwargs):
+        observed.extend(roots)
         return {'cleanup': 'confirmed' if confirmed else 'cleanup_unconfirmed', 'processes': []}
-    monkeypatch.setattr(agent_cgroup, 'cleanup_cgroup', cleanup)
-    monkeypatch.setattr(supervisor, 'cleanup_processes', lambda *a, **k: pytest.fail('cgroup members must not use PID recovery'))
+    monkeypatch.setattr(supervisor, 'cleanup_processes', cleanup)
     supervisor.recover(store, 'execution-1', cleanup_timeout=0)
     attempt = store.load('execution-1')['attempts'][-1]
-    assert observed == [receipt]
+    assert observed == [process]
     assert attempt['cleanup'] == ('confirmed' if confirmed else 'unconfirmed')
     assert attempt['status'] == 'interrupted'
     assert attempt['exit_code'] is None
@@ -966,15 +946,17 @@ def test_recovery_cleans_groups_without_pid_scan_or_inventing_exit(execution, mo
 
 @pytest.mark.parametrize('receipt_exists', [True, False])
 def test_recovery_resolves_only_receipt_for_pending_collector_launch(execution, monkeypatch, receipt_exists):
-    from hermes_pipeline import agent_cgroup, agent_collector
+    from hermes_pipeline import agent_collector
+    from hermes_pipeline.agent_execution import process_identity
     store, _ = execution
     store.admit('execution-1')
-    previous, current = _cgroup_receipt('a'), _cgroup_receipt('b')
-    store.update_attempt('execution-1', 1, status='running', owned_cgroups=[previous])
+    previous = process_identity(os.getpid())
+    current = dict(previous, pid=991)
+    store.update_attempt('execution-1', 1, status='running', direct_processes=[previous])
     agent_collector._launch_marker(store, 'execution-1', 1, True)
     if receipt_exists:
-        store.update_attempt('execution-1', 1, owned_cgroups=[previous, current])
-    monkeypatch.setattr(agent_cgroup, 'cleanup_cgroup', lambda *a, **k: {'cleanup': 'confirmed', 'processes': []})
+        store.update_attempt('execution-1', 1, direct_processes=[previous, current])
+    monkeypatch.setattr(supervisor, 'cleanup_processes', lambda *a, **k: {'cleanup': 'confirmed', 'processes': []})
     for _ in range(2):
         supervisor.recover(store, 'execution-1', cleanup_timeout=0)
         attempt = store.load('execution-1')['attempts'][-1]
@@ -1024,13 +1006,12 @@ def test_entrypoint_path_fallback_requires_no_executable_sibling(tmp_path, monke
 
 
 @pytest.mark.parametrize('cleanup', ['confirmed', 'cleanup_unconfirmed'])
-def test_failed_cgroup_launch_preserves_collected_cleanup(execution, monkeypatch, cleanup):
+def test_failed_launch_preserves_collected_cleanup(execution, monkeypatch, cleanup):
     store, _ = execution
     monkeypatch.setattr(supervisor, 'validate_registration', lambda *a: None)
     monkeypatch.setattr(supervisor, 'confirm_process_capability', lambda: None)
     monkeypatch.setattr(supervisor, 'client_argv', lambda *a, **k: [sys.executable])
     def fail(*args, **kwargs):
-        kwargs['on_cgroup'](_cgroup_receipt())
         raise supervisor.ProcessLaunchError(cleanup=cleanup)
     monkeypatch.setattr(supervisor, 'run_process', fail)
     supervisor.supervise(store, 'execution-1')
@@ -1040,3 +1021,92 @@ def test_failed_cgroup_launch_preserves_collected_cleanup(execution, monkeypatch
     assert attempt['cleanup'] == ('confirmed' if cleanup == 'confirmed' else 'unconfirmed')
     supervisor.supervise(store, 'execution-1')
     assert len(store.load('execution-1')['attempts']) == 1
+
+
+@pytest.mark.parametrize('version', [1, 2])
+def test_old_pending_collector_marker_cannot_adopt_direct_receipt(execution, monkeypatch, version):
+    from hermes_pipeline import agent_collector
+    from hermes_pipeline.agent_execution import process_identity
+    store, _ = execution
+    store.admit('execution-1')
+    root = process_identity(os.getpid())
+    store.update_attempt('execution-1', 1, status='running', direct_processes=[root])
+    marker = dict(version=version, generation=1, pending=True)
+    if version == 2:
+        marker['cgroups_before'] = 0
+    (store.root / 'execution-1' / 'collector-launch.json').write_text(json.dumps(marker))
+    monkeypatch.setattr(supervisor, 'cleanup_processes', lambda *a, **k: dict(cleanup='confirmed', processes=[root]))
+    supervisor.recover(store, 'execution-1', cleanup_timeout=0)
+    assert store.load('execution-1')['attempts'][-1]['cleanup'] == 'unconfirmed'
+    assert agent_collector.collector_launch_pending(store, 'execution-1')
+
+
+def test_pending_collector_receipt_requires_confirmed_death(execution, monkeypatch):
+    from hermes_pipeline import agent_collector
+    from hermes_pipeline.agent_execution import process_identity
+    store, _ = execution
+    store.admit('execution-1')
+    agent_collector._launch_marker(store, 'execution-1', 1, True)
+    root = process_identity(os.getpid())
+    store.update_attempt('execution-1', 1, status='running', direct_processes=[root])
+    monkeypatch.setattr(supervisor, 'cleanup_processes', lambda *a, **k: dict(cleanup='cleanup_unconfirmed', processes=[root]))
+    supervisor.recover(store, 'execution-1', cleanup_timeout=0)
+    assert agent_collector.collector_launch_pending(store, 'execution-1')
+    assert store.load('execution-1')['attempts'][-1]['cleanup'] == 'unconfirmed'
+
+
+def test_cleanup_sequential_reused_pid_preserves_birth_authority(monkeypatch):
+    from hermes_pipeline import agent_process
+    earlier = dict(pid=991, start_ticks=10, boot_id='boot', host='host')
+    later = dict(earlier, start_ticks=20)
+    observed = []
+    monkeypatch.setattr(agent_process, '_live', lambda identity: observed.append(identity) or False)
+    outcome = agent_process.cleanup_processes([earlier, later], cleanup_timeout=0)
+    assert outcome['cleanup'] == 'confirmed'
+    assert outcome['processes'] == [earlier, later]
+    assert observed == [later]
+
+
+@pytest.mark.parametrize('legacy_source', ['process', 'cgroup'])
+@pytest.mark.parametrize('version', [1, 2])
+def test_legacy_unconfirmed_collector_ownership_cannot_become_retry_authority(execution, monkeypatch, legacy_source, version):
+    from hermes_pipeline.agent_execution import process_identity
+    store, _ = execution
+    store.admit('execution-1')
+    root = process_identity(os.getpid())
+    changes = dict(status='running', cleanup='unconfirmed', client_process=root)
+    if legacy_source == 'process':
+        changes['owned_processes'] = [root, dict(root, pid=991)]
+    else:
+        changes['owned_cgroups'] = [_cgroup_receipt()]
+    store.update_attempt('execution-1', 1, **changes)
+    marker = dict(version=version, generation=1, pending=False)
+    if version == 2:
+        marker['cgroups_before'] = 0
+    (store.root / 'execution-1' / 'collector-launch.json').write_text(json.dumps(marker))
+    seen = []
+    def cleanup(roots, **kwargs):
+        seen.extend(roots)
+        return dict(cleanup='confirmed', processes=roots)
+    monkeypatch.setattr(supervisor, 'cleanup_processes', cleanup)
+    result = supervisor.recover(store, 'execution-1', cleanup_timeout=0)
+    assert seen == [root]
+    assert result['status'] == 'cleanup_unconfirmed'
+    assert store.load('execution-1')['attempts'][-1]['cleanup'] == 'unconfirmed'
+
+
+@pytest.mark.parametrize('version', [1, 2])
+def test_legacy_confirmed_marker_does_not_block_new_generation(execution, version):
+    from hermes_pipeline import agent_collector
+    store, _ = execution
+    store.admit('execution-1')
+    store.update_attempt('execution-1', 1, status='interrupted', cleanup='confirmed')
+    marker = dict(version=version, generation=1, pending=False)
+    if version == 2:
+        marker['cgroups_before'] = 0
+    (store.root / 'execution-1' / 'collector-launch.json').write_text(json.dumps(marker))
+    assert not agent_collector.collector_launch_pending(store, 'execution-1')
+    store.authorize_retry('execution-1', expected_generation=1, event_id='retry')
+    store.admit('execution-1', recovery_event='retry')
+    assert store.load('execution-1')['attempts'][-1]['direct_processes'] == []
+    assert not agent_collector.collector_launch_pending(store, 'execution-1')

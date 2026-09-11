@@ -20,20 +20,6 @@ def record(pid=42, unique=901, version=7, flags=0):
     return bytes(value)
 
 
-def public_info(pid, flavor, arg, buf, size, *, unique, flags=0):
-    assert arg == 1
-    data = bytearray(size)
-    if flavor == 17:
-        assert size == 56
-        struct.pack_into('=QQi', data, 16, unique, 100, 7)
-    else:
-        assert (flavor, size) == (13, 64)
-        struct.pack_into('=IIII', data, 0, pid, 1, pid, 2)
-        struct.pack_into('=I', data, 32, flags)
-    ctypes.memmove(buf, bytes(data), size)
-    return size
-
-
 class Operation:
     def __init__(self, call):
         self.call = call
@@ -49,7 +35,6 @@ class Library:
         self.signal_result = 0
         self.proc_pidinfo = Operation(self.info)
         self.proc_signal_with_audittoken = Operation(self.send)
-        self.proc_listpids = Operation(self.pids)
         self.sysctlbyname = Operation(self.boot)
 
     def info(self, pid, flavor, arg, buf, size):
@@ -60,12 +45,6 @@ class Library:
     def send(self, token, sig):
         self.signals.append((list(token), sig))
         return self.signal_result
-
-    def pids(self, kind, arg, buf, size):
-        assert (kind, arg) == (1, 0)
-        if buf is not None:
-            ctypes.memmove(buf, struct.pack('=ii', 42, 43), 8)
-        return 8
 
     def boot(self, name, buf, size, new, newsize):
         assert name == b'kern.bootsessionuuid'
@@ -90,7 +69,6 @@ def test_combined_snapshot_and_boot(api):
     assert snapshot['ppid'] == 1
     assert snapshot['session'] == 42
     assert snapshot['boot_id'] == 'darwin:01234567-89ab-cdef-0123-456789abcdef'
-    assert backend.pids() == [42, 43]
 
 
 def test_snapshot_accepts_same_birth_reparenting(api, monkeypatch):
@@ -175,7 +153,7 @@ def test_native_ci_requires_darwin():
         darwin.Backend().snapshot(os.getpid())
 
 
-def test_errno_and_enumeration_fail_closed(api):
+def test_snapshot_errno_fails_closed(api):
     library, backend = api
     def gone(*args):
         ctypes.set_errno(errno.ESRCH)
@@ -189,10 +167,6 @@ def test_errno_and_enumeration_fail_closed(api):
     backend._info = denied
     with pytest.raises(OSError):
         backend.snapshot(42)
-    for count in (-1, 0, 3, 20 * 1024 * 1024):
-        backend._list = lambda *args, count=count: count
-        with pytest.raises(OSError):
-            backend.pids()
 
 
 def test_boot_and_host_mismatch_never_signal(api):
@@ -260,37 +234,88 @@ def test_native_exec_preserves_birth_rejects_stale_audit_token(tmp_path):
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='native Darwin required')
 @pytest.mark.parametrize('stopped', [False, True])
-def test_native_owned_tree_timeout_and_sibling_survives(tmp_path, stopped):
+@pytest.mark.parametrize('successful', [False, True])
+def test_native_direct_parent_cleanup_preserves_descendants_and_sibling(tmp_path, stopped, successful):
+    import json
     import subprocess
     import time
+    from pathlib import Path
 
     from hermes_pipeline.agent_process import run_process
     backend = darwin.Backend()
     sibling = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
     sibling_identity = backend.snapshot(sibling.pid)
-    leaf = ('import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+    # Each fixture process records its own native birth identity before spawning
+    # another. Teardown can therefore target only these exact process births,
+    # even if a failed assertion leaves the parent alive or its PID is reused.
+    prelude = (
+        'import json,os,signal,subprocess,sys,time; from pathlib import Path; '
+        f'sys.path.insert(0,{str(Path(darwin.__file__).resolve().parent.parent)!r}); '
+        'from hermes_pipeline.agent_darwin import Backend; '
+        'identity=Backend().snapshot(os.getpid()); '
+        'p=Path(sys.argv[1]); q=p.with_suffix(".tmp"); '
+        'q.write_text(json.dumps(identity)); q.replace(p); '
+    )
+    leaf = (prelude + 'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
             + ('os.kill(os.getpid(),signal.SIGSTOP); ' if stopped else '')
             + 'time.sleep(30)')
-    child = ('import signal,subprocess,sys,time; '
-             'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
-             'subprocess.Popen([sys.executable,"-c",sys.argv[1]]); time.sleep(30)')
-    leader = ('import subprocess,sys,time; '
-              'subprocess.Popen([sys.executable,"-c",sys.argv[1],sys.argv[2]]); time.sleep(30)')
+    child = (prelude + 'signal.signal(signal.SIGTERM,signal.SIG_IGN); '
+             'subprocess.Popen([sys.executable,"-c",sys.argv[2],sys.argv[3]]); time.sleep(30)')
+    leader = (prelude + 'subprocess.Popen([sys.executable,"-c",sys.argv[2],'
+              'sys.argv[3],sys.argv[4],sys.argv[5]]); '
+              'deadline=time.monotonic()+5; '
+              'exec("while not Path(sys.argv[5]).exists() and time.monotonic()<deadline: time.sleep(.01)"); '
+              'assert Path(sys.argv[5]).exists(); '
+              + ('time.sleep(.1)' if successful else 'time.sleep(30)'))
+    paths = [tmp_path.resolve() / name for name in ('parent.json', 'child.json', 'leaf.json')]
     try:
         started = time.monotonic()
-        result = run_process([sys.executable, '-c', leader, child, leaf],
-                             cwd=tmp_path.resolve(), stdin_bytes=b'', timeout=1, cleanup_timeout=3)
-        assert time.monotonic() - started < 6
-        assert result['outcome'] == 'timed_out'
+        result = run_process([sys.executable, '-c', leader, str(paths[0]), child,
+                              str(paths[1]), leaf, str(paths[2])],
+                             cwd=tmp_path.resolve(), stdin_bytes=b'',
+                             timeout=2, cleanup_timeout=3)
+        assert time.monotonic() - started < 5
+        assert result['outcome'] == ('exited' if successful else 'timed_out')
+        if successful:
+            assert result['exit_code'] == 0
         assert result['cleanup'] == 'confirmed'
-        assert len(result['processes']) >= 3
-        assert sibling.poll() is None
-        for identity in result['processes']:
+        identities = [json.loads(path.read_text()) for path in paths]
+        assert [item['pid'] for item in result['processes']] == [identities[0]['pid']]
+        parent = backend.snapshot(identities[0]['pid'])
+        assert parent is None or parent['state'] == 'Z'
+        for identity in identities[1:]:
             snapshot = backend.snapshot(identity['pid'])
-            assert snapshot is None or snapshot['state'] == 'Z'
+            assert snapshot is not None
+            assert snapshot['start_ticks'] == identity['start_ticks']
+            assert snapshot['state'] != 'Z'
+            if stopped and identity == identities[-1]:
+                assert snapshot['state'] == 'T'
+        assert sibling.poll() is None
     finally:
+        # Kill the root first to prevent new fixture spawns; descendants inherit
+        # the output pipes intentionally so the test also detects waiting on EOF.
+        for path in paths:
+            if path.exists():
+                backend.signal(json.loads(path.read_text()), signal.SIGKILL)
+        deadline = time.monotonic() + 3
+        remaining = []
+        while time.monotonic() < deadline:
+            remaining = []
+            for path in paths:
+                if not path.exists():
+                    continue
+                identity = json.loads(path.read_text())
+                snapshot = backend.snapshot(identity['pid'])
+                if (snapshot is not None and snapshot['start_ticks'] == identity['start_ticks']
+                        and snapshot['state'] != 'Z'):
+                    remaining.append(identity)
+                    backend.signal(identity, signal.SIGKILL)
+            if not remaining:
+                break
+            time.sleep(.01)
         backend.signal(sibling_identity, signal.SIGKILL)
         sibling.wait(timeout=3)
+        assert not remaining, 'fixture processes did not terminate'
 
 
 @pytest.mark.skipif(sys.platform != 'darwin', reason='native Darwin required')
@@ -359,7 +384,6 @@ def test_inexit_process_cleanup_confirms_only_after_later_zombie(api, monkeypatc
             library.data = bytes(zombie)
         return result
     backend._send = become_zombie
-    backend.pids = lambda: [42]
     monkeypatch.setattr(darwin, 'Backend', lambda: backend)
     monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
     result = agent_process.cleanup_processes([identity], cleanup_timeout=5)
@@ -374,7 +398,6 @@ def test_stuck_inexit_process_reaches_unconfirmed_cleanup_deadline(api, monkeypa
     library.data = record(flags=0x4)
     monkeypatch.setattr(os, 'getsid', lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
     identity = backend.snapshot(42)
-    backend.pids = lambda: [42]
     monkeypatch.setattr(darwin, 'Backend', lambda: backend)
     monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
     elapsed = [0.0]
@@ -406,145 +429,6 @@ def test_inexit_session_leader_preserves_own_sid(api, monkeypatch):
     assert identity['session'] == 42
 
 
-def test_public_inexit_session_leader_preserves_own_sid(api, monkeypatch):
-    _, backend = api
-    backend._info = lambda pid, flavor, arg, buf, size: public_info(
-        pid, flavor, arg, buf, size, unique=901, flags=0x24)
-    monkeypatch.setattr(os, 'getsid', lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
-    identity = backend.discovery_snapshot(42)
-    assert identity is not None
-    assert identity['state'] == 'R'
-    assert identity['session'] == 42
-
-
-def test_discovery_uses_public_metadata_but_verifies_owned_candidates(api, monkeypatch):
-    from hermes_pipeline import agent_process
-    library, backend = api
-    rows = {1: (0, 1, 100), 42: (1, 42, 901), 43: (42, 42, 902)}
-    strict_reads = []
-    deny_child = False
-    def info(pid, flavor, arg, buf, size):
-        ppid, pgid, unique = rows[pid]
-        if flavor == 18:
-            strict_reads.append(pid)
-            if pid == 1 or (pid == 43 and deny_child):
-                ctypes.set_errno(errno.EPERM)
-                return 0
-            data = bytearray(record(pid=pid, unique=unique))
-            struct.pack_into('=I', data, 16, ppid)
-            struct.pack_into('=I', data, 100, pgid)
-        elif flavor == 13:
-            assert arg == 1 and size == 64
-            data = bytearray(64)
-            struct.pack_into('=IIII', data, 0, pid, ppid, pgid, 2)
-            struct.pack_into('=I', data, 32, 0x4 if pid == 1 else 0)
-        elif flavor == 17:
-            assert arg == 1 and size == 56
-            data = bytearray(56)
-            struct.pack_into('=QQi', data, 16, unique, 100, 7)
-        else:
-            pytest.fail(f'unexpected flavor {flavor}')
-        ctypes.memmove(buf, bytes(data), len(data))
-        return len(data)
-    backend._info = info
-    monkeypatch.setattr(darwin, 'Backend', lambda: backend)
-    monkeypatch.setattr(backend, 'pids', lambda: list(rows))
-    def getsid(pid):
-        if pid == 1:
-            raise ProcessLookupError
-        return rows[pid][1]
-    monkeypatch.setattr(os, 'getsid', getsid)
-    monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
-    root = backend.snapshot(42)
-    known = {42: root}
-    assert agent_process._discover(known) is agent_process.DiscoveryOutcome.CLEAN
-    assert set(known) == {42, 43}
-    assert 1 not in strict_reads
-    deny_child = True
-    assert agent_process._discover({42: root}) is agent_process.DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-    assert agent_process._discover(known) is agent_process.DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
-
-
-def test_public_discovery_short_record_is_birth_guarded(api, monkeypatch):
-    _, backend = api
-    unique = 901
-    def info(pid, flavor, arg, buf, size):
-        assert arg == 1
-        data = bytearray(size)
-        if flavor == 17:
-            assert size == 56
-            struct.pack_into('=QQi', data, 16, unique, 100, 7)
-        else:
-            assert (flavor, size) == (13, 64)
-            struct.pack_into('=IIII', data, 0, pid, 1, pid, 2)
-        ctypes.memmove(buf, bytes(data), size)
-        return size
-    backend._info = info
-    snapshot = backend.discovery_snapshot(42)
-    assert snapshot['start_ticks'] == 901
-    assert snapshot['ppid'] == 1
-    assert snapshot['session'] == 42
-    def reused(pid):
-        nonlocal unique
-        unique = 902
-        return pid
-    monkeypatch.setattr(os, 'getsid', reused)
-    with pytest.raises(OSError, match='changed during discovery'):
-        backend.discovery_snapshot(42)
-
-
-def test_public_discovery_retries_transient_sid_for_same_birth(api, monkeypatch):
-    _, backend = api
-    backend._info = lambda pid, flavor, arg, buf, size: public_info(
-        pid, flavor, arg, buf, size, unique=901)
-    calls = 0
-    def getsid(pid):
-        nonlocal calls
-        calls += 1
-        if calls == 1:
-            raise ProcessLookupError
-        return pid
-    monkeypatch.setattr(os, 'getsid', getsid)
-    snapshot = backend.discovery_snapshot(42)
-    assert snapshot is not None
-    assert snapshot['start_ticks'] == 901
-    assert snapshot['session'] == 42
-    assert calls == 2
-
-
-def test_public_discovery_persistent_sid_failure_for_live_birth_fails_closed(api, monkeypatch):
-    _, backend = api
-    backend._info = lambda pid, flavor, arg, buf, size: public_info(
-        pid, flavor, arg, buf, size, unique=901)
-    calls = 0
-    def getsid(pid):
-        nonlocal calls
-        calls += 1
-        raise ProcessLookupError
-    monkeypatch.setattr(os, 'getsid', getsid)
-    with pytest.raises(OSError, match='session identity unavailable'):
-        backend.discovery_snapshot(42)
-    assert calls == 2
-
-
-def test_public_discovery_sid_retry_rejects_changed_birth(api, monkeypatch):
-    _, backend = api
-    unique = 901
-    backend._info = lambda pid, flavor, arg, buf, size: public_info(
-        pid, flavor, arg, buf, size, unique=unique)
-    calls = 0
-    def getsid(pid):
-        nonlocal calls, unique
-        calls += 1
-        if calls == 1:
-            raise ProcessLookupError
-        unique = 902
-        return pid
-    monkeypatch.setattr(os, 'getsid', getsid)
-    with pytest.raises(OSError, match='changed during discovery'):
-        backend.discovery_snapshot(42)
-
-
 @pytest.mark.skipif(sys.platform != 'darwin', reason='native Darwin required')
 def test_native_exit_before_first_snapshot_keeps_birth_receipt(tmp_path, monkeypatch):
     from hermes_pipeline import agent_process
@@ -557,8 +441,9 @@ def test_native_exit_before_first_snapshot_keeps_birth_receipt(tmp_path, monkeyp
         # depending on os.waitid (absent on Darwin in supported Python 3.12).
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            short = backend._public_info(child.pid, 13, 64)
-            if short is not None and struct.unpack_from("=I", short, 12)[0] == 5:
+            short = ctypes.create_string_buffer(64)
+            count = backend._info(child.pid, 13, 1, short, len(short))
+            if count == 64 and struct.unpack_from("=I", short.raw, 12)[0] == 5:
                 assert backend.snapshot(child.pid)["state"] == "Z"
                 return child
             time.sleep(.01)
@@ -574,21 +459,7 @@ def test_native_exit_before_first_snapshot_keeps_birth_receipt(tmp_path, monkeyp
     assert result['exit_code'] == 0
     assert result['cleanup'] == 'confirmed'
     assert receipts[0]['identity']['start_ticks'] > 0
-    assert receipts[0]['identity']['session'] == receipts[0]['identity']['pid']
-
-
-@pytest.mark.skipif(sys.platform != 'darwin', reason='native Darwin required')
-def test_native_public_discovery_can_inspect_system_owner():
-    backend = darwin.Backend()
-    snapshot = backend.discovery_snapshot(1)
-    assert snapshot is not None
-    assert snapshot['pid'] == 1
-    assert snapshot['start_ticks'] > 0
-    # PID 1 belongs to root. This confirms the test host exercises the exact
-    # cross-user difference, rather than hiding it under a privileged runner.
-    assert os.geteuid() != 0
-    with pytest.raises(PermissionError):
-        backend.snapshot(1)
+    assert receipts[0]['identity']['pid'] == result['processes'][0]['pid']
 
 
 def test_exhausted_esrch_is_pending_only_for_verified_same_birth(api):
@@ -609,7 +480,7 @@ def test_exhausted_esrch_is_pending_only_for_verified_same_birth(api):
     assert backend.signal(identity, signal.SIGCONT) is False
 
 
-@pytest.mark.parametrize('final', ['zombie', 'alive', 'reused', 'unreadable', 'discovery_gap', 'permission'])
+@pytest.mark.parametrize('final', ['zombie', 'alive', 'reused', 'unreadable', 'permission'])
 def test_continue_exit_race_requires_independent_final_death(api, monkeypatch, final):
     from hermes_pipeline import agent_process
     library, backend = api
@@ -634,9 +505,6 @@ def test_continue_exit_race_requires_independent_final_death(api, monkeypatch, f
     monkeypatch.setattr(darwin, 'Backend', lambda: backend)
     monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
     monkeypatch.setattr(agent_process, 'process_snapshot', snapshot)
-    discovery = (agent_process.DiscoveryOutcome.TRANSIENT if final == 'discovery_gap'
-                 else agent_process.DiscoveryOutcome.CLEAN)
-    monkeypatch.setattr(agent_process, '_discover', lambda known: discovery)
     elapsed = [0.0]
     monkeypatch.setattr(agent_process.time, 'monotonic', lambda: elapsed[0])
     monkeypatch.setattr(agent_process.time, 'sleep', lambda delay: elapsed.__setitem__(0, elapsed[0] + delay))

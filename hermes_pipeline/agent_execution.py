@@ -29,7 +29,7 @@ except ImportError:  # pragma: no cover - Windows fails closed
     fcntl = None
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 MAX_RECORD_BYTES = 8 * 1024 * 1024
 TERMINAL = {"exited", "timed_out", "interrupted", "blocked"}
 STATUSES = TERMINAL | {"admitted", "running", "running_detached", "cleanup_unconfirmed", "lock_unconfirmed"}
@@ -41,7 +41,7 @@ _REGISTRATION_FIELDS = {
 _ATTEMPT_FIELDS = {
     "generation", "status", "host", "boot_id", "supervisor", "client_process",
     "started_monotonic", "deadline_monotonic", "exit_code", "exit_signal", "cleanup",
-    "reason", "recovery_event", "recovery_context", "owned_processes", "owned_cgroups",
+    "reason", "recovery_event", "recovery_context", "owned_processes", "owned_cgroups", "direct_processes",
 }
 
 
@@ -163,8 +163,25 @@ def _atomic_write(path: Path, record: dict, *, directory_fd: int) -> None:
             pass
 
 
+def _validate_legacy_cgroup(receipt: dict) -> None:
+    if not isinstance(receipt, dict):
+        raise ValueError('invalid cgroup receipt')
+    fields = {'version', 'path', 'device', 'inode', 'boot_id', 'host', 'unit'} | ({'root_device', 'root_inode'} if receipt.get('version') == 2 else set())
+    if set(receipt) != fields:
+        raise ValueError('invalid cgroup receipt')
+    unit = receipt['unit']
+    if (type(receipt['version']) is not int or receipt['version'] not in (1, 2)
+            or not isinstance(unit, str) or not re.fullmatch(r'tpo-[0-9a-f]{32}\.scope', unit)
+            or not isinstance(receipt['path'], str)
+            or any(part in ('.', '..') for part in receipt['path'].split('/'))
+            or not re.fullmatch(r'/sys/fs/cgroup/user\.slice/user-[0-9]+\.slice/user@[0-9]+\.service/(?:[A-Za-z0-9_.@-]+/)*' + re.escape(unit), receipt['path'])
+            or any(type(receipt[key]) is not int or receipt[key] <= 0 for key in fields & {'device', 'inode', 'root_device', 'root_inode'})
+            or any(not isinstance(receipt[key], str) or not receipt[key] or len(receipt[key]) > 256 for key in ('boot_id', 'host'))):
+        raise ValueError('invalid cgroup receipt')
+
+
 def _validate(record: dict) -> None:
-    if not isinstance(record, dict) or set(record) != _RECORD_FIELDS or type(record["version"]) is not int or record["version"] not in (1, SCHEMA_VERSION):
+    if not isinstance(record, dict) or set(record) != _RECORD_FIELDS or type(record["version"]) is not int or record["version"] not in (1, 2, SCHEMA_VERSION):
         raise ExecutionError("unsupported execution record schema")
     _identifier(record["execution_id"])
     registration = record["registration"]
@@ -192,7 +209,7 @@ def _validate(record: dict) -> None:
     if not isinstance(record["attempts"], list):
         raise ExecutionError("invalid attempt journal")
     for generation, attempt in enumerate(record["attempts"], 1):
-        if not isinstance(attempt, dict) or set(attempt) != (_ATTEMPT_FIELDS if record["version"] == 2 else _ATTEMPT_FIELDS - {"owned_cgroups"}) or type(attempt["generation"]) is not int or attempt["generation"] != generation:
+        if not isinstance(attempt, dict) or set(attempt) != (_ATTEMPT_FIELDS - ({"direct_processes"} if record["version"] < 3 else set()) - ({"owned_cgroups"} if record["version"] == 1 else set())) or type(attempt["generation"]) is not int or attempt["generation"] != generation:
             raise ExecutionError("invalid attempt generation or schema")
         if attempt["status"] not in STATUSES or attempt["cleanup"] not in {"pending", "confirmed", "unconfirmed"}:
             raise ExecutionError("invalid attempt outcome")
@@ -219,17 +236,21 @@ def _validate(record: dict) -> None:
         groups = attempt.get("owned_cgroups", [])
         if not isinstance(groups, list) or len(groups) > 2048:
             raise ExecutionError("invalid cgroup inventory")
-        from .agent_cgroup import validate_receipt
 
         try:
             for group in groups:
-                validate_receipt(group)
+                _validate_legacy_cgroup(group)
         except ValueError as exc:
             raise ExecutionError("invalid cgroup receipt") from exc
         units = [group["unit"] for group in groups]
         if len(set(units)) != len(units):
             raise ExecutionError("duplicate cgroup receipt")
-        for identity in [attempt["supervisor"], attempt["client_process"], *attempt["owned_processes"]]:
+        roots = attempt.get("direct_processes", [])
+        if (not isinstance(roots, list) or len(roots) > 2048
+                or any(not isinstance(root, dict) for root in roots)
+                or len({json.dumps(root, sort_keys=True) for root in roots}) != len(roots)):
+            raise ExecutionError("invalid direct process receipts")
+        for identity in [attempt["supervisor"], attempt["client_process"], *attempt["owned_processes"], *roots]:
             if identity is None:
                 continue
             core = {"pid", "start_ticks", "boot_id", "host"}
@@ -325,10 +346,11 @@ class ExecutionStore:
         except (OSError, ValueError) as exc:
             raise ExecutionError("execution record unavailable or invalid") from exc
         _validate(record)
-        if record["version"] == 1:
-            record["version"] = SCHEMA_VERSION
+        if record["version"] < SCHEMA_VERSION:
             for attempt in record["attempts"]:
-                attempt["owned_cgroups"] = []
+                attempt.setdefault("owned_cgroups", [])
+                attempt["direct_processes"] = []
+            record["version"] = SCHEMA_VERSION
         if record["execution_id"] != execution_id:
             raise ExecutionError("execution identity mismatch")
         self._outside_worktree(record["registration"]["worktree"])
@@ -401,7 +423,7 @@ class ExecutionStore:
                 deadline_monotonic=None, exit_code=None, exit_signal=None,
                 cleanup="pending", reason=None, recovery_event=recovery_event,
                 recovery_context=record["approved_recovery"]["recovery_context"] if record["approved_recovery"] else None,
-                owned_processes=[], owned_cgroups=[],
+                owned_processes=[], owned_cgroups=[], direct_processes=[],
             ))
             record["approved_recovery"] = None
             self._write(execution_id, record)
@@ -440,6 +462,10 @@ class ExecutionStore:
                 old_groups = attempt["owned_cgroups"]
                 if not isinstance(new_groups, list) or new_groups[:len(old_groups)] != old_groups:
                     raise ExecutionError("cgroup ownership receipts are append-only")
+            if "direct_processes" in changes:
+                roots = changes["direct_processes"]
+                if not isinstance(roots, list) or roots[:len(attempt["direct_processes"])] != attempt["direct_processes"]:
+                    raise ExecutionError("direct process receipts are append-only")
             attempt.update(changes)
             _validate(record)
             self._write(execution_id, record)

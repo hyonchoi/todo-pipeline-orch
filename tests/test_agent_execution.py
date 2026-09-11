@@ -250,10 +250,11 @@ def test_legacy_record_upgrades_without_inventing_cgroup_evidence(execution):
     record, _ = store.admit('execution-1')
     record['version'] = 1
     record['attempts'][0].pop('owned_cgroups', None)
+    record['attempts'][0].pop('direct_processes', None)
     path = store.root / 'execution-1' / 'record.json'
     path.write_text(json.dumps(record))
     upgraded = store.load('execution-1')
-    assert upgraded['version'] == 2
+    assert upgraded['version'] == 3
     assert upgraded['attempts'][0]['owned_cgroups'] == []
     assert json.loads(path.read_text())['version'] == 1  # reads do not rewrite
 
@@ -269,3 +270,47 @@ def test_cgroup_receipt_schema_rejects_unsafe_evidence(execution, change):
                    host='host', boot_id='boot')
     with pytest.raises(ExecutionError):
         store.update_attempt('execution-1', 1, owned_cgroups=[{**receipt, **change}])
+
+
+def test_direct_roots_are_explicit_append_only_evidence(execution):
+    store, _ = execution
+    store.admit('execution-1')
+    root = process_identity(os.getpid())
+    store.update_attempt('execution-1', 1, direct_processes=[root])
+    assert store.load('execution-1')['attempts'][0]['direct_processes'] == [root]
+    with pytest.raises(ExecutionError):
+        store.update_attempt('execution-1', 1, direct_processes=[])
+
+
+@pytest.mark.parametrize('version', [1, 2])
+def test_upgrade_never_reinterprets_old_inventory_as_direct_roots(execution, version):
+    store, _ = execution
+    store.admit('execution-1')
+    root = process_identity(os.getpid())
+    record = store.update_attempt('execution-1', 1, client_process=root, owned_processes=[root, dict(root, pid=991)])
+    record['version'] = version
+    record['attempts'][0].pop('direct_processes')
+    if version == 1:
+        record['attempts'][0].pop('owned_cgroups')
+    (store.root / 'execution-1' / 'record.json').write_text(json.dumps(record))
+    upgraded = store.load('execution-1')
+    assert upgraded['version'] == 3
+    assert upgraded['attempts'][0]['direct_processes'] == []
+    assert upgraded['attempts'][0]['client_process'] == root
+
+
+@pytest.mark.parametrize('roots', [[None], [dict(pid=1)], ['pid']])
+def test_invalid_direct_roots_rejected(execution, roots):
+    store, _ = execution
+    store.admit('execution-1')
+    with pytest.raises(ExecutionError):
+        store.update_attempt('execution-1', 1, direct_processes=roots)
+
+
+def test_sequential_same_pid_births_remain_distinct(execution):
+    store, _ = execution
+    store.admit('execution-1')
+    root = process_identity(os.getpid())
+    later = dict(root, start_ticks=root['start_ticks'] + 1)
+    store.update_attempt('execution-1', 1, direct_processes=[root, later])
+    assert store.load('execution-1')['attempts'][0]['direct_processes'] == [root, later]
