@@ -362,3 +362,17 @@ def test_collector_retains_each_group_and_tags_only_new_processes(candidate, mon
         collector._run_owned(store, 'execution', 1, ['fake'], cwd=work, stdin_bytes=b'', env={}, deadline=time.monotonic() + 30)
     attempt = store.load('execution')['attempts'][-1]
     assert attempt['owned_processes'] == [process, *[{**process, 'cgroup': group['unit']} for group in groups]]
+
+
+@pytest.mark.parametrize('cleanup', ['confirmed', 'cleanup_unconfirmed'])
+def test_collector_launch_error_keeps_proven_cleanup(candidate, monkeypatch, cleanup):
+    from hermes_pipeline import agent_collector as collector
+    from tests.test_agent_supervisor import _cgroup_receipt
+    store, _, work = candidate
+    def fail(*args, **kwargs):
+        kwargs['on_cgroup'](_cgroup_receipt())
+        raise collector.ProcessLaunchError(cleanup=cleanup)
+    monkeypatch.setattr(collector, 'run_process', fail)
+    with pytest.raises(ExecutionError, match='checkpoint process launch failed'):
+        collector._run_owned(store, 'execution', 1, ['fake'], cwd=work, stdin_bytes=b'', env={}, deadline=time.monotonic()+30)
+    assert store.load('execution')['attempts'][-1]['cleanup'] == ('confirmed' if cleanup == 'confirmed' else 'unconfirmed')

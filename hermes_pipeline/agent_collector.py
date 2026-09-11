@@ -239,7 +239,7 @@ def _run_owned(store, identity, generation, argv, *, cwd, stdin_bytes, env, dead
                               on_processes=inventory, on_cgroup=cgroup_launched)
     except ProcessLaunchError as exc:
         _launch_marker(store, identity, generation, False)
-        store.update_attempt(identity, generation, cleanup='unconfirmed' if current_group else 'confirmed')
+        store.update_attempt(identity, generation, cleanup='confirmed' if exc.cleanup == 'confirmed' else 'unconfirmed')
         _remaining(deadline)
         raise ExecutionError('checkpoint process launch failed') from exc
     except ProcessOwnershipError as exc:

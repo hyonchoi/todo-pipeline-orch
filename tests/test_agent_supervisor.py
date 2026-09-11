@@ -1021,3 +1021,22 @@ def test_entrypoint_path_fallback_requires_no_executable_sibling(tmp_path, monke
     monkeypatch.setattr(supervisor, 'sys', SimpleNamespace(executable=str(installed / 'python')))
     monkeypatch.setattr(supervisor.shutil, 'which', lambda _: str(fallback))
     assert supervisor.installed_entrypoint() == str(fallback)
+
+
+@pytest.mark.parametrize('cleanup', ['confirmed', 'cleanup_unconfirmed'])
+def test_failed_cgroup_launch_preserves_collected_cleanup(execution, monkeypatch, cleanup):
+    store, _ = execution
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *a: None)
+    monkeypatch.setattr(supervisor, 'confirm_process_capability', lambda: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *a, **k: [sys.executable])
+    def fail(*args, **kwargs):
+        kwargs['on_cgroup'](_cgroup_receipt())
+        raise supervisor.ProcessLaunchError(cleanup=cleanup)
+    monkeypatch.setattr(supervisor, 'run_process', fail)
+    supervisor.supervise(store, 'execution-1')
+    attempt = store.load('execution-1')['attempts'][-1]
+    assert attempt['status'] == 'blocked'
+    assert attempt['exit_code'] is None
+    assert attempt['cleanup'] == ('confirmed' if cleanup == 'confirmed' else 'unconfirmed')
+    supervisor.supervise(store, 'execution-1')
+    assert len(store.load('execution-1')['attempts']) == 1

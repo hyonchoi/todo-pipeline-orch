@@ -15,7 +15,7 @@ import socket
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from enum import Enum
 from pathlib import Path
 
@@ -30,12 +30,12 @@ class DiscoveryOutcome(Enum):
 
 
 class ProcessLaunchError(RuntimeError):
-    """The client was provably not created; no process cleanup is outstanding."""
+    """The client did not launch; cleanup evidence may still require recovery."""
 
-    def __init__(self):
+    def __init__(self, *, cleanup="confirmed", processes=()):
         super().__init__("client_not_launched")
-        self.cleanup = "confirmed"
-        self.processes = []
+        self.cleanup = cleanup
+        self.processes = [dict(identity) for identity in processes]
 
 
 class ProcessOwnershipError(RuntimeError):
@@ -414,7 +414,7 @@ def _cleanup_owned_child(
 def run_process(
     argv: Sequence[str], *, cwd: Path, stdin_bytes: bytes, timeout: float,
     cleanup_timeout: float = 60,
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
     deadline_monotonic: float | None = None,
     pass_fds: tuple[int, ...] = (),
     on_launch: Callable[[dict], None] | None = None,
@@ -466,6 +466,7 @@ def run_process(
     child_fd = None
     cleanup = {"cleanup": "cleanup_unconfirmed", "processes": []}
     uncertain = False
+    launch_error = None
     try:
         # Before polling/waiting, this direct child has not been reaped and its
         # PID cannot be reused. Retain the kernel handle before /proc lookup,
@@ -535,6 +536,9 @@ def run_process(
                 except BrokenPipeError:
                     child.stdin.close()
             time.sleep(min(0.01, max(0, deadline - time.monotonic())))
+    except ProcessLaunchError as exc:
+        launch_error = exc
+        raise
     finally:
         cleanup_deadline = time.monotonic() + cleanup_timeout
         if release_fd is not None:
@@ -558,6 +562,9 @@ def run_process(
                     cleanup_timeout=max(0, cleanup_deadline - time.monotonic()),
                     on_processes=on_processes,
                 )
+            if launch_error is not None:
+                launch_error.cleanup = cleanup["cleanup"]
+                launch_error.processes = cleanup["processes"]
             # Never block beyond cleanup; a live child leaves exit unobservable.
             exit_code = child.poll()
         finally:

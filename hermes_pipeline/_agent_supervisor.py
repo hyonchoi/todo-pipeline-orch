@@ -529,9 +529,9 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
             on_processes=lambda processes: store.update_attempt(identity, generation, owned_processes=[tagged(p) for p in processes]),
             on_cgroup=cgroup_launched,
         )
-    except ProcessLaunchError:
+    except ProcessLaunchError as exc:
         store.update_attempt(identity, generation, status="blocked", reason="client_not_launched",
-                             cleanup="unconfirmed" if current_group else "confirmed")
+                             cleanup="confirmed" if exc.cleanup == "confirmed" else "unconfirmed")
     except ProcessOwnershipError as exc:
         store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable",
                              cleanup="unconfirmed", owned_processes=[tagged(p) for p in exc.processes])

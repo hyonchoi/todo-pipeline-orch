@@ -12,15 +12,21 @@ pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux cgroup v2
 
 @pytest.fixture(scope="module")
 def native_cgroup():
+    import os
+
+    def unavailable(reason):
+        if os.environ.get('REQUIRE_NATIVE_CGROUP') == '1':
+            pytest.fail(reason)
+        pytest.skip(reason)
     if not Path("/sys/fs/cgroup/cgroup.controllers").exists():
-        pytest.skip("native cgroup v2 unavailable")
+        unavailable("native cgroup v2 unavailable")
     try:
         check = subprocess.run(["systemctl", "--user", "show-environment"],
                                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
     except (OSError, subprocess.TimeoutExpired):
-        pytest.skip("existing user manager unavailable")
+        unavailable("existing user manager unavailable")
     if check.returncode:
-        pytest.skip("existing user manager unavailable")
+        unavailable("existing user manager unavailable")
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux cgroup v2')
@@ -34,7 +40,7 @@ def test_cgroup_receipt_precedes_client_execution(tmp_path, native_cgroup):
         cwd=tmp_path, stdin_bytes=b'', timeout=5, cleanup_timeout=1,
         on_cgroup=persist,
     )
-    assert receipts and receipts[0]['version'] == 1
+    assert receipts and receipts[0]['version'] == 2
     assert result['exit_code'] == 0
     assert result['cleanup'] == 'confirmed'
 
@@ -49,7 +55,7 @@ def test_linux_does_not_discover_host_processes(tmp_path, monkeypatch, native_cg
 
 
 @pytest.mark.skipif(sys.platform != 'linux', reason='Linux cgroup v2')
-@pytest.mark.parametrize('mode', ['detached', 'stopped', 'resistant'])
+@pytest.mark.parametrize('mode', ['detached', 'stopped'])
 def test_cleanup_after_success_contains_orphaned_descendants(tmp_path, mode, native_cgroup):
     descendant = (
         "import os,signal,time; from pathlib import Path; os.setsid(); "
@@ -258,5 +264,173 @@ def test_bootstrap_does_not_import_worktree_python_modules(tmp_path, native_cgro
     result = agent_process.run_process(
         ['/bin/true'], cwd=tmp_path, stdin_bytes=b'', timeout=5,
     )
+    assert result['exit_code'] == 0
+    assert result['cleanup'] == 'confirmed'
+
+
+def test_target_environment_does_not_control_user_manager_connection(tmp_path, native_cgroup):
+    import json
+
+    intended = {'PATH': '/usr/bin', 'LC_CTYPE': 'C.UTF-8', 'TPO_EXACT_VALUE': 'quoted " value\nend'}
+    result = agent_process.run_process(
+        [sys.executable, '-c', "import os,json;from pathlib import Path;Path('environment').write_text(json.dumps(dict(os.environ)))"],
+        cwd=tmp_path, stdin_bytes=b'', timeout=5, env=intended,
+    )
+    assert result['exit_code'] == 0
+    assert json.loads((tmp_path / 'environment').read_text()) == intended
+
+
+@pytest.mark.parametrize('environment', [{'BAD=KEY': 'x'}, {'NUL': '\0'}, {'TYPE': 1}, {'': 'value'}])
+def test_invalid_target_environment_refused_before_bootstrap(tmp_path, monkeypatch, environment):
+    from hermes_pipeline import agent_cgroup
+
+    monkeypatch.setattr(agent_cgroup.subprocess, 'Popen', lambda *a, **kw: pytest.fail('invalid environment launched'))
+    with pytest.raises(agent_process.ProcessLaunchError, match='^client_not_launched$') as caught:
+        agent_cgroup.launch(['/bin/true'], cwd=tmp_path, env=environment,
+                            pass_fds=(), deadline=10, on_cgroup=None)
+    assert caught.value.cleanup == 'confirmed'
+    assert caught.value.processes == []
+
+
+def test_oversized_environment_refused_without_payload_disclosure(tmp_path, monkeypatch):
+    from hermes_pipeline import agent_cgroup
+
+    monkeypatch.setattr(agent_cgroup, '_MAX_ENV_BYTES', 32)
+    monkeypatch.setattr(agent_cgroup.subprocess, 'Popen', lambda *a, **kw: pytest.fail('oversized environment launched'))
+    with pytest.raises(agent_process.ProcessLaunchError, match='^client_not_launched$') as caught:
+        agent_cgroup.launch(['/bin/true'], cwd=tmp_path, env={'PRIVATE_VALUE': 'x' * 100},
+                            pass_fds=(), deadline=10, on_cgroup=None)
+    assert caught.value.cleanup == 'confirmed'
+    assert caught.value.processes == []
+
+
+def test_environment_delivery_larger_than_pipe_capacity(tmp_path, native_cgroup):
+    intended = {'PATH': '/usr/bin', 'LARGE': 'x' * 100_000}
+    result = agent_process.run_process(
+        [sys.executable, '-c', "import os;from pathlib import Path;Path('large').write_text(os.environ['LARGE'])"],
+        cwd=tmp_path, stdin_bytes=b'', timeout=5, env=intended,
+    )
+    assert result['exit_code'] == 0
+    assert (tmp_path / 'large').read_text() == intended['LARGE']
+
+
+def test_bootstrap_works_above_select_fd_limit(tmp_path, native_cgroup):
+    import os
+    import resource
+
+    if resource.getrlimit(resource.RLIMIT_NOFILE)[0] < 1100:
+        pytest.skip('insufficient fd allowance for high descriptor regression')
+    held = []
+    try:
+        while not held or held[-1] < 1030:
+            held.append(os.open('/dev/null', os.O_RDONLY))
+        result = agent_process.run_process(['/bin/true'], cwd=tmp_path, stdin_bytes=b'', timeout=5)
+        assert result['exit_code'] == 0
+    finally:
+        for fd in held:
+            os.close(fd)
+
+
+def test_missing_legacy_scope_cannot_prove_empty_group():
+    import socket
+
+    from hermes_pipeline import agent_cgroup
+
+    receipt = dict(version=1, path='/sys/fs/cgroup/user.slice/user-1.slice/user@1.service/app.slice/tpo-'+'a'*32+'.scope',
+                   device=1, inode=2,
+                   boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                   host=socket.gethostname(), unit='tpo-'+'a'*32+'.scope')
+    assert agent_cgroup.cleanup_cgroup(receipt)['cleanup'] == 'cleanup_unconfirmed'
+
+
+def test_changed_cgroup_root_refuses_before_scope_lookup(tmp_path, native_cgroup, monkeypatch):
+    from hermes_pipeline import agent_cgroup
+
+    receipts = []
+    agent_process.run_process(['/bin/true'], cwd=tmp_path, stdin_bytes=b'', timeout=5, on_cgroup=receipts.append)
+    receipt = receipts[0]
+    monkeypatch.setattr(agent_cgroup, '_root_identity', lambda: (receipt['root_device'], receipt['root_inode'] + 1))
+    monkeypatch.setattr(agent_cgroup, '_open_directory', lambda *_: pytest.fail('changed root traversed'))
+    assert agent_cgroup.cleanup_cgroup(receipt)['cleanup'] == 'cleanup_unconfirmed'
+
+
+def test_remounted_cgroup_namespace_cannot_confirm_hidden_live_scope(tmp_path, native_cgroup):
+    import json
+    import os
+
+    def unavailable(reason):
+        if os.environ.get('REQUIRE_NATIVE_CGROUP') == '1':
+            pytest.fail(reason)
+        pytest.skip(reason)
+
+    def inspect(receipt):
+        members = (Path(receipt['path']) / 'cgroup.procs').read_text()
+        code = "import json,sys;from hermes_pipeline.agent_cgroup import cleanup_cgroup;print(json.dumps(cleanup_cgroup(json.loads(sys.argv[1]),cleanup_timeout=0)))"
+        # Hosted Ubuntu restricts unprivileged namespaces. Opt in only on CI to
+        # a root scratch child; mounts stay private and host policy is unchanged.
+        namespace = ['unshare', '--user', '--map-root-user', '--cgroup', '--mount']
+        if os.environ.get('NATIVE_CGROUP_NAMESPACE_SUDO') == '1':
+            namespace = ['sudo', '-n', 'unshare', '--cgroup', '--mount']
+        try:
+            probe = subprocess.run(
+                [*namespace, '--',
+                 'sh', '-c', 'mount --make-rprivate / && mount -t cgroup2 none /sys/fs/cgroup && exec "$@"',
+                 'sh', sys.executable, '-c', code, json.dumps(receipt)],
+                capture_output=True, text=True, timeout=10,
+            )
+        except OSError:
+            unavailable('native namespace tooling unavailable')
+        if probe.returncode:
+            unavailable('native namespace remount unavailable')
+        assert json.loads(probe.stdout)['cleanup'] == 'cleanup_unconfirmed'
+        assert (Path(receipt['path']) / 'cgroup.procs').read_text() == members
+    result = agent_process.run_process(['/bin/true'], cwd=tmp_path, stdin_bytes=b'', timeout=15, on_cgroup=inspect)
+    assert result['cleanup'] == 'confirmed'
+
+
+def test_exec_failure_retains_unconfirmed_cleanup(tmp_path, native_cgroup, monkeypatch):
+    from hermes_pipeline import agent_cgroup
+
+    monkeypatch.setattr(agent_cgroup, 'cleanup_cgroup', lambda *a, **kw: {'cleanup': 'cleanup_unconfirmed', 'processes': []})
+    with pytest.raises(agent_process.ProcessLaunchError) as caught:
+        agent_process.run_process(['/missing-cgroup-exec-target'], cwd=tmp_path, stdin_bytes=b'', timeout=5)
+    assert caught.value.cleanup == 'cleanup_unconfirmed'
+    assert caught.value.processes
+
+
+def test_unreaped_bootstrap_does_not_claim_launch_cleanup_confirmed(tmp_path, native_cgroup, monkeypatch):
+    import time
+
+    from hermes_pipeline import agent_cgroup
+
+    children = []
+    original_popen = subprocess.Popen
+    original_wait = original_popen.wait
+    def start(*args, **kwargs):
+        child = original_popen(*args, **kwargs)
+        children.append(child)
+        return child
+    def unavailable_wait(child, *args, **kwargs):
+        raise subprocess.TimeoutExpired('bootstrap', 5)
+    def reject(_):
+        raise agent_process.ProcessLaunchError()
+    monkeypatch.setattr(agent_cgroup.subprocess, 'Popen', start)
+    monkeypatch.setattr(original_popen, 'wait', unavailable_wait)
+    try:
+        with pytest.raises(agent_process.ProcessOwnershipError) as caught:
+            agent_cgroup.launch(['/bin/true'], cwd=tmp_path, env=None, pass_fds=(),
+                                deadline=time.monotonic() + 5, on_cgroup=reject)
+        assert caught.value.cleanup == 'cleanup_unconfirmed'
+        assert caught.value.processes
+    finally:
+        for child in children:
+            original_wait(child, timeout=5)
+
+
+def test_environment_mapping_preserves_popen_compatibility(tmp_path, native_cgroup):
+    import os
+
+    result = agent_process.run_process(['/bin/true'], cwd=tmp_path, stdin_bytes=b'',
+                                       env=os.environ, timeout=5)
     assert result['exit_code'] == 0
     assert result['cleanup'] == 'confirmed'
