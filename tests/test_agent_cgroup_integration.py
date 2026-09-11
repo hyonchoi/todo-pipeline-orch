@@ -15,13 +15,13 @@ from hermes_pipeline.agent_execution import ExecutionStore
 from tests.test_agent_cgroup import native_cgroup  # noqa: F401
 
 
-@pytest.mark.parametrize("failure", ["missing-tool", "remount-denied"])
+@pytest.mark.parametrize("failure", ["missing-tool", "remount-denied", "python-error"])
 def test_required_namespace_probe_cannot_skip(tmp_path, monkeypatch, failure):
     from tests.test_agent_cgroup import (
         test_remounted_cgroup_namespace_cannot_confirm_hidden_live_scope,
     )
 
-    monkeypatch.setenv("REQUIRE_NATIVE_CGROUP", "1")
+    monkeypatch.setenv("REQUIRE_NATIVE_CGROUP", "0" if failure == "python-error" else "1")
     (tmp_path / "cgroup.procs").write_text("123\n")
 
     def run_process(*args, **kwargs):
@@ -30,11 +30,17 @@ def test_required_namespace_probe_cannot_skip(tmp_path, monkeypatch, failure):
     def denied(*args, **kwargs):
         if failure == "missing-tool":
             raise FileNotFoundError()
-        return subprocess.CompletedProcess(args[0], 1, stdout="", stderr="denied")
+        stderr = "tpo-namespace-remounted\nModuleNotFoundError: missing module" if failure == "python-error" else "denied"
+        return subprocess.CompletedProcess(args[0], 1, stdout="", stderr=stderr)
 
     monkeypatch.setattr("hermes_pipeline.agent_process.run_process", run_process)
     monkeypatch.setattr(subprocess, "run", denied)
-    with pytest.raises(pytest.fail.Exception, match="native namespace"):
+    expected = {
+        "missing-tool": "native namespace tooling unavailable",
+        "remount-denied": "native namespace remount unavailable: returncode=1; stderr='denied'",
+        "python-error": "native namespace Python probe failed: returncode=1; stderr=",
+    }[failure]
+    with pytest.raises(pytest.fail.Exception, match=expected):
         try:
             test_remounted_cgroup_namespace_cannot_confirm_hidden_live_scope(tmp_path, None)
         except pytest.skip.Exception:

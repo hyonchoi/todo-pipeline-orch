@@ -374,14 +374,20 @@ def test_remounted_cgroup_namespace_cannot_confirm_hidden_live_scope(tmp_path, n
         try:
             probe = subprocess.run(
                 [*namespace, '--',
-                 'sh', '-c', 'mount --make-rprivate / && mount -t cgroup2 none /sys/fs/cgroup && exec "$@"',
+                 'sh', '-c', 'mount --make-rprivate / && mount -t cgroup2 none /sys/fs/cgroup '
+                 '&& { printf "tpo-namespace-remounted\\n" >&2; exec "$@"; }',
                  'sh', sys.executable, '-c', code, json.dumps(receipt)],
                 capture_output=True, text=True, timeout=10,
             )
-        except OSError:
-            unavailable('native namespace tooling unavailable')
+        except OSError as error:
+            unavailable(f'native namespace tooling unavailable: errno={error.errno}')
         if probe.returncode:
-            unavailable('native namespace remount unavailable')
+            # This bounded stderr is only from trusted namespace tools and our
+            # Python probe, never an agent, provider response, or environment dump.
+            diagnostic = f'returncode={probe.returncode}; stderr={probe.stderr[-2000:]!r}'
+            if 'tpo-namespace-remounted' in probe.stderr.splitlines():
+                pytest.fail(f'native namespace Python probe failed: {diagnostic}')
+            unavailable(f'native namespace remount unavailable: {diagnostic}')
         assert json.loads(probe.stdout)['cleanup'] == 'cleanup_unconfirmed'
         assert (Path(receipt['path']) / 'cgroup.procs').read_text() == members
     result = agent_process.run_process(['/bin/true'], cwd=tmp_path, stdin_bytes=b'', timeout=15, on_cgroup=inspect)
