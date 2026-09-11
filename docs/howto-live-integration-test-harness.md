@@ -173,22 +173,24 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    with an isolated `TPO_CONFIG_FILE` (log at `artifacts/tick.log`). Recover its
    `tick_id` and expected phase keys. For a plan-gated profile, use the production
    registration loader, then require embedded Plan authority in the current
-   schema-v5 registration with `plan_path=None`, the expected repository, issue,
+   schema-v6 registration with `plan_path=None`, the expected repository, issue,
    branch, `run_base_sha`, and
    Plan digest (`registration_invalid`, `unexpected_registration`,
    `registration_base_mismatch`, `registration_plan_mismatch`). Hash only the
    Plan document as UTF-8, normalize line endings to LF and exactly one trailing
    newline, and retain the assigned issue number. Issue fields and the folding
    wrapper are excluded. The issue manifest remains schema-v1; production
-   registration readers also support legacy v2, v3, and v4 registrations and
-   legacy repository Plans. New v5 registrations require supervisor authority.
+   registration readers also support legacy v2, v3, v4, and v5 registrations and
+   legacy repository Plans without rewriting their identities. New v6 registrations
+   require supervisor authority and pin the complete ordered phase definitions.
    The `tick_registered` event records `tick_id`, `phase_keys` and, for a pinned
    run, `pinned`, `worktree`, and `branch`.
 5. **Poll / drive** — a non-plan profile polls the registered kanban cards once
    until every card is terminal, auto-completing gate cards behind their
    predecessors. A plan-gated run instead loops: poll the registered cards until
-   the board *settles* (gates are never auto-completed — the production
-   reconcilers own them), classify the settled board, then run another
+   the created worker prefix *settles* (gates are never auto-completed — the
+   production reconcilers own them), classify against the full required worker
+   list, then run another
    `tpo tick` under the same tick id. Each settled board emits
    `tick_completed` `{tick_no, status_map}`. A board identical to the previous
    tick's is *tolerated* once — one reconciler hop can legitimately change
@@ -199,20 +201,24 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    still names the run: a tick that registered a different run fails with
    `unexpected_selection`, while one that merely selected nothing counts as no
    progress and reports `tick_stalled`. The loop is bounded by
-   `pinned_tick_budget(step_keys)` = `len(step_keys) + 6`; exhausting it fails
+   a schedule-based tick budget; exhausting it fails
    with `tick_budget_exhausted`, which
    means the run is stuck rather than out of legitimate work. A tick whose
    subprocess exits non-zero — `tpo tick` isolates a project's crash but reports
    it — fails the run with `tick_crashed`, whose detail is the tail of
-   `artifacts/tick.log`. The run is `delivered` when the `finish` card is `done`
-   **and every card on the board is `done`**; any card that is `blocked`,
+   `artifacts/tick.log`. The run is `delivered` when the registered delivery card
+   (`phase_8_finish_branch` for new native-sdd runs, legacy `finish`) is `done`
+   **and every required worker card is present and `done`**; any card that is `blocked`,
    `failed` or `archived` classifies the run as failed instead. There is no
    `human-gate` card: a `requires_plan` run defers `phase_9_human_review` and
    registers no card for it, so a board matching the older "finish done,
    human-gate blocked" description would be classified as *failed*, never
    delivered. `classify_pinned_run` reads card statuses only — the
-   `finish-verified` marker is written by the production delivery reconciler and
-   is not part of the harness's verdict.
+   `finish-verified` marker is an internal evidence filename written by the
+   production delivery reconciler, not a phase key or part of the harness verdict.
+   A modern profile without a delivery role reaches sequence completion when all
+   required workers are done; the separate PR invariant can then fail with
+   `pr_missing` rather than waiting for an undeclared delivery phase.
    The pinned registration and authored Plan expectation are revalidated before
    and after later ticks and polling, preserving the same authority through
    implementation, review, and finish. Validation failures retain the tick
@@ -315,10 +321,13 @@ For a plan-gated run, `events.jsonl` additionally carries one `tick_registered`
 `{tick_no, status_map}` per settled board; a `tick_stalled` event marks the
 third consecutive identical board that failed the run — the tolerated repeat
 before it is a warning log line, not an event. A delivered run's final board has the
-`finish` card `done` and every other card `done` too — the open, unmerged pull
-request the finish card leaves behind is where the run is supposed to stop, and
-the post-run PR invariant is what checks it. No card is expected to be
-`blocked`: a blocked card classifies the run as failed.
+registered delivery card (`phase_8_finish_branch` for new native-sdd runs,
+legacy `finish`) `done` and every required worker card present and `done` too.
+The open, unmerged pull request the delivery card leaves behind is where the
+run is supposed to stop, and
+the post-run PR invariant is what checks it. Deferred cards retain the exact
+profile key in reports and cannot be omitted to claim completion. No card is
+expected to be `blocked`: a blocked card classifies the run as failed.
 
 ## Troubleshooting
 
@@ -428,7 +437,10 @@ the Plan. It also checks normalization behavior and no tracked Plan files.
 `tests/test_harness_e2e.py` exercises orchestration and cleanup with a local bare
 remote and a mocked tick; it does not independently prove production ticking.
 These are provider-free checks. Live GitHub/Hermes behavior requires a separate
-live harness run and is not established by these tests.
+live harness run and is not established by these tests. Earlier live Codex and
+Claude evidence applies only to the revision it exercised; it does not qualify
+the schema-v6 scheduler or arbitrary custom profiles. The live-safe profile
+allow-list still applies.
 
 Retained clones carry `.hermes/todo-create-input/<uuid>.json` and, on partial
 creation, `.hermes/todo-create/<uuid>.json`; the production

@@ -110,6 +110,77 @@ tpo init myproject --assignee my-custom-profile
 
 **Important:** SOUL.md is advisory — it shapes agent behavior through instructions, not enforcement. The pipeline execution contract's `capabilities` field gates tool access at tick start; `doctor` also hard-fails (exit 2) if a non-default `assignee`'s Hermes profile isn't installed or Hermes itself isn't on PATH.
 
+## Phase keys and validation roles
+
+A Hermes agent profile selects the worker environment. A pipeline phase profile
+also declares the ordered workflow in `phases.yaml`. New schema-v6 run
+registrations pin that complete workflow, so editing a profile affects future
+runs. An existing v6 run resumes from its pinned definitions even if the current
+profile has changed or become invalid. Keep `phase_key` as the phase's identity;
+optional `role` metadata selects
+special validation without changing that key. For example, these entries can
+appear in a phase profile's `phases` list:
+
+```yaml
+- phase_key: build_feature
+  role: implementation
+  name: Implement the approved Plan
+  prompt: Implement {todo_id} from {plan_path}.
+  tools: Read,Write,Edit,Bash
+  turns: 100
+  timeout: 7200
+- phase_key: inspect_changes
+  role: review
+  name: Review the changes
+  prompt: Review and verify the changes for {todo_id}.
+  tools: Read,Write,Edit,Bash
+  turns: 30
+  timeout: 2400
+- phase_key: summarize_checks
+  name: Summarize verification
+  prompt: Summarize the verified changes for {todo_id}.
+  tools: Read,Bash
+  turns: 10
+  timeout: 600
+- phase_key: open_pull_request
+  role: delivery
+  name: Deliver the branch
+  prompt: Open an unmerged pull request for {todo_id}.
+  tools: Read,Bash
+  turns: 30
+  timeout: 1800
+```
+
+This illustrates identity and role metadata; write complete task, verification,
+and delivery instructions for a production profile. The omitted role on
+`summarize_checks` defaults to `worker`, which uses generic validation and has
+no single-commit restriction. Existing clean-worktree and result-validation
+requirements still apply. Each special role may appear at most once. TPO never
+invents review or delivery phases when the profile omits them.
+
+For a dynamically scheduled run, TPO releases workers in the pinned declaration
+order only after their predecessors validate. Completion requires every declared
+worker, including deferred cards not yet visible on the board. A new
+manifest-bearing run requires exactly one reachable worker with
+`role: implementation` to retain task checkpoints. Custom manifest profiles
+that previously omitted roles must add that metadata before registering new
+runs. Gate phases do not create workers; the human terminal boundary remains unchanged. Planless
+profiles retain the static declared chain. The same supervisor launcher command
+serves every phase: `--execution` selects the registered phase and prompt, the
+supervisor runs and collects it, and TPO selects the next phase. Card headers,
+execution records, results, and status keep keys such as `inspect_changes`;
+retries use attempt generations instead of renaming phases.
+
+A delivery phase may precede other workers. Issue closeout waits for authorized
+evidence from every required worker, including those after delivery, and the
+final HEAD must equal the delivered PR head. Completing the delivery card alone
+cannot close the issue or authorize later changes to that head.
+
+Supported registrations through schema v5 retain their original identities and
+read protocol. In particular, legacy `review:0` and `finish` cards are not aliases
+for keys in new registrations. Preserve registration and execution journals and
+drain active v6 runs before downgrading to code that cannot read them.
+
 ## Exit Codes
 
 **`install-profile`:**

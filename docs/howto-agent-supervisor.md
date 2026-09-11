@@ -11,7 +11,12 @@ The launcher is installed with the package by `uv tool install` and uses that
 environment's interpreter. Do not replace it with an ambient `python -m` call.
 Plan/profile validation and prompt rendering precede card registration. The
 execution record pins the Plan identity, prompt, client launch settings, original
-worktree and branch, timeout, and result contract.
+worktree and branch, timeout, and result contract, including `phase_role`.
+The same launcher command is used for every phase: `--execution` selects the
+registered identity and its pinned prompt. The supervisor runs and collects that
+execution; the TPO scheduler decides which phase comes next. The exact profile
+`phase_key` is retained in card headers, execution records, results, and status.
+Attempt generations identify retries separately and never rename the phase.
 
 ## Ownership and deadlines
 
@@ -179,16 +184,24 @@ an unconfirmed custom root blocks registration before publishing a card. Move
 the intended configuration into a trusted conventional location explicitly;
 the supervisor does not silently relocate state.
 
-New run registrations use schema v5, pin `agent_policy_mode` (`inherit` or
-`delegated`), and require durable supervisor authority. Supported legacy v2/v3/v4
-registrations remain readable. Before dispatching a supervised phase for an older
-registration, TPO durably records enrollment in `supervisor-required.json`. Missing
+New run registrations use schema v6, pin `agent_policy_mode` (`inherit` or
+`delegated`) and the complete ordered phase definitions, and require durable
+supervisor authority. Phase keys, prompts, tools, timeouts, roles, and gates
+remain fixed for the run. Supported legacy v2/v3/v4/v5 registrations remain
+readable with their original phase identities and are not rewritten. Before
+dispatching a supervised phase for an older registration, TPO durably records
+enrollment in `supervisor-required.json`. Missing
 execution records cannot then make that run fall back to unsupervised acceptance.
 Only older runs without enrollment or execution evidence retain legacy handling;
 this does not bootstrap them into supervised recovery. The pipeline contract
 schema is a separate versioned format and is unchanged.
 
-Implementation, review, and finish consumers require the latest attempt to have
+Role metadata selects implementation, review, or delivery validation without
+renaming the phase. An omitted role means `worker`; ordinary workers use generic
+result validation without a single-commit restriction. Each special role may
+appear at most once, and absent roles do not create implicit phases.
+
+Implementation, review, and delivery consumers require the latest attempt to have
 a collected zero exit, no exit signal, confirmed cleanup, a matching promoted
 result, and trusted journal evidence. A shared worktree lock spans prerequisite
 reads and review acceptance or finish delivery, alongside the execution locks.
@@ -207,5 +220,5 @@ Before downgrading, pause the TPO tick/scan scheduler and new Hermes worker
 dispatch. Let existing supervisors finish or reach their deadline, then inspect
 all owned attempts and confirm cleanup. Preserve registrations, result receipts,
 journals, and original worktrees. Unknown schemas or unresolved owned processes
-block downgrade. Reverting package code is not a process-cleanup operation and
-must not erase recovery evidence.
+block downgrade; pre-v6 code cannot consume active v6 registrations. Reverting
+package code is not a process-cleanup operation and must not erase recovery evidence.

@@ -203,6 +203,30 @@ plus cleanup and, on the same host and boot, the original attempt deadline plus
 cleanup. It never refreshes the execution budget. Worker instructions preserve
 card state while waiting; existing card bodies are not rewritten.
 
+New schema-v6 run registrations pin the complete ordered profile phase
+snapshot: exact keys, prompts, tools, timeouts, roles, and gates. Existing v6
+runs reconcile from that snapshot even when current profile definitions change
+or become invalid. The scheduler advances in that declared worker order only after the predecessor validates.
+The full required worker list prevents completion when a deferred card has not
+yet been created. Gates retain their no-worker semantics, including the terminal
+human boundary. Planless profiles retain their static declared card chain.
+
+`Phase.role` defaults to `worker`. Unique optional `implementation`, `review`,
+and `delivery` roles select special validation; an ordinary worker has no
+single-commit restriction. Manifest-bearing runs require exactly one reachable
+implementation worker; review and delivery remain optional. Missing roles do
+not synthesize phases. Card headers,
+execution records, result identity, and status retain the exact `phase_key`;
+for native-sdd these include `phase_5_review` and `phase_8_finish_branch`.
+The supervisor's existing result contract also pins `phase_role`. Its shared
+launcher uses `--execution` to select the registered phase and prompt, runs the
+client, and collects evidence; TPO owns the next-phase decision. Attempt
+generations remain separate from phase identity. Supported registrations through
+v5 retain their legacy identities and read protocol without rewriting. Internal
+marker names such as `finish-verified` do not define phase keys. Delivery may
+precede later workers, but issue closeout requires authorized evidence from every
+required worker and a final HEAD matching the delivered PR head.
+
 ## Data Flow
 
 ### State Files
@@ -214,7 +238,7 @@ execution authority uses the trusted account state root described in the
 <project>/.hermes/
 ├── decisions/                 # Immutable selection decisions (write-once)
 ├── outcomes/                  # Phase completion/failure sidecars
-├── runs/<tick-id>/registration.json # Schema v5: pinned Plan, required supervision
+├── runs/<tick-id>/registration.json # Schema v6: pinned Plan and phase schedule, required supervision
 ├── runs/<tick-id>/plan.md           # Verified mode-0600 artifact for embedded Plans
 ├── runs/<tick-id>/issue-closed    # Marker: run delivered, issue closed at closeout
 ├── runs/<tick-id>/abandoned       # Marker: operator abandoned the run (`touch`)
@@ -310,11 +334,12 @@ and `TODOS-archive.md` are retired (see
   block it. Decisions live in the issue body; labels are mirrors. See
   [issue tracker](agents/issue-tracker.md#tpo-backlog-items) and
   [triage labels](agents/triage-labels.md).
-- **Snapshot authority** — new schema-v5 registrations pin the issue identity,
+- **Snapshot authority** — new schema-v6 registrations pin the issue identity,
   hashed snapshot, `plan_source_kind`, `plan_hash`, either a legacy `plan_path`
-  or verified embedded `plan_artifact`, and `agent_policy_mode`. They require
+  or verified embedded `plan_artifact`, `agent_policy_mode`, and the complete
+  ordered phase snapshot. They require
   durable supervisor authority. Readers also accept supported legacy schema-v2,
-  v3, and v4 registrations; schema v1 remains unsupported. Drain active runs and
+  v3, v4, and v5 registrations; schema v1 remains unsupported. Drain active runs and
   confirm process cleanup before installing a version that cannot read their
   registration schema.
 - **Single-writer creation** — one host-local `<state-dir>/todo-create.lock`
