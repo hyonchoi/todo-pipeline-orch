@@ -8518,10 +8518,28 @@ def test_profile_registration_recovery_retains_complete_workers_and_roles(tmp_pa
         registration=registration.authority) == "in_progress"
     assert harness_mod.classify_pinned_run(dict.fromkeys(registration.phase_keys, "done"),
         registration=registration.authority) == "delivered"
-    fx.write_sentinel(["build"])
-    with pytest.raises(HarnessTickError) as error:
+    for prefix in (["build"], ["build", "audit"]):
+        fx.write_sentinel(prefix)
+        recovered = fx.recover()
+        assert recovered == registration
+        assert harness_mod.classify_pinned_run(dict.fromkeys(prefix, "done"),
+            registration=recovered.authority) == "in_progress"
+
+
+@pytest.mark.real_git
+@pytest.mark.parametrize("keys", [
+    [], ["audit"], ["build", "publish"], ["audit", "build"],
+    ["build", "build"], ["build", "unknown"],
+    ["build", "audit", "publish", "unknown"],
+])
+def test_profile_registration_recovery_rejects_invalid_created_prefix(tmp_path, keys):
+    phases = (Phase("build", "Build", role="implementation"),
+              Phase("audit", "Audit", role="review"),
+              Phase("publish", "Publish", role="delivery", terminal=True))
+    fx = _pinned_registration(tmp_path, phases=phases)
+    fx.write_sentinel(keys)
+    with pytest.raises(HarnessTickError):
         fx.recover()
-    assert error.value.code == "unexpected_registration"
 
 
 @pytest.mark.real_git

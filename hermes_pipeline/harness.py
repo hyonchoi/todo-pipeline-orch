@@ -2804,7 +2804,8 @@ def recover_pinned_registration(
     exactly one trailing newline (``registration_plan_mismatch``). This separate
     expectation detects coordinated artifact and digest tampering in agent state;
     and the ``expected-phases.json`` sentinel under the run worktree must list
-    exactly the registered ``step_keys`` (``expected_phases_missing`` /
+    a nonempty ordered prefix of modern registered ``step_keys``, or exactly
+    the registered keys for legacy runs (``expected_phases_missing`` /
     ``unexpected_registration``, detail capped at ``_ERROR_MESSAGE_MAX``).
     """
     tick_id, _ = _recover_started_tick(
@@ -2858,8 +2859,14 @@ def recover_pinned_registration(
         )
     expected = _read_expected_phases(validated.worktree / ".hermes" / "outcomes", tick_id)
     step_keys = tuple(validated.step_keys)
-    # result_contract already rejects duplicate step_keys; only the sentinel can repeat.
-    if set(expected) != set(step_keys) or len(set(expected)) != len(expected):
+    # Modern schedules create workers incrementally. Their sentinel records
+    # the created prefix; the full pinned sequence still governs completion.
+    # Legacy registrations retain their original exact-set sentinel contract.
+    if validated.phase_definitions:
+        expected_matches = expected == step_keys[:len(expected)]
+    else:
+        expected_matches = set(expected) == set(step_keys) and len(set(expected)) == len(expected)
+    if not expected_matches:
         raise HarnessTickError(
             "unexpected_registration",
             f"expected phases {list(expected)} != step keys {list(step_keys)}"[:_ERROR_MESSAGE_MAX],
