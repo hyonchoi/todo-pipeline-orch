@@ -78,6 +78,24 @@ def test_combined_snapshot_and_boot(api):
     assert backend.pids() == [42, 43]
 
 
+def test_snapshot_accepts_same_birth_reparenting(api, monkeypatch):
+    library, backend = api
+    before = bytearray(record())
+    struct.pack_into('=I', before, 16, 77)
+    library.data = bytes(before)
+
+    def reparent_during_session_lookup(pid):
+        library.data = record()
+        return pid
+
+    monkeypatch.setattr(darwin.os, 'getsid', reparent_during_session_lookup)
+    snapshot = backend.snapshot(42)
+    assert snapshot['pid'] == 42
+    assert snapshot['start_ticks'] == 901
+    assert snapshot['ppid'] == 1
+    assert snapshot['pgrp'] == snapshot['session'] == 42
+
+
 def test_audit_signal_pins_version_without_numeric_kill(api, monkeypatch):
     library, backend = api
     monkeypatch.setattr(os, 'kill', lambda *args: pytest.fail('numeric signal'))

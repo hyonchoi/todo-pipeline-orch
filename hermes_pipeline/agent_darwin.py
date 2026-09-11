@@ -97,8 +97,7 @@ class Backend:
             raise OSError('process changed during session lookup')
         if second['state'] == 'Z':
             return self._snapshot(second, boot, pid if second['_session_leader'] else 0)
-        if (session is None or first['ppid'] != second['ppid']
-                or first['pgrp'] != second['pgrp']):
+        if session is None or first['pgrp'] != second['pgrp']:
             raise OSError('process changed during session lookup')
         return self._snapshot(second, boot, session)
 
