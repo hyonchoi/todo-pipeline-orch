@@ -71,11 +71,11 @@ def locked_run_authority(*, registration, state_dir: Path, tick_id: str):
     recovery approval, and supervise, before taking any execution lock. Legacy
     un-enrolled runs retain their original behavior without creating locks.
     """
-    from .phases import IMPLEMENTATION_KEY
+    from .phase_schedule import execution_keys
 
     try:
         if not _supervisor_required(registration, state_dir, tick_id,
-                                    (IMPLEMENTATION_KEY, 'review:0', 'finish')):
+                                    execution_keys(registration)):
             yield
             return
         if state_dir.resolve() != (registration.repository / '.hermes').resolve():
@@ -103,6 +103,14 @@ def require_accepted_review(*, registration, state_dir: Path, tick_id: str,
     from ._agent_supervisor import execution_id
     from .phases import IMPLEMENTATION_KEY
 
+    if getattr(registration, "phase_definitions", ()):
+        from .phase_schedule import role_key, validated_predecessor_head
+
+        parent = validated_predecessor_head(registration, state_dir=state_dir, tick_id=tick_id,
+                                            stop_key=role_key(registration, "delivery"))
+        if parent != accepted_head:
+            raise ResultContractError("supervisor_result_unconfirmed")
+        return
     try:
         if not _supervisor_required(registration, state_dir, tick_id,
                                     (IMPLEMENTATION_KEY, 'review:0')):
@@ -162,7 +170,7 @@ def require_authorized_result(*, registration, state_dir: Path, tick_id: str,
                     or pinned['plan_identity'] != registration.plan_hash
                     or pinned['worktree'] != str(registration.worktree)
                     or contract['todo_id'] != registration.todo_id
-                    or contract['result_kind'] != 'worker'):
+                    or contract['result_kind'] not in {'worker', 'phase'}):
                 raise ExecutionError('supervisor identity mismatch')
             attempt = record['attempts'][-1] if record['attempts'] else None
             if (attempt is None or attempt['status'] != 'exited'
@@ -175,6 +183,18 @@ def require_authorized_result(*, registration, state_dir: Path, tick_id: str,
             if len(encoded) > MAX_METADATA_BYTES:
                 raise ExecutionError('promoted result size limit')
             raw = json.loads(encoded)
+            if contract['result_kind'] == 'phase':
+                from .result_contract import _git
+
+                expected = {"schema_version": 1, "execution_id": identity, "generation": generation,
+                            "tick_id": tick_id, "todo_id": registration.todo_id, "step_key": step_key,
+                            "verdict": "success", "head_sha": raw.get("head_sha")}
+                if (raw != expected or raw != result or type(raw.get("generation")) is not int
+                        or type(raw.get("schema_version")) is not int):
+                    raise ExecutionError('supervisor result mismatch')
+                _git(registration.worktree, 'merge-base', '--is-ancestor', contract['base_sha'], raw['head_sha'])
+                yield
+                return
             promoted = parse_worker_result(
                 {'runs': [{'status': 'completed', 'metadata': {'tpo_result': raw}}]},
                 tick_id=tick_id, todo_id=registration.todo_id, step_key=step_key,

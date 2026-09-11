@@ -193,7 +193,11 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert registration.plan_hash == hashlib.sha256(GOLDEN.encode()).hexdigest()
     assert Path(registration.plan_reference.value).read_text() == GOLDEN
     assert registration.base_sha == base
-    assert json.loads(pinned)["schema_version"] == 5
+    assert json.loads(pinned)["schema_version"] == 6
+    assert registration.step_keys == ("phase_4_development", "phase_5_review", "phase_8_finish_branch")
+    assert [p.role for p in registration.phase_definitions] == ["implementation", "review", "delivery", "worker"]
+    assert [json.loads(c["body"].splitlines()[0])["phase_key"] for c in cards
+            if "execution_id" in json.loads(c["body"].splitlines()[0])] == ["phase_4_development"]
     assert registration.agent_policy_mode == policy_mode
     current_mode[0] = "inherit" if policy_mode == "delegated" else "delegated"
     assert json.loads(pinned)["plan_path"] is None
@@ -294,7 +298,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     worker_result(implementation, base, head, changed=("mock_transform.py",),
                   acceptance=registration.manifest.tasks[0].acceptance_criteria)
     assert cli.main(["tick", "sandbox"]) == 0
-    review = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "review:0")
+    review = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "phase_5_review")
     if review_fix == "blocked":
         # Model the dispatcher's needs_input card after its client exits 17.
         # This checks TPO attribution, not that live Hermes honors the contract.
@@ -306,7 +310,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         assert not (registration_file.parent / "accepted-review-head").exists()
         assert registration_file.read_bytes() == pinned
         outcomes = [json.loads(line) for line in (state / "outcomes" / f"{tick}-phases.json").read_text().splitlines()]
-        assert any(o["outcome"] == "failed_at_phase_review:0" for o in outcomes)
+        assert any(o["outcome"] == "failed_at_phase_phase_5_review" for o in outcomes)
         assert not any("finish" in o["outcome"] or "human" in o["outcome"] for o in outcomes)
         worker_prompt = pinned_prompt(review)
         assert worker_prompt.startswith("AGENT-POLICY-MODE: delegated\n\n")
@@ -321,7 +325,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         changed_files = ("review.txt",)
     worker_result(review, reviewed_parent, head, changed=changed_files)
     assert cli.main(["tick", "sandbox"]) == 0
-    finish = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "finish")
+    finish = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "phase_8_finish_branch")
     assert registration.plan_reference.value in pinned_prompt(review)
     assert registration.plan_reference.value in pinned_prompt(finish)
     workers = [implementation, review, finish]

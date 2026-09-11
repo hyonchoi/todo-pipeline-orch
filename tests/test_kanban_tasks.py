@@ -105,6 +105,8 @@ class FakeGatePhase:
         self.tools = tools
         self.turns = turns
         self.gate = gate
+        self.terminal = False
+        self.role = "worker"
         self.timeout = timeout
 
 
@@ -2951,7 +2953,8 @@ def test_spec_and_references_render_in_every_pinned_prompt_across_shipped_profil
     assert marker in native[IMPLEMENTATION_KEY].rendered_prompt
     assert decisions_marker in native[IMPLEMENTATION_KEY].rendered_prompt
     assert not any(key.startswith("validate:") for key in native)
-    assert not any(key.startswith(("phase_5", "phase_8", "phase_9")) for key in native)
+    assert "phase_5_review" in native and "phase_8_finish_branch" in native
+    assert "phase_9_human_review" not in native
 
 
 def test_planned_phase_keys_are_exactly_the_cards_compilation_creates(tmp_path):
@@ -3066,6 +3069,7 @@ def test_implementation_preparation_pins_the_result_metadata_template(
         "requires_plan: true\n"
         "phases:\n"
         f"  - phase_key: {phase_key}\n"
+        f"    role: {'implementation' if phase_key == IMPLEMENTATION_KEY else 'worker'}\n"
         "    name: Development\n"
         "    prompt: implement legacy plan\n"
         "    tools: Read,Write,Edit,Bash\n"

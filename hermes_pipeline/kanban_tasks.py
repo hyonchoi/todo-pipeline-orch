@@ -119,6 +119,7 @@ class PreparedPhaseTask:
     tools: str = ""
     result_template: str | None = None
     execution_id: str | None = None
+    phase_role: str = "worker"
 
 
 @dataclass(frozen=True)
@@ -667,6 +668,7 @@ def prepare_todo_phases(
     decisions: Mapping[str, str] | None = None,
     profile_name: str | None = None,
     agent_policy_mode: str = "inherit",
+    phase_definitions=None,
 ) -> list[PreparedPhaseTask]:
     """Render every phase card for ``todo_id`` without touching Hermes.
 
@@ -678,10 +680,10 @@ def prepare_todo_phases(
     """
     if not re.fullmatch(r"TODO-\d+", todo_id):
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
-    profile = load_phase_profile(phases_path)
+    profile = load_phase_profile(phases_path) if phase_definitions is None else None
     manifest = None
     plan_reference_value = plan_path
-    if profile.requires_plan:
+    if (profile.requires_plan if profile is not None else plan_source is not None):
         if plan_source is not None:
             from .plan_manifest import PlanReference, validate_plan_reference
 
@@ -715,27 +717,12 @@ def prepare_todo_phases(
     references = _contained_paths(
         Path(project_dir) if project_dir is not None else None, todo_id, reference_paths
     )
-    phases = load_phases(phases_path)
+    phases = tuple(phase_definitions) if phase_definitions is not None else load_phases(phases_path)
+    from .phase_schedule import phase_tools, worker_phases
+
+    phases = worker_phases(phases)
     prepared: list[PreparedPhaseTask] = []
     for phase in phases:
-        if manifest is not None and phase.phase_key in {
-            "phase_5_review",
-            "phase_8_finish_branch",
-            "phase_9_human_review",
-        }:
-            # Native manifest runs defer these cards, not their prompts: the
-            # review card cannot exist until the Plan tasks are done and the
-            # finish card until the review is accepted. The reconcilers that
-            # create them render THIS profile's ``phase_5_review`` and
-            # ``phase_8_finish_branch`` prompts (see
-            # ``review_reconciliation.render_profile_prompt``), so deferring
-            # creation never substitutes a TPO-authored instruction.
-            continue
-        if phase.gate:
-            # A gate phase dispatches no worker, so it gets no kanban card.
-            # Its terminal meaning is carried by the phase it follows: a worker
-            # that exits non-zero lands in Hermes's sticky ``blocked``.
-            continue
         rendered_prompt = _render_phase_prompt(
             phase.prompt,
             todo_id=todo_id,
@@ -755,6 +742,7 @@ def prepare_todo_phases(
             PreparedPhaseTask(
                 phase_key=phase.phase_key,
                 name=phase.name,
+                phase_role=phase.role,
                 body=(
                     _build_json_header(
                         tick_id=tick_id,
@@ -769,18 +757,11 @@ def prepare_todo_phases(
                 timeout=phase.timeout,
                 rendered_prompt=rendered_prompt,
                 prompt_client=prompt_client,
-                # Native SDD already requires an implementation subagent. Agent
-                # is a Claude launch grant, separate from the stable contract
-                # capabilities; retain full validation of declared phase tools.
-                tools=(phase.tools + ",Agent" if (
-                    profile_name == "native-sdd" and prompt_client == "claude"
-                    and phase.phase_key == IMPLEMENTATION_KEY
-                    and "Agent" not in phase.tools.split(",")
-                ) else phase.tools),
+                tools=phase_tools(phase, profile=profile_name, prompt_client=prompt_client),
                 result_template=(render_result_template(
                     tick_id=tick_id, todo_id=todo_id, step_key=phase.phase_key,
                     acceptance_criteria=manifest_acceptance_criteria(manifest),
-                ) if manifest is not None and phase.phase_key == IMPLEMENTATION_KEY else None),
+                ) if manifest is not None and phase.role == "implementation" else None),
             )
         )
     return prepared
@@ -793,12 +774,21 @@ def bind_prepared_executions(prepared: list[PreparedPhaseTask], *, project_dir: 
     from ._agent_supervisor import register_execution, worker_instructions
 
     bound = []
+    authority = state_dir / "runs" / tick_id / "registration.json"
+    if authority.exists():
+        from .result_contract import load_validated_registration
+
+        registration = load_validated_registration(project_dir, state_dir, tick_id)
+        if registration.phase_definitions:
+            prepared = prepared[:1]
+        else:
+            prepared = [phase for phase in prepared if phase.phase_key in registration.step_keys]
     for phase in prepared:
         identity = register_execution(
             project_dir=project_dir, state_dir=state_dir, root=root, tick_id=tick_id,
             phase=phase.phase_key, prompt=phase.rendered_prompt, client=phase.prompt_client,
             tools=phase.tools, worktree=worktree, timeout=phase.timeout, todo_id=todo_id,
-            result_template=phase.result_template,
+            result_template=phase.result_template, phase_role=phase.phase_role,
         )
         header = json.loads(phase.body.split("\n", 1)[0])
         header["execution_id"] = identity
@@ -808,17 +798,9 @@ def bind_prepared_executions(prepared: list[PreparedPhaseTask], *, project_dir: 
 
 def planned_phase_keys(phases_path: str | Path | None, plan_source) -> tuple[str, ...]:
     """Compute registration keys without rendering prompts or touching Hermes."""
-    keys: list[str] = []
-    manifest = plan_source.manifest
-    for phase in load_phases(phases_path):
-        if manifest is not None and phase.phase_key in {
-            "phase_5_review", "phase_8_finish_branch", "phase_9_human_review",
-        }:
-            continue
-        if phase.gate:
-            continue
-        keys.append(phase.phase_key)
-    return tuple(keys)
+    from .phase_schedule import worker_phases
+
+    return tuple(p.phase_key for p in worker_phases(load_phases(phases_path)))
 
 
 def _registration_barrier_body(*, tick_id: str, project_slug: str) -> str:
@@ -1400,6 +1382,11 @@ def reconcile_plan_task_results(
             sanitize_result_text(type(exc).__name__, maximum=1000),
         )
         return False
+    if getattr(registration, "phase_definitions", ()):
+        from .phase_schedule import reconcile_schedule
+
+        return reconcile_schedule(project_dir=project_dir, state_dir=state_dir, tenant=tenant,
+                                  tick_id=tick_id, registration=registration, repo=repo)
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
@@ -1859,6 +1846,18 @@ def all_phases_complete(
         (conservative: don't release lock on failure).
     """
     status_map = get_todo_kanban_status(tenant, tick_id)
+
+    if state_dir is not None:
+        path = Path(state_dir) / "runs" / tick_id / "registration.json"
+        if path.exists():
+            try:
+                pinned = json.loads(path.read_text())
+                if pinned.get("schema_version") == 6:
+                    keys = pinned["step_keys"]
+                    if not keys or any(status_map.get(key) != "done" for key in keys):
+                        return False
+            except (OSError, ValueError, KeyError, TypeError):
+                return False
 
     if not status_map:
         # No tasks found — could be:

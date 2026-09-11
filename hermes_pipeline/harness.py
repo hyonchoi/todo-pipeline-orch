@@ -2225,37 +2225,30 @@ def poll_pinned_run(
             return previous_status
 
 
-def classify_pinned_run(status_map: Mapping[str, str]) -> str:
-    """Classify one settled status map of a plan-pinned (``requires_plan``) run.
+def classify_pinned_run(
+    status_map: Mapping[str, str], *, registration: ValidatedRegistration | None = None
+) -> str:
+    """Classify a settled board against the pinned worker sequence.
 
-    The verdict is read from the phase states alone. TPO manufactures no cards
-    to stand for its own opinion of a run, so every status in the map was put
-    there by Hermes and means exactly what Hermes means by it.
-
-    * ``"failed"`` -- any observed card is ``failed``, ``archived``, or
-      ``blocked``. ``blocked`` is now unambiguous: Hermes blocks a card only
-      when its worker has exhausted the failure limit
-      (``_record_task_failure`` -> ``gave_up``), and that block is sticky, so
-      the card will never move again. ``archived`` cannot happen under a pinned
-      run, but it is terminal and must never read as still on its way to done.
-    * ``"delivered"`` -- every card is ``done``, the ``finish`` card included.
-      ``finish`` is a plain worker card -- the one that runs the repository
-      gates, pushes the branch and opens the pull request -- and it is the last
-      card a pinned run ever creates, so it is what separates "delivered" from
-      "the reconciler has not created the next card yet": between hops the board
-      is legitimately all-done with the next card still to come. The
-      pull-request invariant is *not* re-checked here: the harness proves it
-      separately with ``verify_pull_request``.
-    * ``"in_progress"`` -- anything else; the driver runs another tick.
+    Failed, archived, and blocked cards are terminal failures. Success requires
+    every declared worker, including deferred cards, to be done. For modern
+    profiles without delivery this means the worker sequence is complete; the
+    harness still checks its separate pull-request invariant. Legacy runs retain
+    their recorded review/finish protocol.
     """
-    from .todos_completion import FINISH_KEY
+    from .phase_schedule import execution_keys, role_key
 
     if any(
         status in ("failed", "archived", "blocked") for status in status_map.values()
     ):
         return "failed"
-    if status_map.get(FINISH_KEY) == "done" and all(
-        status == "done" for status in status_map.values()
+    expected = execution_keys(registration) if registration is not None else ("finish",)
+    delivery = role_key(registration, "delivery") if registration is not None else "finish"
+    if (
+        expected
+        and set(expected).issubset(status_map)
+        and (delivery is None or status_map.get(delivery) == "done")
+        and all(status == "done" for status in status_map.values())
     ):
         return "delivered"
     return "in_progress"
@@ -3521,7 +3514,14 @@ def _drive_pinned_ticks(
                     project_slug=slug,
                     tick_id=_registered.tick_id,
                     todo_id=_registered.todo_id,
-                    step_keys=_registered.phase_keys,
+                    # Modern registrations pin deferred workers too. Let the
+                    # settled prefix return so the next tick can create them;
+                    # classification below checks the complete pinned set.
+                    step_keys=(
+                        _registered.phase_keys[:1]
+                        if getattr(_registered.authority, "phase_definitions", ())
+                        else _registered.phase_keys
+                    ),
                     monitor=monitor,
                     detector=detector,
                     cancel_event=_cancel,
@@ -3565,7 +3565,7 @@ def _drive_pinned_ticks(
                 # ``failed`` card instead would be wrong: a single failed card is a
                 # normal, non-halting outcome.
                 failure_code = "convergence_halt"
-            verdict = classify_pinned_run(status_map)
+            verdict = classify_pinned_run(status_map, registration=registered.authority)
             if verdict == "failed":
                 break
             if verdict == "delivered":

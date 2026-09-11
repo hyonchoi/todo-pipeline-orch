@@ -76,6 +76,7 @@ class RunRegistration:
     review_assignee: str | None
     step_keys: tuple[str, ...]
     agent_policy_mode: AgentPolicyMode = "inherit"
+    phase_definitions: tuple = ()
 
 
 def _git(cwd: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -411,6 +412,10 @@ def _load_registration_at(run_fd: int) -> dict[str, object] | None:
 
 def _json_payload(registration: RunRegistration) -> dict[str, object]:
     payload = asdict(registration)
+    if registration.schema_version >= 6:
+        payload["phase_definitions"] = list(payload["phase_definitions"])
+    else:
+        payload.pop("phase_definitions")
     if registration.schema_version < 4:
         payload.pop("agent_policy_mode")
     payload["repository"] = str(registration.repository)
@@ -568,6 +573,7 @@ def register_pinned_run(
     step_keys: Iterable[str],
     repo: str | None = None,
     agent_policy_mode: AgentPolicyMode = "inherit",
+    phase_definitions=None,
 ) -> RunRegistration:
     """Pin the issue snapshot and tracked Plan as authority, checkpoint, ensure worktree.
 
@@ -575,6 +581,28 @@ def register_pinned_run(
     """
     if agent_policy_mode not in ("inherit", "delegated"):
         raise RunRegistrationError("invalid_agent_policy_mode")
+    from .phase_schedule import validate_definitions, worker_phases
+
+    definitions = tuple(phase_definitions or ())
+    # Retry authority comes from the existing versioned registration, before
+    # validating any replacement profile supplied by today's configuration.
+    if (state_dir / "runs" / tick_id / "registration.json").exists():
+        _prior_dir, prior_fd = _open_run_directory(state_dir, tick_id)
+        try:
+            prior = _load_registration_at(prior_fd)
+        finally:
+            os.close(prior_fd)
+        if prior is not None and prior.get("schema_version") == 6:
+            from .phase_schedule import decode_definitions
+
+            definitions = decode_definitions(prior.get("phase_definitions"))
+        elif prior is not None and prior.get("schema_version") in {2, 3, 4, 5}:
+            definitions = ()
+            if phase_definitions is not None:
+                step_keys = tuple(prior.get("step_keys", ()))
+    if definitions:
+        validate_definitions(definitions)
+        step_keys = tuple(p.phase_key for p in worker_phases(definitions))
     effective_mode = agent_policy_mode if profile == "native-sdd" else "inherit"
     project_dir = project_dir.resolve()
     repository = _repository_root(project_dir)
@@ -584,6 +612,10 @@ def register_pinned_run(
         except GitHubIssuesError as exc:
             raise RunRegistrationError(exc.code, "origin") from exc
     source = _validate_issue_authority(selected_issue, repo, plan_path)
+    if definitions and source.manifest is not None and not any(
+        p.role == "implementation" for p in worker_phases(definitions)
+    ):
+        raise RunRegistrationError("implementation_role_missing")
     base_sha = _git(project_dir, "rev-parse", "HEAD").stdout.strip()
     if source.kind == "embedded":
         plan_bytes = source.document.encode("utf-8")
@@ -595,7 +627,7 @@ def register_pinned_run(
     branch = _validate_branch(project_dir, selected_issue, state_dir=state_dir)
     worktree = (repository / ".worktrees" / _slug(selected_issue)).resolve()
     registration = RunRegistration(
-        schema_version=REGISTRATION_SCHEMA_VERSION,
+        schema_version=REGISTRATION_SCHEMA_VERSION if definitions else 5,
         tick_id=tick_id,
         todo_id=selected_issue.todo_id,
         repository=repository,
@@ -616,6 +648,7 @@ def register_pinned_run(
         review_assignee=review_assignee,
         step_keys=tuple(step_keys),
         agent_policy_mode=effective_mode,
+        phase_definitions=definitions,
     )
     payload = _json_payload(registration)
     _run_dir, run_fd = _open_run_directory(state_dir, tick_id)
@@ -635,6 +668,16 @@ def register_pinned_run(
                 registration = replace(registration, schema_version=4, agent_policy_mode="delegated")
             elif existing.get("schema_version") == 5 and existing.get("agent_policy_mode") in ("inherit", "delegated"):
                 registration = replace(registration, schema_version=5, agent_policy_mode=existing["agent_policy_mode"])
+            if existing.get("schema_version") == 6:
+                from .phase_schedule import decode_definitions
+
+                pinned_phases = decode_definitions(existing.get("phase_definitions"))
+                registration = replace(registration, phase_definitions=pinned_phases,
+                    step_keys=tuple(p.phase_key for p in worker_phases(pinned_phases)),
+                    agent_policy_mode=existing["agent_policy_mode"])
+            elif registration.phase_definitions:
+                registration = replace(registration, phase_definitions=(),
+                    step_keys=tuple(existing.get("step_keys", ())))
             payload = _json_payload(registration)
             if existing != payload:
                 raise RunRegistrationError("registration_mismatch")

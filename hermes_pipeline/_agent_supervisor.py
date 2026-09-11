@@ -198,7 +198,8 @@ def worker_instructions(identity: str, root: str) -> str:
 
 def register_execution(*, project_dir: Path, state_dir: Path, root: Path, tick_id: str,
                        phase: str, prompt: str, client: str, tools: str, worktree: Path,
-                       timeout: float, todo_id: str, result_template: str | None = None) -> str:
+                       timeout: float, todo_id: str, result_template: str | None = None,
+                       phase_role: str = "worker") -> str:
     installed_entrypoint()
     from .agent_client import git_metadata_identity
 
@@ -217,21 +218,30 @@ def register_execution(*, project_dir: Path, state_dir: Path, root: Path, tick_i
 
         if root.resolve() != profile_root(project_dir).resolve():
             raise ExecutionError("profile_authority_root_unconfirmed: use trusted conventional configuration")
+    if registration is not None:
+        from .phase_schedule import execution_keys
+        from .phase_schedule import phase_role as registered_phase_role
+
+        if phase not in execution_keys(registration):
+            raise ExecutionError("phase_identity_mismatch")
+        phase_role = registered_phase_role(registration, phase)
     branch = _git(worktree, "branch", "--show-current")
     identity = execution_id(tick_id, phase)
     store = ExecutionStore(root)
+    existing_contract = None
     if (root / identity / "record.json").exists():
-        base = store.load(identity)["registration"]["result_contract"]["base_sha"]
-    elif registration is not None and registration.manifest is not None and phase == "phase_4_development":
+        existing_contract = store.load(identity)["registration"]["result_contract"]
+        base = existing_contract["base_sha"]
+    elif registration is not None and registration.manifest is not None and phase_role == "implementation" and not getattr(registration, "phase_definitions", ()):
         base = registration.base_sha
     else:
         base = _git(worktree, "rev-parse", "HEAD")
-    criteria = manifest_acceptance_criteria(registration.manifest) if registration and registration.manifest and phase == "phase_4_development" else ()
-    worker_result = bool(registration and registration.manifest and phase == "phase_4_development") or phase in {"review:0", "finish"}
+    criteria = manifest_acceptance_criteria(registration.manifest) if registration and registration.manifest and phase_role == "implementation" else ()
+    worker_result = bool(registration and registration.manifest and phase_role in {"implementation", "review", "delivery"})
     contract = {
         "kind": "registered" if registration else "profile", "project_dir": str(project_dir.resolve()),
         "state_dir": str(state_dir.resolve()), "todo_id": todo_id, "tick_id": tick_id,
-        "phase": phase, "base_sha": base, "acceptance": list(criteria),
+        "phase": phase, "phase_role": phase_role, "base_sha": base, "acceptance": list(criteria),
         "registration_sha256": hashlib.sha256(_safe_read(authority_path)).hexdigest() if registration else None,
         "expected_commits": len(registration.manifest.tasks) if criteria else None,
         "result_kind": "worker" if worker_result else "phase",
@@ -241,6 +251,8 @@ def register_execution(*, project_dir: Path, state_dir: Path, root: Path, tick_i
             tick_id=tick_id, todo_id=todo_id, step_key=phase, acceptance_criteria=criteria,
             allow_no_changes=not bool(criteria)),
     }
+    if existing_contract is not None and "phase_role" not in existing_contract:
+        contract.pop("phase_role")
     if not worker_result:
         contract["result_template"] = "Write this bounded phase result, replacing placeholders:\n" + json.dumps({
             "schema_version": 1, "execution_id": identity, "generation": "integer from TPO_ATTEMPT_GENERATION",
@@ -253,7 +265,7 @@ def register_execution(*, project_dir: Path, state_dir: Path, root: Path, tick_i
                    "TPO_CHECKPOINT_DIR is the only additional writable submission directory. "
                    "If TPO_RECOVERY_CONTEXT_PATH is set, read it before working and preserve partial work.\n"
                    + contract["result_template"] + "\n")
-    if registration and registration.manifest and phase == "phase_4_development":
+    if registration and registration.manifest and phase_role == "implementation":
         full_prompt += (
             "After each complete task commit, write checkpoint-TASK_ID.json in TPO_CHECKPOINT_DIR "
             "with exactly this JSON schema, substituting the task ID and actual commit SHA: "
@@ -272,7 +284,7 @@ def register_execution(*, project_dir: Path, state_dir: Path, root: Path, tick_i
         identity, registration_id=tick_id, plan_identity=registration.plan_hash if registration else hashlib.sha256(full_prompt.encode()).hexdigest(),
         phase=phase, prompt=full_prompt.encode("utf-8"), client={"name": client, "tools": [t.strip() for t in tools.split(",") if t.strip()]},
         worktree=str(worktree.resolve()), branch=branch, result_contract=contract, timeout=timeout,
-        manifest=json.loads(json.dumps(asdict(registration.manifest))) if registration and registration.manifest and phase == "phase_4_development" else None,
+        manifest=json.loads(json.dumps(asdict(registration.manifest))) if registration and registration.manifest and phase_role == "implementation" else None,
     )
     from .agent_checkpoint import ProgressJournal
 
@@ -312,7 +324,9 @@ def validate_registration(store: ExecutionStore, identity: str) -> None:
         if (str(validated.worktree) != pinned["worktree"] or validated.branch != pinned["branch"]
                 or validated.plan_hash != pinned["plan_identity"] or validated.prompt_client != pinned["client"]["name"]):
             raise ExecutionError("registration_drift")
-        if pinned["phase"] not in {*validated.step_keys, "review:0", "finish"}:
+        from .phase_schedule import execution_keys
+
+        if pinned["phase"] not in execution_keys(validated):
             raise ExecutionError("phase_identity_mismatch")
 
 

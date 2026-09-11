@@ -81,7 +81,9 @@ def test_implementation_card_delimited_prompt_is_exactly_the_profile_prompt(tmp_
     """
     prepared = _prepared_implementation_card(tmp_path)
 
-    assert [card.phase_key for card in prepared] == ["phase_4_development"]
+    assert [card.phase_key for card in prepared] == [
+        "phase_4_development", "phase_5_review", "phase_8_finish_branch"
+    ]
     dispatcher, delimited = _split_card_body(prepared[0])
 
     _assert_prompt_is_clean(delimited)
@@ -382,7 +384,6 @@ def test_native_policy_initial_worker_cards(tmp_path, client, manifest, mode):
     baseline = prepare_todo_phases(**kwargs)
     cards = prepare_todo_phases(**kwargs, profile_name="native-sdd", agent_policy_mode=mode)
     assert [c.phase_key for c in cards] == (
-        ["phase_4_development"] if manifest else
         ["phase_4_development", "phase_5_review", "phase_8_finish_branch"]
     )
     for card, original in zip(cards, baseline, strict=True):

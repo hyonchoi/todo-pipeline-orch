@@ -640,12 +640,21 @@ def reconcile_todo_completion(
 
 def _reconcile_todo_completion_locked(
     *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str, repo: str, registration,
+    allow_close: bool = True,
 ) -> bool:
     registration_path = state_dir / "runs" / tick_id / "registration.json"
     tasks = get_todo_kanban_tasks(tenant, tick_id)
 
-    finish = tasks.get(FINISH_KEY)
+    from .phase_schedule import role_key, validated_predecessor_head
+
+    modern = bool(getattr(registration, "phase_definitions", ()))
+    finish_key = role_key(registration, "delivery")
+    if finish_key is None:
+        return True
+    finish = tasks.get(finish_key)
     if finish is None:
+        if modern:
+            return True  # Only the ordered schedule may admit this worker.
         if _run_marker(state_dir, tick_id, "finish-verified").exists():
             return _blocked(tick_id, "verified_finish_missing")
         try:
@@ -674,7 +683,7 @@ def _reconcile_todo_completion_locked(
                 result_template=render_result_template(
                     tick_id=tick_id,
                     todo_id=registration.todo_id,
-                    step_key=FINISH_KEY,
+                    step_key=finish_key,
                     section="delivery",
                     branch=registration.branch,
                     allow_no_changes=True,
@@ -701,16 +710,18 @@ def _reconcile_todo_completion_locked(
         try:
             payload = parse_worker_result(
                 _show_task_payload(finish.task_id), tick_id=tick_id,
-                todo_id=registration.todo_id, step_key=FINISH_KEY,
+                todo_id=registration.todo_id, step_key=finish_key,
                 acceptance_criteria=(), allow_no_changes=True,
             )
             result_guard.enter_context(require_authorized_result(
                 registration=registration, state_dir=state_dir, tick_id=tick_id,
-                step_key=FINISH_KEY, result=payload,
+                step_key=finish_key, result=payload,
             ))
             if payload.delivery is None or payload.delivery.branch != registration.branch:
                 raise ResultContractError("invalid_delivery")
-            accepted_head = _accepted_head(state_dir, tick_id)
+            accepted_head = (validated_predecessor_head(registration, state_dir=state_dir,
+                                tick_id=tick_id, stop_key=finish_key) if modern
+                             else _accepted_head(state_dir, tick_id))
             require_accepted_review(registration=registration, state_dir=state_dir,
                                     tick_id=tick_id, accepted_head=accepted_head)
             _verify_finish(
@@ -762,6 +773,20 @@ def _reconcile_todo_completion_locked(
         except ResultContractError as exc:
             return _blocked(tick_id, exc.code)
 
+        # The outer worktree lock still owns the transition. Release the
+        # delivery execution lock before the full chain opens that same lock.
+        result_guard.close()
+        sequence_done = not modern or all(tasks.get(key) is not None and tasks[key].status == "done"
+                                         for key in registration.step_keys)
+        if modern and sequence_done:
+            try:
+                final_head = validated_predecessor_head(registration, state_dir=state_dir, tick_id=tick_id)
+                if (final_head != delivery.head_sha
+                        or _git(registration.worktree, "rev-parse", "HEAD") != delivery.head_sha):
+                    return _blocked(tick_id, "delivery_head_mismatch")
+            except (ResultContractError, OSError, RuntimeError, ValueError, KeyError, IndexError):
+                return _blocked(tick_id, "supervisor_result_unconfirmed")
+
         try:
             checks = _check_state(
                 registration.worktree, delivery.pr_url,
@@ -784,6 +809,9 @@ def _reconcile_todo_completion_locked(
         if checks == "pending" or view.get("state") != "MERGED":
             # A verified, open pull request waiting on a human merge is not a
             # stall: keep the registration active until post-merge issue closeout.
+            return True
+
+        if not allow_close or not sequence_done:
             return True
 
         # A human merge can auto-close the issue before TPO observes it. Allow

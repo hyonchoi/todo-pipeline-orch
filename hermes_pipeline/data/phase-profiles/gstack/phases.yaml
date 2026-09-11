@@ -31,6 +31,7 @@ phases:
     turns: 15
     timeout: 1800
   - phase_key: "phase_4_development"
+    role: "implementation"
     name: "Phase 4: Development"
     prompt: |
       Use the superpowers {superpowers_skill_prefix}subagent-driven-development skill with
@@ -47,6 +48,7 @@ phases:
     turns: 60
     timeout: 3600
   - phase_key: "phase_5_review"
+    role: "review"
     name: "Phase 5: Code Review"
     prompt: |
       Use the gstack {skill_prefix}review skill on the current branch.
@@ -142,6 +144,7 @@ phases:
     turns: 20
     timeout: 1800
   - phase_key: "phase_8_finish_branch"
+    role: "delivery"
     name: "Phase 8: Finish Branch"
     prompt: |
       Use the gstack {skill_prefix}ship skill.

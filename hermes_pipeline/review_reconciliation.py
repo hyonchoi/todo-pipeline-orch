@@ -176,6 +176,11 @@ def profile_phase(registration, phase_key: str):
     registration -- not from the project's current config -- keeps a profile
     switch mid-run from changing the run already in flight.
     """
+    if getattr(registration, "phase_definitions", ()):
+        for phase in registration.phase_definitions:
+            if phase.phase_key == phase_key:
+                return "pinned-profile", phase
+        raise ResultContractError("profile_phase_missing", phase_key)
     from .contract import ContractSchemaError
     from .phases import load_phases, resolve_profile_phases_path
 
@@ -204,6 +209,18 @@ def render_profile_prompt(
     """
     from .phases import _render_phase_prompt
 
+    context = {}
+    if getattr(registration, "phase_definitions", ()) and getattr(registration, "issue_snapshot", ""):
+        from . import github_issues
+        from .kanban_tasks import _contained_paths
+
+        repo, number, title, body = github_issues.split_canonical_snapshot(registration.issue_snapshot)
+        issue = github_issues.issue_from_api(
+            {"number": number, "title": title, "body": body, "labels": []}, repo=repo)
+        specs = _contained_paths(registration.repository, registration.todo_id, [issue.spec] if issue.spec else [])
+        references = _contained_paths(registration.repository, registration.todo_id, issue.references)
+        context = {"spec_path": specs[0] if specs else None, "reference_paths": references,
+                   "decisions": github_issues.issue_decisions(issue)}
     plan_reference = getattr(registration, "plan_reference", None)
     return _render_phase_prompt(
         phase.prompt,
@@ -217,6 +234,7 @@ def render_profile_prompt(
         context_facts=facts,
         profile_name=registration.profile,
         agent_policy_mode=getattr(registration, "agent_policy_mode", "inherit"),
+        **context,
     )
 
 
@@ -327,6 +345,8 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
     if not (state_dir / "runs" / tick_id / "registration.json").exists():
         return True
     registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
+    if getattr(registration, "phase_definitions", ()):
+        return True  # The ordered profile reconciler owns modern runs.
     if getattr(registration, "manifest", object()) is None:
         return True
     try:

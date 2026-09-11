@@ -6421,7 +6421,7 @@ class _PinnedFixture:
         return recover_pinned_registration(self.project_dir, self.state, **kwargs)
 
 
-def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _PinnedFixture:
+def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE, phases=()) -> _PinnedFixture:
     """A real ``register_pinned_run`` against a temp clone whose HEAD commits the Plan."""
     from hermes_pipeline.run_registration import register_pinned_run
 
@@ -6456,7 +6456,8 @@ def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _Pinn
         prompt_client="claude",
         assignee="pipeline",
         review_assignee=None,
-        step_keys=_PINNED_STEPS,
+        step_keys=tuple(p.phase_key for p in phases if not p.gate) if phases else _PINNED_STEPS,
+        phase_definitions=phases,
         repo=_PINNED_REPO,
     )
     _write_tick_state(state, tick_id=_PINNED_TICK, expected_phases=None)
@@ -6475,7 +6476,7 @@ def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _Pinn
         worktree=registration.worktree,
         run_dir=state / "runs" / _PINNED_TICK,
     )
-    fixture.write_sentinel(list(_PINNED_STEPS))
+    fixture.write_sentinel(list(registration.step_keys))
     return fixture
 
 
@@ -8458,3 +8459,78 @@ def test_isolated_config_preserves_delegated_opt_in(tmp_path):
     with isolate_config(state_dir=tmp_path / "state", projects_dir=tmp_path / "projects",
                         agent_policy_mode="delegated"):
         assert load_global_config().agent_policy_mode == "delegated"
+
+
+@pytest.mark.parametrize("review", [True, False])
+@pytest.mark.parametrize("delivery", [True, False])
+@pytest.mark.parametrize("missing", [None, "audit", "publish"])
+def test_profile_classifier_requires_every_pinned_worker(review, delivery, missing):
+    from types import SimpleNamespace
+
+    from hermes_pipeline.harness import classify_pinned_run
+
+    phases = (Phase("build", "Build", role="implementation"),
+              Phase("audit", "Audit", role="review" if review else "worker"),
+              Phase("publish", "Publish", role="delivery" if delivery else "worker"))
+    registration = SimpleNamespace(phase_definitions=phases,
+                                   step_keys=tuple(p.phase_key for p in phases))
+    board = {key: "done" for key in registration.step_keys if key != missing}
+    assert classify_pinned_run(board, registration=registration) == (
+        "delivered" if missing is None else "in_progress"
+    )
+
+
+class TestProfileDriveTicks:
+    @pytest.mark.parametrize("delivery", [True, False])
+    def test_profile_sequence_drives_deferred_cards_without_synthetic_finish(self, tmp_path, mocker, delivery):
+        from types import SimpleNamespace
+        helper = TestDriveTicks()
+        phases = (Phase("build", "Build", role="implementation"),
+                  Phase("audit", "Audit", role="review"),
+                  Phase("publish", "Publish", role="delivery" if delivery else "worker"))
+        keys = tuple(p.phase_key for p in phases)
+        kwargs = helper._kwargs(tmp_path, pinned=True, repo=_PINNED_REPO,
+                              run_base_sha="a" * 40, plan_text="plan")
+        state = kwargs["project_state"]
+        _, _, poll = helper._pinned_patches(mocker, state,
+            tick_ids=[_PINNED_TICK] * 3,
+            maps=[{k: "done" for k in keys[:n]} for n in (1, 2, 3)])
+        authority = SimpleNamespace(phase_definitions=phases, step_keys=keys)
+        registration = dataclasses.replace(helper._registration(state), phase_keys=keys, authority=authority)
+        mocker.patch.object(harness_mod, "recover_pinned_registration", return_value=registration)
+        result = harness_mod.drive_ticks(**kwargs)
+        assert result.success
+        assert result.ticks_run == 3
+        assert result.observed_keys == frozenset(keys)
+        assert all(call["step_keys"] == ("build",) for call in poll.calls)
+
+
+@pytest.mark.real_git
+def test_profile_registration_recovery_retains_complete_workers_and_roles(tmp_path):
+    phases = (Phase("build", "Build", role="implementation"),
+              Phase("audit", "Audit", role="review"),
+              Phase("publish", "Publish", role="delivery", terminal=True))
+    fx = _pinned_registration(tmp_path, phases=phases)
+    registration = fx.recover()
+    assert registration.phase_keys == ("build", "audit", "publish")
+    assert registration.authority.phase_definitions == phases
+    assert harness_mod.classify_pinned_run({"build": "done", "publish": "done"},
+        registration=registration.authority) == "in_progress"
+    assert harness_mod.classify_pinned_run(dict.fromkeys(registration.phase_keys, "done"),
+        registration=registration.authority) == "delivered"
+    fx.write_sentinel(["build"])
+    with pytest.raises(HarnessTickError) as error:
+        fx.recover()
+    assert error.value.code == "unexpected_registration"
+
+
+@pytest.mark.real_git
+def test_legacy_registration_recovery_keeps_review_finish_protocol(tmp_path):
+    fx = _pinned_registration(tmp_path)
+    registration = fx.recover()
+    assert not registration.authority.phase_definitions
+    assert registration.phase_keys == _PINNED_STEPS
+    assert harness_mod.classify_pinned_run(dict.fromkeys((*_PINNED_STEPS, "finish"), "done"),
+        registration=registration.authority) == "in_progress"
+    assert harness_mod.classify_pinned_run(dict.fromkeys((*_PINNED_STEPS, "review:0", "finish"), "done"),
+        registration=registration.authority) == "delivered"
