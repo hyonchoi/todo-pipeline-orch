@@ -371,10 +371,15 @@ def test_remounted_cgroup_namespace_cannot_confirm_hidden_live_scope(tmp_path, n
         namespace = ['unshare', '--user', '--map-root-user', '--cgroup', '--mount']
         if os.environ.get('NATIVE_CGROUP_NAMESPACE_SUDO') == '1':
             namespace = ['sudo', '-n', 'unshare', '--cgroup', '--mount']
+        # A scratch tmpfs avoids mounting the same cgroup superblock directly
+        # onto itself (EBUSY with the legacy mount syscall). Both mounts are
+        # private to this child; inherited mounts need not be unmounted.
         try:
             probe = subprocess.run(
                 [*namespace, '--',
-                 'sh', '-c', 'mount --make-rprivate / && mount -t cgroup2 none /sys/fs/cgroup '
+                 'sh', '-c', 'mount --make-rprivate / '
+                 '&& mount -t tmpfs tpo-namespace /sys/fs/cgroup '
+                 '&& mount -t cgroup2 none /sys/fs/cgroup '
                  '&& { printf "tpo-namespace-remounted\\n" >&2; exec "$@"; }',
                  'sh', sys.executable, '-c', code, json.dumps(receipt)],
                 capture_output=True, text=True, timeout=10,
