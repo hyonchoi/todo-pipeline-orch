@@ -242,7 +242,7 @@ def test_disappeared_candidate_still_requires_live_owned_anchor(monkeypatch):
     assert agent_process._discover({991: parent}) is False
 
 
-def test_disappeared_detached_session_leader_still_blocks_discovery(monkeypatch):
+def test_disappeared_detached_session_leader_is_retained_as_owned_history(monkeypatch):
     parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
     detached = dict(parent, pid=992, ppid=991, session=992, start_ticks=20)
     reads = {991: 0, 992: 0}
@@ -252,6 +252,72 @@ def test_disappeared_detached_session_leader_still_blocks_discovery(monkeypatch)
         if pid == 991:
             return parent
         return detached if reads[pid] == 1 else None
+
+    monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/992")]))
+    monkeypatch.setattr(agent_process, "process_snapshot", snapshot)
+    known = {991: parent}
+    assert agent_process._discover(known) is True
+    assert known == {991: parent, 992: detached}
+    assert reads == {991: 2, 992: 2}
+
+
+def test_vanished_detached_leader_with_same_scan_orphan_blocks_cleanup(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    detached = dict(parent, pid=992, ppid=991, session=992, start_ticks=20)
+    orphan = dict(parent, pid=993, ppid=1, session=992, start_ticks=30)
+
+    def install_scan():
+        reads = {991: 0, 992: 0, 993: 0}
+        def snapshot(pid):
+            if pid not in reads:
+                return dict(parent, pid=pid)
+            reads[pid] += 1
+            if pid == 991:
+                return parent
+            if pid == 992:
+                return detached if reads[pid] == 1 else None
+            return orphan
+        monkeypatch.setattr(
+            agent_process.Path, "iterdir",
+            lambda _: iter(agent_process.Path(f"/proc/{pid}") for pid in reads))
+        monkeypatch.setattr(agent_process, "process_snapshot", snapshot)
+
+    install_scan()
+    known = {991: parent}
+    assert agent_process._discover(known) is False
+    assert known == {991: parent, 992: detached}
+
+    install_scan()
+    signaled = []
+    monkeypatch.setattr(agent_process, "_signal", lambda identity, sig: signaled.append(identity["pid"]) or True)
+    result = agent_process.cleanup_processes([parent], cleanup_timeout=0)
+    assert result["cleanup"] == "cleanup_unconfirmed"
+    assert {identity["pid"] for identity in result["processes"]} == {991, 992}
+    assert 993 not in signaled
+
+
+def test_historical_detached_session_rejects_later_unknown_orphan(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    detached = dict(parent, pid=992, ppid=991, session=992, start_ticks=20)
+    orphan = dict(parent, pid=993, ppid=1, session=992, start_ticks=30)
+    monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/993")]))
+    monkeypatch.setattr(
+        agent_process, "process_snapshot",
+        lambda pid: parent if pid == 991 else orphan if pid == 993 else None)
+    assert agent_process._discover({991: parent, 992: detached}) is False
+
+
+def test_reused_detached_session_leader_pid_blocks_discovery(monkeypatch):
+    parent = dict(pid=991, start_ticks=10, host="h", boot_id="b", session=991, ppid=1, state="S")
+    detached = dict(parent, pid=992, ppid=991, session=992, start_ticks=20)
+    replacement = dict(detached, start_ticks=30, session=999, ppid=1)
+    reads = {991: 0, 992: 0}
+
+    def snapshot(pid):
+        reads[pid] += 1
+        if pid == 991:
+            return parent
+        return detached if reads[pid] == 1 else replacement
 
     monkeypatch.setattr(agent_process.Path, "iterdir", lambda _: iter([agent_process.Path("/proc/991"), agent_process.Path("/proc/992")]))
     monkeypatch.setattr(agent_process, "process_snapshot", snapshot)

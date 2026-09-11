@@ -185,6 +185,16 @@ def _discover(known: dict[int, Identity]) -> bool:
                     return False
                 if anchor is None or not _same(known[anchor_pid], anchor):
                     return False
+                if (current is None and snapshot["session"] == pid
+                        and snapshot["start_ticks"] >= anchor["start_ticks"]):
+                    # Retain a newly detached leader that exited after the scan.
+                    # It is history, not a live anchor for adopting processes.
+                    known[pid] = snapshot
+                    if any(other_pid != pid and other_pid not in live
+                           and other["session"] == pid
+                           for other_pid, other in snapshots.items()):
+                        return False
+                    continue
                 if current is None or not _same(snapshot, current):
                     # A scanned session member may exit or reuse its PID before
                     # revalidation. Its unchanged owned anchor makes that race
