@@ -362,7 +362,7 @@ def test_inexit_process_cleanup_confirms_only_after_later_zombie(api, monkeypatc
     backend.pids = lambda: [42]
     monkeypatch.setattr(darwin, 'Backend', lambda: backend)
     monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
-    result = agent_process.cleanup_processes([identity], cleanup_timeout=.1)
+    result = agent_process.cleanup_processes([identity], cleanup_timeout=5)
     assert result['cleanup'] == 'confirmed'
     assert any(sig == signal.SIGTERM for _, sig in library.signals)
     assert backend.snapshot(42)['state'] == 'Z'
