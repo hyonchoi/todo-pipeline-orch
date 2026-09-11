@@ -14,6 +14,9 @@ import socket
 import struct
 import uuid
 
+_PROC_FLAG_INEXIT = 0x4
+_PROC_FLAG_SLEADER = 0x20
+
 
 class Backend:
     def __init__(self):
@@ -60,6 +63,7 @@ class Backend:
         if size != 192:
             raise OSError(ctypes.get_errno(), 'process identity unavailable')
         data = buffer.raw
+        flags = struct.unpack_from('=I', data, 0)[0]
         state = struct.unpack_from('=I', data, 4)[0]
         actual_pid, ppid = struct.unpack_from('=II', data, 12)
         unique, parent_unique, version = struct.unpack_from('=QQi', data, 152)
@@ -69,11 +73,12 @@ class Backend:
                 'pgrp': struct.unpack_from('=I', data, 100)[0],
                 'state': 'Z' if state == 5 else 'T' if state == 4 else 'R',
                 '_parent_unique': parent_unique, '_version': version,
-                '_session_leader': bool(struct.unpack_from('=I', data, 0)[0] & 0x20)}
+                '_in_exit': bool(flags & _PROC_FLAG_INEXIT),
+                '_session_leader': bool(flags & _PROC_FLAG_SLEADER)}
 
     @staticmethod
     def _snapshot(record: dict, boot: str, session: int) -> dict:
-        # Internal audit versions never enter durable schema-v1 evidence.
+        # Internal kernel fields never enter durable schema-v1 evidence.
         return {key: value for key, value in record.items() if not key.startswith('_')} | {
             'boot_id': boot, 'host': socket.gethostname(), 'session': session}
 
@@ -97,8 +102,12 @@ class Backend:
             raise OSError('process changed during session lookup')
         if second['state'] == 'Z':
             return self._snapshot(second, boot, pid if second['_session_leader'] else 0)
-        if session is None or first['pgrp'] != second['pgrp']:
+        if first['pgrp'] != second['pgrp']:
             raise OSError('process changed during session lookup')
+        if session is None:
+            if not second['_in_exit']:
+                raise OSError('process changed during session lookup')
+            session = pid if second['_session_leader'] else 0
         return self._snapshot(second, boot, session)
 
     def _public_info(self, pid: int, flavor: int, size: int) -> bytes | None:
@@ -125,10 +134,11 @@ class Backend:
         if first is None or short is None:
             return None
         actual, parent, group, state = struct.unpack_from('=IIII', short)
+        flags = struct.unpack_from('=I', short, 32)[0]
         if actual != pid:
             raise OSError('process changed during discovery')
         if state == 5:
-            session = 0
+            session = pid if flags & _PROC_FLAG_SLEADER else 0
         else:
             try:
                 session = os.getsid(pid)
@@ -158,10 +168,11 @@ class Backend:
             if short is None or final is None:
                 return None
             actual, parent, group, state = struct.unpack_from('=IIII', short)
-            if (actual != pid or state != 5
+            flags = struct.unpack_from('=I', short, 32)[0]
+            if (actual != pid or (state != 5 and not (flags & _PROC_FLAG_INEXIT))
                     or unique != struct.unpack_from('=Q', final, 16)[0]):
                 raise OSError('session identity unavailable')
-            session = 0
+            session = pid if flags & _PROC_FLAG_SLEADER else 0
         return {'pid': pid, 'start_ticks': unique, 'ppid': parent, 'pgrp': group,
                 'state': 'Z' if state == 5 else 'T' if state == 4 else 'R',
                 'boot_id': boot, 'host': socket.gethostname(), 'session': session}

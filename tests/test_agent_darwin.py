@@ -11,15 +11,16 @@ import pytest
 from hermes_pipeline import agent_darwin as darwin
 
 
-def record(pid=42, unique=901, version=7):
+def record(pid=42, unique=901, version=7, flags=0):
     value = bytearray(192)
+    struct.pack_into('=I', value, 0, flags)
     struct.pack_into('=IIII', value, 4, 2, 12345, pid, 1)
     struct.pack_into('=I', value, 100, pid)
     struct.pack_into('=QQi', value, 152, unique, 900, version)
     return bytes(value)
 
 
-def public_info(pid, flavor, arg, buf, size, *, unique):
+def public_info(pid, flavor, arg, buf, size, *, unique, flags=0):
     assert arg == 1
     data = bytearray(size)
     if flavor == 17:
@@ -28,6 +29,7 @@ def public_info(pid, flavor, arg, buf, size, *, unique):
     else:
         assert (flavor, size) == (13, 64)
         struct.pack_into('=IIII', data, 0, pid, 1, pid, 2)
+        struct.pack_into('=I', data, 32, flags)
     ctypes.memmove(buf, bytes(data), size)
     return size
 
@@ -328,6 +330,93 @@ def test_zombie_birth_is_observable_without_getsid(api, monkeypatch):
     assert library.signals == []
 
 
+def test_inexit_same_birth_is_observable_and_live(api, monkeypatch):
+    from hermes_pipeline import agent_process
+    library, backend = api
+    library.data = record(flags=0x4)
+    monkeypatch.setattr(os, 'getsid', lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
+    identity = backend.snapshot(42)
+    assert identity is not None
+    assert identity['state'] == 'R'
+    assert identity['session'] == 0
+    monkeypatch.setattr(darwin, 'Backend', lambda: backend)
+    monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
+    assert agent_process._live(identity) is True
+
+
+def test_inexit_process_cleanup_confirms_only_after_later_zombie(api, monkeypatch):
+    from hermes_pipeline import agent_process
+    library, backend = api
+    library.data = record(flags=0x4)
+    monkeypatch.setattr(os, 'getsid', lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
+    identity = backend.snapshot(42)
+    original_send = library.send
+    def become_zombie(token, sig):
+        result = original_send(token, sig)
+        if sig == signal.SIGTERM:
+            zombie = bytearray(record(flags=0x4))
+            struct.pack_into('=I', zombie, 4, 5)
+            library.data = bytes(zombie)
+        return result
+    backend._send = become_zombie
+    backend.pids = lambda: [42]
+    monkeypatch.setattr(darwin, 'Backend', lambda: backend)
+    monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
+    result = agent_process.cleanup_processes([identity], cleanup_timeout=.1)
+    assert result['cleanup'] == 'confirmed'
+    assert any(sig == signal.SIGTERM for _, sig in library.signals)
+    assert backend.snapshot(42)['state'] == 'Z'
+
+
+def test_stuck_inexit_process_reaches_unconfirmed_cleanup_deadline(api, monkeypatch):
+    from hermes_pipeline import agent_process
+    library, backend = api
+    library.data = record(flags=0x4)
+    monkeypatch.setattr(os, 'getsid', lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
+    identity = backend.snapshot(42)
+    backend.pids = lambda: [42]
+    monkeypatch.setattr(darwin, 'Backend', lambda: backend)
+    monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
+    elapsed = [0.0]
+    monkeypatch.setattr(agent_process.time, 'monotonic', lambda: elapsed[0])
+    monkeypatch.setattr(agent_process.time, 'sleep', lambda delay: elapsed.__setitem__(0, elapsed[0] + delay))
+    result = agent_process.cleanup_processes([identity], cleanup_timeout=.06)
+    assert result['cleanup'] == 'cleanup_unconfirmed'
+    assert elapsed[0] <= .06
+
+
+def test_inexit_sid_failure_rejects_birth_reuse(api, monkeypatch):
+    library, backend = api
+    library.data = record(flags=0x4)
+    def reused(pid):
+        library.data = record(unique=902, flags=0x4)
+        raise ProcessLookupError
+    monkeypatch.setattr(os, 'getsid', reused)
+    with pytest.raises(OSError, match='changed during session lookup'):
+        backend.snapshot(42)
+
+
+def test_inexit_session_leader_preserves_own_sid(api, monkeypatch):
+    library, backend = api
+    library.data = record(flags=0x24)
+    monkeypatch.setattr(os, 'getsid', lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
+    identity = backend.snapshot(42)
+    assert identity is not None
+    assert identity['state'] == 'R'
+    assert identity['session'] == 42
+
+
+def test_public_inexit_session_leader_preserves_own_sid(api, monkeypatch):
+    _, backend = api
+    backend._info = lambda pid, flavor, arg, buf, size: public_info(
+        pid, flavor, arg, buf, size, unique=901, flags=0x24)
+    monkeypatch.setattr(os, 'getsid', lambda pid: (_ for _ in ()).throw(ProcessLookupError()))
+    identity = backend.discovery_snapshot(42)
+    assert identity is not None
+    assert identity['state'] == 'R'
+    assert identity['session'] == 42
+
+
 def test_discovery_uses_public_metadata_but_verifies_owned_candidates(api, monkeypatch):
     from hermes_pipeline import agent_process
     library, backend = api
@@ -348,6 +437,7 @@ def test_discovery_uses_public_metadata_but_verifies_owned_candidates(api, monke
             assert arg == 1 and size == 64
             data = bytearray(64)
             struct.pack_into('=IIII', data, 0, pid, ppid, pgid, 2)
+            struct.pack_into('=I', data, 32, 0x4 if pid == 1 else 0)
         elif flavor == 17:
             assert arg == 1 and size == 56
             data = bytearray(56)
@@ -359,7 +449,11 @@ def test_discovery_uses_public_metadata_but_verifies_owned_candidates(api, monke
     backend._info = info
     monkeypatch.setattr(darwin, 'Backend', lambda: backend)
     monkeypatch.setattr(backend, 'pids', lambda: list(rows))
-    monkeypatch.setattr(os, 'getsid', lambda pid: rows[pid][1])
+    def getsid(pid):
+        if pid == 1:
+            raise ProcessLookupError
+        return rows[pid][1]
+    monkeypatch.setattr(os, 'getsid', getsid)
     monkeypatch.setattr(agent_process.sys, 'platform', 'darwin')
     root = backend.snapshot(42)
     known = {42: root}
