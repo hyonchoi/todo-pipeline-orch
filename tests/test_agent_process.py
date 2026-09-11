@@ -174,6 +174,41 @@ def test_run_latches_ownership_ambiguity_after_later_clean_inventory(tmp_path, m
     assert result["cleanup"] == "cleanup_unconfirmed"
 
 
+def test_run_does_not_discover_again_after_observing_client_exit(tmp_path, monkeypatch):
+    dead_scans = 0
+    cleanup_calls = 0
+    exit_observed = False
+    poll = agent_process.subprocess.Popen.poll
+
+    def observed_poll(process):
+        nonlocal exit_observed
+        result = poll(process)
+        if result is not None:
+            exit_observed = True
+        return result
+
+    def discover(known):
+        nonlocal dead_scans
+        if not exit_observed:
+            return agent_process.DiscoveryOutcome.CLEAN
+        dead_scans += 1
+        return agent_process.DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
+
+    def cleanup(identities, **kwargs):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        return {"cleanup": "confirmed", "processes": list(identities)}
+
+    monkeypatch.setattr(agent_process.subprocess.Popen, "poll", observed_poll)
+    monkeypatch.setattr(agent_process, "_discover", discover)
+    monkeypatch.setattr(agent_process, "cleanup_processes", cleanup)
+    result = run(tmp_path, "import time; time.sleep(0.05)")
+    assert dead_scans == 0
+    assert cleanup_calls == 1
+    assert result["exit_code"] == 0
+    assert result["cleanup"] == "confirmed"
+
+
 def test_linux_snapshot_treats_esrch_as_disappearance(monkeypatch):
     read_text = agent_process.Path.read_text
 

@@ -493,13 +493,13 @@ def run_process(
             if observed >= deadline:
                 outcome = "timed_out"
                 break
+            if exit_code is not None:
+                outcome = "exited"
+                break
             previous = len(known)
             uncertain |= _discover(known) is DiscoveryOutcome.OWNERSHIP_AMBIGUOUS
             if on_processes and len(known) != previous:
                 on_processes(list(known.values()))
-            if exit_code is not None:
-                outcome = "exited"
-                break
             if not child.stdin.closed:
                 try:
                     if offset < len(stdin_bytes):
