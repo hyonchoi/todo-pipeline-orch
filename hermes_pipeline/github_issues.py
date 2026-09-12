@@ -300,6 +300,16 @@ class IssueTodo:
     state_reason: str | None = None
 
 
+def _reference_path(value: str) -> str:
+    """Unwrap a complete Markdown code span, allowing a sentence-final period.
+
+    Keep plain paths and malformed spans literal for downstream path validation.
+    """
+    path = value.strip()
+    match = re.fullmatch(r"(`+)([^`]+)\1\.?", path)
+    return match[2] if match else path
+
+
 def first_lines(values: tuple[str, ...]) -> tuple[str, ...]:
     """First non-empty line of each section value; empty values are dropped."""
     result: list[str] = []
@@ -380,7 +390,7 @@ def issue_from_api(payload: Mapping, *, repo: str) -> IssueTodo:
         plan_source = None
     spec_values = first_lines(sections.get("Spec", ()))
     references = tuple(
-        item.strip()
+        _reference_path(item)
         for value in sections.get("Reference", ())
         for item in value.split(",")
         if item.strip()
