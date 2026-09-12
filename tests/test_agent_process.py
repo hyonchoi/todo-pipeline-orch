@@ -3,6 +3,7 @@
 import os
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -298,3 +299,108 @@ def test_direct_stopped_and_resistant_root_terminated(tmp_path, source):
 
 def test_empty_root_inventory_is_not_cleanup_proof():
     assert agent_process.cleanup_processes([], cleanup_timeout=0)['cleanup'] == 'cleanup_unconfirmed'
+
+
+def test_default_output_is_discarded(tmp_path):
+    """Default behavior: stdout/stderr go to DEVNULL."""
+    if not os.path.exists("/proc/self/fd"):
+        pytest.skip("/proc/self/fd unavailable")
+    readlink_script = "import os,sys; open(sys.argv[1],'w').write(os.readlink('/proc/self/fd/1')+'\\n'+os.readlink('/proc/self/fd/2'))"
+    output_path = tmp_path / "fds.txt"
+    result = agent_process.run_process(
+        [sys.executable, "-c", readlink_script, str(output_path)],
+        cwd=tmp_path, stdin_bytes=b"", timeout=2, cleanup_timeout=0.5,
+    )
+    assert result["outcome"] == "exited"
+    assert result["exit_code"] == 0
+    content = output_path.read_text().strip().split("\n")
+    assert content == ["/dev/null", "/dev/null"]
+
+
+def test_stderr_only_capture_and_partial_open_rollback(tmp_path):
+    """stderr_path only -> stderr captured, stdout /dev/null; symlink on stderr -> ProcessLaunchError with no fd leak."""
+    if not os.path.exists("/proc/self/fd"):
+        pytest.skip("/proc/self/fd unavailable")
+    readlink_script = "import os,sys; open(sys.argv[1],'w').write(os.readlink('/proc/self/fd/1')+'\\n'+os.readlink('/proc/self/fd/2'))"
+    output_path = tmp_path / "fds.txt"
+    stderr_path = tmp_path / "stderr.txt"
+    result = agent_process.run_process(
+        [sys.executable, "-c", readlink_script, str(output_path)],
+        cwd=tmp_path, stdin_bytes=b"", timeout=2, cleanup_timeout=0.5,
+        stderr_path=stderr_path,
+    )
+    assert result["outcome"] == "exited"
+    assert result["exit_code"] == 0
+    content = output_path.read_text().strip().split("\n")
+    assert content[0] == "/dev/null"
+    assert "stderr.txt" in content[1]
+
+    fd_count_before = len(os.listdir("/proc/self/fd"))
+    stderr_symlink = tmp_path / "stderr_link"
+    target = tmp_path / "target"
+    target.write_text("x")
+    stderr_symlink.symlink_to(target)
+    with pytest.raises(agent_process.ProcessLaunchError) as exc_info:
+        agent_process.run_process(
+            [sys.executable, "-c", "print('x')"],
+            cwd=tmp_path, stdin_bytes=b"", timeout=2, cleanup_timeout=0.5,
+            stderr_path=stderr_symlink,
+        )
+    assert exc_info.value.cleanup == "confirmed"
+    assert exc_info.value.processes == []
+    fd_count_after = len(os.listdir("/proc/self/fd"))
+    assert fd_count_before == fd_count_after
+
+
+
+@pytest.mark.parametrize("path_param", ["stdout_path", "stderr_path"])
+def test_output_path_symlink_refused(tmp_path, path_param):
+    """symlink as stdout_path or stderr_path raises ProcessLaunchError."""
+    link_path = tmp_path / f"{path_param}.txt"
+    target = tmp_path / "target.txt"
+    target.write_text("existing")
+    link_path.symlink_to(target)
+
+    with pytest.raises(agent_process.ProcessLaunchError):
+        agent_process.run_process(
+            [sys.executable, "-c", "print('out')"],
+            cwd=tmp_path, stdin_bytes=b"", timeout=2, cleanup_timeout=0.5,
+            **{path_param: link_path},
+        )
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="mkfifo unavailable")
+def test_output_path_must_be_regular_file(tmp_path):
+    """A pre-planted FIFO must fail the launch promptly instead of blocking it."""
+    fifo = tmp_path / "stdout.log"
+    os.mkfifo(fifo)
+    started = time.monotonic()
+    with pytest.raises(agent_process.ProcessLaunchError):
+        agent_process.run_process(
+            [sys.executable, "-c", "print('out')"],
+            cwd=tmp_path, stdin_bytes=b"", timeout=2, cleanup_timeout=0.5,
+            stdout_path=fifo,
+        )
+    assert time.monotonic() - started < 1.0
+
+
+def test_output_path_rejects_character_device(tmp_path):
+    """The regular-file check fires even when the open itself succeeds."""
+    with pytest.raises(agent_process.ProcessLaunchError):
+        agent_process.run_process(
+            [sys.executable, "-c", "print('out')"],
+            cwd=tmp_path, stdin_bytes=b"", timeout=2, cleanup_timeout=0.5,
+            stdout_path=Path("/dev/null"),
+        )
+
+
+def test_output_capture_appends_to_existing_file(tmp_path):
+    out = tmp_path / "stdout.log"
+    out.write_text("earlier\n")
+    result = agent_process.run_process(
+        [sys.executable, "-c", "print('later')"],
+        cwd=tmp_path, stdin_bytes=b"", timeout=10, cleanup_timeout=1,
+        stdout_path=out,
+    )
+    assert result["outcome"] == "exited"
+    assert out.read_text() == "earlier\nlater\n"

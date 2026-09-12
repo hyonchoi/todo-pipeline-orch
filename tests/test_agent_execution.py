@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import stat
 import subprocess
 import sys
 
@@ -9,6 +11,8 @@ from hermes_pipeline.agent_execution import (
     ExecutionError,
     ExecutionStore,
     LockUnconfirmed,
+    close_execution_logger,
+    execution_logger,
     identity_matches,
     process_identity,
 )
@@ -314,3 +318,43 @@ def test_sequential_same_pid_births_remain_distinct(execution):
     later = dict(root, start_ticks=root['start_ticks'] + 1)
     store.update_attempt('execution-1', 1, direct_processes=[root, later])
     assert store.load('execution-1')['attempts'][0]['direct_processes'] == [root, later]
+
+
+def test_execution_logger_writes_to_execution_directory(execution):
+    """Logger writes to supervisor.log with 0o600 mode; calling twice does not add handlers."""
+    store, _ = execution
+    store.admit("execution-1")
+
+    try:
+        logger = execution_logger(store, "execution-1")
+        assert logger.propagate is False
+        logger.info("test message")
+
+        log_path = store._directory("execution-1") / "supervisor.log"
+        assert log_path.exists()
+        assert "test message" in log_path.read_text()
+        assert stat.S_IMODE(log_path.stat().st_mode) == 0o600
+
+        logger.info("second message")
+        content = log_path.read_text()
+        assert content.count("test message") == 1
+        assert content.count("second message") == 1
+
+        logger2 = execution_logger(store, "execution-1")
+        handler_count = sum(1 for h in logger2.handlers if not isinstance(h, logging.NullHandler))
+        assert handler_count == 1
+    finally:
+        close_execution_logger(store, "execution-1")
+
+
+def test_execution_logger_falls_back_to_null_handler_on_unregistered_execution():
+    """Unregistered execution -> logger.info() does not raise, only NullHandlers; calling twice leaves exactly one."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as tmpdir:
+        store = ExecutionStore(tmpdir)
+        logger = execution_logger(store, "unregistered-exec")
+        logger.info("x")
+        assert all(isinstance(h, logging.NullHandler) for h in logger.handlers)
+        logger2 = execution_logger(store, "unregistered-exec")
+        null_handlers = [h for h in logger2.handlers if isinstance(h, logging.NullHandler)]
+        assert len(null_handlers) == 1

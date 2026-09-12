@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import ctypes
+import fcntl
 import math
 import os
 import signal
 import socket
+import stat
 import subprocess
 import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from pathlib import Path
 
 Identity = dict[str, object]
@@ -303,6 +306,28 @@ def _cleanup_owned_child(
         pass
 
 
+def _open_output(path: Path | None, stack: ExitStack) -> int:
+    """Open a client output capture file, or return DEVNULL when no path is given.
+
+    ``O_NONBLOCK`` makes an unexpected FIFO fail with ``ENXIO`` instead of
+    blocking the launch before any deadline exists; the flag is cleared once
+    the descriptor is confirmed to be a regular file so the child sees a
+    normal blocking file.
+    """
+    if path is None:
+        return subprocess.DEVNULL
+    fd = os.open(
+        str(path),
+        os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK,
+        0o600,
+    )
+    stack.callback(os.close, fd)
+    if not stat.S_ISREG(os.fstat(fd).st_mode):
+        raise ProcessLaunchError()
+    fcntl.fcntl(fd, fcntl.F_SETFL, fcntl.fcntl(fd, fcntl.F_GETFL) & ~os.O_NONBLOCK)
+    return fd
+
+
 def run_process(
     argv: Sequence[str], *, cwd: Path, stdin_bytes: bytes, timeout: float,
     cleanup_timeout: float = 60,
@@ -311,6 +336,8 @@ def run_process(
     pass_fds: tuple[int, ...] = (),
     on_launch: Callable[[dict], None] | None = None,
     on_processes: Callable[[list[Identity]], None] | None = None,
+    stdout_path: Path | None = None,
+    stderr_path: Path | None = None,
 ) -> dict:
     """Launch one internally constructed argv and exclusively collect its exit.
 
@@ -318,6 +345,7 @@ def run_process(
     before propagating; no output or arbitrary provider exception is persisted.
     The deadline starts immediately before launch, conservatively charging spawn
     overhead. Exit eligibility is based on observation before that deadline.
+    Output paths must be regular files inside a TPO-owned staging directory.
     """
     if isinstance(argv, (str, bytes)) or not argv or not all(isinstance(arg, str) for arg in argv):
         raise ValueError("argv must be a nonempty sequence of strings")
@@ -336,13 +364,23 @@ def run_process(
         deadline = min(deadline, deadline_monotonic)
     if deadline <= started:
         raise ProcessLaunchError()
-    try:
-        child = subprocess.Popen(
-            list(argv), cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True, env=env, pass_fds=pass_fds,
-        )
-    except OSError:
-        raise ProcessLaunchError() from None
+
+    # The parent's capture descriptors live only until Popen has duplicated them.
+    with ExitStack() as stack:
+        try:
+            stdout_fd = _open_output(stdout_path, stack)
+            stderr_fd = _open_output(stderr_path, stack)
+        except OSError:
+            raise ProcessLaunchError() from None
+        try:
+            child = subprocess.Popen(
+                list(argv), cwd=cwd, stdin=subprocess.PIPE,
+                stdout=stdout_fd, stderr=stderr_fd,
+                start_new_session=True, env=env, pass_fds=pass_fds,
+            )
+        except OSError:
+            raise ProcessLaunchError() from None
+
     known = {}
     child_fd = None
     cleanup = {"cleanup": "cleanup_unconfirmed", "processes": []}
