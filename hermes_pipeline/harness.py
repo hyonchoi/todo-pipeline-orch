@@ -525,11 +525,13 @@ _SANDBOX_GITIGNORE = """\
 # Agent scratch space
 .superpowers/
 .code-review-graph/
+.serena/
 
 # Python runtime artifacts
 __pycache__/
 *.py[cod]
 .venv/
+uv.lock
 """
 _SANDBOX_SEED_FILES: dict[str, str] = {
     "README.md": (
@@ -561,7 +563,7 @@ _SANDBOX_SEED_FILES: dict[str, str] = {
 _SANDBOX_ALLOWED_FOREIGN = (".github/",)
 _SANDBOX_SEED_COMMIT_MESSAGE = "chore(harness): seed sandbox"
 # Lines the sandbox ``.gitignore`` must carry; a tracked one lacking any is replaced.
-_SANDBOX_GITIGNORE_REQUIRED = (".hermes/",)
+_SANDBOX_GITIGNORE_REQUIRED = (".hermes/", ".serena/", "uv.lock")
 _DEFAULT_BRANCH_JQ = '.defaultBranchRef.name // ""'
 _FOREIGN_DETAIL_LIMIT = 5
 

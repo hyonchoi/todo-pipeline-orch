@@ -3520,6 +3520,8 @@ def _assert_porcelain_clean_with_runtime_junk(clone: Path) -> None:
         ".venv/bin/python",
         ".superpowers/scratch.md",
         ".code-review-graph/graph.json",
+        ".serena/project.yml",
+        "uv.lock",
     ):
         target = clone / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -3538,6 +3540,8 @@ class TestInitSandbox:
             "README.md", ".gitignore", "pyproject.toml", "tests/__init__.py", "docs/harness/SANDBOX.md"
         }
         assert ".hermes/\n" in harness_mod._SANDBOX_GITIGNORE
+        assert ".serena/\n" in harness_mod._SANDBOX_GITIGNORE
+        assert "uv.lock\n" in harness_mod._SANDBOX_GITIGNORE
 
     def _serve_gh(self, fake_gh, bare: Path | None, *, default_branch: str | None = None):
         """Serve gh against the bare remote's real state.
@@ -3880,8 +3884,7 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_tracked_gitignore_hiding_docs_does_not_block_seed(self, fake_gh, tmp_path):
-        # ``.hermes/`` is present so the .gitignore is kept as-is and ``docs/`` stays
-        # ignored: only ``add -f`` can land docs/harness/SANDBOX.md.
+        # Missing harness ignore rules are refreshed before the seed marker is added.
         bare = _make_bare_remote(tmp_path, {".gitignore": ".hermes/\ndocs/\n"})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
@@ -3890,7 +3893,7 @@ class TestInitSandbox:
 
         tree = _remote_tree(bare, "main")
         assert "docs/harness/SANDBOX.md" in tree
-        assert tree[".gitignore"] == ".hermes/\ndocs/"
+        assert tree[".gitignore"] == harness_mod._SANDBOX_GITIGNORE.rstrip("\n")
 
     @pytest.mark.real_git
     def test_non_empty_path_never_removes_preexisting_project_dir(self, fake_gh, tmp_path):
