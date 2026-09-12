@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.1.1
+
+### Patch Changes
+
+- Supervise external agent attempts with strict deadlines, evidence-based recovery,
+and validated checkpoints and results on Linux and macOS. Run clients and
+verification commands without supervisor sandbox restrictions, using the
+invoking user's environment. Let workers await supervised outcomes with bounded
+`run --wait` handling without refreshing attempt deadlines.
+Preserve exact profile phase keys through execution, results, and status. Pin
+complete phase schedules for new runs, use explicit roles for special validation,
+and advance declared workers only after validated predecessors while preserving
+legacy registrations.
+
+- Unify Linux and macOS supervision around the directly launched Claude, Codex, verification, and reviewer process identities. Confirm cleanup when those processes terminate, leave their descendants to the clients, and remove the Linux cgroup v2 and systemd requirements while preserving safe PID recovery and legacy record readability.
+
 ## 1.1.0
 
 ### Minor Changes
