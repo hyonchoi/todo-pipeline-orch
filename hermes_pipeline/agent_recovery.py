@@ -29,6 +29,11 @@ from .agent_execution import (
 )
 from .agent_git import run_git
 
+
+class RecoveryStateChanged(ExecutionError):
+    """The worktree or record no longer matches the approved recovery preview."""
+
+
 _LIMIT = 256 * 1024
 _PREVIEW_FIELDS = {'version', 'execution_id', 'event_id', 'generation', 'mode',
                    'registration_sha256', 'head', 'branch', 'worktree',
@@ -272,7 +277,7 @@ def validate_recovery(store, execution_id: str, event_id: str) -> dict:
             raise ExecutionError('recovery lacks an approved unused event')
         preview = intent['preview']
         if _snapshot(store, execution_id, preview['mode'], event_id) != preview:
-            raise ExecutionError('recovery state changed since approval')
+            raise RecoveryStateChanged('recovery state changed since approval')
         return preview
 
 
@@ -524,18 +529,17 @@ def invalidate_recovery(store, execution_id, event_id) -> bool:
 def recovery_state(store, execution_id) -> dict | None:
     """Return recovery state info if intent exists, None otherwise.
 
-    Returns: {"state": status, "approver": ..., "event_id": ..., "generation": ..., "reissues": ...}
+    Returns: {"state": status, "approver": ..., "generation": ..., "reissues": ...}
 
     A missing intent yields None; a malformed intent raises ExecutionError.
+    This is a lockless operation; a daemon may hold the lock simultaneously.
     """
-    with store.locked(execution_id):
-        intent = _read_optional(store, execution_id)
-        if intent is None:
-            return None
-        return {
-            'state': intent['status'],
-            'approver': intent.get('approver', 'operator'),
-            'event_id': intent['preview']['event_id'],
-            'generation': intent['preview']['generation'],
-            'reissues': intent.get('reissues', 0),
-        }
+    intent = _read_optional(store, execution_id)
+    if intent is None:
+        return None
+    return {
+        'state': intent['status'],
+        'approver': intent.get('approver', 'operator'),
+        'generation': intent['preview']['generation'],
+        'reissues': intent.get('reissues', 0),
+    }

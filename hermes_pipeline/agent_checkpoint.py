@@ -85,6 +85,23 @@ class ProgressJournal:
             raise ExecutionError('rewritten or interrupted checkpoint history')
         return journal
 
+    def accepted_count(self) -> int:
+        """Return the count of accepted entries in progress.json without git or lock.
+
+        Raw read of progress.json via _safe_read under _directory_handle.
+        Raises ExecutionError on malformed/missing-field; FileNotFoundError propagates.
+        """
+        with self.store._directory_handle(self.execution_id) as directory:
+            try:
+                journal = json.loads(_safe_read(Path('progress.json'), directory_fd=directory))
+            except (ValueError, UnicodeError) as exc:
+                raise ExecutionError('invalid progress journal') from exc
+        if not isinstance(journal, dict) or 'accepted' not in journal:
+            raise ExecutionError('missing accepted field in progress journal')
+        if not isinstance(journal['accepted'], list):
+            raise ExecutionError('accepted field is not a list')
+        return len(journal['accepted'])
+
     @staticmethod
     def _tasks(registration):
         manifest = registration['manifest']

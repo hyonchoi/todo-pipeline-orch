@@ -280,3 +280,27 @@ def test_excess_commits_block_recovery(journal):
         git(work, 'commit', '--allow-empty', '-m', 'unknown')
     with pytest.raises(ExecutionError, match='unexpected HEAD'):
         progress.recovery_context(1)
+
+
+def test_accepted_count_reads_progress_without_git(journal):
+    """accepted_count() should read progress.json directly without invoking git."""
+    progress, work = journal
+    git(work, 'commit', '--allow-empty', '-m', 'one')
+    sha = git(work, 'rev-parse', 'HEAD')
+    receipts(progress, sha)
+    submission(progress, sha)
+    progress.promote(1, 'checkpoint.json')
+
+    # Patch run_git to fail if called
+    import hermes_pipeline.agent_checkpoint
+    original_run_git = hermes_pipeline.agent_checkpoint.run_git
+    def failing_run_git(*args, **kwargs):
+        pytest.fail("run_git should not be called by accepted_count()")
+
+    try:
+        hermes_pipeline.agent_checkpoint.run_git = failing_run_git
+        # This should succeed without calling run_git
+        count = progress.accepted_count()
+        assert count == 1
+    finally:
+        hermes_pipeline.agent_checkpoint.run_git = original_run_git

@@ -1,17 +1,23 @@
 """Provider-free tests of the registered, deterministic supervisor boundary."""
 
+import errno
 import json
 import os
 import subprocess
 import sys
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_pipeline import _agent_supervisor as supervisor
 from hermes_pipeline.agent_collector import CollectionInterrupted
-from hermes_pipeline.agent_execution import ExecutionError, ExecutionStore
+from hermes_pipeline.agent_execution import (
+    ExecutionError,
+    ExecutionStore,
+    LockUnconfirmed,
+)
 from hermes_pipeline.agent_git import CollectionTimedOut
 from hermes_pipeline.result_contract import ResultContractError
 
@@ -334,8 +340,6 @@ def test_actual_admission_lock_remains_distinct_from_capability_refusal(executio
 
 @pytest.mark.parametrize("daemon_admits", [False, True])
 def test_explicit_recovery_waits_for_daemon_without_rewriting_terminal_attempt(execution, monkeypatch, capsys, daemon_admits):
-    from types import SimpleNamespace
-
     from hermes_pipeline.agent_recovery import approve_recovery, prepare_recovery
 
     store, _ = execution
@@ -441,8 +445,6 @@ def test_internal_cli_rejects_arbitrary_command(capsys):
 
 
 def test_missing_installed_supervisor_blocks_dispatch(monkeypatch, tmp_path):
-    from types import SimpleNamespace
-
     monkeypatch.setattr(supervisor, "sys", SimpleNamespace(executable=str(tmp_path / "missing-python")))
     monkeypatch.setattr(supervisor.shutil, "which", lambda name: None)
     with pytest.raises(ExecutionError, match="supervisor_unavailable"):
@@ -657,8 +659,6 @@ def test_profile_registration_rejects_noncanonical_root_before_record_creation(t
 
 
 def test_existing_manifest_work_keeps_original_registered_base(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
     from hermes_pipeline.plan_manifest import PlanManifest, PlanTask
 
     project = tmp_path / "repository"
@@ -744,8 +744,6 @@ def test_supervisor_survives_worker_and_preserves_prompt_bytes(tmp_path, monkeyp
 
 
 def test_worktree_admission_wait_retries_in_code_after_release(execution, monkeypatch, capsys):
-    from types import SimpleNamespace
-
     from hermes_pipeline.agent_execution import ExecutionStore, process_identity
     store, _ = execution
     owner = store.worktree_locked('execution-1')
@@ -785,7 +783,6 @@ def test_worktree_admission_wait_retries_in_code_after_release(execution, monkey
 
 
 def test_unadmitted_daemon_window_stays_honestly_pending(execution, monkeypatch, capsys):
-    from types import SimpleNamespace
     store, _ = execution
     clock = [0.0]
     def wait(interval):
@@ -823,8 +820,6 @@ def test_unsupported_worktree_admission_lock_is_not_retryable(execution, monkeyp
 
 @pytest.mark.parametrize('finish_at', [8.0, None])
 def test_wait_cli_keeps_original_attempt_budget(execution, monkeypatch, capsys, finish_at):
-    from types import SimpleNamespace
-
     store, _ = execution
     store.admit('execution-1')
     store.update_attempt('execution-1', 1, status='running',
@@ -850,8 +845,6 @@ def test_wait_cli_keeps_original_attempt_budget(execution, monkeypatch, capsys, 
 
 
 def test_wait_cli_bounds_unadmitted_wait(execution, monkeypatch, capsys):
-    from types import SimpleNamespace
-
     store, _ = execution
     clock = [0.0]
     def sleep(interval):
@@ -875,15 +868,12 @@ def test_worker_waits_for_command_completion_and_never_blocks_nonterminal():
     assert 'Never use kanban_block for running_detached or waiting_for_admission' in body
 
 
-@pytest.mark.parametrize('previous_attempt', ['previous_boot', 'previous_generation'])
-def test_wait_cli_ignores_unrelated_monotonic_budget(execution, monkeypatch, capsys, previous_attempt):
-    from types import SimpleNamespace
-
+def test_wait_cli_ignores_unrelated_monotonic_budget(execution, monkeypatch, capsys):
+    """Previous boot's deadline is ignored; full ceiling timeout used."""
     store, _ = execution
     store.admit('execution-1')
     owner = supervisor.process_identity(os.getpid())
-    if previous_attempt == 'previous_boot':
-        owner['boot_id'] = 'previous-boot'
+    owner['boot_id'] = 'previous-boot'
     store.update_attempt('execution-1', 1, status='timed_out', cleanup='confirmed',
                          supervisor=owner, deadline_monotonic=10.0)
     clock = [0.0]
@@ -893,15 +883,18 @@ def test_wait_cli_ignores_unrelated_monotonic_budget(execution, monkeypatch, cap
     pending = {'status': 'waiting_for_admission', 'reason': 'launch_pending',
                'generation': 1, 'completion_allowed': False}
     monkeypatch.setattr(supervisor, 'attach', lambda *a, **k: pending)
-    if previous_attempt == 'previous_boot':
-        monkeypatch.setattr(supervisor, 'status', lambda *a, **k: pending)
+    monkeypatch.setattr(supervisor, 'status', lambda *a, **k: pending)
     args = ['run', '--wait', '--root', str(store.root), '--execution', 'execution-1']
-    if previous_attempt == 'previous_generation':
-        args += ['--recovery-event', 'approved-event']
     assert supervisor.main(args) == 0
     assert json.loads(capsys.readouterr().out)['status'] == 'waiting_for_admission'
     assert 90 <= clock[0] <= 90.2
     assert len(store.load('execution-1')['attempts']) == 1
+
+
+def test_worker_instructions_name_tick_authorized_resumption():
+    body = supervisor.worker_instructions('execution-1', '/state/executions')
+    assert 'a pipeline-tick approval may start the next generation automatically through this same command' in body
+    assert 'recovery_invalidated and admission_failed are terminal for this worker' in body
 
 
 def test_worker_completion_passes_metadata_envelope_to_kanban_tool():
@@ -980,8 +973,6 @@ def test_recovery_resolves_only_receipt_for_pending_collector_launch(execution, 
 
 def test_worker_command_pins_interpreter_sibling_across_changed_path(tmp_path, monkeypatch):
     import shlex
-    from types import SimpleNamespace
-
     installed = tmp_path / 'new install with spaces' / 'bin'
     stale = tmp_path / 'old-bin'
     installed.mkdir(parents=True)
@@ -1005,8 +996,6 @@ def test_worker_command_pins_interpreter_sibling_across_changed_path(tmp_path, m
 
 @pytest.mark.parametrize('sibling_exists', [False, True])
 def test_entrypoint_path_fallback_requires_no_executable_sibling(tmp_path, monkeypatch, sibling_exists):
-    from types import SimpleNamespace
-
     installed = tmp_path / 'environment'
     installed.mkdir()
     if sibling_exists:
@@ -1384,8 +1373,6 @@ def test_recover_finishes_interrupted_deadline_collection_as_timed_out(manifest_
 
 
 def test_wait_cli_manifest_ceiling_includes_collection_budget(manifest_execution, monkeypatch, capsys):
-    from types import SimpleNamespace
-
     store, _ = manifest_execution
     store.admit('manifest-1')
     store.update_attempt('manifest-1', 1, status='running',
@@ -1399,3 +1386,585 @@ def test_wait_cli_manifest_ceiling_includes_collection_budget(manifest_execution
     assert json.loads(capsys.readouterr().out)['status'] == 'running_detached'
     expected = 10.0 + 60 + supervisor.deadline_collection_budget(30) + 60
     assert expected <= clock[0] <= expected + 0.2
+
+
+def test_wait_auto_consumes_tick_approval_without_flag(execution, monkeypatch, capsys):
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, worktree = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    auto_approve_resume(store, "execution-1")
+
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+
+    captured_argv = []
+    spawn = supervisor.subprocess.Popen
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" in argv:
+            captured_argv.append(argv[:])
+            supervisor.supervise(store, "execution-1", recovery_event=argv[argv.index("--recovery-event") + 1])
+            return None
+        return spawn(argv, **kwargs)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["generation"] == 2
+    assert report["status"] == "timed_out"
+    assert result == 1
+    assert len(captured_argv) == 1
+    assert "--recovery-event" in captured_argv[0]
+    intent = json.loads((store.root / "execution-1" / "recovery-intent.json").read_text())
+    assert intent["status"] == "consumed"
+    assert len(store.load("execution-1")["attempts"]) == 2
+
+
+def test_wait_without_approval_returns_stored_terminal_status(execution, monkeypatch, capsys):
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *a, **k: pytest.fail("should not spawn daemon"))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "timed_out"
+    assert report["generation"] == 1
+    assert result == 1
+    assert len(store.load("execution-1")["attempts"]) == 1
+
+
+def test_worktree_change_after_tick_approval_yields_recovery_invalidated(execution, monkeypatch, capsys):
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, worktree = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    auto_approve_resume(store, "execution-1")
+
+    # Modify worktree after approval
+    (worktree / "untracked.txt").write_text("untracked")
+
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    spawn = supervisor.subprocess.Popen
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" in argv:
+            pytest.fail("daemon should not spawn")
+        return spawn(argv, **kwargs)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "recovery_invalidated"
+    assert report.get("reason") == "recovery_state_changed"
+    assert result == 1
+    from hermes_pipeline.agent_recovery import recovery_state
+    state = recovery_state(store, "execution-1")
+    assert state is not None
+    assert state["state"] == "invalidated"
+    from hermes_pipeline.agent_recovery import pending_auto_recovery
+    assert pending_auto_recovery(store, "execution-1") is None
+    assert len(store.load("execution-1")["attempts"]) == 1
+
+
+def test_transient_consume_failure_keeps_approval(execution, monkeypatch):
+    """Daemon consume raises plain ExecutionError → propagates from supervise, intent stays approved."""
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    auto_approve_resume(store, "execution-1")
+
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+
+    from hermes_pipeline import agent_recovery
+    def fail_consume(*args, **kwargs):
+        raise ExecutionError("transient git failure")
+    monkeypatch.setattr(agent_recovery, "consume_recovery", fail_consume)
+
+    intent = json.loads((store.root / "execution-1" / "recovery-intent.json").read_text())
+    event_id = intent["preview"]["event_id"]
+
+    with pytest.raises(ExecutionError):
+        supervisor.supervise(store, "execution-1", recovery_event=event_id)
+
+    # Approval survives the transient failure
+    state = agent_recovery.recovery_state(store, "execution-1")
+    assert state is not None
+    assert state["state"] == "approved"
+
+
+def test_state_change_consume_failure_invalidates(execution, monkeypatch):
+    """Daemon consume raises RecoveryStateChanged → recovery_invalidated."""
+    from hermes_pipeline.agent_recovery import RecoveryStateChanged, auto_approve_resume
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    auto_approve_resume(store, "execution-1")
+
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+
+    from hermes_pipeline import agent_recovery
+    def fail_consume(*args, **kwargs):
+        raise RecoveryStateChanged("worktree changed")
+    monkeypatch.setattr(agent_recovery, "consume_recovery", fail_consume)
+
+    intent = json.loads((store.root / "execution-1" / "recovery-intent.json").read_text())
+    event_id = intent["preview"]["event_id"]
+
+    result = supervisor.supervise(store, "execution-1", recovery_event=event_id)
+
+    assert result["status"] == "recovery_invalidated"
+    assert len(store.load("execution-1")["attempts"]) == 1
+
+    # Intent is invalidated
+    state = agent_recovery.recovery_state(store, "execution-1")
+    assert state is not None
+    assert state["state"] == "invalidated"
+
+
+def test_explicit_recovery_event_still_supported(execution, monkeypatch, capsys):
+    from hermes_pipeline.agent_recovery import approve_recovery, prepare_recovery
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    preview = prepare_recovery(store, "execution-1")
+    event = approve_recovery(store, "execution-1", preview)
+
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    spawn = supervisor.subprocess.Popen
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda argv, **kwargs: (
+        None if "_supervise" in argv else spawn(argv, **kwargs)))
+
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+        if clock[0] >= 0.2 and len(store.load("execution-1")["attempts"]) == 1:
+            supervisor.supervise(store, "execution-1", recovery_event=event)
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1",
+                              "--recovery-event", event])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["generation"] == 2
+    assert result == 1
+    assert len(store.load("execution-1")["attempts"]) == 2
+
+
+def test_status_reports_supervisor_alive_remaining_and_accepted(manifest_execution, monkeypatch):
+    from hermes_pipeline.agent_execution import process_identity
+
+    store, worktree = manifest_execution
+    store.admit("manifest-1")
+    caller = process_identity(os.getpid())
+    now = time.monotonic()
+    store.update_attempt("manifest-1", 1, status="running",
+                        supervisor=caller, deadline_monotonic=now + 100)
+
+    import hermes_pipeline.agent_checkpoint as checkpoint
+    monkeypatch.setattr(checkpoint, "run_git", lambda *a, **k: pytest.fail("status() must not run git"))
+    report = supervisor.status(store, "manifest-1")
+    assert report["supervisor_alive"] is True
+    assert report["remaining_s"] is not None
+    assert 0 < report["remaining_s"] <= 100
+    assert report.get("recovery") is None
+    assert report["accepted_tasks"] == 0  # manifest-1 initialized but no tasks accepted
+
+    # Terminal attempt
+    store.update_attempt("manifest-1", 1, status="timed_out", cleanup="confirmed")
+    report = supervisor.status(store, "manifest-1")
+    assert report["supervisor_alive"] is False
+    assert report["remaining_s"] is None
+
+
+def test_malformed_intent_does_not_block_first_admission(execution, monkeypatch, capsys):
+    """A garbage intent is the tick's problem; the first admission still spawns a daemon."""
+    store, _ = execution
+    (store.root / "execution-1" / "recovery-intent.json").write_text("{invalid json")
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    spawn = supervisor.subprocess.Popen
+    captured_argv = []
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" in argv:
+            captured_argv.append(argv[:])
+            return None
+        return spawn(argv, **kwargs)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "waiting_for_admission"
+    assert report["reason"] == "launch_pending"
+    assert result == 0
+    assert len(captured_argv) == 1
+    assert "--recovery-event" not in captured_argv[0]
+
+
+def test_malformed_intent_with_terminal_attempt_reports_stored_status(execution, monkeypatch, capsys):
+    """Terminal gen 1 + garbage intent → timed_out, no daemon spawn, recovery is None."""
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+
+    # Write garbage recovery-intent.json
+    intent_path = store.root / "execution-1" / "recovery-intent.json"
+    intent_path.write_text("{invalid json")
+
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *a, **k: pytest.fail("should not spawn daemon"))
+
+    result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"])
+    output = capsys.readouterr().out
+    report = json.loads(output)
+
+    assert report["status"] == "timed_out"
+    assert report["recovery"] is None
+    assert result == 1
+
+
+def test_run_while_daemon_holds_execution_lock_stays_running_detached(execution, monkeypatch, capsys):
+    from hermes_pipeline.agent_execution import process_identity
+
+    store, _ = execution
+    store.admit("execution-1")
+    # A live daemon holds the execution lock for the whole client run while the
+    # worker re-runs the card command; the auto-recovery probe must not turn
+    # that into a lock_unconfirmed refusal.
+    store.update_attempt("execution-1", 1, status="running", supervisor=process_identity(os.getpid()),
+                         deadline_monotonic=time.monotonic() + 100)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *a, **k: pytest.fail("should not spawn daemon"))
+
+    with ExecutionStore(store.root).locked("execution-1"):
+        result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "running_detached"
+    assert result == 0
+
+
+def test_wait_tolerates_daemon_lock_during_admission_window(execution, monkeypatch, capsys):
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    event = auto_approve_resume(store, "execution-1")["event_id"]
+
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
+
+    daemon = ExecutionStore(store.root).locked("execution-1")
+    spawn = supervisor.subprocess.Popen
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" in argv:
+            daemon.__enter__()  # the daemon takes the lock before it admits generation 2
+            return None
+        return spawn(argv, **kwargs)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+
+    clock = [0.0]
+    ticks = [0]
+    def wait(interval):
+        clock[0] += interval
+        ticks[0] += 1
+        if ticks[0] == 3:
+            daemon.__exit__(None, None, None)
+            supervisor.supervise(store, "execution-1", recovery_event=event)
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert ticks[0] >= 3
+    assert report["generation"] == 2
+    assert report["status"] == "timed_out"
+    assert result == 1
+
+
+def test_execution_lock_retrying_propagates_body_errors(execution, monkeypatch):
+    """A LockUnconfirmed raised by the body is not a retry signal: it propagates and the body runs once."""
+    store, _ = execution
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+    runs = [0]
+
+    with pytest.raises(LockUnconfirmed, match="from the body"):
+        with supervisor._execution_lock_retrying(store, "execution-1"):
+            runs[0] += 1
+            raise LockUnconfirmed("from the body") from OSError(errno.EAGAIN, "busy")
+
+    assert runs[0] == 1
+    assert clock[0] == 0.0
+
+
+def test_execution_lock_retrying_retries_on_transient_contention(execution, monkeypatch):
+    """A polling waiter's brief lock does not make the daemon give up its admission."""
+    store, _ = execution
+    waiter = ExecutionStore(store.root).locked("execution-1")
+    waiter.__enter__()
+    clock = [0.0]
+    released = []
+    def wait(interval):
+        clock[0] += interval
+        if len(released) == 0 and clock[0] >= 0.06:
+            waiter.__exit__(None, None, None)
+            released.append(clock[0])
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    with supervisor._execution_lock_retrying(store, "execution-1"):
+        held = store.locked("execution-1")  # re-entrant: the lock is ours now
+        with held:
+            pass
+
+    assert released == [0.06]
+    assert clock[0] < supervisor.ADMISSION_LOCK_RETRY_S
+
+
+def test_execution_lock_retrying_gives_up_after_window(execution, monkeypatch):
+    """A lock held for the whole window is not transient; the daemon reports it."""
+    store, _ = execution
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    with ExecutionStore(store.root).locked("execution-1"):
+        with pytest.raises(LockUnconfirmed):
+            with supervisor._execution_lock_retrying(store, "execution-1"):
+                pytest.fail("the lock was never free")
+
+    assert supervisor.ADMISSION_LOCK_RETRY_S <= clock[0] <= supervisor.ADMISSION_LOCK_RETRY_S + 0.05
+
+
+def test_stale_event_after_admission_reports_that_generation(execution, monkeypatch):
+    """A second waiter holding an event another daemon already admitted sees that generation, not an invalidation."""
+    from hermes_pipeline.agent_recovery import (
+        approve_recovery,
+        prepare_recovery,
+        recovery_state,
+    )
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    event = approve_recovery(store, "execution-1", prepare_recovery(store, "execution-1"))
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
+    assert supervisor.supervise(store, "execution-1", recovery_event=event)["generation"] == 2
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *a, **k: pytest.fail("no second daemon"))
+
+    report = supervisor.attach(store, "execution-1", recovery_event=event)
+
+    assert report["status"] == "timed_out"
+    assert report["generation"] == 2
+    assert recovery_state(store, "execution-1")["state"] == "consumed"
+
+
+def test_waiter_ends_when_daemon_dies_after_consume(execution, monkeypatch, capsys):
+    """The daemon consumed the approval and died before admitting: the waiter must not wait to the ceiling."""
+    from hermes_pipeline.agent_recovery import auto_approve_resume, consume_recovery
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    event = auto_approve_resume(store, "execution-1")["event_id"]
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    spawn = supervisor.subprocess.Popen
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" in argv:
+            consume_recovery(store, "execution-1", argv[argv.index("--recovery-event") + 1])
+            return None  # the daemon dies here, before authorize_retry/admit
+        return spawn(argv, **kwargs)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "recovery_invalidated"
+    assert report["reason"] == "recovery_state_changed"
+    assert result == 1
+    assert clock[0] < 1.0
+    assert len(store.load("execution-1")["attempts"]) == 1
+    assert event  # the consumed event stays consumed; the next tick re-approves
+
+
+def test_waiter_reports_admission_failed_after_grace(execution, monkeypatch, capsys):
+    """An approval that no daemon admits within the grace window is a failure, not a ceiling-long wait."""
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed",
+                         supervisor=supervisor.process_identity(os.getpid()), deadline_monotonic=10.0)
+    auto_approve_resume(store, "execution-1")
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    spawn = supervisor.subprocess.Popen
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda argv, **kwargs: (
+        None if "_supervise" in argv else spawn(argv, **kwargs)))
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "admission_failed"
+    assert report["reason"] == "daemon_exited"
+    assert report["generation"] == 1
+    assert result == 1
+    # The previous generation's deadline (10 s) never bounds this wait; the grace window does.
+    assert supervisor.DAEMON_ADMISSION_GRACE_S <= clock[0] < supervisor.DAEMON_ADMISSION_GRACE_S + 0.3
+    from hermes_pipeline.agent_recovery import recovery_state
+    assert recovery_state(store, "execution-1")["state"] == "approved"
+
+
+def test_probe_under_tick_lock_retries_then_admits(execution, monkeypatch, capsys):
+    """A tick holding the execution lock during the probe yields a retried busy report, not a stale outcome."""
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    auto_approve_resume(store, "execution-1")
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
+    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
+    monkeypatch.setattr(supervisor, "run_process", lambda *a, **k: {
+        "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
+    spawn = supervisor.subprocess.Popen
+    def daemon_spawn(argv, **kwargs):
+        if "_supervise" in argv:
+            supervisor.supervise(store, "execution-1", recovery_event=argv[argv.index("--recovery-event") + 1])
+            return None
+        return spawn(argv, **kwargs)
+    monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
+    reasons = []
+    real_attach = supervisor.attach
+    def recording_attach(*args, **kwargs):
+        report = real_attach(*args, **kwargs)
+        reasons.append((report["status"], report.get("reason")))
+        return report
+    monkeypatch.setattr(supervisor, "attach", recording_attach)
+    tick = ExecutionStore(store.root).locked("execution-1")
+    tick.__enter__()
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+        if clock[0] >= 0.2 and not released:
+            tick.__exit__(None, None, None)
+            released.append(clock[0])
+    released = []
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert reasons[0] == ("waiting_for_admission", "execution_busy")
+    assert released and len(released) == 1
+    assert report["generation"] == 2
+    assert report["status"] == "timed_out"
+    assert result == 1
+
+
+def test_status_omits_recovery_event_id(execution, monkeypatch):
+    """Status with approved intent doesn't include event_id."""
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    auto_approve_resume(store, "execution-1")
+
+    report = supervisor.status(store, "execution-1")
+
+    assert report["recovery"]["state"] == "approved"
+    assert report["recovery"]["approver"] == "tick"
+    assert "event_id" not in json.dumps(report)
+
+
+def test_registered_status_carries_observability_fields(execution):
+    """No-attempt status includes recovery, supervisor_alive, remaining_s, accepted_tasks."""
+    store, _ = execution
+
+    report = supervisor.status(store, "execution-1")
+
+    assert "recovery" in report
+    assert "supervisor_alive" in report
+    assert "remaining_s" in report
+    assert "accepted_tasks" in report
+
+
+def test_preflight_lock_failure_is_not_translated_to_execution_busy(execution, monkeypatch, capsys):
+    """Only contention on acquiring the execution lock is retryable; a preflight lock failure stays a refusal."""
+    from hermes_pipeline.agent_recovery import auto_approve_resume
+
+    store, _ = execution
+    store.admit("execution-1")
+    store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    auto_approve_resume(store, "execution-1")
+    def replaced_root(*args):
+        raise LockUnconfirmed("lock_unconfirmed: storage root was replaced")
+    monkeypatch.setattr(supervisor, "validate_registration", replaced_root)
+    spawn = supervisor.subprocess.Popen
+    monkeypatch.setattr(supervisor.subprocess, "Popen", lambda argv, **kwargs: (
+        pytest.fail("should not spawn daemon") if "_supervise" in argv else spawn(argv, **kwargs)))
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["status"] == "lock_unconfirmed"
+    assert result == 1
+    assert clock[0] < 1.0

@@ -756,3 +756,26 @@ def test_reissues_cap_retracts_approval(recovery):
 
     # Verify pending is None
     assert pending_auto_recovery(store, execution_id) is None
+
+
+def test_recovery_state_reads_while_lock_held_elsewhere(recovery):
+    """recovery_state is lockless and does not block when another instance holds the lock."""
+    from hermes_pipeline.agent_execution import ExecutionStore
+
+    store, tree = recovery
+
+    from hermes_pipeline.agent_recovery import auto_approve_resume, recovery_state
+
+    auto_approve_resume(store, 'run')
+
+    store2 = ExecutionStore(store.root)
+
+    # Another store instance owns the execution lock, as a live daemon would.
+    with store2.locked('run'):
+        state = recovery_state(store, 'run')
+        assert state is not None
+        assert state['state'] == 'approved'
+        assert 'event_id' not in state
+        assert 'generation' in state
+        assert 'approver' in state
+        assert 'reissues' in state
