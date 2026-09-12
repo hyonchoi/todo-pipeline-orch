@@ -24,12 +24,14 @@ phases:
     turns: 15
     timeout: 1800
   - phase_key: "phase_3_implement"
+    role: "implementation"
     name: "Phase 3: Implement"
     prompt: "Use the agent-skills:incremental-implementation skill alongside agent-skills:test-driven-development in {agent_product}. Read tasks/plan.md and tasks/todo.md and implement the plan in thin, test-driven slices. Commit as you go."
     tools: "Read,Write,Edit,Bash"
     turns: 60
     timeout: 3600
   - phase_key: "phase_4_review"
+    role: "review"
     name: "Phase 4: Code Review"
     prompt: |
       Use the agent-skills:code-review-and-quality skill (or the agent-skills:code-reviewer
@@ -62,6 +64,7 @@ phases:
     turns: 15
     timeout: 1800
   - phase_key: "phase_7_ship"
+    role: "delivery"
     name: "Phase 7: Ship"
     prompt: "Use the agent-skills:ship skill. Open a PR and HALT — do NOT merge."
     tools: "Read,Write,Bash"

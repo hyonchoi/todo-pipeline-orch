@@ -180,6 +180,9 @@ class TestTickPicked:
 
     def test_tick_picked_registers_tasks(self, tmp_path, mocker):
         """When picked=TODO-10, tasks are registered and tick_id persisted in per-project state."""
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
         from hermes_pipeline.decision.schema import HermesSelectionDecision
@@ -268,6 +271,9 @@ class TestTickPicked:
 
     def test_circuit_breaker_observe_on_picked(self, tmp_path, mocker):
         """When a TODO is picked, the circuit breaker is observed with picked=TODO-N."""
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
         from hermes_pipeline.decision.schema import HermesSelectionDecision
@@ -312,6 +318,9 @@ class TestTickPicked:
         "Continues" means the loop reaches the remaining projects, not that the
         scan claims success.
         """
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
         from hermes_pipeline.decision.schema import HermesSelectionDecision
@@ -354,6 +363,9 @@ class TestTickPicked:
         isolation, so later projects still tick) and turns the scan's exit code
         non-zero, and the outcome persists for the circuit breaker.
         """
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
 
         from hermes_pipeline.decision.schema import HermesSelectionDecision

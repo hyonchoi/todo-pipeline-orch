@@ -525,11 +525,13 @@ _SANDBOX_GITIGNORE = """\
 # Agent scratch space
 .superpowers/
 .code-review-graph/
+.serena/
 
 # Python runtime artifacts
 __pycache__/
 *.py[cod]
 .venv/
+uv.lock
 """
 _SANDBOX_SEED_FILES: dict[str, str] = {
     "README.md": (
@@ -561,7 +563,7 @@ _SANDBOX_SEED_FILES: dict[str, str] = {
 _SANDBOX_ALLOWED_FOREIGN = (".github/",)
 _SANDBOX_SEED_COMMIT_MESSAGE = "chore(harness): seed sandbox"
 # Lines the sandbox ``.gitignore`` must carry; a tracked one lacking any is replaced.
-_SANDBOX_GITIGNORE_REQUIRED = (".hermes/",)
+_SANDBOX_GITIGNORE_REQUIRED = (".hermes/", ".serena/", "uv.lock")
 _DEFAULT_BRANCH_JQ = '.defaultBranchRef.name // ""'
 _FOREIGN_DETAIL_LIMIT = 5
 
@@ -2225,37 +2227,30 @@ def poll_pinned_run(
             return previous_status
 
 
-def classify_pinned_run(status_map: Mapping[str, str]) -> str:
-    """Classify one settled status map of a plan-pinned (``requires_plan``) run.
+def classify_pinned_run(
+    status_map: Mapping[str, str], *, registration: ValidatedRegistration | None = None
+) -> str:
+    """Classify a settled board against the pinned worker sequence.
 
-    The verdict is read from the phase states alone. TPO manufactures no cards
-    to stand for its own opinion of a run, so every status in the map was put
-    there by Hermes and means exactly what Hermes means by it.
-
-    * ``"failed"`` -- any observed card is ``failed``, ``archived``, or
-      ``blocked``. ``blocked`` is now unambiguous: Hermes blocks a card only
-      when its worker has exhausted the failure limit
-      (``_record_task_failure`` -> ``gave_up``), and that block is sticky, so
-      the card will never move again. ``archived`` cannot happen under a pinned
-      run, but it is terminal and must never read as still on its way to done.
-    * ``"delivered"`` -- every card is ``done``, the ``finish`` card included.
-      ``finish`` is a plain worker card -- the one that runs the repository
-      gates, pushes the branch and opens the pull request -- and it is the last
-      card a pinned run ever creates, so it is what separates "delivered" from
-      "the reconciler has not created the next card yet": between hops the board
-      is legitimately all-done with the next card still to come. The
-      pull-request invariant is *not* re-checked here: the harness proves it
-      separately with ``verify_pull_request``.
-    * ``"in_progress"`` -- anything else; the driver runs another tick.
+    Failed, archived, and blocked cards are terminal failures. Success requires
+    every declared worker, including deferred cards, to be done. For modern
+    profiles without delivery this means the worker sequence is complete; the
+    harness still checks its separate pull-request invariant. Legacy runs retain
+    their recorded review/finish protocol.
     """
-    from .todos_completion import FINISH_KEY
+    from .phase_schedule import execution_keys, role_key
 
     if any(
         status in ("failed", "archived", "blocked") for status in status_map.values()
     ):
         return "failed"
-    if status_map.get(FINISH_KEY) == "done" and all(
-        status == "done" for status in status_map.values()
+    expected = execution_keys(registration) if registration is not None else ("finish",)
+    delivery = role_key(registration, "delivery") if registration is not None else "finish"
+    if (
+        expected
+        and set(expected).issubset(status_map)
+        and (delivery is None or status_map.get(delivery) == "done")
+        and all(status == "done" for status in status_map.values())
     ):
         return "delivered"
     return "in_progress"
@@ -2811,7 +2806,8 @@ def recover_pinned_registration(
     exactly one trailing newline (``registration_plan_mismatch``). This separate
     expectation detects coordinated artifact and digest tampering in agent state;
     and the ``expected-phases.json`` sentinel under the run worktree must list
-    exactly the registered ``step_keys`` (``expected_phases_missing`` /
+    a nonempty ordered prefix of modern registered ``step_keys``, or exactly
+    the registered keys for legacy runs (``expected_phases_missing`` /
     ``unexpected_registration``, detail capped at ``_ERROR_MESSAGE_MAX``).
     """
     tick_id, _ = _recover_started_tick(
@@ -2865,8 +2861,14 @@ def recover_pinned_registration(
         )
     expected = _read_expected_phases(validated.worktree / ".hermes" / "outcomes", tick_id)
     step_keys = tuple(validated.step_keys)
-    # result_contract already rejects duplicate step_keys; only the sentinel can repeat.
-    if set(expected) != set(step_keys) or len(set(expected)) != len(expected):
+    # Modern schedules create workers incrementally. Their sentinel records
+    # the created prefix; the full pinned sequence still governs completion.
+    # Legacy registrations retain their original exact-set sentinel contract.
+    if validated.phase_definitions:
+        expected_matches = expected == step_keys[:len(expected)]
+    else:
+        expected_matches = set(expected) == set(step_keys) and len(set(expected)) == len(expected)
+    if not expected_matches:
         raise HarnessTickError(
             "unexpected_registration",
             f"expected phases {list(expected)} != step keys {list(step_keys)}"[:_ERROR_MESSAGE_MAX],
@@ -3521,7 +3523,14 @@ def _drive_pinned_ticks(
                     project_slug=slug,
                     tick_id=_registered.tick_id,
                     todo_id=_registered.todo_id,
-                    step_keys=_registered.phase_keys,
+                    # Modern registrations pin deferred workers too. Let the
+                    # settled prefix return so the next tick can create them;
+                    # classification below checks the complete pinned set.
+                    step_keys=(
+                        _registered.phase_keys[:1]
+                        if getattr(_registered.authority, "phase_definitions", ())
+                        else _registered.phase_keys
+                    ),
                     monitor=monitor,
                     detector=detector,
                     cancel_event=_cancel,
@@ -3565,7 +3574,7 @@ def _drive_pinned_ticks(
                 # ``failed`` card instead would be wrong: a single failed card is a
                 # normal, non-halting outcome.
                 failure_code = "convergence_halt"
-            verdict = classify_pinned_run(status_map)
+            verdict = classify_pinned_run(status_map, registration=registered.authority)
             if verdict == "failed":
                 break
             if verdict == "delivered":
@@ -3791,7 +3800,10 @@ def shutdown_run(
 
     *tick_id* and *expected_phase_keys* are what the caller learned from
     :func:`recover_tick_registration` (never re-derived from disk here): on success
-    pass ``registration.tick_id`` and ``registration.phase_keys``. When it raised
+    pass ``registration.tick_id`` and the created-card completeness set. Modern
+    schedules use their validated created prefix plus every observed card;
+    uncreated deferred workers belong only to the completion requirement.
+    Legacy runs retain ``registration.phase_keys`` plus observed cards. When it raised
     ``HarnessTickError`` with a non-``None`` ``exc.tick_id`` (``tick_not_started``,
     ``failed_to_spawn``, ``expected_phases_missing``, or ``unexpected_registration``
     after registration), cards may exist for that tick: pass ``exc.tick_id`` with
@@ -4265,13 +4277,27 @@ def run_harness(
         shutdown_keys: tuple[str, ...] | None = (
             registration.phase_keys if registration is not None else None
         )
+        modern_schedule = registration is not None and bool(
+            getattr(registration.authority, "phase_definitions", ())
+        )
+        if modern_schedule and registration.worktree is not None:
+            try:
+                created = _read_expected_phases(
+                    registration.worktree / ".hermes" / "outcomes", registration.tick_id
+                )
+                if created != registration.phase_keys[:len(created)]:
+                    raise HarnessTickError("unexpected_registration", tick_id=registration.tick_id)
+            except HarnessTickError:
+                # An unreadable or invalid created-card sentinel cannot reduce
+                # the completeness check. Keep the full pinned set fail-closed.
+                log.warning("harness shutdown: created phase prefix unavailable for tick %s", registration.tick_id)
+            else:
+                shutdown_keys = created
         if shutdown_keys is not None and observed_keys:
-            # A pinned run's reconcilers add cards that are not registered step
-            # keys (``review:0``, ``finish``). Requiring those
-            # too is what stops shutdown from reading a board that is still
-            # missing a dynamic card as quiescent. Registered order first, then
-            # the extras, so the value stays deterministic; a non-pinned drive
-            # observes no keys and its registered tuple passes through unchanged.
+            # Legacy reconcilers can add cards whose keys are not in the old
+            # registration (``review:0``, ``finish``). Require every observed
+            # card too, so shutdown cannot call a partially observed board
+            # quiescent. Registered order comes first and extras are sorted.
             shutdown_keys = (*shutdown_keys, *sorted(observed_keys - set(shutdown_keys)))
         if tick_error is not None:
             shutdown_tick_id = tick_error.tick_id or shutdown_tick_id
@@ -4283,7 +4309,8 @@ def run_harness(
                 # quiescence could not be proven, the whole timeout would be
                 # burned and remote cleanup skipped -- leaving the branch and an
                 # open PR on the sandbox. Require exactly what was observed.
-                shutdown_keys = tuple(sorted(observed_keys)) or None
+                if not modern_schedule:
+                    shutdown_keys = tuple(sorted(observed_keys)) or None
             else:
                 # A partial registration (``tick_not_started``,
                 # ``failed_to_spawn``, ``registration_*``, ...): cards may exist

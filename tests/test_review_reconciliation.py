@@ -123,6 +123,7 @@ def test_implementation_head_revalidates_the_card_report_against_the_base(
 
     registration = SimpleNamespace(
         todo_id="TODO-42",
+        repository=tmp_path,
         worktree=tmp_path,
         base_sha="a" * 40,
         manifest=SimpleNamespace(
@@ -161,6 +162,8 @@ def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
     tmp_path, mocker
 ):
     import subprocess
+
+    mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-review")
 
     state = tmp_path / ".hermes"
     (state / "runs" / "01TICK").mkdir(parents=True)

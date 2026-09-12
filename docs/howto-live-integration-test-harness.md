@@ -31,35 +31,40 @@ and the prompt client are all real.
 - The selected prompt client (`claude` or `codex`) installed and authenticated.
   Preflight checks only the client selected by `prompt_client`.
 
-The Codex dispatcher requires a Codex version that supports named permission
-profiles (verified with 0.154.0). The Hermes shell must also have Python 3.11+
-available as `python3` on PATH for permission serialization and validation;
-TPO's uv-managed Python environment does not ensure this prerequisite.
-At launch, it resolves the selected phase
-worktree's absolute Git common directory and absolute per-worktree Git directory
-with `git rev-parse`. It builds a launch-local named permission profile extending
-`:workspace` and explicitly grants write access to both Git directories. Linked
-worktrees need both grants because their index and HEAD live in a separate
-metadata directory within the common directory. This permits Git operations
-without granting write access to the whole parent checkout.
+New cards invoke the installed `tpo-agent-supervisor` launcher. Install it with
+TPO in its Python 3.12+ environment; the Hermes shell does not need a separate
+Python interpreter for client launch settings. The supervisor delivers pinned
+prompt bytes directly through stdin and owns launch, deadlines, exit collection,
+and result validation. There is no Hermes prompt-marker extraction or unmanaged
+shell client launch in a new card. Historical cards retain their old instructions;
+start a new harness run to exercise current dispatch and admission-waiting
+instructions. New cards use `run --wait` to await a bounded terminal response;
+if it returns a nonterminal status, they reconnect without changing card state.
+Existing workers may require an explicit operator refresh or
+recovery through supported Kanban operations; upgrading does not rewrite them.
 
-The profile enables network access so agents can fetch dependencies and access
-GitHub. TPO passes the profile and its selection through CLI `-c` overrides;
-it neither edits user/global Codex configuration nor persists a profile file.
-The launch fails closed if either Git directory cannot be resolved or the
-permission configuration cannot be serialized. The dispatcher copies only the
-content inside the prompt markers into its stdin file, excluding the marker
-lines. It assigns the
-prompt variable before redirecting stdin and
-shell-quotes the literal file path. Existing kanban cards retain their original
-instructions, so start a new harness run to exercise these dispatcher fixes.
+The selected client must satisfy the
+[client and platform prerequisites](howto-agent-supervisor.md#client-and-platform-prerequisites).
+Linux process supervision requires `/proc` and pidfds; macOS requires available
+`libproc` identity and audit-token signaling capabilities. Capability refusals
+occur before attempt admission and are available from supervisor status.
+Both platforms supervise only directly launched processes. Confirmed client
+termination satisfies process cleanup; the client owns its descendants. Neither
+cgroup v2 nor a systemd user manager is required.
 
-After a successful external-client run, Hermes collects result metadata using
-the client's reported gate and test evidence and read-only Git inspection. It
-does not rerun tests, builds, or dependency installation during collection,
-because those commands can recreate files such as `uv.lock`. A final clean-tree
-check follows collection; missing evidence or a dirty tree blocks completion.
-The dispatcher does not clean up files or create a commit to resolve that block.
+Codex uses `--dangerously-bypass-approvals-and-sandbox`; Claude uses
+`--dangerously-skip-permissions` with its configured tools. Clients and checks
+run as the invoking OS user, without supervisor sandbox restrictions or storage
+isolation. No user/global client configuration is edited.
+
+After the client exits, the supervisor validates results against current Git
+state. Manifest checkpoints require pinned verification commands executed as
+direct argv in exact-commit snapshots, using the inherited environment and
+available worktree virtual environment, plus a fresh review within the attempt's
+remaining deadline. Hermes reports the structured outcome through supported
+worker tools. A zero exit without valid result and checkpoint evidence cannot
+complete a card. Preserve partial work; collection does not clean or commit the
+original worktree to force acceptance.
 
 ## One-time sandbox setup
 
@@ -77,7 +82,7 @@ default branch; every push is a plain fast-forward. It pushes one
 | Seed file | Purpose |
 |-----------|---------|
 | `README.md` | Placeholder for the sandbox project |
-| `.gitignore` | Ignores `.hermes/` (per-run state never lands in a PR), agent scratch (`.superpowers/`, `.code-review-graph/`), and Python artifacts (`__pycache__/`, `*.py[cod]`, `.venv/`) |
+| `.gitignore` | Ignores runtime state (`.hermes/`, `.serena/`, `uv.lock`), agent scratch (`.superpowers/`, `.code-review-graph/`), and Python artifacts (`__pycache__/`, `*.py[cod]`, `.venv/`) |
 | `pyproject.toml` | `pytest` dev group and `testpaths` so the agent's tests run |
 | `tests/__init__.py` | Test package marker |
 | `docs/harness/SANDBOX.md` | Marker that this repo is a harness sandbox |
@@ -90,13 +95,13 @@ Behavior:
   `sandbox_not_empty` when any tracked path is neither a seed file nor under
   `.github/**`. README-only and minimal-scaffold repos are seedable by design;
   a real project is not. Missing seed files are added and a `.gitignore` that
-  does not ignore `.hermes/` is replaced, then the result is pushed to the
+  does not carry all required runtime-state rules is replaced, then the result is pushed to the
   default branch, whatever its name.
 - Returns `already_seeded` (no writes, no push) when every seed file is tracked
-  and `.gitignore` already carries the required rule.
+  and `.gitignore` already carries all required runtime-state rules.
 - Per-run `sandbox_seed_check` requires only `pyproject.toml`,
   `tests/__init__.py`, `docs/harness/SANDBOX.md` tracked at HEAD and a
-  `.gitignore` containing `.hermes/`; `README.md` is seeded but not required.
+  `.gitignore` containing `.hermes/`, `.serena/`, and `uv.lock`; `README.md` is seeded but not required.
 
 The repository can also be supplied through the `TPO_HARNESS_REPO` environment
 variable; `--repo` takes precedence.
@@ -170,21 +175,25 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    recheck the final issue before running production `tpo tick` as a subprocess
    with an isolated `TPO_CONFIG_FILE` (log at `artifacts/tick.log`). Recover its
    `tick_id` and expected phase keys. For a plan-gated profile, use the production
-   registration loader, then require embedded schema-v3 authority with
-   `plan_path=None`, the expected repository, issue, branch, `run_base_sha`, and
+   registration loader, then require embedded Plan authority in the current
+   schema-v6 registration with `plan_path=None`, the expected repository, issue,
+   branch, `run_base_sha`, and
    Plan digest (`registration_invalid`, `unexpected_registration`,
    `registration_base_mismatch`, `registration_plan_mismatch`). Hash only the
    Plan document as UTF-8, normalize line endings to LF and exactly one trailing
    newline, and retain the assigned issue number. Issue fields and the folding
    wrapper are excluded. The issue manifest remains schema-v1; production
-   registration readers still support v2 and v3 and legacy repository Plans.
+   registration readers also support legacy v2, v3, v4, and v5 registrations and
+   legacy repository Plans without rewriting their identities. New v6 registrations
+   require supervisor authority and pin the complete ordered phase definitions.
    The `tick_registered` event records `tick_id`, `phase_keys` and, for a pinned
    run, `pinned`, `worktree`, and `branch`.
 5. **Poll / drive** — a non-plan profile polls the registered kanban cards once
    until every card is terminal, auto-completing gate cards behind their
    predecessors. A plan-gated run instead loops: poll the registered cards until
-   the board *settles* (gates are never auto-completed — the production
-   reconcilers own them), classify the settled board, then run another
+   the created worker prefix *settles* (gates are never auto-completed — the
+   production reconcilers own them), classify against the full required worker
+   list, then run another
    `tpo tick` under the same tick id. Each settled board emits
    `tick_completed` `{tick_no, status_map}`. A board identical to the previous
    tick's is *tolerated* once — one reconciler hop can legitimately change
@@ -195,20 +204,24 @@ uv run tpo test --repo OWNER/NAME --keep --loop
    still names the run: a tick that registered a different run fails with
    `unexpected_selection`, while one that merely selected nothing counts as no
    progress and reports `tick_stalled`. The loop is bounded by
-   `pinned_tick_budget(step_keys)` = `len(step_keys) + 6`; exhausting it fails
+   a schedule-based tick budget; exhausting it fails
    with `tick_budget_exhausted`, which
    means the run is stuck rather than out of legitimate work. A tick whose
    subprocess exits non-zero — `tpo tick` isolates a project's crash but reports
    it — fails the run with `tick_crashed`, whose detail is the tail of
-   `artifacts/tick.log`. The run is `delivered` when the `finish` card is `done`
-   **and every card on the board is `done`**; any card that is `blocked`,
+   `artifacts/tick.log`. The run is `delivered` when the registered delivery card
+   (`phase_8_finish_branch` for new native-sdd runs, legacy `finish`) is `done`
+   **and every required worker card is present and `done`**; any card that is `blocked`,
    `failed` or `archived` classifies the run as failed instead. There is no
    `human-gate` card: a `requires_plan` run defers `phase_9_human_review` and
    registers no card for it, so a board matching the older "finish done,
    human-gate blocked" description would be classified as *failed*, never
    delivered. `classify_pinned_run` reads card statuses only — the
-   `finish-verified` marker is written by the production delivery reconciler and
-   is not part of the harness's verdict.
+   `finish-verified` marker is an internal evidence filename written by the
+   production delivery reconciler, not a phase key or part of the harness verdict.
+   A modern profile without a delivery role reaches sequence completion when all
+   required workers are done; the separate PR invariant can then fail with
+   `pr_missing` rather than waiting for an undeclared delivery phase.
    The pinned registration and authored Plan expectation are revalidated before
    and after later ticks and polling, preserving the same authority through
    implementation, review, and finish. Validation failures retain the tick
@@ -311,10 +324,13 @@ For a plan-gated run, `events.jsonl` additionally carries one `tick_registered`
 `{tick_no, status_map}` per settled board; a `tick_stalled` event marks the
 third consecutive identical board that failed the run — the tolerated repeat
 before it is a warning log line, not an event. A delivered run's final board has the
-`finish` card `done` and every other card `done` too — the open, unmerged pull
-request the finish card leaves behind is where the run is supposed to stop, and
-the post-run PR invariant is what checks it. No card is expected to be
-`blocked`: a blocked card classifies the run as failed.
+registered delivery card (`phase_8_finish_branch` for new native-sdd runs,
+legacy `finish`) `done` and every required worker card present and `done` too.
+The open, unmerged pull request the delivery card leaves behind is where the
+run is supposed to stop, and
+the post-run PR invariant is what checks it. Deferred cards retain the exact
+profile key in reports and cannot be omitted to claim completion. No card is
+expected to be `blocked`: a blocked card classifies the run as failed.
 
 ## Troubleshooting
 
@@ -326,7 +342,7 @@ the post-run PR invariant is what checks it. No card is expected to be
 | `gh_permission` | Viewer lacks WRITE/MAINTAIN/ADMIN on the sandbox |
 | `gh_viewer_unknown` | `gh api user` returned no usable login; re-run `gh auth login` |
 | `gh_override_forbidden` | `TPO_GH_BIN` is set; unset it |
-| `sandbox_not_seeded` | Seed files or the `.hermes/` ignore rule are missing; run `--init-sandbox` |
+| `sandbox_not_seeded` | Seed files or a required runtime-state ignore rule (`.hermes/`, `.serena/`, `uv.lock`) is missing; run `--init-sandbox` |
 | `sandbox_not_empty` | `--init-sandbox` refused a repo tracking files outside the seed set / `.github/**` |
 | `seed_incomplete` | `--init-sandbox` committed but a seed file is not a blob at HEAD; the init workspace is removed again, so re-run `--init-sandbox` (nothing was pushed) |
 | `default_branch_unknown` | `--init-sandbox`: `gh` reports no default branch but `git ls-remote` advertises refs; set the default branch on GitHub |
@@ -424,7 +440,10 @@ the Plan. It also checks normalization behavior and no tracked Plan files.
 `tests/test_harness_e2e.py` exercises orchestration and cleanup with a local bare
 remote and a mocked tick; it does not independently prove production ticking.
 These are provider-free checks. Live GitHub/Hermes behavior requires a separate
-live harness run and is not established by these tests.
+live harness run and is not established by these tests. Earlier live Codex and
+Claude evidence applies only to the revision it exercised; it does not qualify
+the schema-v6 scheduler or arbitrary custom profiles. The live-safe profile
+allow-list still applies.
 
 Retained clones carry `.hermes/todo-create-input/<uuid>.json` and, on partial
 creation, `.hermes/todo-create/<uuid>.json`; the production

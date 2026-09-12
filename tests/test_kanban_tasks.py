@@ -2,10 +2,8 @@
 from __future__ import annotations
 
 import json
-import os
-import shlex
 import subprocess
-import tomllib
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,7 +25,10 @@ def _register_todo_phases(**kwargs):
 
     assignee = kwargs.pop("assignee", "default")
     cancel_event = kwargs.pop("cancel_event", None)
-    prepared = prepare_todo_phases(**kwargs)
+    prepared = [
+        replace(phase, execution_id="test-execution")
+        for phase in prepare_todo_phases(**kwargs)
+    ]
     return create_prepared_todo_phases(
         prepared=prepared,
         tick_id=kwargs["tick_id"],
@@ -76,8 +77,8 @@ def test_prepare_embedded_plan_requires_verified_digest_bound_reference(tmp_path
         phases_path=profile, plan_source=source,
         plan_reference=PlanReference(str(artifact.resolve()), source),
     )
-    assert str(artifact.resolve()) in prepared[0].body
-    assert digest in prepared[0].body
+    assert str(artifact.resolve()) in prepared[0].rendered_prompt
+    assert digest in prepared[0].rendered_prompt
 
     with pytest.raises(TodoPlanValidationError, match="invalid_plan_reference"):
         prepare_todo_phases(
@@ -104,6 +105,8 @@ class FakeGatePhase:
         self.tools = tools
         self.turns = turns
         self.gate = gate
+        self.terminal = False
+        self.role = "worker"
         self.timeout = timeout
 
 
@@ -327,403 +330,49 @@ def test_prepare_todo_phases_renders_all_without_external_calls(tmp_path, mocker
     )
     run.assert_not_called()
     assert len(prepared) == 1
-    assert "selected external client (Codex)" in prepared[0].body
-    assert "Use $review." in prepared[0].body
+    assert prepared[0].prompt_client == "codex"
+    assert "Use $review." in prepared[0].rendered_prompt
 
 
-@pytest.mark.parametrize(
-    ("prompt_client", "command", "forbidden"),
-    [
-        (
-            "codex",
-            "codex exec -c 'approval_policy=\"never\"' "
-            "-c 'default_permissions=\"tpo-worktree\"' "
-            '-c "$TPO_CODEX_PERMISSIONS" - < "$PROMPT_FILE"',
-            "claude -p",
-        ),
-        (
-            "claude",
-            "claude -p --permission-mode dontAsk --allowedTools Read,Bash"
-            ' < "$PROMPT_FILE"',
-            "codex exec",
-        ),
-    ],
-)
-def test_prepare_todo_phases_wraps_executable_phases_with_client_delegation(
-    tmp_path, mocker, prompt_client, command, forbidden
+@pytest.mark.parametrize("prompt_client", ["codex", "claude"])
+@pytest.mark.parametrize("policy_mode", ["inherit", "delegated"])
+def test_preparation_pins_prompt_bytes_and_client_configuration(
+    tmp_path, mocker, prompt_client, policy_mode,
 ):
+    """Preparation preserves hostile text without asking Hermes to transport it."""
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
 
+    prompt = "Execute the Plan's tasks, keep $VAR, `date`, $(false), and \\ literal.\nNext: é 😀"
     phases_path = tmp_path / "phases.yaml"
     phases_path.write_text(
-        "phases:\n"
-        "  - phase_key: phase_1\n"
-        "    name: One\n"
-        "    prompt: 'Use {skill_prefix}review.'\n"
-        "    tools: Read,Bash\n"
-        "    turns: 5\n"
-        "    timeout: 2400\n"
+        "phases:\n  - phase_key: phase_1\n    name: One\n"
+        f"    prompt: {json.dumps(prompt, ensure_ascii=False)}\n"
+        "    tools: Read,Bash\n    turns: 5\n    timeout: 2400\n"
     )
     run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-
-    prepared = prepare_todo_phases(
-        todo_id="TODO-41",
-        tick_id="01CLIENT",
-        board_slug="demo",
-        phases_path=phases_path,
-        prompt_client=prompt_client,
-    )
-
-    run.assert_not_called()
-    assert "You are the Hermes dispatcher" in prepared[0].body
-    assert "Build the external-agent prompt" in prepared[0].body
-    assert "pass only that prompt to the external client" in prepared[0].body
-    assert command in prepared[0].body
-    assert forbidden not in prepared[0].body
-    assert "Do not implement this phase directly with Hermes tools" in prepared[0].body
-    assert "external_agent_command" in prepared[0].body
-    assert prepared[0].timeout == 2400
-    assert "External agent timeout: 2400 seconds" in prepared[0].body
-    assert "tracked background execution" in prepared[0].body
-    assert "monitor the background process" in prepared[0].body
-    from hermes_pipeline.kanban_tasks import PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS
-
-    assert (
-        f"{PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS}-second cleanup grace"
-        in prepared[0].body
-    )
-    assert "terminate the external process tree" in prepared[0].body
-    assert "confirm that it is no longer running" in prepared[0].body
-    assert "external_agent_timeout_seconds" in prepared[0].body
-    assert "external_agent_exit_code" in prepared[0].body
-    assert "kanban_comment" in prepared[0].body
-    assert 'kanban_block(kind="needs_input"' in prepared[0].body
-    assert "must not inspect partial changes" in prepared[0].body
-    assert "must not implement or commit the phase yourself" in prepared[0].body
-
-
-def test_claude_delegation_rejects_unsafe_allowed_tool_names():
-    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
-
-    with pytest.raises(ValueError, match="simple identifiers"):
-        _external_client_delegation_block(
-            "claude",
-            1800,
-            tools="Read,$(touch /tmp/unsafe-tool-name)",
-        )
-
-
-# The live defect these two tests pin: a phase profile is the specification, so
-# its prose is arbitrary, and commit 3cc5042 started delivering it unmodified.
-# ``phase_4_development`` says "Execute the Plan's ordered tasks"; the wrapper
-# asked an LLM dispatcher to inline that multi-paragraph prompt into a shell
-# command line without saying how, it chose single quotes, and the shell
-# truncated the prompt at ``Plan'``. Codex exited 2 in 42 seconds having done
-# no work. Transport, not the prompt, is what these tests constrain.
-_HOSTILE_PROMPT = (
-    "Execute the Plan's ordered tasks, reply \"go\", keep $VAR and `date` intact."
-)
-
-
-@pytest.mark.parametrize(
-    ("prompt_client", "expected_command"),
-    [
-        (
-            "codex",
-            "codex exec -c 'approval_policy=\"never\"' "
-            "-c 'default_permissions=\"tpo-worktree\"' "
-            '-c "$TPO_CODEX_PERMISSIONS" - < "$PROMPT_FILE"',
-        ),
-        (
-            "claude",
-            "claude -p --permission-mode dontAsk --allowedTools Read,Bash"
-            ' < "$PROMPT_FILE"',
-        ),
-    ],
-)
-def test_delegation_block_delivers_the_prompt_on_stdin_from_outside_the_repo(
-    prompt_client, expected_command
-):
-    """The required command must read the prompt from stdin, never from argv.
-
-    Both clients support it: ``codex exec [PROMPT]`` reads stdin when ``-`` is
-    given, and ``claude -p`` reads stdin when no prompt argument is passed.
-    The prompt file must land outside the repository, because the phase itself
-    verifies the worktree is clean and ``verify_worker_git_topology`` fails the
-    run on ``worktree_dirty`` -- which is how the run before this one died, on
-    a stray untracked file.
-    """
-    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
-
-    block = _external_client_delegation_block(
-        prompt_client, timeout=1800, tools="Read,Bash"
-    )
-
-    assert f"Required external command: `{expected_command}`" in block
-    # The old shape: a placeholder for the prompt inside a quoted argument.
-    assert "<external-agent prompt>" not in block
-    assert "standard input" in block
-    assert "byte-for-byte" in block
-    assert "outside this repository" in block.lower()
-    assert "mktemp -d" in block
-    assert "worktree_dirty" in block
-
-
-@pytest.mark.parametrize("prompt_client", ["codex", "claude"])
-def test_shell_metacharacters_in_a_phase_prompt_reach_the_card_unchanged(
-    tmp_path, prompt_client
-):
-    """Every byte that breaks a quoted shell argument must survive transport.
-
-    An apostrophe ends a single-quoted string, a double quote ends a
-    double-quoted one, and ``$``/backtick are expanded by the shell inside
-    double quotes. All four round-trip into the delimited block verbatim, and
-    none of them may appear in the dispatcher's command line -- if the prompt
-    text is in the command, some shell will parse it.
-    """
-    from hermes_pipeline.kanban_tasks import prepare_todo_phases
-
-    phases_path = tmp_path / "phases.yaml"
-    phases_path.write_text(
-        "phases:\n"
-        "  - phase_key: phase_1\n"
-        "    name: One\n"
-        f"    prompt: {json.dumps(_HOSTILE_PROMPT)}\n"
-        "    tools: Read,Bash\n"
-        "    turns: 5\n"
-    )
-
-    prepared = prepare_todo_phases(
-        todo_id="TODO-41",
-        tick_id="01CLIENT",
-        board_slug="demo",
-        phases_path=phases_path,
-        prompt_client=prompt_client,
-    )
-
-    body = prepared[0].body
-    dispatcher, _, rest = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
-    delimited, _, _ = rest.partition("END EXTERNAL AGENT PROMPT")
-
-    # The prompt survives verbatim on the client's side of the boundary.
-    assert _HOSTILE_PROMPT in delimited
-    # ...and appears nowhere in the dispatcher's half, so it cannot be inlined
-    # into a shell word. This is the assertion an inlined quoted command kills.
-    assert _HOSTILE_PROMPT not in dispatcher
-    for metacharacter in ("'", '"', "$VAR", "`date`"):
-        assert metacharacter in delimited
-    command_line = next(
-        line for line in dispatcher.splitlines()
-        if line.startswith("Required external command:")
-    )
-    assert command_line.endswith('< "$PROMPT_FILE"`')
-    assert "Plan's" not in command_line
-
-
-@pytest.mark.parametrize("client_exit", [0, 17])
-@pytest.mark.parametrize("policy_mode", ["inherit", "delegated"])
-@pytest.mark.parametrize("linked_worktree", [False, True])
-@pytest.mark.parametrize("prompt_client", ["codex", "claude"])
-def test_prepared_dispatch_launch_preserves_prompt_and_scopes_network_access(
-    tmp_path, prompt_client, linked_worktree, policy_mode, client_exit
-):
-    """Run the advertised shell sequence with an unset PROMPT_FILE and fake client."""
-    from hermes_pipeline.kanban_tasks import prepare_todo_phases
-
-    phases_path = tmp_path / "phases.yaml"
-    prompt = _HOSTILE_PROMPT + "\nSecond line: $(false) and \\ stay literal."
-    phases_path.write_text(
-        "phases:\n"
-        "  - phase_key: phase_1\n"
-        "    name: One\n"
-        f"    prompt: {json.dumps(prompt)}\n"
-        "    tools: Read,Bash\n"
-        "    turns: 5\n"
-    )
-    body = prepare_todo_phases(
+    phase, = prepare_todo_phases(
         todo_id="TODO-41", tick_id="01CLIENT", board_slug="demo",
         phases_path=phases_path, prompt_client=prompt_client,
-        profile_name="native-sdd", agent_policy_mode=policy_mode,
-    )[0].body
-    dispatcher, _, rest = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
-    payload, _, _ = rest.partition("END EXTERNAL AGENT PROMPT\n")
-    assert "Exclude both marker lines" in dispatcher
-    assert "dispatcher instructions and result metadata" in dispatcher
-    assert payload.endswith(prompt + "\n")
-    assert payload.startswith("AGENT-POLICY-MODE: delegated\n\n") == (policy_mode == "delegated")
-
-    # The dispatcher writes precisely the content between the marker lines.
-    # Run its advertised launch sequence without an inherited prompt variable:
-    # inline VAR=value command < "$VAR" would fail before the client starts.
-    assert "shell-quote the entire absolute path" in dispatcher
-    assert "Replace the whole quoted example" in dispatcher
-    assert "without interpolation or command substitution" in dispatcher
-    prompt_file = tmp_path / "prompt-$PAYLOAD-`false`-apostrophe's.txt"
-    prompt_file.write_text(payload)
-    _, fence, snippet_rest = dispatcher.partition("```sh\n")
-    assert fence, "Dispatcher must provide a safe launch sequence"
-    snippet, _, _ = snippet_rest.partition("```\n")
-    snippet = snippet.replace(
-        '"/absolute/path/to/already-written-prompt.txt"',
-        shlex.quote(str(prompt_file)),
+        agent_policy_mode=policy_mode, profile_name="native-sdd",
     )
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    client = fake_bin / prompt_client
-    client.write_text(
-        "#!/bin/sh\n"
-        'printf "%s\\n" "$@" > "$CAPTURE_ARGS"\n'
-        'cat > "$CAPTURE_STDIN"\n'
-        f'exit {client_exit}\n'
-    )
-    client.chmod(0o755)
-    args_file, stdin_file = tmp_path / "args", tmp_path / "stdin"
-    env = dict(os.environ)
-    env.pop("PROMPT_FILE", None)
-    env.update(
-        PATH=f"{fake_bin}:{env['PATH']}",
-        CAPTURE_ARGS=str(args_file), CAPTURE_STDIN=str(stdin_file),
-    )
-    repository = tmp_path / 'repo spaces-$PAYLOAD-`false`-apostrophe\'s-"-\\-é-😀-\x7f'
-    subprocess.run(["git", "init", str(repository)], check=True, capture_output=True)
-    launch_dir = repository
-    if linked_worktree:
-        subprocess.run(
-            ["git", "-C", str(repository), "-c", "user.name=Test", "-c",
-             "user.email=test@example.com", "-c", "commit.gpgsign=false",
-             "commit", "--allow-empty", "-m", "fixture"],
-            check=True, capture_output=True,
-        )
-        launch_dir = tmp_path / "selected worktree"
-        subprocess.run(
-            ["git", "-C", str(repository), "worktree", "add", "-b", "fixture", str(launch_dir)],
-            check=True, capture_output=True,
-        )
-    completed = subprocess.run(
-        ["/bin/sh", "-eu", "-c", snippet], env=env, cwd=launch_dir,
-        capture_output=True, text=True, timeout=10,
-    )
-    assert completed.returncode == client_exit, completed.stderr
-    assert stdin_file.read_bytes() == payload.encode()
-    assert "BEGIN EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
-    assert "END EXTERNAL AGENT PROMPT" not in stdin_file.read_text()
-    actual_args = args_file.read_text().splitlines()
-    if prompt_client == "codex":
-        assert actual_args[:6] == [
-            "exec", "-c", 'approval_policy="never"', "-c",
-            'default_permissions="tpo-worktree"', "-c",
-        ]
-        assert actual_args[7:] == ["-"]
-        config = tomllib.loads(actual_args[6])
-        git_dir = subprocess.check_output(
-            ["git", "rev-parse", "--absolute-git-dir"], cwd=launch_dir, text=True,
-        ).strip()
-        assert config == {"permissions": {"tpo-worktree": {
-            "extends": ":workspace",
-            "filesystem": {str(repository.resolve() / ".git"): "write", git_dir: "write"},
-            "network": {"enabled": True},
-        }}}
-    else:
-        assert actual_args == [
-            "-p", "--permission-mode", "dontAsk", "--allowedTools", "Read,Bash",
-        ]
-
-
-@pytest.mark.parametrize(
-    ("git_output", "git_status"),
-    [
-        ("", 1), ("", 0), ("/does-not-exist/tpo-git-metadata", 0), (".", 0),
-        ("unencodable-path", 0),
-    ],
-)
-@pytest.mark.parametrize("failed_resolution", ["common", "worktree"])
-def test_codex_dispatch_refuses_unresolved_git_metadata(
-    tmp_path, git_output, git_status, failed_resolution,
-):
-    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
-
-    if git_output == "unencodable-path":
-        # A valid filesystem path can still be impossible to serialize as TOML.
-        raw_directory = os.fsencode(tmp_path) + b"/invalid-\xff"
-        os.mkdir(raw_directory)
-        git_output = os.fsdecode(raw_directory)
-    block = _external_client_delegation_block("codex", timeout=1800, tools="")
-    snippet = block.partition("```sh\n")[2].partition("```\n")[0]
-    prompt_file = tmp_path / "prompt.txt"
-    prompt_file.write_text("Never launch with missing metadata permissions.")
-    snippet = snippet.replace(
-        '"/absolute/path/to/already-written-prompt.txt"', shlex.quote(str(prompt_file))
-    )
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    git = fake_bin / "git"
-    git.write_text(
-        "#!/bin/sh\n"
-        'if [ "$FAILED_RESOLUTION" = worktree ] && [ "$3" = --git-common-dir ]; then\n'
-        '  printf "%s\\n" "$VALID_COMMON_DIR"\n'
-        '  exit 0\n'
-        'fi\n'
-        'printf "%s\\n" "$GIT_OUTPUT"\n'
-        'exit "$GIT_STATUS"\n'
-    )
-    git.chmod(0o755)
-    client = fake_bin / "codex"
-    client.write_text('#!/bin/sh\ntouch "$CLIENT_STARTED"\n')
-    client.chmod(0o755)
-    started = tmp_path / "started"
-    env = dict(os.environ)
-    env.update(
-        PATH=f"{fake_bin}:{env['PATH']}", GIT_OUTPUT=git_output,
-        GIT_STATUS=str(git_status), CLIENT_STARTED=str(started),
-        FAILED_RESOLUTION=failed_resolution, VALID_COMMON_DIR=str(tmp_path),
-        TPO_CODEX_PERMISSIONS='permissions.tpo-worktree={extends=":workspace"}',
-        TPO_GIT_COMMON_DIR=str(tmp_path),  # Stale inherited values cannot authorize launch.
-    )
-    completed = subprocess.run(
-        ["/bin/sh", "-c", snippet], cwd=tmp_path, env=env,
-        capture_output=True, text=True, timeout=10,
-    )
-    assert completed.returncode != 0
-    assert not started.exists()
-
-
-def test_prepare_todo_phases_wraps_rendered_prompt_for_external_agent(tmp_path, mocker):
-    from hermes_pipeline.kanban_tasks import prepare_todo_phases
-
-    phases_path = tmp_path / "phases.yaml"
-    phases_path.write_text(
-        "phases:\n"
-        "  - phase_key: phase_1\n"
-        "    name: One\n"
-        "    prompt: 'Use {skill_prefix}review.'\n"
-        "    tools: Read,Bash\n"
-        "    turns: 5\n"
-    )
-    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
-
-    prepared = prepare_todo_phases(
-        todo_id="TODO-41",
-        tick_id="01CLIENT",
-        board_slug="demo",
-        phases_path=phases_path,
-        prompt_client="codex",
-    )
-
     run.assert_not_called()
-    body = prepared[0].body
-    assert "Hermes phase instructions:" not in body
-    assert body.count("BEGIN EXTERNAL AGENT PROMPT") == 1
-    assert body.count("END EXTERNAL AGENT PROMPT") == 1
-    assert (
-        "BEGIN EXTERNAL AGENT PROMPT\n"
-        "Pipeline context:\n"
-        "- todo_id: TODO-41\n"
-        "- tick_id: 01CLIENT\n"
-        "- project_slug: demo\n"
-        "Work on TODO-41 ONLY. Do not pick a different TODO.\n\n"
-        "Use $review.\n"
-        "END EXTERNAL AGENT PROMPT"
-    ) in body
+    prefix = "AGENT-POLICY-MODE: delegated\n\n" if policy_mode == "delegated" else ""
+    assert phase.rendered_prompt.encode() == (
+        prefix + "Pipeline context:\n- todo_id: TODO-41\n- tick_id: 01CLIENT\n"
+        "- project_slug: demo\nWork on TODO-41 ONLY. Do not pick a different TODO.\n\n"
+        + prompt
+    ).encode()
+    assert phase.prompt_client == prompt_client
+    assert phase.tools == "Read,Bash"
+    assert phase.timeout == 2400
+    assert phase.turns == 5
+    assert phase.result_template is None
+    assert prompt not in phase.body
+    assert "not dispatchable" in phase.body
+    assert json.loads(phase.body.splitlines()[0]) == {
+        "todo_id": "TODO-41", "tick_id": "01CLIENT",
+        "project_slug": "demo", "phase_key": "phase_1",
+    }
 
 
 def test_prepare_todo_phases_registers_no_card_for_a_gate_phase(tmp_path):
@@ -833,7 +482,7 @@ def test_prepare_todo_phases_requires_plan_for_plan_gated_profile(tmp_path):
         )
 
 
-def test_prepare_todo_phases_renders_plan_path_into_bodies(tmp_path):
+def test_prepare_todo_phases_renders_plan_path_into_pinned_prompt(tmp_path):
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
 
     phases_path = tmp_path / "phases.yaml"
@@ -858,7 +507,7 @@ def test_prepare_todo_phases_renders_plan_path_into_bodies(tmp_path):
         plan_path="docs/plan.md",
     )
 
-    assert "Implement from docs/plan.md" in prepared[0].body
+    assert "Implement from docs/plan.md" in prepared[0].rendered_prompt
 
 
 def test_prepare_todo_phases_registers_one_implementation_card_for_a_manifest(
@@ -934,8 +583,8 @@ def test_prepare_todo_phases_registers_one_implementation_card_for_a_manifest(
     ]
     # The Plan's own words are NOT copied into the card any more: the profile's
     # prompt is what the agent receives, and it tells the agent to read the Plan.
-    assert "Exact first instruction." not in prepared[0].body
-    assert "Required commit message" not in prepared[0].body
+    assert "Exact first instruction." not in prepared[0].rendered_prompt
+    assert "Required commit message" not in prepared[0].rendered_prompt
     assert "legacy" not in caplog.text.lower()
 
     created: list[list[str]] = []
@@ -955,7 +604,7 @@ def test_prepare_todo_phases_registers_one_implementation_card_for_a_manifest(
 
     mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run", side_effect=run)
     create_prepared_todo_phases(
-        prepared=prepared,
+        prepared=[replace(phase, execution_id="test-execution") for phase in prepared],
         tick_id="01TICK",
         board_slug="demo",
         project_dir=tmp_path,
@@ -991,6 +640,7 @@ def test_prepare_todo_phases_registers_one_implementation_card_for_a_manifest(
 def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import (
         PreparedPhaseTask,
+        bind_prepared_executions,
         create_prepared_todo_phases,
     )
 
@@ -998,14 +648,16 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
         PreparedPhaseTask(
             phase_key="phase_1",
             name="One",
-            body="already rendered $body",
+            body='{"phase_key":"phase_1"}\nregistration pending',
+            rendered_prompt="already rendered $body",
             turns=5,
             timeout=2400,
         ),
         PreparedPhaseTask(
             phase_key="phase_2",
             name="Two",
-            body="second body",
+            body='{"phase_key":"phase_2"}\nregistration pending',
+            rendered_prompt="second body",
             turns=10,
             timeout=7200,
         ),
@@ -1018,6 +670,19 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
         mocker.Mock(returncode=0, stdout="", stderr=""),
     ]
 
+    register = mocker.patch(
+        "hermes_pipeline._agent_supervisor.register_execution",
+        side_effect=["execution-one", "execution-two"],
+    )
+    prepared = bind_prepared_executions(
+        prepared, project_dir=tmp_path, state_dir=tmp_path / ".hermes",
+        root=tmp_path / "executions", tick_id="01CLIENT", worktree=tmp_path,
+        todo_id="TODO-41",
+    )
+    mock_run.assert_not_called()
+    assert [call.kwargs["prompt"] for call in register.call_args_list] == [
+        "already rendered $body", "second body",
+    ]
     task_ids = create_prepared_todo_phases(
         prepared=prepared,
         tick_id="01CLIENT",
@@ -1039,7 +704,13 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     assert create_commands[2][create_commands[2].index("--parent") + 1] == (
         "t_00000001"
     )
-    assert "already rendered $body" in create_commands[1]
+    for index, identity in enumerate(("execution-one", "execution-two"), 1):
+        body = create_commands[index][create_commands[index].index("--body") + 1]
+        assert json.loads(body.splitlines()[0])["execution_id"] == identity
+        assert f"--execution {identity}" in body
+        assert "tpo-agent-supervisor run" in body
+        assert "already rendered $body" not in body
+        assert "second body" not in body
     assert "--max-runtime" not in create_commands[0]
     assert "--max-retries" not in create_commands[0]
     assert create_commands[1][create_commands[1].index("--max-runtime") + 1] == "2460"
@@ -1156,8 +827,8 @@ def test_create_prepared_blocks_until_registered_and_preserves_activation_order(
     )
 
     prepared = [
-        PreparedPhaseTask("phase_1", "One", "body", 5, False),
-        PreparedPhaseTask("phase_2", "Two", "body", 10, False),
+        PreparedPhaseTask("phase_1", "One", "body", 5, False, execution_id="test-execution"),
+        PreparedPhaseTask("phase_2", "Two", "body", 10, False, execution_id="test-execution"),
     ]
     events: list[str] = []
     create_commands: list[list[str]] = []
@@ -1402,7 +1073,7 @@ def test_sentinel_failure_retains_child_first_cleanup(tmp_path, mocker):
     with pytest.raises(RuntimeError, match="cleanup remains pending"):
         create_prepared_todo_phases(
             prepared=[
-                PreparedPhaseTask("phase_1", "One", "body", 5, False),
+                PreparedPhaseTask("phase_1", "One", "body", 5, False, execution_id="test-execution"),
             ],
             tick_id="01CLIENT",
             board_slug="demo",
@@ -1454,7 +1125,7 @@ def test_activation_order_expected_phase_write_failure_is_reported(
 
     with pytest.raises(RuntimeError, match="expected phases"):
         _persist_expected_phases(
-            [PreparedPhaseTask("phase_1", "One", "body", 5, False)],
+            [PreparedPhaseTask("phase_1", "One", "body", 5, False, execution_id="test-execution")],
             project_dir=tmp_path,
         )
 
@@ -3232,7 +2903,7 @@ def test_prepare_todo_phases_filters_spec_and_references_to_tracked_repository_f
             spec_path=".hidden/spec.md", reference_paths=references,
         )
 
-    body = prepared[0].body
+    body = prepared[0].rendered_prompt
     assert "Spec (authoritative)" not in body
     kept = [f"docs/ref-{i}.md" for i in range(10)]
     assert f"Reference material: {', '.join(kept)}\n" in body
@@ -3242,8 +2913,8 @@ def test_prepare_todo_phases_filters_spec_and_references_to_tracked_repository_f
     assert any("truncat" in m.lower() for m in messages)
 
 
-def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles(tmp_path):
-    """Every registered card is a worker, and every worker sees Spec/Reference (C9)."""
+def test_spec_and_references_render_in_every_pinned_prompt_across_shipped_profiles(tmp_path):
+    """Every external worker prompt carries the approved Spec/Reference (C9)."""
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
     from hermes_pipeline.phases import resolve_profile_phases_path
 
@@ -3270,8 +2941,8 @@ def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles
         rendered = render(profile)
         assert rendered
         for task in rendered:
-            assert marker in task.body, (profile, task.phase_key)
-            assert decisions_marker in task.body, (profile, task.phase_key)
+            assert marker in task.rendered_prompt, (profile, task.phase_key)
+            assert decisions_marker in task.rendered_prompt, (profile, task.phase_key)
         # The agent-skills gate phases register nothing at all.
         assert not any(
             task.phase_key in ("phase_1b_spec_gate", "phase_8_ship")
@@ -3279,10 +2950,11 @@ def test_spec_and_references_render_on_every_worker_card_across_shipped_profiles
         ), profile
 
     native = {task.phase_key: task for task in render("native-sdd")}
-    assert marker in native[IMPLEMENTATION_KEY].body
-    assert decisions_marker in native[IMPLEMENTATION_KEY].body
+    assert marker in native[IMPLEMENTATION_KEY].rendered_prompt
+    assert decisions_marker in native[IMPLEMENTATION_KEY].rendered_prompt
     assert not any(key.startswith("validate:") for key in native)
-    assert not any(key.startswith(("phase_5", "phase_8", "phase_9")) for key in native)
+    assert "phase_5_review" in native and "phase_8_finish_branch" in native
+    assert "phase_9_human_review" not in native
 
 
 def test_planned_phase_keys_are_exactly_the_cards_compilation_creates(tmp_path):
@@ -3381,15 +3053,13 @@ def test_contained_paths_drop_on_git_timeout(tmp_path, mocker, caplog):
 
 @pytest.mark.parametrize("prompt_client", ["codex", "claude"])
 @pytest.mark.parametrize("phase_key", [IMPLEMENTATION_KEY, "phase_1"])
-def test_implementation_card_publishes_the_result_metadata_template(
+def test_implementation_preparation_pins_the_result_metadata_template(
     tmp_path, prompt_client, phase_key
 ):
-    """The worker cannot satisfy the strict contract it is never shown.
+    """Pin the implementation contract separately from profile-controlled text.
 
-    This is the one profile phase whose result IS parsed -- the reviewed head is
-    anchored to it -- so it is the one profile phase that publishes a template,
-    and the template names every Plan task's criteria in Plan order, because one
-    card answers for all of them.
+    The supervisor receives the template and Plan criteria for validation; the
+    thin Hermes card never asks its worker to invent result evidence.
     """
     from hermes_pipeline.kanban_tasks import prepare_todo_phases
     from hermes_pipeline.result_contract import render_result_template
@@ -3399,6 +3069,7 @@ def test_implementation_card_publishes_the_result_metadata_template(
         "requires_plan: true\n"
         "phases:\n"
         f"  - phase_key: {phase_key}\n"
+        f"    role: {'implementation' if phase_key == IMPLEMENTATION_KEY else 'worker'}\n"
         "    name: Development\n"
         "    prompt: implement legacy plan\n"
         "    tools: Read,Write,Edit,Bash\n"
@@ -3425,35 +3096,14 @@ def test_implementation_card_publishes_the_result_metadata_template(
         project_dir=tmp_path,
     )
 
-    # The dispatcher closes the card, so the template it must copy is published
-    # on its side of the boundary -- never inside the delimited client prompt.
-    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
     template = render_result_template(
-        tick_id="01TICK",
-        todo_id="TODO-41",
-        step_key=IMPLEMENTATION_KEY,
+        tick_id="01TICK", todo_id="TODO-41", step_key=IMPLEMENTATION_KEY,
         acceptance_criteria=("First exact criterion.",),
     )
-    assert (template in dispatcher) == (phase_key == IMPLEMENTATION_KEY)
-    if phase_key == IMPLEMENTATION_KEY:
-        assert "metadata.tpo_result" in dispatcher
-        # "exactly, never paraphrase" must not override a stated substitution, or a
-        # defect-bearing review gets published as clean.
-        assert "substitution the template" in dispatcher
-    assert "use the external client's reported gate and test evidence" in dispatcher
-    assert "Do not re-run test, build, or install commands" in dispatcher
-    assert "do not modify the worktree while collecting result metadata" in dispatcher
-    assert "read-only Git observations" in dispatcher
-    assert "final clean-worktree check after all evidence collection" in dispatcher
-    assert "before completing the card" in dispatcher
-    assert "If required verification evidence is missing or the worktree is dirty" in dispatcher
-    assert 'kanban_block(kind="needs_input"' in dispatcher
-    assert "do not invent successful verification" in dispatcher
-    assert "do not clean up or commit the work yourself" in dispatcher
-    payload = prepared[0].body.partition("BEGIN EXTERNAL AGENT PROMPT\n")[2]
-    payload = payload.partition("END EXTERNAL AGENT PROMPT\n")[0]
-    assert payload.endswith("implement legacy plan\n")
-    assert "Do not re-run test, build, or install commands" not in payload
+    assert prepared[0].result_template == (template if phase_key == IMPLEMENTATION_KEY else None)
+    assert template not in prepared[0].body
+    assert template not in prepared[0].rendered_prompt
+    assert prepared[0].rendered_prompt.endswith("implement legacy plan")
 
 
 def test_profile_phase_prompt_cannot_claim_a_template_it_never_publishes(tmp_path):
@@ -3476,15 +3126,22 @@ def test_profile_phase_prompt_cannot_claim_a_template_it_never_publishes(tmp_pat
         phases_path=phases_path, prompt_client="codex", project_dir=tmp_path,
     )
 
-    dispatcher = prepared[0].body.split("BEGIN EXTERNAL AGENT PROMPT")[0]
-    assert "include the same result metadata" in dispatcher
-    assert "set `metadata.tpo_result` to exactly" not in dispatcher
+    assert prepared[0].result_template is None
+    assert RESULT_TEMPLATE_HEADING in prepared[0].rendered_prompt
+    assert RESULT_TEMPLATE_HEADING not in prepared[0].body
 
 
-def test_legacy_phase_delegation_block_keeps_its_generic_metadata_line(tmp_path):
-    from hermes_pipeline.kanban_tasks import _external_client_delegation_block
+def test_unbound_preparation_cannot_create_even_the_barrier(tmp_path, mocker):
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
 
-    block = _external_client_delegation_block("codex", timeout=1800, tools="")
-
-    assert "```json" not in block
-    assert "result metadata" in block
+    run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    with pytest.raises(RuntimeError, match="execution registration required"):
+        create_prepared_todo_phases(
+            prepared=[PreparedPhaseTask("phase_1", "One", "pending", 5)],
+            tick_id="01CLIENT", board_slug="demo", project_dir=tmp_path,
+        )
+    run.assert_not_called()
+    assert not (tmp_path / ".hermes").exists()

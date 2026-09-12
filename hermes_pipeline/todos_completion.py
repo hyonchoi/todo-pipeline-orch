@@ -6,10 +6,17 @@ import json
 import logging
 import re
 import subprocess
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Literal
 
 from . import github_issues
+from .authority_result import (
+    RunAuthorityBusy,
+    locked_run_authority,
+    require_accepted_review,
+    require_authorized_result,
+)
 from .github_issues import IN_PROGRESS_LABEL, parse_github_remote
 from .kanban_tasks import (
     _show_task_payload,
@@ -619,10 +626,35 @@ def reconcile_todo_completion(
     registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
     if getattr(registration, "manifest", object()) is None:
         return True
+    try:
+        with locked_run_authority(registration=registration, state_dir=state_dir, tick_id=tick_id):
+            return _reconcile_todo_completion_locked(
+                project_dir=project_dir, state_dir=state_dir, tenant=tenant,
+                tick_id=tick_id, repo=repo, registration=registration,
+            )
+    except RunAuthorityBusy:
+        return True
+    except ResultContractError as exc:
+        return _blocked(tick_id, exc.code)
+
+
+def _reconcile_todo_completion_locked(
+    *, project_dir: Path, state_dir: Path, tenant: str, tick_id: str, repo: str, registration,
+    allow_close: bool = True,
+) -> bool:
+    registration_path = state_dir / "runs" / tick_id / "registration.json"
     tasks = get_todo_kanban_tasks(tenant, tick_id)
 
-    finish = tasks.get(FINISH_KEY)
+    from .phase_schedule import role_key, validated_predecessor_head
+
+    modern = bool(getattr(registration, "phase_definitions", ()))
+    finish_key = role_key(registration, "delivery")
+    if finish_key is None:
+        return True
+    finish = tasks.get(finish_key)
     if finish is None:
+        if modern:
+            return True  # Only the ordered schedule may admit this worker.
         if _run_marker(state_dir, tick_id, "finish-verified").exists():
             return _blocked(tick_id, "verified_finish_missing")
         try:
@@ -632,6 +664,8 @@ def reconcile_todo_completion(
             head = _accepted_head(state_dir, tick_id)
         except ResultContractError:
             return True
+        require_accepted_review(registration=registration, state_dir=state_dir,
+                                tick_id=tick_id, accepted_head=head)
         _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo, create=True)
         phases_path, phase = profile_phase(registration, FINISH_PHASE_KEY)
         try:
@@ -649,7 +683,7 @@ def reconcile_todo_completion(
                 result_template=render_result_template(
                     tick_id=tick_id,
                     todo_id=registration.todo_id,
-                    step_key=FINISH_KEY,
+                    step_key=finish_key,
                     section="delivery",
                     branch=registration.branch,
                     allow_no_changes=True,
@@ -671,113 +705,139 @@ def reconcile_todo_completion(
     if finish.status != "done":
         return True
 
-    finish_verified = _run_marker(state_dir, tick_id, "finish-verified")
-    try:
-        payload = parse_worker_result(
-            _show_task_payload(finish.task_id), tick_id=tick_id,
-            todo_id=registration.todo_id, step_key=FINISH_KEY,
-            acceptance_criteria=(), allow_no_changes=True,
-        )
-        if payload.delivery is None or payload.delivery.branch != registration.branch:
-            raise ResultContractError("invalid_delivery")
-        accepted_head = _accepted_head(state_dir, tick_id)
-        _verify_finish(
-            registration.worktree, payload, accepted_head,
-            require_current=not finish_verified.exists(),
-        )
-        delivery = payload.delivery
-        if delivery.head_sha != payload.git.resulting_head_sha:
-            raise ResultContractError("delivery_head_mismatch")
-        authority = _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo)
-        if _github_identity(registration.worktree) != authority:
-            raise ResultContractError("delivery_authority_drift")
-        pr_match = re.fullmatch(r"https://github\.com/([^/]+/[^/]+)/pull/(\d+)", delivery.pr_url)
-        if pr_match is None or pr_match.group(1).lower() != repo.lower():
-            raise ResultContractError("pr_identity_mismatch")
-        pr_number = int(pr_match.group(2))
-        # Written last, only once every check above has passed. This marker is
-        # what relaxes ``require_current`` on the next tick, so writing it
-        # before ``delivery_head_mismatch``, ``delivery_authority_drift`` and
-        # ``pr_identity_mismatch`` were checked handed the weaker verification
-        # to the next tick on the strength of a tick that had FAILED delivery.
-        if not finish_verified.exists():
-            _atomic_write_text(finish_verified, accepted_head + "\n")
-    except ResultContractError as exc:
-        return _blocked(tick_id, exc.code)
+    with ExitStack() as result_guard:
+        finish_verified = _run_marker(state_dir, tick_id, "finish-verified")
+        try:
+            payload = parse_worker_result(
+                _show_task_payload(finish.task_id), tick_id=tick_id,
+                todo_id=registration.todo_id, step_key=finish_key,
+                acceptance_criteria=(), allow_no_changes=True,
+            )
+            result_guard.enter_context(require_authorized_result(
+                registration=registration, state_dir=state_dir, tick_id=tick_id,
+                step_key=finish_key, result=payload,
+            ))
+            if payload.delivery is None or payload.delivery.branch != registration.branch:
+                raise ResultContractError("invalid_delivery")
+            accepted_head = (validated_predecessor_head(registration, state_dir=state_dir,
+                                tick_id=tick_id, stop_key=finish_key) if modern
+                             else _accepted_head(state_dir, tick_id))
+            require_accepted_review(registration=registration, state_dir=state_dir,
+                                    tick_id=tick_id, accepted_head=accepted_head)
+            _verify_finish(
+                registration.worktree, payload, accepted_head,
+                require_current=not finish_verified.exists(),
+            )
+            delivery = payload.delivery
+            if delivery.head_sha != payload.git.resulting_head_sha:
+                raise ResultContractError("delivery_head_mismatch")
+            authority = _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo)
+            if _github_identity(registration.worktree) != authority:
+                raise ResultContractError("delivery_authority_drift")
+            pr_match = re.fullmatch(r"https://github\.com/([^/]+/[^/]+)/pull/(\d+)", delivery.pr_url)
+            if pr_match is None or pr_match.group(1).lower() != repo.lower():
+                raise ResultContractError("pr_identity_mismatch")
+            pr_number = int(pr_match.group(2))
+            # Written last, only once every check above has passed. This marker is
+            # what relaxes ``require_current`` on the next tick, so writing it
+            # before ``delivery_head_mismatch``, ``delivery_authority_drift`` and
+            # ``pr_identity_mismatch`` were checked handed the weaker verification
+            # to the next tick on the strength of a tick that had FAILED delivery.
+            if not finish_verified.exists():
+                _atomic_write_text(finish_verified, accepted_head + "\n")
+        except ResultContractError as exc:
+            return _blocked(tick_id, exc.code)
 
-    try:
-        view = _pr_view(registration.worktree, delivery.pr_url)
-        # Every judgement below -- merge state, head, `_check_state`, the issue
-        # close -- is measured on the PR `gh` actually answered with, so the
-        # echoed `url` must be the PR the delivery named. `_verify_pr_identity`
-        # does not cover it: it pins the branch, base and repository, all of
-        # which another pull request of the same repository shares.
-        if view.get("url") != delivery.pr_url:
-            raise ResultContractError("pr_identity_mismatch")
-        _verify_pr_identity(
-            registration.worktree, view, branch=registration.branch, repo=repo,
-        )
-        if view.get("state") != "MERGED" and (
-            view.get("state") != "OPEN" or view.get("headRefName") != registration.branch
-        ):
-            raise ResultContractError("pull_request_closed_or_drifted")
-        if view.get("headRefOid") != delivery.head_sha:
-            raise ResultContractError("pr_head_drift")
-        if view.get("state") == "OPEN" and (
-            _remote_head(registration.worktree, registration.branch) != delivery.head_sha
-        ):
-            raise ResultContractError("remote_head_drift")
-    except ResultContractError as exc:
-        return _blocked(tick_id, exc.code)
+        try:
+            view = _pr_view(registration.worktree, delivery.pr_url)
+            # Every judgement below -- merge state, head, `_check_state`, the issue
+            # close -- is measured on the PR `gh` actually answered with, so the
+            # echoed `url` must be the PR the delivery named. `_verify_pr_identity`
+            # does not cover it: it pins the branch, base and repository, all of
+            # which another pull request of the same repository shares.
+            if view.get("url") != delivery.pr_url:
+                raise ResultContractError("pr_identity_mismatch")
+            _verify_pr_identity(
+                registration.worktree, view, branch=registration.branch, repo=repo,
+            )
+            if view.get("state") != "MERGED" and (
+                view.get("state") != "OPEN" or view.get("headRefName") != registration.branch
+            ):
+                raise ResultContractError("pull_request_closed_or_drifted")
+            if view.get("headRefOid") != delivery.head_sha:
+                raise ResultContractError("pr_head_drift")
+            if view.get("state") == "OPEN" and (
+                _remote_head(registration.worktree, registration.branch) != delivery.head_sha
+            ):
+                raise ResultContractError("remote_head_drift")
+        except ResultContractError as exc:
+            return _blocked(tick_id, exc.code)
 
-    try:
-        checks = _check_state(
-            registration.worktree, delivery.pr_url,
-            repo=repo, head_sha=delivery.head_sha,
+        # The outer worktree lock still owns the transition. Release the
+        # delivery execution lock before the full chain opens that same lock.
+        result_guard.close()
+        sequence_done = not modern or all(tasks.get(key) is not None and tasks[key].status == "done"
+                                         for key in registration.step_keys)
+        if modern and sequence_done:
+            try:
+                final_head = validated_predecessor_head(registration, state_dir=state_dir, tick_id=tick_id)
+                if (final_head != delivery.head_sha
+                        or _git(registration.worktree, "rev-parse", "HEAD") != delivery.head_sha):
+                    return _blocked(tick_id, "delivery_head_mismatch")
+            except (ResultContractError, OSError, RuntimeError, ValueError, KeyError, IndexError):
+                return _blocked(tick_id, "supervisor_result_unconfirmed")
+
+        try:
+            checks = _check_state(
+                registration.worktree, delivery.pr_url,
+                repo=repo, head_sha=delivery.head_sha,
+            )
+        except ResultContractError as exc:
+            return _blocked(tick_id, exc.code)
+        if checks == "failed":
+            # Not "required_checks_failed": `gh pr checks` runs without `--required`,
+            # so this counts advisory checks too. Passing `--required` instead would
+            # be worse. gh 2.89.0 carries a SECOND format string for that mode,
+            # `no required checks reported on the '%s' branch`, so a repository with
+            # CI but no branch protection -- no check is marked required -- would get
+            # that message for every PR. It does not match the anchored
+            # `_NO_CHECKS_STDERR_PREFIX`, which is correct: `_check_state` would raise
+            # `checks_unavailable` immediately, never reaching corroboration, and
+            # delivery would stall forever, reinstating the wedge this was just
+            # fixed for. We measure every check and name what we measured.
+            return _blocked(tick_id, "pr_checks_failed")
+        if checks == "pending" or view.get("state") != "MERGED":
+            # A verified, open pull request waiting on a human merge is not a
+            # stall: keep the registration active until post-merge issue closeout.
+            return True
+
+        if not allow_close or not sequence_done:
+            return True
+
+        # A human merge can auto-close the issue before TPO observes it. Allow
+        # that state only here, after all finish, PR identity/head and CI checks.
+        # The default drift policy remains strict for execution and review.
+        try:
+            pinned = json.loads(registration_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return _blocked(tick_id, "registration_invalid")
+        if not isinstance(pinned, dict):
+            return _blocked(tick_id, "registration_invalid")
+        drift = github_issues.check_issue_drift(
+            project_dir, pinned, repo=repo, allow_closed=True,
         )
-    except ResultContractError as exc:
-        return _blocked(tick_id, exc.code)
-    if checks == "failed":
-        # Not "required_checks_failed": `gh pr checks` runs without `--required`,
-        # so this counts advisory checks too. Passing `--required` instead would
-        # be worse. gh 2.89.0 carries a SECOND format string for that mode,
-        # `no required checks reported on the '%s' branch`, so a repository with
-        # CI but no branch protection -- no check is marked required -- would get
-        # that message for every PR. It does not match the anchored
-        # `_NO_CHECKS_STDERR_PREFIX`, which is correct: `_check_state` would raise
-        # `checks_unavailable` immediately, never reaching corroboration, and
-        # delivery would stall forever, reinstating the wedge this was just
-        # fixed for. We measure every check and name what we measured.
-        return _blocked(tick_id, "pr_checks_failed")
-    if checks == "pending" or view.get("state") != "MERGED":
-        # A verified, open pull request waiting on a human merge is not a
-        # stall: keep the registration active until post-merge issue closeout.
+        if drift is not None:
+            return _blocked(tick_id, f"issue_drift:{drift}")
+
+        try:
+            close_issue_for_delivery(
+                project_dir=project_dir, state_dir=state_dir, tick_id=tick_id,
+                issue_number=registration.issue_number, pr_number=pr_number,
+                pr_url=delivery.pr_url, repo=repo,
+            )
+        except github_issues.GitHubIssuesError as exc:
+            return _blocked(tick_id, exc.code)
         return True
-
-    # A human merge can auto-close the issue before TPO observes it. Allow
-    # that state only here, after all finish, PR identity/head and CI checks.
-    # The default drift policy remains strict for execution and review.
-    try:
-        pinned = json.loads(registration_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
-        return _blocked(tick_id, "registration_invalid")
-    if not isinstance(pinned, dict):
-        return _blocked(tick_id, "registration_invalid")
-    drift = github_issues.check_issue_drift(
-        project_dir, pinned, repo=repo, allow_closed=True,
-    )
-    if drift is not None:
-        return _blocked(tick_id, f"issue_drift:{drift}")
-
-    try:
-        close_issue_for_delivery(
-            project_dir=project_dir, state_dir=state_dir, tick_id=tick_id,
-            issue_number=registration.issue_number, pr_number=pr_number,
-            pr_url=delivery.pr_url, repo=repo,
-        )
-    except github_issues.GitHubIssuesError as exc:
-        return _blocked(tick_id, exc.code)
-    return True
 
 
 COMPLETION_MARKER = "<!-- tpo-completed tick={tick_id} pr={pr_number} -->"

@@ -76,12 +76,22 @@ only when every listed skill is installed and discoverable by the worker.
 contracts have qualification evidence. `tpo doctor` fails closed with exit code
 2 when the selected profile contains an `Unverified` prerequisite, and `tpo tick`
 refuses to select or register work for that unsupported profile/client pair.
-Hermes-owned prerequisites are verified against the assigned Hermes profile's
-local skill registry; remote worker prerequisites remain operator-provisioned.
+Worker skill prerequisites remain operator-provisioned. Bundled profiles dispatch
+through the installed `tpo-agent-supervisor`; they do not require a Hermes coding
+agent skill. `native-sdd` has no external skill prerequisite. Its configured client
+and process identity capabilities must be available before launch. Linux
+requires `/proc` and pidfds; macOS requires `libproc` identity and audit-token
+signaling. Both platforms supervise only the directly launched client PID and
+use the same bounded cleanup contract. Client exit is treated as the end of its
+operations; its subprocesses remain the client's responsibility. No cgroup or
+systemd setup is required. Missing identity capabilities fail closed. Both clients
+and verification commands run without supervisor sandbox restrictions, as the
+invoking OS user. See the
+[platform prerequisites](docs/howto-agent-supervisor.md#client-and-platform-prerequisites)
+for client launch settings and pre-admission failures.
 
 | Profile | Referenced skill | Distribution owner | Claude discovery / invocation | Codex discovery / invocation | Support |
 |---|---|---|---|---|---|
-| `gstack` | `ai-coding-agents` | hermes | `Hermes skill registry` / `claude -p` | `Hermes skill registry` / `codex exec` | Conditional |
 | `gstack` | `autoplan` | gstack | `.claude/skills` / `/autoplan` | `.codex/skills` / `$autoplan` | Conditional |
 | `gstack` | `writing-plans` | superpowers | `~/.claude/plugins/cache/claude-plugins-official/superpowers/*/skills` / `/writing-plans` | `~/.config/codex/plugins/cache/openai-curated-remote/superpowers/*/skills` / `$superpowers:writing-plans` | Conditional |
 | `gstack` | `subagent-driven-development` | superpowers | `~/.claude/plugins/cache/claude-plugins-official/superpowers/*/skills` / `/subagent-driven-development` | `~/.config/codex/plugins/cache/openai-curated-remote/superpowers/*/skills` / `$superpowers:subagent-driven-development` | Conditional |
@@ -100,7 +110,6 @@ local skill registry; remote worker prerequisites remain operator-provisioned.
 | `agent-skills` | `agent-skills:security-and-hardening` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:security-auditor` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
 | `agent-skills` | `agent-skills:ship` | agent-skills plugin | Unverified external plugin mechanism | Unverified external plugin mechanism | Unverified |
-| `native-sdd` | `ai-coding-agents` | hermes | `Hermes skill registry` / `claude -p` | `Hermes skill registry` / `codex exec` | Conditional |
 
 See [optional agent client diagnostics](docs/release-qualification-agent-clients.md)
 for live checks of `Conditional` pairs. These are informational and do not gate
@@ -232,6 +241,7 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 | [Run a manual tick](docs/howto-pipeline-tick.md) | How-to | Running `tpo tick` for iterative development |
 | [Set up the pipeline profile](docs/howto-pipeline-profile.md) | How-to | Installing the dedicated pipeline Hermes profile |
 | [Debug ticks and recover runs](docs/howto-debugging-and-recovery.md) | How-to | Using `--verbose`, `--debug`, run markers, and issue-state recovery |
+| [Supervise external agents and recover work](docs/howto-agent-supervisor.md) | How-to | Registered execution, deadlines, checkpoint evidence, and operator retry |
 | [Handle phase 5 review outcomes](docs/howto-review-outcomes.md) | How-to | Inspecting review artifacts and reverted/timed-out reviews |
 
 ### Multi-project configuration

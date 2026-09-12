@@ -581,7 +581,7 @@ def test_tick_project_calls_maybe_ship_ready_before_early_return(mocker, tmp_pat
         project_slug="demo",
         project_state=tmp_path,
         tick_id="02NEXT",
-        config=mocker.Mock(slack_channel=None),
+        config=mocker.Mock(slack_channel=None, state_dir=tmp_path / "global-state"),
         cb_cfg=mocker.Mock(),
         project_toml={},
     )

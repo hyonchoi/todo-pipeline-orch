@@ -5,6 +5,8 @@ import hashlib
 import json
 import runpy
 import subprocess
+import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -137,7 +139,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         if argv[0] == "gh":
             return fake_gh(argv, **kwargs)
         if argv[:2] != ["hermes", "kanban"]:
-            assert argv[0] == "git", f"unexpected executable: {argv}"
+            assert argv[0] == "git" or Path(argv[0]).resolve() == Path("/usr/bin/git").resolve(), f"unexpected executable: {argv}"
             assert argv[1] not in {"push", "fetch", "pull", "clone", "ls-remote"}
             return real_run(argv, **kwargs)
         command = argv[2]
@@ -191,19 +193,45 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert registration.plan_hash == hashlib.sha256(GOLDEN.encode()).hexdigest()
     assert Path(registration.plan_reference.value).read_text() == GOLDEN
     assert registration.base_sha == base
-    assert json.loads(pinned)["schema_version"] == (4 if policy_mode == "delegated" else 3)
+    assert json.loads(pinned)["schema_version"] == 6
+    assert registration.step_keys == ("phase_4_development", "phase_5_review", "phase_8_finish_branch")
+    assert [p.role for p in registration.phase_definitions] == ["implementation", "review", "delivery", "worker"]
+    assert [json.loads(c["body"].splitlines()[0])["phase_key"] for c in cards
+            if "execution_id" in json.loads(c["body"].splitlines()[0])] == ["phase_4_development"]
     assert registration.agent_policy_mode == policy_mode
     current_mode[0] = "inherit" if policy_mode == "delegated" else "delegated"
     assert json.loads(pinned)["plan_path"] is None
     implementation = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == phases.IMPLEMENTATION_KEY)
-    assert registration.plan_reference.value in implementation["body"]
+    from hermes_pipeline.agent_execution import ExecutionStore
+
+    executions = ExecutionStore(state / "agent-executions")
+    def pinned_prompt(card):
+        header = json.loads(card["body"].splitlines()[0])
+        record = executions.load(header["execution_id"])
+        prompt_bytes = executions.prompt(header["execution_id"])
+        assert hashlib.sha256(prompt_bytes).hexdigest() == record["registration"]["prompt_sha256"]
+        assert record["registration"]["client"]["name"] == client
+        assert record["registration"]["plan_identity"] == registration.plan_hash
+        assert "BEGIN EXTERNAL AGENT PROMPT" not in card["body"]
+        assert "tpo-agent-supervisor" in card["body"]
+        return prompt_bytes.decode("utf-8")
+
+    implementation_prompt = pinned_prompt(implementation)
+    assert registration.plan_reference.value in implementation_prompt
     assert cli.main(["tick", "sandbox"]) == 0
     assert registration_file.read_bytes() == pinned
     assert remote["body"] == published
+    assert pinned_prompt(implementation) == implementation_prompt
     assert _git(project, "rev-parse", "HEAD") == base
     assert _git(project, "ls-files") == ".gitignore\nREADME.md"
 
     def worker_result(card, parent, head, *, changed=(), acceptance=(), delivery=None):
+        from hermes_pipeline import _agent_supervisor as supervisor
+        from hermes_pipeline.agent_checkpoint import ProgressJournal
+
+        identity = json.loads(card["body"].splitlines()[0])["execution_id"]
+        record, admitted = executions.admit(identity)
+        assert admitted
         value = {
             "schema_version": 1, "tick_id": tick, "todo_id": "TODO-42",
             "step_key": json.loads(card["body"].splitlines()[0])["phase_key"],
@@ -214,6 +242,45 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         }
         if delivery is not None:
             value["delivery"] = delivery
+
+        # Simulate the client and reviewer boundary, retaining real supervisor
+        # receipt, checkpoint, and result validation against the committed Git tree.
+        if record["registration"]["manifest"] is not None:
+            check = tmp_path / "verify_normalize.py"
+            check.write_text(
+                "import runpy\n"
+                "normalize = runpy.run_path('mock_transform.py')['normalize_names']\n"
+                "assert normalize([' Alice ', '', 'BOB']) == ['alice', 'bob']\n"
+                "assert normalize([' b ', '\\t', 'A']) == ['b', 'a']\n"
+                "assert normalize([]) == []\n"
+            )
+            argv = [sys.executable, str(check)]
+            checked = real_run(argv, cwd=registration.worktree, check=True,
+                               capture_output=True, text=True, timeout=10)
+            assert _git(registration.worktree, "status", "--porcelain") == ""
+            progress = ProgressJournal(executions, identity)
+            task_id = registration.manifest.tasks[0].id
+            progress.record_receipt(1, task_id, head, kind="verification", evidence={
+                "checks": [{"argv": argv, "exit_code": checked.returncode}]})
+            progress.record_receipt(1, task_id, head, kind="review", evidence={
+                "reviewer": "fixture-review-stub", "receipt_id": "fixture-review-1",
+                "outcome": "accepted"})
+            checkpoint = progress.staging_directory(1) / "checkpoint.json"
+            checkpoint.write_text(json.dumps({
+                "version": 1, "execution_id": identity, "generation": 1,
+                "plan_identity": registration.plan_hash, "task_id": task_id,
+                "commit": head,
+            }))
+            progress.promote(1, checkpoint.name)
+        stage = supervisor.staging_directory(executions, identity, 1)
+        stage.mkdir(parents=True, exist_ok=True)
+        (stage / "result.json").write_text(json.dumps(value))
+        assert supervisor.validated_result(
+            executions, identity, 1, promote=True,
+            deadline_monotonic=time.monotonic() + 10,
+        ) == value
+        executions.update_attempt(identity, 1, status="exited", exit_code=0,
+                                  cleanup="confirmed")
         card["status"] = "done"
         card["runs"] = [{"status": "succeeded", "metadata": {"tpo_result": value}}]
 
@@ -231,21 +298,21 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     worker_result(implementation, base, head, changed=("mock_transform.py",),
                   acceptance=registration.manifest.tasks[0].acceptance_criteria)
     assert cli.main(["tick", "sandbox"]) == 0
-    review = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "review:0")
+    review = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "phase_5_review")
     if review_fix == "blocked":
         # Model the dispatcher's needs_input card after its client exits 17.
         # This checks TPO attribution, not that live Hermes honors the contract.
         review["status"] = "blocked"
         review["runs"] = [{"status": "failed", "metadata": {"external_agent_exit_code": 17}}]
         assert cli.main(["tick", "sandbox"]) == 0
-        workers = [c for c in cards if "BEGIN EXTERNAL AGENT PROMPT" in c["body"]]
+        workers = [c for c in cards if "execution_id" in json.loads(c["body"].splitlines()[0])]
         assert workers == [implementation, review]
         assert not (registration_file.parent / "accepted-review-head").exists()
         assert registration_file.read_bytes() == pinned
         outcomes = [json.loads(line) for line in (state / "outcomes" / f"{tick}-phases.json").read_text().splitlines()]
-        assert any(o["outcome"] == "failed_at_phase_review:0" for o in outcomes)
+        assert any(o["outcome"] == "failed_at_phase_phase_5_review" for o in outcomes)
         assert not any("finish" in o["outcome"] or "human" in o["outcome"] for o in outcomes)
-        _, _, worker_prompt = review["body"].partition("BEGIN EXTERNAL AGENT PROMPT\n")
+        worker_prompt = pinned_prompt(review)
         assert worker_prompt.startswith("AGENT-POLICY-MODE: delegated\n\n")
         return
     reviewed_parent = head
@@ -258,16 +325,16 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
         changed_files = ("review.txt",)
     worker_result(review, reviewed_parent, head, changed=changed_files)
     assert cli.main(["tick", "sandbox"]) == 0
-    finish = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "finish")
-    assert registration.plan_reference.value in review["body"]
-    assert registration.plan_reference.value in finish["body"]
+    finish = next(c for c in cards if json.loads(c["body"].splitlines()[0]).get("phase_key") == "phase_8_finish_branch")
+    assert registration.plan_reference.value in pinned_prompt(review)
+    assert registration.plan_reference.value in pinned_prompt(finish)
     workers = [implementation, review, finish]
     for worker in workers:
-        dispatcher, _, worker_prompt = worker["body"].partition("BEGIN EXTERNAL AGENT PROMPT\n")
+        dispatcher, worker_prompt = worker["body"], pinned_prompt(worker)
         assert "AGENT-POLICY-MODE" not in dispatcher
         assert worker_prompt.startswith("AGENT-POLICY-MODE: delegated\n\n") == (policy_mode == "delegated")
     # The controller barrier gets no payload; no human-gate or remediation worker exists.
-    assert all(c in workers or "BEGIN EXTERNAL AGENT PROMPT" not in c["body"] for c in cards)
+    assert all(c in workers or "execution_id" not in json.loads(c["body"].splitlines()[0]) for c in cards)
     assert registration_file.read_bytes() == pinned
 
     pr_url = f"https://github.com/{REPO}/pull/17"
@@ -302,6 +369,7 @@ def test_real_cli_pins_harness_embedded_plan_across_ticks(
     assert (registration_file.parent / "issue-closed").exists()
     assert cli.main(["todos", "complete", "sandbox", "--todo", "42", "--pr", "17"]) == 0
     assert remote["body"] == published
+    assert pinned_prompt(implementation) == implementation_prompt
     assert registration_file.read_bytes() == pinned
     assert Path(registration.plan_reference.value).read_bytes() == GOLDEN.encode()
     assert _git(project, "ls-files") == ".gitignore\nREADME.md"

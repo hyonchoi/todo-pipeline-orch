@@ -25,7 +25,10 @@ def _register_todo_phases(**kwargs):
 
     assignee = kwargs.pop("assignee", "default")
     cancel_event = kwargs.pop("cancel_event", None)
-    prepared = prepare_todo_phases(**kwargs)
+    from dataclasses import replace
+
+    # These tests isolate legacy Hermes output parsing after registration.
+    prepared = [replace(phase, execution_id="registered-phase") for phase in prepare_todo_phases(**kwargs)]
     return create_prepared_todo_phases(
         prepared=prepared,
         tick_id=kwargs["tick_id"],

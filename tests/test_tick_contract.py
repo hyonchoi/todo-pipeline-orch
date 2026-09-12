@@ -75,6 +75,17 @@ def _run_project_tick(
     patch_registration=True,
     picked="TODO-10",
 ):
+    # These orchestration tests substitute registration/preparation; keep their
+    # boundary stub valid without making malformed fixtures reach the supervisor.
+    from unittest.mock import Mock
+
+    from hermes_pipeline import kanban_tasks
+
+    if patch_registration or isinstance(kanban_tasks.prepare_todo_phases, Mock):
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.bind_prepared_executions",
+            side_effect=lambda prepared, **kwargs: prepared,
+        )
     cb = mocker.Mock()
     mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=cb)
     selection = mocker.patch(
@@ -175,6 +186,14 @@ def test_tick_sha_mismatch_uses_resolved_optional_slack_channel(
 
 
 class TestTickContractAssignee:
+    @pytest.fixture(autouse=True)
+    def stub_execution_binding(self, mocker):
+        """Assignee routing mocks process/registration state at the CLI boundary."""
+        mocker.patch(
+            "hermes_pipeline.kanban_tasks.bind_prepared_executions",
+            side_effect=lambda prepared, **kwargs: prepared,
+        )
+
     def test_tick_uses_contract_assignee(self, tmp_path, mocker):
         """create_prepared_todo_phases is called with the contract's assignee."""
         mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
@@ -887,7 +906,10 @@ class TestTickPlanRequirement:
         project_state.mkdir()
         self._configure_profile(project_dir, tmp_path, mocker)
         (project_dir / "docs").mkdir()
-        (project_dir / "docs" / "plan.md").write_text(MANIFEST_PLAN)  # no git repo at all
+        (project_dir / "docs" / "plan.md").write_text(MANIFEST_PLAN)
+        # An empty repository prevents discovery of the enclosing checkout when
+        # pytest's temporary directory is inside the implementation worktree.
+        subprocess.run(["git", "init", "-q", str(project_dir)], check=True, capture_output=True)
         seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=PLAN_BODY)])
         create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases")
 
@@ -1969,6 +1991,5 @@ def test_legacy_registration_retry_publishes_pinned_policy(tmp_path, mocker, fak
                       tick_id="01PINNEDRETRY", mocker=mocker, registration_side_effect=retry)
     assert len(observed) == 1
     create.assert_called_once()
-    body = create.call_args.kwargs["prepared"][0].body
-    _, _, prompt = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
+    prompt = create.call_args.kwargs["prepared"][0].rendered_prompt
     assert prompt.startswith("AGENT-POLICY-MODE: delegated\n\n") == (original == "delegated")

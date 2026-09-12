@@ -1189,9 +1189,77 @@ def _clear_pr_handoff_state(state_dir: Path) -> None:
             log.warning("failed to clear completed PR handoff marker %s: %s", path, e)
 
 
-def _status_map_has_successful_pr_handoff(status_map: dict[str, str]) -> bool:
-    """True only after the default finish-branch phase completed successfully."""
-    return status_map.get("phase_8_finish_branch") == "done"
+def _pr_handoff_authority(
+    project_dir: Path, state_dir: Path, tick_id: str, status_map: dict[str, str],
+    *, registration=None,
+) -> tuple[str | None, str | None]:
+    """Read the delivery key and branch from the run's persisted authority."""
+    from .phase_schedule import role_key
+
+    if registration is None and (state_dir / "runs" / tick_id / "registration.json").exists():
+        from .result_contract import load_validated_registration
+
+        registration = load_validated_registration(project_dir, state_dir, tick_id)
+    if registration is not None:
+        if getattr(registration, "phase_definitions", ()):
+            return role_key(registration, "delivery"), registration.branch
+        if getattr(registration, "manifest", None) is not None:
+            return "finish", registration.branch
+        # Manifest-free registrations predate roles and retain their static
+        # profile keys; they never used the manifest review/finish aliases.
+        legacy_keys = registration.step_keys
+        branch = registration.branch
+    else:
+        from ._agent_supervisor import execution_id
+        from .agent_authority import profile_root
+        from .agent_execution import ExecutionError, ExecutionStore
+
+        root = profile_root(project_dir)
+        store = ExecutionStore(root)
+        records = []
+        for key in status_map:
+            identity = execution_id(tick_id, key)
+            directory = root / identity
+            if not directory.exists() and not directory.is_symlink():
+                continue
+            pinned = store.load(identity)["registration"]
+            contract = pinned["result_contract"]
+            if (
+                pinned["registration_id"] != tick_id or pinned["phase"] != key
+                or contract.get("kind") != "profile"
+                or contract.get("tick_id") != tick_id or contract.get("phase") != key
+                or contract.get("project_dir") != str(project_dir.resolve())
+                or contract.get("state_dir") != str(state_dir.resolve())
+            ):
+                raise ExecutionError("handoff_execution_identity_mismatch")
+            records.append((key, pinned))
+        if records:
+            if len(records) != len(status_map):
+                raise ExecutionError("handoff_execution_authority_missing")
+            branches = {pinned["branch"] for _, pinned in records}
+            if len(branches) != 1:
+                raise ExecutionError("handoff_execution_branch_mismatch")
+            branch = branches.pop()
+            modern = [pinned["result_contract"].get("phase_role") for _, pinned in records]
+            if any(role is not None for role in modern):
+                if any(role not in {"worker", "implementation", "review", "delivery"} for role in modern):
+                    raise ExecutionError("handoff_execution_role_invalid")
+                deliveries = [key for (key, _), role in zip(records, modern) if role == "delivery"]
+                if len(deliveries) > 1:
+                    raise ExecutionError("handoff_execution_delivery_ambiguous")
+                return next(iter(deliveries), None), branch
+        else:
+            branch = None
+        legacy_keys = status_map
+    delivery = next((key for key in ("phase_8_finish_branch", "phase_7_ship") if key in legacy_keys), None)
+    return delivery, branch
+
+
+def _status_map_has_successful_pr_handoff(
+    status_map: dict[str, str], delivery_key: str | None = "phase_8_finish_branch"
+) -> bool:
+    """Recognize successful completion of the actual delivery worker."""
+    return delivery_key is not None and status_map.get(delivery_key) == "done"
 
 
 def _historical_legacy_execution_complete(
@@ -1217,8 +1285,11 @@ def _historical_legacy_execution_complete(
             or any(status not in COMPLETION_STATUSES for status in statuses.values())
         ):
             return False
-        if _status_map_has_successful_pr_handoff(statuses):
-            view = ship.gh_pr_view(registration.branch, cwd=project_dir)
+        delivery_key, branch = _pr_handoff_authority(
+            project_dir, state_dir, tick_id, statuses, registration=registration
+        )
+        if _status_map_has_successful_pr_handoff(statuses, delivery_key):
+            view = ship.gh_pr_view(branch, cwd=project_dir)
             return (
                 isinstance(view, dict)
                 and view.get("headRefName") == registration.branch
@@ -1750,6 +1821,9 @@ def _tick_project(
     Note:
         The caller holds this project's TickLock for the duration of this call.
     """
+    import hashlib
+
+    from ._agent_supervisor import sweep
     from .contract import (
         CONTRACT_SCHEMA_VERSION,
         LEGACY_IMPLICIT_PROFILE,
@@ -1763,89 +1837,14 @@ def _tick_project(
         missing_capabilities,
         required_capabilities,
     )
-    from .phases import (
-        load_phase_profile,
-        load_profile_prerequisites,
-        resolve_profile_phases_path,
+    execution_roots = (
+        project_state / "agent-executions",
+        config.state_dir / "agent-executions" / hashlib.sha256(os.fsencode(project_dir.resolve())).hexdigest(),
     )
-
-    try:
-        contract = load_contract(project_state)
-        phases_path = resolve_profile_phases_path(contract.profile)
-        phase_profile = load_phase_profile(phases_path)
-        phases = list(phase_profile.phases)
-        prerequisites = load_profile_prerequisites(contract.profile)
-        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
-            log.warning("project %s: %s", project_slug, notice)
-    except ContractMissingError:
-        # A contract-less project keeps resolving to the legacy implicit
-        # profile — same as a contract that omits `profile` — regardless of
-        # what `tpo init` now writes for new projects. Passed explicitly so a
-        # change to PipelineContract.profile's default can't migrate an
-        # existing project's phases underneath it.
-        # Auto-compute capabilities from phases.yaml so a fresh project
-        # doesn't break when a future phase requires a tool not in the
-        # hardcoded DEFAULT_CAPABILITIES tuple.
-        phases_path = resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE)
-        phase_profile = load_phase_profile(phases_path)
-        phases = list(phase_profile.phases)
-        prerequisites = load_profile_prerequisites(LEGACY_IMPLICIT_PROFILE)
-        contract = PipelineContract(
-            schema_version=CONTRACT_SCHEMA_VERSION,
-            assignee="pipeline",
-            capabilities=tuple(sorted(required_capabilities(phases))),
-            profile=LEGACY_IMPLICIT_PROFILE,
-            # No contract declares nothing, so the profile is as implicit as it
-            # gets: this is the population ADR-0004 most needs to reach with the
-            # migration hint, and the default (declared) would silence it.
-            profile_declared=False,
-        )
-        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
-            log.warning("project %s: %s", project_slug, notice)
-        try:
-            result = _cli_sp.run(
-                ["hermes", "profile", "show", contract.assignee],
-                capture_output=True,
-                text=True,
-                timeout=10,
-                check=False,
-            )
-            profile_rc = result.returncode
-        except FileNotFoundError:
-            profile_rc = 127
-        if profile_rc != 0:
-            log.warning(
-                "project %s has no pipeline contract at %s; falling back to "
-                "assignee='pipeline', but `hermes profile show pipeline` failed "
-                "(rc=%d). Run `tpo install-profile`, then `tpo init %s --assignee pipeline`.",
-                project_slug,
-                contract_path(project_state),
-                profile_rc,
-                project_slug,
-            )
-    except (ContractSchemaError, ContractVersionMismatchError) as e:
-        log.error(
-            "project %s: pipeline contract invalid: %s — run `tpo doctor %s` for details",
-            project_slug,
-            e,
-            project_slug,
-        )
-        raise
-
-    missing = missing_capabilities(contract, phases)
-    if missing:
-        log.error(
-            "project %s: pipeline contract at %s is missing capabilities %s required by "
-            "phases.yaml — edit the contract to add them, or run `tpo doctor %s` for details",
-            project_slug,
-            contract_path(project_state),
-            sorted(missing),
-            project_slug,
-        )
-        raise CapabilityMismatchError(
-            f"contract missing capabilities: {sorted(missing)}"
-        )
-
+    for execution_root in execution_roots:
+        for report in sweep(execution_root):
+            if report["status"] in {"running_detached", "cleanup_unconfirmed", "lock_unconfirmed", "interrupted"}:
+                log.warning("project %s: execution %s %s", project_slug, report["execution_id"], report["status"])
     from .kanban_tasks import reconcile_pending_task_create
 
     if not reconcile_pending_task_create(project_dir):
@@ -1854,22 +1853,6 @@ def _tick_project(
             project_slug,
         )
         return
-
-    unverified = _unverified_prerequisite_ids(prerequisites, config.prompt_client)
-    if unverified:
-        log.error(
-            "project %s: profile '%s' has Unverified prerequisites for prompt "
-            "client '%s': %s — run `tpo doctor %s` for details",
-            project_slug,
-            contract.profile,
-            config.prompt_client,
-            ", ".join(unverified),
-            project_slug,
-        )
-        raise RuntimeError(
-            f"profile '{contract.profile}' has Unverified prerequisites for "
-            f"prompt client '{config.prompt_client}': {', '.join(unverified)}"
-        )
 
     from .project_config import _resolve_slack_channel
 
@@ -2135,12 +2118,17 @@ def _tick_project(
                 tick_id=prior_tick_id,
                 status_map=status_map,
             )
+            delivery_key, handoff_branch = (None, None)
+            if not pr_handoff_resolved:
+                delivery_key, handoff_branch = _pr_handoff_authority(
+                    project_dir, project_state, prior_tick_id, status_map
+                )
             if (
                 not pr_handoff_resolved
-                and _status_map_has_successful_pr_handoff(status_map)
+                and _status_map_has_successful_pr_handoff(status_map, delivery_key)
             ):
                 pending, counts_as_no_progress = _has_pending_pr_handoff(
-                    project_dir, project_state
+                    project_dir, project_state, work_branch=handoff_branch,
                 )
                 if pending:
                     cb.observe(
@@ -2190,6 +2178,106 @@ def _tick_project(
         log.warning("project %s: %s; resolve or abandon before selection", project_slug, detail)
         cb.observe(picked=None, counts_as_no_progress=True, detail=detail)
         return
+
+    # Live profile configuration governs new selections; resumed executions use their pins.
+    from .phases import (
+        load_phase_profile,
+        load_profile_prerequisites,
+        resolve_profile_phases_path,
+    )
+
+    try:
+        contract = load_contract(project_state)
+        phases_path = resolve_profile_phases_path(contract.profile)
+        phase_profile = load_phase_profile(phases_path)
+        phases = list(phase_profile.phases)
+        prerequisites = load_profile_prerequisites(contract.profile)
+        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
+            log.warning("project %s: %s", project_slug, notice)
+    except ContractMissingError:
+        # A contract-less project keeps resolving to the legacy implicit
+        # profile — same as a contract that omits `profile` — regardless of
+        # what `tpo init` now writes for new projects. Passed explicitly so a
+        # change to PipelineContract.profile's default can't migrate an
+        # existing project's phases underneath it.
+        # Auto-compute capabilities from phases.yaml so a fresh project
+        # doesn't break when a future phase requires a tool not in the
+        # hardcoded DEFAULT_CAPABILITIES tuple.
+        phases_path = resolve_profile_phases_path(LEGACY_IMPLICIT_PROFILE)
+        phase_profile = load_phase_profile(phases_path)
+        phases = list(phase_profile.phases)
+        prerequisites = load_profile_prerequisites(LEGACY_IMPLICIT_PROFILE)
+        contract = PipelineContract(
+            schema_version=CONTRACT_SCHEMA_VERSION,
+            assignee="pipeline",
+            capabilities=tuple(sorted(required_capabilities(phases))),
+            profile=LEGACY_IMPLICIT_PROFILE,
+            # No contract declares nothing, so the profile is as implicit as it
+            # gets: this is the population ADR-0004 most needs to reach with the
+            # migration hint, and the default (declared) would silence it.
+            profile_declared=False,
+        )
+        for notice in _profile_deprecation_notices(contract, phase_profile, project_slug):
+            log.warning("project %s: %s", project_slug, notice)
+        try:
+            result = _cli_sp.run(
+                ["hermes", "profile", "show", contract.assignee],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            profile_rc = result.returncode
+        except FileNotFoundError:
+            profile_rc = 127
+        if profile_rc != 0:
+            log.warning(
+                "project %s has no pipeline contract at %s; falling back to "
+                "assignee='pipeline', but `hermes profile show pipeline` failed "
+                "(rc=%d). Run `tpo install-profile`, then `tpo init %s --assignee pipeline`.",
+                project_slug,
+                contract_path(project_state),
+                profile_rc,
+                project_slug,
+            )
+    except (ContractSchemaError, ContractVersionMismatchError) as e:
+        log.error(
+            "project %s: pipeline contract invalid: %s — run `tpo doctor %s` for details",
+            project_slug,
+            e,
+            project_slug,
+        )
+        raise
+
+    missing = missing_capabilities(contract, phases)
+    if missing:
+        log.error(
+            "project %s: pipeline contract at %s is missing capabilities %s required by "
+            "phases.yaml — edit the contract to add them, or run `tpo doctor %s` for details",
+            project_slug,
+            contract_path(project_state),
+            sorted(missing),
+            project_slug,
+        )
+        raise CapabilityMismatchError(
+            f"contract missing capabilities: {sorted(missing)}"
+        )
+
+    unverified = _unverified_prerequisite_ids(prerequisites, config.prompt_client)
+    if unverified:
+        log.error(
+            "project %s: profile '%s' has Unverified prerequisites for prompt "
+            "client '%s': %s — run `tpo doctor %s` for details",
+            project_slug,
+            contract.profile,
+            config.prompt_client,
+            ", ".join(unverified),
+            project_slug,
+        )
+        raise RuntimeError(
+            f"profile '{contract.profile}' has Unverified prerequisites for "
+            f"prompt client '{config.prompt_client}': {', '.join(unverified)}"
+        )
 
     # Step 3: Build context & run selection. GitHub Issues are the sole TODO source.
     from .decision.context import build_in_flight, fetch_kanban_snapshot
@@ -2389,6 +2477,7 @@ def _tick_project(
                 agent_policy_mode=config.agent_policy_mode,
                 review_assignee=getattr(contract, "review_assignee", None),
                 step_keys=planned_phase_keys(phases_path, plan_source),
+                phase_definitions=phase_profile.phases,
             )
             validated = load_validated_registration(project_dir, project_state, tick_id, repo=repo)
             plan_source = validated.plan_source
@@ -2413,6 +2502,7 @@ def _tick_project(
             tick_id=tick_id,
             board_slug=project_slug,
             phases_path=phases_path,
+            phase_definitions=getattr(registration, "phase_definitions", ()) or phase_profile.phases,
             prompt_client=config.prompt_client,
             profile_name=getattr(registration, "profile", contract.profile),
             agent_policy_mode=(
@@ -2448,6 +2538,9 @@ def _tick_project(
         )
         return
 
+    if registration is not None and not getattr(registration, "phase_definitions", ()):
+        prepared = [phase for phase in prepared if phase.phase_key in registration.step_keys]
+
     if registration is not None and tuple(phase.phase_key for phase in prepared) != registration.step_keys:
         _abandon_run_if_registered(project_state, tick_id, "phase_key_drift")
         _record_failed_to_spawn(
@@ -2474,6 +2567,7 @@ def _tick_project(
                 assignee=contract.assignee,
                 review_assignee=getattr(contract, "review_assignee", None),
                 step_keys=(phase.phase_key for phase in prepared),
+                phase_definitions=phase_profile.phases,
             )
         except RunRegistrationError as exc:
             _record_failed_to_spawn(
@@ -2515,6 +2609,22 @@ def _tick_project(
             log.error("project %s: phase prompt preparation failed: error_type=%s",
                       project_slug, type(exc).__name__)
             return
+
+    try:
+        from .kanban_tasks import bind_prepared_executions
+
+        prepared = bind_prepared_executions(
+            prepared, project_dir=project_dir, state_dir=project_state,
+            root=execution_roots[0] if registration else execution_roots[1],
+            tick_id=tick_id, worktree=registration.worktree if registration else project_dir,
+            todo_id=picked,
+        )
+    except (ValueError, RuntimeError, OSError) as exc:
+        _abandon_run_if_registered(project_state, tick_id, "supervisor_registration_failed")
+        _record_failed_to_spawn(project_state, tick_id, picked, exc, reason="supervisor_registration_failed")
+        cb.observe(picked=None, counts_as_no_progress=True)
+        log.error("project %s: supervisor registration failed: error_type=%s", project_slug, type(exc).__name__)
+        return
 
     # Step 5: Persist immediately before the first Hermes mutation. The
     # tick_started sentinel preserves the existing registration-crash recovery.
@@ -3358,6 +3468,16 @@ def _cmd_doctor(args, config: Config) -> int:
         requires_plan=phase_profile.requires_plan,
         profile=contract.profile,
     )
+
+    import hashlib
+
+    from ._agent_supervisor import diagnostics
+    for root in (
+        project_state / "agent-executions",
+        config.state_dir / "agent-executions" / hashlib.sha256(os.fsencode(project_dir.resolve())).hexdigest(),
+    ):
+        for report in diagnostics(root):
+            print(f"Execution {report['execution_id']}: {report['status']}")
 
     if not _doctor_active_registration(project_dir, project_state) or not github_ok:
         return 1

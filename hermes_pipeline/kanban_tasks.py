@@ -13,9 +13,10 @@ import re
 import subprocess
 from collections.abc import Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .authority_result import require_authorized_result
 from .config import PromptClient
 from .outcomes import (
     OUTCOME_ALL_COMPLETE,
@@ -23,14 +24,12 @@ from .outcomes import (
     OUTCOME_PICKED_NONE,
 )
 from .phases import (
-    CLIENT_VOCABULARY,
     IMPLEMENTATION_KEY,
     _render_phase_prompt,
     load_phase_profile,
     load_phases,
 )
 from .result_contract import (
-    RESULT_TEMPLATE_HEADING,
     manifest_acceptance_criteria,
     render_result_template,
 )
@@ -115,6 +114,12 @@ class PreparedPhaseTask:
     body: str
     turns: int
     timeout: int = 1800
+    rendered_prompt: str = ""
+    prompt_client: str = "claude"
+    tools: str = ""
+    result_template: str | None = None
+    execution_id: str | None = None
+    phase_role: str = "worker"
 
 
 @dataclass(frozen=True)
@@ -144,193 +149,6 @@ class PendingBarrierCommit:
     tick_id: str
     barrier_task_id: str
     cleanup_task_ids: tuple[str, ...]
-
-
-def _external_client_delegation_block(
-    prompt_client: PromptClient,
-    timeout: int,
-    tools: str,
-    result_template: str | None = None,
-) -> str:
-    """Return the dispatcher contract prepended to executable phase tasks.
-
-    ``result_template`` is the rendered ``metadata.tpo_result`` template, and it
-    is published here rather than inside the delimited prompt below: the
-    dispatcher is the party that closes the card, so the schema and its
-    instructions are addressed to it. The delimited block stays exactly the
-    phase profile's or Plan task's own words, which is what the external client
-    is asked to execute. Passing ``None`` publishes no template, and the
-    dispatcher is told only to carry the same result metadata forward.
-    """
-    launch_setup = ""
-    launch_guidance = ""
-    if prompt_client == "codex":
-        # ``codex exec [PROMPT]``: "If not provided as an argument (or if `-`
-        # is used), instructions are read from stdin." ``-`` is given
-        # explicitly because a prompt argument *plus* piped stdin makes Codex
-        # append the stdin as a separate ``<stdin>`` block instead.
-        command = (
-            "codex exec -c 'approval_policy=\"never\"' "
-            "-c 'default_permissions=\"tpo-worktree\"' "
-            '-c "$TPO_CODEX_PERMISSIONS" -'
-        )
-        launch_setup = (
-            'TPO_CODEX_PERMISSIONS="$(python3 - <<\'TPO_CODEX_PERMISSIONS_PY\'\n'
-            'import json\n'
-            'import os\n'
-            'import subprocess\n'
-            'import sys\n'
-            'import tomllib\n'
-            '\n'
-            'try:\n'
-            '    directories = []\n'
-            '    for option in ("--git-common-dir", "--absolute-git-dir"):\n'
-            '        result = subprocess.run(\n'
-            '            ["git", "rev-parse", "--path-format=absolute", option],\n'
-            '            check=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10,\n'
-            '        )\n'
-            '        directory = os.fsdecode(result.stdout.removesuffix(b"\\n"))\n'
-            '        if not os.path.isabs(directory) or not os.path.isdir(directory):\n'
-            '            raise ValueError("Invalid Git metadata directory")\n'
-            '        directories.append(directory)\n'
-            '    # JSON basic-string escapes are TOML-compatible, except literal DEL.\n'
-            '    grants = ",".join(\n'
-            '        json.dumps(directory, ensure_ascii=False).replace("\\x7f", "\\\\u007f") + \'= "write"\'\n'
-            '        for directory in dict.fromkeys(directories)\n'
-            '    )\n'
-            '    override = (\n'
-            '        \'permissions.tpo-worktree={extends=":workspace",filesystem={\'\n'
-            "        + grants + '},network={enabled=true}}'\n"
-            '    )\n'
-            '    tomllib.loads(override)\n'
-            '    override.encode("utf-8")\n'
-            'except Exception:\n'
-            '    sys.exit("Cannot resolve or encode Git metadata permissions; Codex was not launched.")\n'
-            'print(override)\n'
-            'TPO_CODEX_PERMISSIONS_PY\n'
-            ')" || exit 1\n'
-        )
-        launch_guidance = (
-            "Run the entire launch sequence from the selected phase worktree. "
-            "Resolve its absolute Git common and worktree metadata directories "
-            "there immediately before launch; stop if either resolution or "
-            "permission serialization fails. Pass both explicit write grants "
-            "in the launch-local named permissions profile extending `:workspace`, "
-            "with network access enabled. Do not mix legacy sandbox flags with "
-            "this profile, write Codex configuration, or grant the parent checkout "
-            "or broader filesystem access. Python 3.11+ is required for this setup.\n"
-        )
-    elif prompt_client == "claude":
-        tool_names = [tool.strip() for tool in tools.split(",") if tool.strip()]
-        if not all(re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", tool) for tool in tool_names):
-            raise ValueError("Claude allowed tool names must be simple identifiers")
-        allowed_tools = ",".join(tool_names)
-        # ``claude -p`` with no prompt argument reads the prompt from stdin.
-        command = "claude -p --permission-mode dontAsk"
-        if allowed_tools:
-            command += f" --allowedTools {allowed_tools}"
-    else:
-        raise ValueError(
-            f"prompt_client must be one of ('claude', 'codex'), got {prompt_client!r}"
-        )
-    agent_product = CLIENT_VOCABULARY[prompt_client]["agent_product"]
-    if result_template is None:
-        closing = "When completing the task, include the same result metadata.\n\n"
-    else:
-        closing = (
-            "When completing the task, set `metadata.tpo_result` to exactly the "
-            f"object in the \"{RESULT_TEMPLATE_HEADING}\" template below, filled "
-            "with the Git facts of the worktree you own and the values the "
-            "external client reported; never summarize or paraphrase it, and "
-            "apply any substitution the template itself states for a section.\n"
-            + result_template
-            + "\n"
-        )
-    return (
-        "External client delegation:\n"
-        "You are the Hermes dispatcher, not the implementation agent.\n"
-        "Use the Hermes `ai-coding-agents` skill to invoke the selected "
-        f"external client ({agent_product}). Build the external-agent prompt "
-        "from the delimited block below and pass only that prompt to the "
-        "external client.\n"
-        "Deliver that prompt on the external client's standard input. Write "
-        "only the content between the opening (BEGIN) and closing (END) "
-        "external-agent prompt marker lines below to a prompt file. "
-        "Exclude both marker lines, all dispatcher instructions and result metadata, "
-        "and any text outside those boundaries. Set `PROMPT_FILE` to its "
-        "path, and redirect the file into the command shown next. Never place "
-        "the prompt in the command line itself.\n"
-        "Write the prompt file to a temporary directory outside this "
-        "repository -- for example `PROMPT_FILE=\"$(mktemp -d)/prompt.txt\"` "
-        "-- and never anywhere inside the worktree you were given, not even a "
-        "gitignored path. This phase verifies that the worktree is clean, and "
-        "an untracked prompt file there fails the run with `worktree_dirty` "
-        "before any work begins.\n"
-        "Copy the prompt byte-for-byte into that file: no shell interpolation "
-        "or command substitution, no added quoting or escaping, no "
-        "re-wrapping, no truncation, and no summarizing. The prompt is a "
-        "specification whose prose is arbitrary -- it contains apostrophes, "
-        "double quotes, `$`, backticks, and newlines that a quoted shell "
-        "argument would truncate or that the shell would expand -- which is "
-        "why standard input is required and a command-line prompt is not "
-        "acceptable.\n"
-        "After writing the prompt file, assign `PROMPT_FILE` in a separate "
-        "shell statement before the client command, in the same shell invocation. "
-        "Never use an inline environment assignment on the client command: "
-        "the shell expands the redirect before that assignment takes effect. "
-        "Use this launch sequence and shell-quote the entire absolute path "
-        "of the already-written prompt file (for example with Python's "
-        "`shlex.quote`). Replace the whole quoted example, including its "
-        "surrounding quotes, with that shell-quoted value. The path must be "
-        "passed literally, without interpolation or command substitution; "
-        "do not just insert a path inside the example's double quotes:\n"
-        f"{launch_guidance}"
-        "```sh\n"
-        'PROMPT_FILE="/absolute/path/to/already-written-prompt.txt"\n'
-        f"{launch_setup}"
-        f'{command} < "$PROMPT_FILE"\n'
-        "```\n"
-        f'Required external command: `{command} < "$PROMPT_FILE"`\n'
-        f"External agent timeout: {timeout} seconds.\n"
-        f"The external client deadline is {timeout} seconds. The Hermes worker "
-        f"has a {PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS}-second cleanup grace "
-        "after that deadline. If the deadline "
-        "expires, terminate the external process tree and confirm that it is "
-        "no longer running.\n"
-        "Launch the external command with Hermes tracked background execution, "
-        "then monitor the background process until it exits or this deadline "
-        "expires. Do not use a foreground terminal call because Hermes may "
-        "replace this phase timeout with its shorter foreground cap.\n"
-        "Do not implement this phase directly with Hermes tools.\n"
-        "If the external client is unavailable, exits non-zero, or exceeds "
-        "the deadline, write known `external_agent_command`, "
-        "`external_agent_timeout_seconds`, `external_agent_session_id`, and "
-        "`external_agent_exit_code` values through `kanban_comment`, then call "
-        '`kanban_block(kind="needs_input", reason=<exact reason>)`. '
-        "Do not inspect, implement, or commit partial work; you must not inspect "
-        "partial changes, and must not implement or commit the phase yourself.\n"
-        "After the external client exits successfully, use the external client's "
-        "reported gate and test evidence to collect the result. Do not re-run "
-        "test, build, or install commands, and do not modify the worktree while "
-        "collecting result metadata; even verification commands can generate "
-        "untracked files such as uv.lock. Use read-only Git observations for "
-        "repository facts, then perform the final clean-worktree check after "
-        "all evidence collection and immediately before completing the card. "
-        "If required verification evidence is missing or the worktree is dirty, "
-        'call `kanban_block(kind="needs_input", reason=<exact reason>)`; '
-        "do not invent successful verification or a clean-worktree result, and "
-        "do not clean up or commit the work yourself.\n"
-        + closing
-    )
-
-
-def _external_agent_prompt_block(rendered_prompt: str) -> str:
-    """Wrap rendered phase work as the prompt Hermes should pass onward."""
-    return (
-        "BEGIN EXTERNAL AGENT PROMPT\n"
-        f"{rendered_prompt.rstrip()}\n"
-        "END EXTERNAL AGENT PROMPT\n"
-    )
 
 
 def _pending_task_create_marker(project_dir: str | Path) -> Path:
@@ -850,6 +668,7 @@ def prepare_todo_phases(
     decisions: Mapping[str, str] | None = None,
     profile_name: str | None = None,
     agent_policy_mode: str = "inherit",
+    phase_definitions=None,
 ) -> list[PreparedPhaseTask]:
     """Render every phase card for ``todo_id`` without touching Hermes.
 
@@ -861,10 +680,10 @@ def prepare_todo_phases(
     """
     if not re.fullmatch(r"TODO-\d+", todo_id):
         raise ValueError(f"invalid todo_id format: {todo_id!r} (expected TODO-N)")
-    profile = load_phase_profile(phases_path)
+    profile = load_phase_profile(phases_path) if phase_definitions is None else None
     manifest = None
     plan_reference_value = plan_path
-    if profile.requires_plan:
+    if (profile.requires_plan if profile is not None else plan_source is not None):
         if plan_source is not None:
             from .plan_manifest import PlanReference, validate_plan_reference
 
@@ -898,27 +717,12 @@ def prepare_todo_phases(
     references = _contained_paths(
         Path(project_dir) if project_dir is not None else None, todo_id, reference_paths
     )
-    phases = load_phases(phases_path)
+    phases = tuple(phase_definitions) if phase_definitions is not None else load_phases(phases_path)
+    from .phase_schedule import phase_tools, worker_phases
+
+    phases = worker_phases(phases)
     prepared: list[PreparedPhaseTask] = []
     for phase in phases:
-        if manifest is not None and phase.phase_key in {
-            "phase_5_review",
-            "phase_8_finish_branch",
-            "phase_9_human_review",
-        }:
-            # Native manifest runs defer these cards, not their prompts: the
-            # review card cannot exist until the Plan tasks are done and the
-            # finish card until the review is accepted. The reconcilers that
-            # create them render THIS profile's ``phase_5_review`` and
-            # ``phase_8_finish_branch`` prompts (see
-            # ``review_reconciliation.render_profile_prompt``), so deferring
-            # creation never substitutes a TPO-authored instruction.
-            continue
-        if phase.gate:
-            # A gate phase dispatches no worker, so it gets no kanban card.
-            # Its terminal meaning is carried by the phase it follows: a worker
-            # that exits non-zero lands in Hermes's sticky ``blocked``.
-            continue
         rendered_prompt = _render_phase_prompt(
             phase.prompt,
             todo_id=todo_id,
@@ -934,34 +738,11 @@ def prepare_todo_phases(
             profile_name=profile_name,
             agent_policy_mode=agent_policy_mode,
         )
-        body_prompt = _external_agent_prompt_block(rendered_prompt)
-        delegation = _external_client_delegation_block(
-            prompt_client,
-            timeout=phase.timeout,
-            tools=phase.tools,
-            # Profile phases publish no result template: their results are
-            # never parsed, and the prompt comes from overridable YAML. The one
-            # exception is the implementation card of a manifest-pinned run:
-            # ``reconcile_plan_task_results`` and ``_implementation_head`` parse
-            # its report to anchor the reviewed head, so it must be told what to
-            # report. The template stays on the dispatcher's side of the
-            # delimiters, so the profile's prompt still reaches the client
-            # unmodified.
-            result_template=(
-                render_result_template(
-                    tick_id=tick_id,
-                    todo_id=todo_id,
-                    step_key=phase.phase_key,
-                    acceptance_criteria=manifest_acceptance_criteria(manifest),
-                )
-                if manifest is not None and phase.phase_key == IMPLEMENTATION_KEY
-                else None
-            ),
-        )
         prepared.append(
             PreparedPhaseTask(
                 phase_key=phase.phase_key,
                 name=phase.name,
+                phase_role=phase.role,
                 body=(
                     _build_json_header(
                         tick_id=tick_id,
@@ -970,29 +751,56 @@ def prepare_todo_phases(
                         project_slug=board_slug,
                     )
                     + "\n"
-                    + delegation
-                    + body_prompt
+                    + "Execution registration pending; this preview is not dispatchable.\n"
                 ),
                 turns=phase.turns,
                 timeout=phase.timeout,
+                rendered_prompt=rendered_prompt,
+                prompt_client=prompt_client,
+                tools=phase_tools(phase, profile=profile_name, prompt_client=prompt_client),
+                result_template=(render_result_template(
+                    tick_id=tick_id, todo_id=todo_id, step_key=phase.phase_key,
+                    acceptance_criteria=manifest_acceptance_criteria(manifest),
+                ) if manifest is not None and phase.role == "implementation" else None),
             )
         )
     return prepared
 
 
+def bind_prepared_executions(prepared: list[PreparedPhaseTask], *, project_dir: Path,
+                             state_dir: Path, root: Path, tick_id: str,
+                             worktree: Path, todo_id: str) -> list[PreparedPhaseTask]:
+    """Pin every prepared execution before creating any Kanban card."""
+    from ._agent_supervisor import register_execution, worker_instructions
+
+    bound = []
+    authority = state_dir / "runs" / tick_id / "registration.json"
+    if authority.exists():
+        from .result_contract import load_validated_registration
+
+        registration = load_validated_registration(project_dir, state_dir, tick_id)
+        if registration.phase_definitions:
+            prepared = prepared[:1]
+        else:
+            prepared = [phase for phase in prepared if phase.phase_key in registration.step_keys]
+    for phase in prepared:
+        identity = register_execution(
+            project_dir=project_dir, state_dir=state_dir, root=root, tick_id=tick_id,
+            phase=phase.phase_key, prompt=phase.rendered_prompt, client=phase.prompt_client,
+            tools=phase.tools, worktree=worktree, timeout=phase.timeout, todo_id=todo_id,
+            result_template=phase.result_template, phase_role=phase.phase_role,
+        )
+        header = json.loads(phase.body.split("\n", 1)[0])
+        header["execution_id"] = identity
+        bound.append(replace(phase, execution_id=identity, body=json.dumps(header, sort_keys=True) + "\n" + worker_instructions(identity, str(root))))
+    return bound
+
+
 def planned_phase_keys(phases_path: str | Path | None, plan_source) -> tuple[str, ...]:
     """Compute registration keys without rendering prompts or touching Hermes."""
-    keys: list[str] = []
-    manifest = plan_source.manifest
-    for phase in load_phases(phases_path):
-        if manifest is not None and phase.phase_key in {
-            "phase_5_review", "phase_8_finish_branch", "phase_9_human_review",
-        }:
-            continue
-        if phase.gate:
-            continue
-        keys.append(phase.phase_key)
-    return tuple(keys)
+    from .phase_schedule import worker_phases
+
+    return tuple(p.phase_key for p in worker_phases(load_phases(phases_path)))
 
 
 def _registration_barrier_body(*, tick_id: str, project_slug: str) -> str:
@@ -1181,6 +989,8 @@ def create_prepared_todo_phases(
         RuntimeError: If registration cannot commit or cleanup cannot be
             confirmed. Unconfirmed cleanup remains durable for reconciliation.
     """
+    if any(not phase.execution_id for phase in prepared):
+        raise RuntimeError("supervisor execution registration required before card creation")
     project_dir = Path(project_dir)
     created_task_ids: list[str] = []
     phase_task_ids: list[str] = []
@@ -1572,6 +1382,11 @@ def reconcile_plan_task_results(
             sanitize_result_text(type(exc).__name__, maximum=1000),
         )
         return False
+    if getattr(registration, "phase_definitions", ()):
+        from .phase_schedule import reconcile_schedule
+
+        return reconcile_schedule(project_dir=project_dir, state_dir=state_dir, tenant=tenant,
+                                  tick_id=tick_id, registration=registration, repo=repo)
     if getattr(registration, "manifest", object()) is None:
         return True
     tasks = get_todo_kanban_tasks(tenant, tick_id)
@@ -1617,12 +1432,16 @@ def reconcile_plan_task_results(
             step_key=IMPLEMENTATION_KEY,
             acceptance_criteria=manifest_acceptance_criteria(registration.manifest),
         )
-        verify(
-            registration.worktree,
-            result.git,
-            expected_parent_sha=registration.base_sha,
-            expected_commits=len(registration.manifest.tasks),
-        )
+        with require_authorized_result(
+            registration=registration, state_dir=state_dir, tick_id=tick_id,
+            step_key=IMPLEMENTATION_KEY, result=result,
+        ):
+            verify(
+                registration.worktree,
+                result.git,
+                expected_parent_sha=registration.base_sha,
+                expected_commits=len(registration.manifest.tasks),
+            )
     except ResultContractError as exc:
         # No card is blocked here: the implementation card must never open a
         # human-input boundary mid-run. Returning False makes the tick report no
@@ -2027,6 +1846,18 @@ def all_phases_complete(
         (conservative: don't release lock on failure).
     """
     status_map = get_todo_kanban_status(tenant, tick_id)
+
+    if state_dir is not None:
+        path = Path(state_dir) / "runs" / tick_id / "registration.json"
+        if path.exists():
+            try:
+                pinned = json.loads(path.read_text())
+                if pinned.get("schema_version") == 6:
+                    keys = pinned["step_keys"]
+                    if not keys or any(status_map.get(key) != "done" for key in keys):
+                        return False
+            except (OSError, ValueError, KeyError, TypeError):
+                return False
 
     if not status_map:
         # No tasks found — could be:

@@ -1,0 +1,47 @@
+name: Supervisor platforms
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supervisor-platforms-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: supervisor (native Linux PID)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf
+        with:
+          enable-cache: true
+      - name: Install test dependencies
+        run: uv sync --locked --python 3.13
+      - name: Check native PID ownership, cleanup, and recovery
+        run: uv run --python 3.13 pytest -q tests/test_agent_process.py tests/test_agent_supervisor.py tests/test_agent_collector.py tests/test_agent_execution.py --basetemp "$RUNNER_TEMP/pytest-pid"
+  darwin:
+    name: supervisor (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-15-intel]
+    env:
+      REQUIRE_NATIVE_DARWIN: '1'
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: astral-sh/setup-uv@8d55fbecc275b1c35dbe060458839f8d30439ccf
+        with:
+          enable-cache: true
+      - name: Install test dependencies
+        run: uv sync --locked --python 3.13
+      - name: Check native ownership, cleanup, and direct verification
+        run: uv run --python 3.13 pytest -q tests/test_agent_darwin.py tests/test_agent_collector.py --basetemp "$RUNNER_TEMP/pytest-darwin"

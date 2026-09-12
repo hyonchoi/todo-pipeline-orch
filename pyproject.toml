@@ -10,6 +10,7 @@ dependencies = [
 
 [project.scripts]
 tpo = "hermes_pipeline.cli:main"
+tpo-agent-supervisor = "hermes_pipeline._agent_supervisor:main"
 pipeline-watch = "hermes_pipeline.deprecated_entry:pipeline_watch_deprecated"
 hermes-pipeline = "hermes_pipeline.deprecated_entry:hermes_pipeline_deprecated"
 

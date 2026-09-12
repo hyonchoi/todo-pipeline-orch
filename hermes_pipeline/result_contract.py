@@ -10,6 +10,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from . import github_issues
+from .agent_git import run_git
 from .config import AgentPolicyMode
 from .github_issues import (
     MAX_ISSUE_SNAPSHOT_CHARS,
@@ -194,6 +195,9 @@ class ValidatedRegistration:
     # the run's own profile, not whatever the project config says now.
     profile: str = ""
     agent_policy_mode: AgentPolicyMode = "inherit"
+    supervised_execution: bool = False
+    phase_definitions: tuple = ()
+    issue_snapshot: str = ""
 
 
 def sanitize_result_text(value: object, *, maximum: int) -> str:
@@ -814,7 +818,7 @@ def load_validated_registration(
         raise ResultContractError("registration_invalid", "unsupported schema_version")
     _exact_keys(
         registration,
-        {2: _REGISTRATION_KEYS, 3: _REGISTRATION_V3_KEYS, 4: _REGISTRATION_V4_KEYS}[schema_version],
+        {2: _REGISTRATION_KEYS, 3: _REGISTRATION_V3_KEYS, 4: _REGISTRATION_V4_KEYS, 5: _REGISTRATION_V4_KEYS, 6: _REGISTRATION_V4_KEYS | {"phase_definitions"}}[schema_version],
         code="registration_invalid",
     )
     agent_policy_mode: AgentPolicyMode = "inherit"
@@ -825,6 +829,11 @@ def load_validated_registration(
         ):
             raise ResultContractError("registration_invalid", "agent policy mode")
         agent_policy_mode = "delegated"
+    elif schema_version >= 5:
+        mode = registration["agent_policy_mode"]
+        if mode not in ("inherit", "delegated") or (mode == "delegated" and registration["profile"] != "native-sdd"):
+            raise ResultContractError("registration_invalid", "agent policy mode")
+        agent_policy_mode = mode
     # The issue snapshot is hash-pinned authority content, not agent metadata:
     # bound its size instead of scanning it for secret-like text.
     _reject_unsafe_strings({key: value for key, value in registration.items() if key != "issue_snapshot"})
@@ -987,7 +996,19 @@ def load_validated_registration(
         or github_issues.first_lines(sections.get("Branch", ())) != (registration["branch"],)
     ):
         raise ResultContractError("registration_invalid", "issue fields")
-    if manifest is not None:
+    phase_definitions = ()
+    if schema_version >= 6:
+        from .phase_schedule import decode_definitions, worker_phases
+
+        try:
+            phase_definitions = decode_definitions(registration["phase_definitions"])
+        except (TypeError, ValueError) as exc:
+            raise ResultContractError("registration_invalid", "phase definitions") from exc
+        if tuple(steps) != tuple(p.phase_key for p in worker_phases(phase_definitions)):
+            raise ResultContractError("registration_invalid", "phase keys")
+        if manifest is not None and not any(p.role == "implementation" for p in worker_phases(phase_definitions)):
+            raise ResultContractError("registration_invalid", "implementation role missing")
+    elif manifest is not None:
         # Subset, not equality: a run registered before the per-task controller
         # gate was dropped still lists its ``validate:<id>`` keys, and one
         # registered before the per-Plan-task fan-out was deleted still lists
@@ -1035,13 +1056,16 @@ def load_validated_registration(
         resolved_source,
         registration["profile"],
         agent_policy_mode,
+        schema_version >= 5,
+        phase_definitions,
+        registration["issue_snapshot"],
     )
 
 
 def _git(cwd: Path, *args: str) -> str:
     try:
-        result = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, timeout=60
+        result = run_git(
+            cwd, args, capture_output=True, text=True, check=False, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
         raise ResultContractError("git_verification_failed") from exc
@@ -1057,8 +1081,8 @@ def _git_predicate(cwd: Path, *args: str) -> bool:
     would collapse "false" (1) into "git is broken" (>= 2).
     """
     try:
-        result = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, text=True, check=False, timeout=60
+        result = run_git(
+            cwd, args, capture_output=True, text=True, check=False, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
         raise ResultContractError("git_verification_failed") from exc
@@ -1082,8 +1106,8 @@ def _git_bytes(cwd: Path, *args: str) -> bytes:
     not carry) translates it at its own call site.
     """
     try:
-        result = subprocess.run(
-            ["git", *args], cwd=cwd, capture_output=True, check=False, timeout=60
+        result = run_git(
+            cwd, args, capture_output=True, check=False, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise ResultContractError("git_verification_failed") from exc

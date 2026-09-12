@@ -11,8 +11,8 @@ def _prepared_phases():
     from hermes_pipeline.kanban_tasks import PreparedPhaseTask
 
     return [
-        PreparedPhaseTask("phase_1", "One", "body one", 5, 2400),
-        PreparedPhaseTask("phase_2", "Two", "body two", 10, 7200),
+        PreparedPhaseTask("phase_1", "One", "body one", 5, 2400, execution_id="registered-phase-1"),
+        PreparedPhaseTask("phase_2", "Two", "body two", 10, 7200, execution_id="registered-phase-2"),
     ]
 
 
@@ -293,8 +293,8 @@ def test_local_phase_two_oserror_becomes_cleanup_only_and_later_clears(
     with pytest.raises(RuntimeError, match=r"phase_2.*OSError") as exc_info:
         create_prepared_todo_phases(
             prepared=[
-                PreparedPhaseTask("phase_1", "One", "body", 5, False),
-                PreparedPhaseTask("phase_2", "Two", "body", 5, False),
+                PreparedPhaseTask("phase_1", "One", "body", 5, False, execution_id="registered-phase"),
+                PreparedPhaseTask("phase_2", "Two", "body", 5, False, execution_id="registered-phase"),
             ],
             tick_id="01CLIENT",
             board_slug="demo",
@@ -357,7 +357,7 @@ def test_barrier_completion_failure_retains_commit_pending(tmp_path, mocker):
     with pytest.raises(RuntimeError, match=r"complete registration barrier"):
         create_prepared_todo_phases(
             prepared=[
-                PreparedPhaseTask("phase_1", "One", "body", 5, False),
+                PreparedPhaseTask("phase_1", "One", "body", 5, False, execution_id="registered-phase"),
             ],
             tick_id="01CLIENT",
             board_slug="demo",
@@ -410,7 +410,7 @@ def test_registration_persists_commit_pending_until_barrier_completes(
     mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run", side_effect=run)
 
     assert create_prepared_todo_phases(
-        prepared=[PreparedPhaseTask("phase_1", "One", "body", 5, False)],
+        prepared=[PreparedPhaseTask("phase_1", "One", "body", 5, False, execution_id="registered-phase")],
         tick_id="01CLIENT",
         board_slug="demo",
         project_dir=tmp_path,

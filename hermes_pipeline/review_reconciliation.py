@@ -6,12 +6,15 @@ import logging
 import subprocess
 from pathlib import Path
 
+from .authority_result import (
+    RunAuthorityBusy,
+    locked_run_authority,
+    require_authorized_result,
+)
 from .kanban_tasks import (
     KANBAN_QUERY_TIMEOUT,
     PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS,
     _build_json_header,
-    _external_agent_prompt_block,
-    _external_client_delegation_block,
     _find_task_id_in_snapshot,
     _parse_task_id,
     _show_task_payload,
@@ -87,12 +90,6 @@ def _persist_accepted_head(state_dir: Path, tick_id: str, head_sha: str) -> None
     _atomic_write_text(path, head_sha + "\n")
 
 
-def _body(*, tick_id: str, todo_id: str, tenant: str, key: str, prompt: str) -> str:
-    return _build_json_header(
-        tick_id=tick_id, phase_key=key, todo_id=todo_id, project_slug=tenant
-    ) + "\n" + prompt
-
-
 def _create_task(
     *, project_dir: Path, tenant: str, tick_id: str, todo_id: str,
     key: str, title: str,
@@ -103,10 +100,9 @@ def _create_task(
 ) -> str:
     """Create one assigned worker card. ``parent`` omitted means immediately ready.
 
-    Every card this module and delivery create is a real worker: it publishes
-    the result template and its verdict is its own exit status. ``prompt`` is
-    the work instruction the external client receives verbatim; the dispatcher's
-    ``result_template`` stays outside that delimited block.
+    Every card invokes one registered supervisor execution. The supervisor pins
+    the profile prompt and result template before this function publishes the
+    thin dispatcher card, and validates collected exit and result evidence.
 
     ``tools``, ``turns`` and ``timeout`` come from the phase profile the card
     renders, never from a default here: the profile's ``phase_5_review`` needs
@@ -123,19 +119,20 @@ def _create_task(
     scope; ``load_validated_registration`` validated the registration's
     containment against exactly this value.
     """
-    task_prompt = (
-        _external_client_delegation_block(
-            prompt_client, timeout=timeout, tools=tools,
-            result_template=result_template,
-        )
-        + _external_agent_prompt_block(prompt)
+    from ._agent_supervisor import register_execution, worker_instructions
+
+    root = project_dir / ".hermes" / "agent-executions"
+    identity = register_execution(
+        project_dir=project_dir, state_dir=project_dir / ".hermes", root=root,
+        tick_id=tick_id, phase=key, prompt=prompt, client=prompt_client, tools=tools,
+        worktree=worktree, timeout=timeout, todo_id=todo_id, result_template=result_template,
     )
+    task_prompt = worker_instructions(identity, str(root))
+    header = json.loads(_build_json_header(tick_id=tick_id, phase_key=key, todo_id=todo_id, project_slug=tenant))
+    header["execution_id"] = identity
     cmd = [
         "hermes", "kanban", "create", "--tenant", tenant, title,
-        "--body", _body(
-            tick_id=tick_id, todo_id=todo_id, tenant=tenant, key=key,
-            prompt=task_prompt,
-        ),
+        "--body", json.dumps(header, sort_keys=True) + "\n" + task_prompt,
         "--workspace", f"dir:{worktree}", "--idempotency-key", f"{tick_id}:{key}",
         "--assignee", assignee or "default",
         "--json",
@@ -179,6 +176,11 @@ def profile_phase(registration, phase_key: str):
     registration -- not from the project's current config -- keeps a profile
     switch mid-run from changing the run already in flight.
     """
+    if getattr(registration, "phase_definitions", ()):
+        for phase in registration.phase_definitions:
+            if phase.phase_key == phase_key:
+                return "pinned-profile", phase
+        raise ResultContractError("profile_phase_missing", phase_key)
     from .contract import ContractSchemaError
     from .phases import load_phases, resolve_profile_phases_path
 
@@ -207,6 +209,18 @@ def render_profile_prompt(
     """
     from .phases import _render_phase_prompt
 
+    context = {}
+    if getattr(registration, "phase_definitions", ()) and getattr(registration, "issue_snapshot", ""):
+        from . import github_issues
+        from .kanban_tasks import _contained_paths
+
+        repo, number, title, body = github_issues.split_canonical_snapshot(registration.issue_snapshot)
+        issue = github_issues.issue_from_api(
+            {"number": number, "title": title, "body": body, "labels": []}, repo=repo)
+        specs = _contained_paths(registration.repository, registration.todo_id, [issue.spec] if issue.spec else [])
+        references = _contained_paths(registration.repository, registration.todo_id, issue.references)
+        context = {"spec_path": specs[0] if specs else None, "reference_paths": references,
+                   "decisions": github_issues.issue_decisions(issue)}
     plan_reference = getattr(registration, "plan_reference", None)
     return _render_phase_prompt(
         phase.prompt,
@@ -220,6 +234,7 @@ def render_profile_prompt(
         context_facts=facts,
         profile_name=registration.profile,
         agent_policy_mode=getattr(registration, "agent_policy_mode", "inherit"),
+        **context,
     )
 
 
@@ -240,12 +255,16 @@ def _implementation_head(*, tasks: dict, registration, tick_id: str) -> str:
         todo_id=registration.todo_id, step_key=IMPLEMENTATION_KEY,
         acceptance_criteria=manifest_acceptance_criteria(registration.manifest),
     )
-    verify_worker_git_topology(
-        registration.worktree, result.git,
-        expected_parent_sha=registration.base_sha,
-        expected_commits=len(registration.manifest.tasks),
-    )
-    return result.git.resulting_head_sha
+    with require_authorized_result(
+        registration=registration, state_dir=registration.repository / ".hermes",
+        tick_id=tick_id, step_key=IMPLEMENTATION_KEY, result=result,
+    ):
+        verify_worker_git_topology(
+            registration.worktree, result.git,
+            expected_parent_sha=registration.base_sha,
+            expected_commits=len(registration.manifest.tasks),
+        )
+        return result.git.resulting_head_sha
 
 
 def _ensure_initial_review(*, project_dir: Path, tasks: dict, registration, tenant: str,
@@ -326,8 +345,23 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
     if not (state_dir / "runs" / tick_id / "registration.json").exists():
         return True
     registration = load_validated_registration(project_dir, state_dir, tick_id, repo=repo)
+    if getattr(registration, "phase_definitions", ()):
+        return True  # The ordered profile reconciler owns modern runs.
     if getattr(registration, "manifest", object()) is None:
         return True
+    try:
+        with locked_run_authority(registration=registration, state_dir=state_dir, tick_id=tick_id):
+            return _reconcile_reviews_locked(project_dir=project_dir, state_dir=state_dir,
+                                              tenant=tenant, tick_id=tick_id, registration=registration)
+    except RunAuthorityBusy:
+        return True
+    except ResultContractError as exc:
+        log.error("tick %s: review reconciliation failed: %s", tick_id, exc.code)
+        return False
+
+
+def _reconcile_reviews_locked(*, project_dir: Path, state_dir: Path, tenant: str,
+                              tick_id: str, registration) -> bool:
     tasks = get_todo_kanban_tasks(tenant, tick_id)
     try:
         _ensure_initial_review(
@@ -356,22 +390,26 @@ def reconcile_reviews(*, project_dir: Path, state_dir: Path, tenant: str,
             todo_id=registration.todo_id, step_key=REVIEW_KEY,
             acceptance_criteria=(), allow_no_changes=True,
         )
-        # The profile's reviewer applies its own findings as one review-fix
-        # commit, so the reviewed head may legitimately have advanced by one.
-        # It may advance by no more than that, and it must still descend from
-        # the implementation chain this reconciler recomputed -- that is what
-        # keeps the accepted head an anchor rather than a worker's claim.
-        accepted = _accepted_head_path(state_dir, tick_id)
-        verify_optional_single_commit(
-            registration.worktree, result.git,
-            expected_parent_sha=expected_parent,
-            require_current=not accepted.exists(),
-        )
-        # Record the head the review actually left behind, not the head it
-        # started from: a review-fix commit is part of the reviewed work, and
-        # delivery anchors to what was blessed.
-        _persist_accepted_head(state_dir, tick_id, result.git.resulting_head_sha)
-        return True
+        with require_authorized_result(
+            registration=registration, state_dir=state_dir, tick_id=tick_id,
+            step_key=REVIEW_KEY, result=result,
+        ):
+            # The profile's reviewer applies its own findings as one review-fix
+            # commit, so the reviewed head may legitimately have advanced by one.
+            # It may advance by no more than that, and it must still descend from
+            # the implementation chain this reconciler recomputed -- that is what
+            # keeps the accepted head an anchor rather than a worker's claim.
+            accepted = _accepted_head_path(state_dir, tick_id)
+            verify_optional_single_commit(
+                registration.worktree, result.git,
+                expected_parent_sha=expected_parent,
+                require_current=not accepted.exists(),
+            )
+            # Record the head the review actually left behind, not the head it
+            # started from: a review-fix commit is part of the reviewed work, and
+            # delivery anchors to what was blessed.
+            _persist_accepted_head(state_dir, tick_id, result.git.resulting_head_sha)
+            return True
     except (ResultContractError, RuntimeError, OSError) as exc:
         log.error(
             "tick %s: review reconciliation failed: %s", tick_id,

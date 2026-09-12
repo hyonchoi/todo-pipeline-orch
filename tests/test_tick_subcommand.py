@@ -693,6 +693,9 @@ class TestTickSubcommand:
     ):
         """No pipeline.toml -> the tick still prepares the legacy implicit
         profile's phases, independent of what new projects now default to."""
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         import hermes_pipeline.contract as contract_mod
         from hermes_pipeline.contract import DEFAULT_PROFILE, LEGACY_IMPLICIT_PROFILE
         from hermes_pipeline.phases import load_phases, resolve_profile_phases_path
@@ -849,6 +852,9 @@ class TestTickSubcommand:
 
     def test_tick_kanban_registration_failure_project_error(self, tmp_path, mocker):
         """Kanban registration raises RuntimeError -> project error logged, tick returns 0."""
+        # Isolate tick orchestration after the execution-registration boundary.
+        mocker.patch("hermes_pipeline.kanban_tasks.bind_prepared_executions",
+                     side_effect=lambda prepared, **kwargs: prepared)
         mocker.patch(
             "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
@@ -1364,6 +1370,51 @@ class TestBlockedSelectionGate:
         )]
         return state, config, selection, cb, reconcilers
 
+    @pytest.mark.parametrize("state_name, head, released", [
+        ("OPEN", "feat/pinned", False),
+        ("MERGED", "feat/pinned", True),
+        ("MERGED", "feat/other", False),
+        ("UNKNOWN", "feat/pinned", False),
+    ])
+    def test_current_profile_execution_handoff_uses_pinned_branch(
+        self, tick, mocker, state_name, head, released
+    ):
+        from hermes_pipeline._agent_supervisor import execution_id
+        state, config, selection, _, _ = tick
+        (state / "current_tick_id.txt").write_text("01PRIOR")
+        (state / "pipeline_branch.txt").write_text("feat/unrelated")
+        root = state / "executions"
+        identity = execution_id("01PRIOR", "publish")
+        (root / identity).mkdir(parents=True)
+        (root / identity / "record.json").touch()
+        mocker.patch("hermes_pipeline.agent_authority.profile_root", return_value=root)
+        mocker.patch("hermes_pipeline.agent_execution.ExecutionStore.load", return_value={
+            "registration": {"registration_id": "01PRIOR", "phase": "publish", "branch": "feat/pinned",
+                "result_contract": {"kind": "profile", "phase_role": "delivery",
+                    "tick_id": "01PRIOR", "phase": "publish",
+                    "project_dir": str(state.parent), "state_dir": str(state)}}})
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", return_value={"publish": "done"})
+        pr = mocker.patch("hermes_pipeline.cli._cli_sp.run", return_value=MagicMock(
+            returncode=0, stdout=json.dumps({"state": state_name, "headRefName": head, "baseRefName": "main"})))
+        mocker.patch("hermes_pipeline.cli._sync_project_to_base_after_handoff", return_value=True)
+        assert _cmd_tick(FakeArgs(), config) == 0
+        assert selection.call_count == int(released)
+        handoff = [call for call in pr.call_args_list if call.args[0][:3] == ["gh", "pr", "view"]]
+        assert len(handoff) == 1
+        assert handoff[0].args[0][3] == "feat/pinned"
+
+    def test_resume_does_not_reload_mutated_current_profile(self, tick, mocker):
+        state, config, selection, _, reconcilers = tick
+        (state / "current_tick_id.txt").write_text("01PRIOR")
+        mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                     return_value={"custom-build": "running"})
+        profile = mocker.patch("hermes_pipeline.phases.load_phase_profile",
+                             side_effect=ValueError("current profile was removed"))
+        assert _cmd_tick(FakeArgs(), config) == 0
+        assert reconcilers[0].called
+        profile.assert_not_called()
+        selection.assert_not_called()
+
     def test_blocked_prior_tick_holds_selection_and_records_failure(self, tick, mocker):
         state, config, selection, cb, _ = tick
         (state / "current_tick_id.txt").write_text("01PRIOR")
@@ -1559,3 +1610,72 @@ class TestBlockedSelectionGate:
         assert _cmd_tick(FakeArgs(), config) == 0
         assert selection.call_count == int(released)
         pr.assert_not_called()
+
+
+@pytest.mark.parametrize("pr, expected", [
+    ({"state": "OPEN", "headRefName": "feat/pinned"}, False),
+    ({"state": "MERGED", "headRefName": "feat/pinned"}, True),
+    ({"state": "MERGED", "headRefName": "feat/other"}, False),
+    ({}, False),
+])
+def test_historical_profile_handoff_uses_pinned_delivery_role(tmp_path, mocker, pr, expected):
+    from types import SimpleNamespace
+
+    from hermes_pipeline.cli import _historical_legacy_execution_complete
+    from hermes_pipeline.phases import Phase
+    registration = SimpleNamespace(manifest=None, branch="feat/pinned",
+        step_keys=("build", "publish"), phase_definitions=(
+            Phase("build", "Build", role="implementation"),
+            Phase("publish", "Publish", role="delivery")))
+    mocker.patch("hermes_pipeline.result_contract.load_validated_registration", return_value=registration)
+    mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status",
+                 return_value={"build": "done", "publish": "done"})
+    view = mocker.patch("hermes_pipeline.ship.gh_pr_view", return_value=pr)
+    assert _historical_legacy_execution_complete(tmp_path, tmp_path / ".hermes", "demo", "OLD") is expected
+    view.assert_called_once_with("feat/pinned", cwd=tmp_path)
+
+
+@pytest.mark.parametrize("change", ["tick", "phase", "project", "branch", "role", "missing", "corrupt"])
+def test_profile_handoff_rejects_incomplete_or_mismatched_execution_authority(tmp_path, mocker, change):
+    from hermes_pipeline._agent_supervisor import execution_id
+    from hermes_pipeline.agent_execution import ExecutionError
+    from hermes_pipeline.cli import _pr_handoff_authority
+
+    state = tmp_path / ".hermes"
+    root = state / "executions"
+    records = {}
+    for key in ("build", "publish"):
+        identity = execution_id("OLD", key)
+        (root / identity).mkdir(parents=True)
+        records[identity] = {"registration": {
+            "registration_id": "OLD", "phase": key, "branch": "feat/pinned",
+            "result_contract": {"kind": "profile", "tick_id": "OLD", "phase": key,
+                "project_dir": str(tmp_path), "state_dir": str(state),
+                "phase_role": "delivery" if key == "publish" else "implementation"}}}
+    pinned = records[execution_id("OLD", "publish")]["registration"]
+    if change == "tick":
+        pinned["registration_id"] = "OTHER"
+    elif change == "phase":
+        pinned["result_contract"]["phase"] = "other"
+    elif change == "project":
+        pinned["result_contract"]["project_dir"] = str(tmp_path / "other")
+    elif change == "branch":
+        pinned["branch"] = "feat/other"
+    elif change == "role":
+        pinned["result_contract"]["phase_role"] = "invalid"
+    elif change == "missing":
+        (root / execution_id("OLD", "publish")).rmdir()
+    mocker.patch("hermes_pipeline.agent_authority.profile_root", return_value=root)
+    mocker.patch("hermes_pipeline.agent_execution.ExecutionStore.load",
+        side_effect=ExecutionError("invalid record") if change == "corrupt" else records.__getitem__)
+    with pytest.raises(ExecutionError):
+        _pr_handoff_authority(tmp_path, state, "OLD", {"build": "done", "publish": "done"})
+
+
+def test_legacy_agent_skills_handoff_preserves_recorded_ship_key(tmp_path):
+    from types import SimpleNamespace
+
+    from hermes_pipeline.cli import _pr_handoff_authority
+    registration = SimpleNamespace(manifest=None, step_keys=("phase_7_ship",), branch="feat/pinned")
+    assert _pr_handoff_authority(tmp_path, tmp_path / ".hermes", "OLD", {"phase_7_ship": "done"},
+                                 registration=registration) == ("phase_7_ship", "feat/pinned")

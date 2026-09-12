@@ -127,7 +127,8 @@ def test_registers_hashes_and_creates_linked_worktree(tmp_path):
         "prompt_client": "codex",
         "repository": str(repo.resolve()),
         "review_assignee": "reviewer",
-        "schema_version": 3,
+        "schema_version": 5,
+        "agent_policy_mode": "inherit",
         "selected_entry_hash": snapshot_hash(issue.snapshot),
         "step_keys": ["task-1", "gate-1"],
         "tick_id": "01TICK",
@@ -149,7 +150,7 @@ def test_embedded_registration_materializes_private_verified_artifact(tmp_path):
     assert artifact.read_text() == issue.plan_source.document
     assert artifact.stat().st_mode & 0o777 == 0o600
     payload = json.loads((artifact.parent / "registration.json").read_text())
-    assert payload["schema_version"] == 3
+    assert payload["schema_version"] == 5
     assert payload["plan_hash"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
 
 
@@ -308,9 +309,12 @@ def test_embedded_artifact_rejects_lstat_fstat_identity_swap(tmp_path, mocker):
     issue = _embedded_issue()
     _register(repo, issue=issue, plan_path=None)
     real_fstat = __import__("os").fstat
+    artifact_inode = (repo / ".hermes/runs/01TICK/plan.md").stat().st_ino
 
     def swapped(fd):
         value = real_fstat(fd)
+        if value.st_ino != artifact_inode:
+            return value
         fields = list(value)
         fields[1] += 1  # st_ino
         return __import__("os").stat_result(fields)
@@ -800,14 +804,13 @@ def test_recording_the_branch_never_fails_registration(tmp_path, mocker, caplog)
     assert "pipeline_branch.txt" in caplog.text
 
 
-@pytest.mark.parametrize("mode,version", [("inherit", 3), ("delegated", 4)])
-def test_writer_pins_effective_native_policy_mode(tmp_path, mode, version):
+@pytest.mark.parametrize("mode", ["inherit", "delegated"])
+def test_writer_pins_effective_native_policy_mode(tmp_path, mode):
     project, _ = _repo(tmp_path)
     registration = _register(project, agent_policy_mode=mode)
     payload = json.loads((project / ".hermes/runs/01TICK/registration.json").read_text())
-    assert payload["schema_version"] == version
-    assert (payload.get("agent_policy_mode") == "delegated") == (version == 4)
-    assert ("agent_policy_mode" in payload) == (version == 4)
+    assert payload["schema_version"] == 5
+    assert payload["agent_policy_mode"] == mode
     validated = load_validated_registration(project, project / ".hermes", "01TICK", repo=REPO)
     assert validated.agent_policy_mode == mode
     assert registration.agent_policy_mode == mode
@@ -824,7 +827,7 @@ def test_registration_retry_retains_pinned_mode_when_global_config_changes(tmp_p
     assert resumed == registration
 
 
-@pytest.mark.parametrize("version", [3.0, 4.0, True])
+@pytest.mark.parametrize("version", [3.0, 4.0, 5.0, True])
 def test_writer_retry_rejects_non_integer_schema(tmp_path, version):
     project, _ = _repo(tmp_path)
     _register(project, agent_policy_mode="delegated" if version == 4 else "inherit")
@@ -837,12 +840,12 @@ def test_writer_retry_rejects_non_integer_schema(tmp_path, version):
 
 
 @pytest.mark.parametrize("profile", ["gstack", "custom", "native-sdd-custom"])
-def test_global_opt_in_keeps_other_profile_registrations_v3(tmp_path, profile):
+def test_global_opt_in_keeps_other_profile_registrations_inherit(tmp_path, profile):
     project, _ = _repo(tmp_path)
     registration = _register(project, profile=profile, agent_policy_mode="delegated")
     payload = json.loads((project / ".hermes/runs/01TICK/registration.json").read_text())
-    assert payload["schema_version"] == 3
-    assert "agent_policy_mode" not in payload
+    assert payload["schema_version"] == 5
+    assert payload["agent_policy_mode"] == "inherit"
     assert registration.agent_policy_mode == "inherit"
     validated = load_validated_registration(project, project / ".hermes", "01TICK", repo=REPO)
     assert validated.agent_policy_mode == "inherit"

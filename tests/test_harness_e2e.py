@@ -210,11 +210,11 @@ class _LiveSandbox:
         monkeypatch.setattr(harness_mod, "_harness_tmp_root", lambda: self.tmp_root)
         real_mkdtemp = harness_mod.tempfile.mkdtemp
 
-        def workspace_mkdtemp(prefix=None, dir=None, **kwargs):
+        def workspace_mkdtemp(suffix=None, prefix=None, dir=None):
             # Only the workspace allocation is redirected; provenance/staging dirs stay real.
             if dir is not None and Path(dir) == self.tmp_root:
                 return str(self.workspace)
-            return real_mkdtemp(prefix=prefix, dir=dir, **kwargs)
+            return real_mkdtemp(suffix=suffix, prefix=prefix, dir=dir)
 
         monkeypatch.setattr(harness_mod.tempfile, "mkdtemp", workspace_mkdtemp)
         real_rmtree = harness_mod.shutil.rmtree

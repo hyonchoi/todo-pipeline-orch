@@ -2,8 +2,9 @@
 
 The `native-sdd` profile is the Plan-to-Kanban compiler. The production flow is
 `Hermes cron -> TPO tick -> eligible TODO -> pinned worktree -> Kanban ->
-worker`. Hermes >= 0.19.0 dispatches workers; TPO never invokes Claude or Codex
-directly.
+thin worker -> installed TPO supervisor -> Claude or Codex`. Hermes >= 0.19.0
+dispatches the Kanban worker; the supervisor launches and monitors the selected
+client for its registered execution.
 
 It is the default profile for every new contract `tpo init` writes
 ([ADR-0004](adr/0004-native-sdd-is-the-default-phase-profile.md)); `gstack` is
@@ -48,14 +49,13 @@ picks nothing from it. `tpo doctor` counts it in
 `Plan readiness: ... blocked=N (plan_invalid=N)` and prints the migration `Hint:`.
 
 A pre-existing `### Plan` repository path remains supported as `legacy_path`,
-and there the manifest stays optional: a valid legacy Markdown Plan without the
-block still runs as exactly one development card. `tpo plan validate` and
-`tpo doctor` warn because its internal steps cannot be exposed as separate
-Kanban cards; pass `--require-manifest` to turn that warning into a failure. On
-retries, TPO validates its pinned base authority and then leaves the existing
-static development, review, and finish chain to the legacy
-lifecycle; manifest-only result, dynamic review, and closeout reconciliation do
-not intercept that chain.
+and there the manifest stays optional. `tpo plan validate` and `tpo doctor` warn
+because a manifest-free Plan has no task-level checkpoint contract; pass
+`--require-manifest` to turn that warning into a failure. New schema-v6 runs
+still pin and advance the profile's complete ordered worker sequence, using
+generic phase results without manifest checkpoint or issue-closeout semantics.
+Supported schema-v5 and earlier manifest-free registrations retain their
+original static lifecycle and phase identities when resumed.
 
 ## Initialize and verify
 
@@ -64,9 +64,10 @@ tpo init <project> --profile native-sdd
 tpo doctor <project>
 ```
 
-The only skill prerequisite is Hermes `ai-coding-agents`. The selected worker
-client must still be installed and callable as `claude -p` or `codex exec`, but
-no gstack, superpowers, or client-side workflow skill is used.
+This profile has no skill prerequisite. The installed `tpo-agent-supervisor`
+launches the selected Claude or Codex client without sandbox restrictions;
+no gstack, superpowers, or client-side workflow skill is used. See the
+[supervisor prerequisites and recovery guide](howto-agent-supervisor.md).
 
 `tpo init` needs no `--profile` for a new project — `native-sdd` is the
 default; the flag above is explicit for clarity and is required only when
@@ -85,9 +86,10 @@ tpo config set agent_policy_mode delegated
 This is your compatibility assertion, not automatic policy detection. Only the
 exact `native-sdd` profile uses it; other profiles, including custom profiles
 with `requires_plan`, keep inherited behavior. There is no project override or
-launch flag. TPO retains normal user and project instruction loading, client
-arguments, permissions, sandboxing, and tools. It does not use Claude safe mode
-or override Codex instruction files. The policy decides which obligations to
+launch flag. Delegated mode retains normal user and project instruction loading
+and configured tools. The supervisor launches clients without sandbox
+restrictions in either policy mode; it does not override Codex instruction
+files. The policy decides which obligations to
 waive and keeps obligations it does not waive. An incompatible policy can still
 block or time out; TPO cannot guarantee delegated behavior.
 
@@ -97,10 +99,11 @@ and result metadata stay outside that payload. Implementation, unified review
 (including its optional fix commit), and finish workers receive it; controller
 reconciliation and human gates do not run delegated workers.
 
-Registration pins the effective mode: new opted-in native-SDD runs use schema
-v4 with `agent_policy_mode: delegated`; other new runs keep v3. Existing v2/v3
-runs mean `inherit`. Changing the global setting cannot change an active run's
-initial or later workers.
+Registration pins the effective mode: all new runs use schema v6 with
+`agent_policy_mode: inherit` or `delegated` and require durable supervisor
+authority. Existing v2/v3 runs mean `inherit`; v4 pins `delegated`; v5 pins either
+mode. These legacy registrations remain readable. Changing the global setting cannot change an
+active run's initial or later workers.
 
 TPO rejects pre-existing standalone mode declarations before publishing the
 corresponding worker card, including duplicates, conflicting or malformed
@@ -136,10 +139,14 @@ for path in Path(".hermes/runs").glob("*/registration.json"):
 PYCODE
 ```
 
-Inspect their active-run state and drain opted-in runs before reverting code.
-Preserve registration files: pre-v4 code rejects v4; restore compatible code to
-finish such runs, never reinterpret or edit their pinned mode. If a run must
-change mode, abandon it through the recovery workflow and register a new run.
+Inspect active-run state and drain all supervised runs before reverting code,
+including schema-v6 runs in `inherit` mode. Confirm owned-process cleanup
+using the
+[supervisor rollback procedure](howto-agent-supervisor.md#storage-compatibility-and-rollback).
+Preserve registrations and journals: pre-v6 code cannot read v6, pre-v5 code
+cannot read v5, and pre-v4 code cannot read v4. Restore compatible code to finish
+such runs; never reinterpret or edit their pinned mode. If a run must change mode, abandon it through the
+recovery workflow and register a new run.
 
 ## Migrating from gstack
 
@@ -196,42 +203,45 @@ request and its human merge decision, which no card represents.
 
 ## Run sequence
 
-1. TPO records schema-v3 (or opted-in schema-v4)
-   `.hermes/runs/<tick-id>/registration.json`, including
+1. TPO records schema-v6 `.hermes/runs/<tick-id>/registration.json`, including
    the tagged Plan source, pinned base SHA, TODO and Plan hashes, branch,
-   linked worktree, roles, and step keys. Schema-v2 active runs remain readable;
-   do not downgrade while a schema-v3 run is active. The same applies to the
-   step keys themselves: a manifest run registered after the per-Plan-task
-   fan-out was deleted lists one `phase_4_development` step key, which an older
-   TPO rejects as `registration_invalid` on every tick because it looks for
-   `plan:<task-id>` keys instead — and the reverse is equally true, so a run
-   registered before that release will not load after it. The break is
-   fail-closed in both directions: nothing is verified against a card shape
-   that no longer exists, and the branch and its commits are left untouched. Do
-   not upgrade or downgrade across that release while a manifest run is active;
-   drain the run first.
+   linked worktree, step keys, and policy mode; supervision is required. It
+   also pins the complete ordered phase definitions, including exact keys,
+   prompts, tools, timeouts, roles, and gates. Later profile edits cannot
+   change this run's schedule. Supported schema-v2/v3/v4/v5 registrations keep
+   their original identities and read protocol; they are not rewritten.
+   Drain active runs before downgrading to code that cannot read their schema.
 2. The Plan gets exactly ONE implementation card — the profile's
-   `phase_4_development` — whatever the Plan's task count. The card carries that
-   phase's prompt verbatim and its declared `tools`, `turns` and `timeout`; the
-   prompt is what tells the agent to read the Plan, branch from main, preserve
-   unrelated tracked and untracked work, run one native implementer subagent per
-   Plan task, and make exactly one atomic commit per Plan task. TPO does not
-   restate any of that and does not fan the phase into per-task cards: the
-   profile is the specification. The card reports bounded
+   `phase_4_development` — whatever the Plan's task count. The card identifies a
+   durable supervisor registration that pins the rendered phase prompt, tool
+   settings, worktree, branch, timeout, and result contract. Hermes invokes
+   or reconnects to that execution. The external agent reads the original Plan,
+   preserves partial work, runs one native implementer subagent per unfinished
+   task, and makes one atomic commit per task. The supervisor collects trusted
+   verification and review evidence before accepting checkpoints. TPO does not
+   fan the phase into per-task cards. The card reports bounded
    `metadata.tpo_result`; on the next tick TPO validates that metadata, every
    Plan task's acceptance criteria, and the Git topology — exactly
    `len(tasks)` commits on the first-parent mainline from the pinned base SHA —
    and the run stops advancing until it does. No card waits for a human.
-3. A fresh review session runs the profile's own `phase_5_review` prompt: it
+3. After implementation validates, a fresh review card keeps the exact key
+   `phase_5_review` and runs that phase's pinned prompt: it
    applies every valid finding and commits the fixes as one review-fix commit.
    The card reaching `done` IS the pass; the card reaching `blocked` is the
    profile's own nonzero exit and automation stops. There are no remediation
    rounds and no cards fanned out from findings.
-4. An accepted review enables finish, deterministic issue closeout (the `tpo:todo`
+4. An accepted review enables `phase_8_finish_branch` (role `delivery`),
+   deterministic issue closeout (the `tpo:todo`
    issue is closed via `gh` after the merge), remote-head/check verification,
    and the open, unmerged pull request and its human merge decision. That
    boundary is not a card: `phase_9_human_review` is a gate phase, and
    registration creates no card for a gate phase.
+
+The scheduler follows the pinned worker order and publishes each deferred card
+only after its predecessor validates. Every required worker must be present and
+validated before completion; a temporarily absent deferred card cannot make the
+run complete. It does not invent review or delivery phases missing from a profile.
+`review:0` and `finish` are legacy card identities, never aliases for new runs.
 
 Exactly one run is active per project. Retries reconcile the same keys. Drifted
 authority, branch, worktree, PR, or remote head is preserved and blocked for
@@ -248,10 +258,13 @@ evidence, never a second workflow database:
 | `registration.json` | the run is registered: immutable pinned authority |
 | `plan.md` | the Plan is embedded: the hash-verified Plan artifact |
 | `result-validation-blocked` | a Plan result fails validation, or the card chain is not wired; names the stalled `step_key` and `code`, blocks nothing, and is removed once every result validates |
-| `pending-review-create.json` | a dynamic card create (`review:0` or `finish`) is about to run; removed once that create reports an id. Diagnostic residue only — `_persist_pending_create` writes it and `_clear_pending_create` deletes it, and nothing reads it back, so a copy left on disk means a create was in flight and never confirmed. It is not what recovers the card: `_create_task` re-derives the id with `_find_task_id_in_snapshot` before every attempt (the create itself is keyed `--idempotency-key <tick>:<step>`), and an outcome it still cannot resolve raises `RetryableReviewRegistration`, which both reconcilers turn into a plain "retry next tick". Do not confuse it with `pending-task-create.json`, the registration marker `reconcile_pending_task_create` really does read |
+| `pending-review-create.json` | a deferred profile card create (legacy registrations use `review:0` or `finish`) is about to run; removed once that create reports an id. Diagnostic residue only — `_persist_pending_create` writes it and `_clear_pending_create` deletes it, and nothing reads it back, so a copy left on disk means a create was in flight and never confirmed. It is not what recovers the card: `_create_task` re-derives the id with `_find_task_id_in_snapshot` before every attempt (the create itself is keyed `--idempotency-key <tick>:<step>`), and an outcome it still cannot resolve raises `RetryableReviewRegistration`, which both reconcilers turn into a plain "retry next tick". Do not confuse it with `pending-task-create.json`, the registration marker `reconcile_pending_task_create` really does read |
 | `accepted-review-head` | a review is accepted, pinning the head the review left behind (its own fix commit included) |
 | `finish-verified` | the PR handoff is verified: the proof of delivery |
 | `issue-close-started` / `issue-commented` / `issue-closed` | issue closeout progresses |
+
+Marker filenames such as `pending-review-create.json`, `accepted-review-head`,
+and `finish-verified` are internal evidence names, not phase keys.
 
 Because a manifest run has no per-task human gate, `result-validation-blocked`
 is the first thing to read when the board shows every worker `done` but the run

@@ -252,7 +252,11 @@ class TestHarnessProfileTopology:
         mkdtemp.assert_not_called()
 
     def test_missing_conditional_skill_fails_profile_preflight(self, mocker):
-        from hermes_pipeline.phases import load_profile_prerequisites
+        from hermes_pipeline.phases import (
+            ClientPrerequisite,
+            ProfilePrerequisites,
+            SkillPrerequisite,
+        )
 
         mocker.patch(
             "hermes_pipeline.harness.verify_hermes_skill_registry_prerequisite",
@@ -265,7 +269,12 @@ class TestHarnessProfileTopology:
             _validate_profile_prerequisites(
                 profile_name="gstack",
                 prompt_client="claude",
-                prerequisites=load_profile_prerequisites("gstack"),
+                prerequisites=ProfilePrerequisites(1, "gstack", (
+                    SkillPrerequisite("custom-dispatch", "hermes", "Conditional", {
+                        name: ClientPrerequisite("Hermes skill registry", "custom invocation")
+                        for name in ("claude", "codex")
+                    }),
+                )),
             )
 
 
@@ -1399,6 +1408,67 @@ class TestRunHarness:
         assert set(keys) == set(registered) | set(delivered)
         assert len(keys) == len(set(keys))
         assert live.kwargs["shutdown_run"]["tick_id"] == "tick-1"
+
+    @pytest.mark.parametrize("snapshot_status, valid_sentinel, cancel_confirmed, quiescent", [
+        ("archived", True, True, True),
+        ("running", True, True, False),
+        ("unknown", True, True, False),
+        ("archived", False, True, False),
+        ("archived", True, False, False),
+    ])
+    def test_profile_shutdown_waits_only_for_created_workers(
+        self, live, mocker, snapshot_status, valid_sentinel, cancel_confirmed, quiescent
+    ):
+        from types import SimpleNamespace
+
+        phases = (Phase("build", "Build", role="implementation"),
+                  Phase("audit", "Audit", role="review"),
+                  Phase("publish", "Publish", role="delivery"))
+        keys = tuple(p.phase_key for p in phases)
+        live.pinned_registration = dataclasses.replace(live.pinned_registration,
+            phase_keys=keys, authority=SimpleNamespace(phase_definitions=phases, step_keys=keys))
+        live.pin([{"build": "blocked"}])
+        prior_tick = live.tick
+
+        def tick(*args, **kwargs):
+            result = prior_tick(*args, **kwargs)
+            outcomes = live.pinned_registration.worktree / ".hermes" / "outcomes"
+            outcomes.mkdir(parents=True)
+            (outcomes / "expected-phases.json").write_text(json.dumps(
+                ["build"] if valid_sentinel else ["publish"]))
+            return result
+
+        live.tick = tick
+        clock = {"time": 0.0}
+        sleeps = []
+        reports = []
+        calls = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["time"] += seconds
+
+        def shutdown(*args, **kwargs):
+            calls.append(kwargs)
+            report = shutdown_run(*args, **kwargs, quiescence_timeout=2,
+                poll_interval=1, sleep=sleep, now=lambda: clock["time"])
+            reports.append(report)
+            return report
+
+        mocker.patch.object(harness_mod, "shutdown_run", side_effect=shutdown)
+        mocker.patch.object(harness_mod, "_cancel_registered_tasks", return_value=cancel_confirmed)
+        mocker.patch.object(harness_mod, "_archived_status_map", return_value={"build": snapshot_status})
+        mocker.patch.object(harness_mod, "cleanup_remote", return_value=(True, ()))
+        mocker.patch.object(harness_mod, "_close_issue_leftover", return_value=[])
+        if quiescent:
+            result = live.run(profile_name="native-sdd")
+            assert result.exit_code != 0
+        else:
+            with pytest.raises(HarnessCleanupError):
+                live.run(profile_name="native-sdd")
+        assert reports[0].kanban_quiescent is quiescent
+        assert calls[0]["expected_phase_keys"] == (("build",) if valid_sentinel else keys)
+        assert bool(sleeps) is (cancel_confirmed and not quiescent)
 
     def test_native_sdd_accepts_a_pr_from_the_registered_branch(self, live):
         """The head invariant's referent is the registration, not the issue.
@@ -3209,9 +3279,10 @@ class TestCloneSandbox:
 
     @pytest.mark.real_git
     @pytest.mark.parametrize(
-        "gitignore", [None, "# no runtime ignores\n__pycache__/\n"], ids=["absent", "lacks_hermes"]
+        "gitignore", [None, "# no runtime ignores\n__pycache__/\n", ".hermes/\n"],
+        ids=["absent", "lacks_hermes", "lacks_agent_runtime_rules"]
     )
-    def test_seed_check_requires_gitignore_with_hermes_rule(self, tmp_path, gitignore):
+    def test_seed_check_requires_gitignore_with_runtime_rules(self, tmp_path, gitignore):
         files = {".gitignore": gitignore} if gitignore is not None else {".gitignore": ""}
         bare, _sha = _seed_bare_remote(tmp_path, seed_paths=_ALL_SEED_PATHS, files=files)
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
@@ -3229,7 +3300,11 @@ class TestCloneSandbox:
 
         assert exc_info.value.code == "sandbox_not_seeded"
         assert ".gitignore" in exc_info.value.detail
-        assert ".hermes/" in exc_info.value.detail
+        if gitignore != ".hermes/\n":
+            assert ".hermes/" in exc_info.value.detail
+        if gitignore == ".hermes/\n":
+            assert ".serena/" in exc_info.value.detail
+            assert "uv.lock" in exc_info.value.detail
         assert "tpo test --repo acme/sandbox --init-sandbox" in exc_info.value.detail
 
     @pytest.mark.real_git
@@ -3450,6 +3525,8 @@ def _assert_porcelain_clean_with_runtime_junk(clone: Path) -> None:
         ".venv/bin/python",
         ".superpowers/scratch.md",
         ".code-review-graph/graph.json",
+        ".serena/project.yml",
+        "uv.lock",
     ):
         target = clone / rel
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -3468,6 +3545,8 @@ class TestInitSandbox:
             "README.md", ".gitignore", "pyproject.toml", "tests/__init__.py", "docs/harness/SANDBOX.md"
         }
         assert ".hermes/\n" in harness_mod._SANDBOX_GITIGNORE
+        assert ".serena/\n" in harness_mod._SANDBOX_GITIGNORE
+        assert "uv.lock\n" in harness_mod._SANDBOX_GITIGNORE
 
     def _serve_gh(self, fake_gh, bare: Path | None, *, default_branch: str | None = None):
         """Serve gh against the bare remote's real state.
@@ -3810,8 +3889,7 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_tracked_gitignore_hiding_docs_does_not_block_seed(self, fake_gh, tmp_path):
-        # ``.hermes/`` is present so the .gitignore is kept as-is and ``docs/`` stays
-        # ignored: only ``add -f`` can land docs/harness/SANDBOX.md.
+        # Missing harness ignore rules are refreshed before the seed marker is added.
         bare = _make_bare_remote(tmp_path, {".gitignore": ".hermes/\ndocs/\n"})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
@@ -3820,7 +3898,7 @@ class TestInitSandbox:
 
         tree = _remote_tree(bare, "main")
         assert "docs/harness/SANDBOX.md" in tree
-        assert tree[".gitignore"] == ".hermes/\ndocs/"
+        assert tree[".gitignore"] == harness_mod._SANDBOX_GITIGNORE.rstrip("\n")
 
     @pytest.mark.real_git
     def test_non_empty_path_never_removes_preexisting_project_dir(self, fake_gh, tmp_path):
@@ -6412,7 +6490,7 @@ class _PinnedFixture:
         return recover_pinned_registration(self.project_dir, self.state, **kwargs)
 
 
-def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _PinnedFixture:
+def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE, phases=()) -> _PinnedFixture:
     """A real ``register_pinned_run`` against a temp clone whose HEAD commits the Plan."""
     from hermes_pipeline.run_registration import register_pinned_run
 
@@ -6447,7 +6525,8 @@ def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _Pinn
         prompt_client="claude",
         assignee="pipeline",
         review_assignee=None,
-        step_keys=_PINNED_STEPS,
+        step_keys=tuple(p.phase_key for p in phases if not p.gate) if phases else _PINNED_STEPS,
+        phase_definitions=phases,
         repo=_PINNED_REPO,
     )
     _write_tick_state(state, tick_id=_PINNED_TICK, expected_phases=None)
@@ -6466,7 +6545,7 @@ def _pinned_registration(tmp_path: Path, *, issue: int = _PINNED_ISSUE) -> _Pinn
         worktree=registration.worktree,
         run_dir=state / "runs" / _PINNED_TICK,
     )
-    fixture.write_sentinel(list(_PINNED_STEPS))
+    fixture.write_sentinel(list(registration.step_keys))
     return fixture
 
 
@@ -8449,3 +8528,96 @@ def test_isolated_config_preserves_delegated_opt_in(tmp_path):
     with isolate_config(state_dir=tmp_path / "state", projects_dir=tmp_path / "projects",
                         agent_policy_mode="delegated"):
         assert load_global_config().agent_policy_mode == "delegated"
+
+
+@pytest.mark.parametrize("review", [True, False])
+@pytest.mark.parametrize("delivery", [True, False])
+@pytest.mark.parametrize("missing", [None, "audit", "publish"])
+def test_profile_classifier_requires_every_pinned_worker(review, delivery, missing):
+    from types import SimpleNamespace
+
+    from hermes_pipeline.harness import classify_pinned_run
+
+    phases = (Phase("build", "Build", role="implementation"),
+              Phase("audit", "Audit", role="review" if review else "worker"),
+              Phase("publish", "Publish", role="delivery" if delivery else "worker"))
+    registration = SimpleNamespace(phase_definitions=phases,
+                                   step_keys=tuple(p.phase_key for p in phases))
+    board = {key: "done" for key in registration.step_keys if key != missing}
+    assert classify_pinned_run(board, registration=registration) == (
+        "delivered" if missing is None else "in_progress"
+    )
+
+
+class TestProfileDriveTicks:
+    @pytest.mark.parametrize("delivery", [True, False])
+    def test_profile_sequence_drives_deferred_cards_without_synthetic_finish(self, tmp_path, mocker, delivery):
+        from types import SimpleNamespace
+        helper = TestDriveTicks()
+        phases = (Phase("build", "Build", role="implementation"),
+                  Phase("audit", "Audit", role="review"),
+                  Phase("publish", "Publish", role="delivery" if delivery else "worker"))
+        keys = tuple(p.phase_key for p in phases)
+        kwargs = helper._kwargs(tmp_path, pinned=True, repo=_PINNED_REPO,
+                              run_base_sha="a" * 40, plan_text="plan")
+        state = kwargs["project_state"]
+        _, _, poll = helper._pinned_patches(mocker, state,
+            tick_ids=[_PINNED_TICK] * 3,
+            maps=[{k: "done" for k in keys[:n]} for n in (1, 2, 3)])
+        authority = SimpleNamespace(phase_definitions=phases, step_keys=keys)
+        registration = dataclasses.replace(helper._registration(state), phase_keys=keys, authority=authority)
+        mocker.patch.object(harness_mod, "recover_pinned_registration", return_value=registration)
+        result = harness_mod.drive_ticks(**kwargs)
+        assert result.success
+        assert result.ticks_run == 3
+        assert result.observed_keys == frozenset(keys)
+        assert all(call["step_keys"] == ("build",) for call in poll.calls)
+
+
+@pytest.mark.real_git
+def test_profile_registration_recovery_retains_complete_workers_and_roles(tmp_path):
+    phases = (Phase("build", "Build", role="implementation"),
+              Phase("audit", "Audit", role="review"),
+              Phase("publish", "Publish", role="delivery", terminal=True))
+    fx = _pinned_registration(tmp_path, phases=phases)
+    registration = fx.recover()
+    assert registration.phase_keys == ("build", "audit", "publish")
+    assert registration.authority.phase_definitions == phases
+    assert harness_mod.classify_pinned_run({"build": "done", "publish": "done"},
+        registration=registration.authority) == "in_progress"
+    assert harness_mod.classify_pinned_run(dict.fromkeys(registration.phase_keys, "done"),
+        registration=registration.authority) == "delivered"
+    for prefix in (["build"], ["build", "audit"]):
+        fx.write_sentinel(prefix)
+        recovered = fx.recover()
+        assert recovered == registration
+        assert harness_mod.classify_pinned_run(dict.fromkeys(prefix, "done"),
+            registration=recovered.authority) == "in_progress"
+
+
+@pytest.mark.real_git
+@pytest.mark.parametrize("keys", [
+    [], ["audit"], ["build", "publish"], ["audit", "build"],
+    ["build", "build"], ["build", "unknown"],
+    ["build", "audit", "publish", "unknown"],
+])
+def test_profile_registration_recovery_rejects_invalid_created_prefix(tmp_path, keys):
+    phases = (Phase("build", "Build", role="implementation"),
+              Phase("audit", "Audit", role="review"),
+              Phase("publish", "Publish", role="delivery", terminal=True))
+    fx = _pinned_registration(tmp_path, phases=phases)
+    fx.write_sentinel(keys)
+    with pytest.raises(HarnessTickError):
+        fx.recover()
+
+
+@pytest.mark.real_git
+def test_legacy_registration_recovery_keeps_review_finish_protocol(tmp_path):
+    fx = _pinned_registration(tmp_path)
+    registration = fx.recover()
+    assert not registration.authority.phase_definitions
+    assert registration.phase_keys == _PINNED_STEPS
+    assert harness_mod.classify_pinned_run(dict.fromkeys((*_PINNED_STEPS, "finish"), "done"),
+        registration=registration.authority) == "in_progress"
+    assert harness_mod.classify_pinned_run(dict.fromkeys((*_PINNED_STEPS, "review:0", "finish"), "done"),
+        registration=registration.authority) == "delivered"

@@ -1,13 +1,6 @@
-"""The delimited external-agent prompt carries only the work instruction.
+"""Profile prompt preparation stays byte exact before supervisor instrumentation.
 
-TPO splits every worker card into two halves on purpose: a delegation block
-addressed to the Hermes dispatcher, and a delimited block Hermes passes
-verbatim to the external client. The result-metadata template is dispatcher
-instrumentation -- it names ``metadata.tpo_result``, a Hermes concept -- so it
-belongs on the dispatcher side of that boundary. When it leaks inside the
-delimiters, the external client receives the phase profile's prompt plus a JSON
-schema addressed to somebody else, and a failure can no longer be attributed to
-the profile under test.
+Prepared prompts and result contracts are pinned separately from thin worker cards.
 """
 from types import SimpleNamespace
 
@@ -35,13 +28,13 @@ TEMPLATE_MARKERS = (
 )
 
 
-def _split_card_body(body: str) -> tuple[str, str]:
-    """Return ``(dispatcher_half, delimited_prompt)`` for one card body."""
-    assert body.count("BEGIN EXTERNAL AGENT PROMPT") == 1
-    assert body.count("END EXTERNAL AGENT PROMPT") == 1
-    dispatcher, _, rest = body.partition("BEGIN EXTERNAL AGENT PROMPT\n")
-    delimited, _, _ = rest.partition("END EXTERNAL AGENT PROMPT")
-    return dispatcher, delimited
+def _split_card_body(card) -> tuple[str, str]:
+    """Inspect prepared inputs; actual worker cards contain only execution identity."""
+    if isinstance(card, tuple):
+        return card
+    assert "BEGIN EXTERNAL AGENT PROMPT" not in card.body
+    assert "Execution registration pending" in card.body
+    return card.result_template or "", card.rendered_prompt
 
 
 def _assert_prompt_is_clean(delimited: str) -> None:
@@ -88,8 +81,10 @@ def test_implementation_card_delimited_prompt_is_exactly_the_profile_prompt(tmp_
     """
     prepared = _prepared_implementation_card(tmp_path)
 
-    assert [card.phase_key for card in prepared] == ["phase_4_development"]
-    dispatcher, delimited = _split_card_body(prepared[0].body)
+    assert [card.phase_key for card in prepared] == [
+        "phase_4_development", "phase_5_review", "phase_8_finish_branch"
+    ]
+    dispatcher, delimited = _split_card_body(prepared[0])
 
     _assert_prompt_is_clean(delimited)
     assert delimited == _rendered_profile_prompt(
@@ -120,9 +115,9 @@ def test_profile_phase_delimited_prompt_is_exactly_the_profile_prompt(tmp_path):
         phases_path=phases_path, prompt_client="claude", project_dir=tmp_path,
     )
 
-    _, delimited = _split_card_body(prepared[0].body)
+    _, delimited = _split_card_body(prepared[0])
     _assert_prompt_is_clean(delimited)
-    assert delimited.endswith("Review the branch. Report defects.\n")
+    assert delimited.endswith("Review the branch. Report defects.")
 
 
 def _reconciler_registration(tmp_path):
@@ -187,9 +182,13 @@ def _created_card_body(mocker, tmp_path, run):
         review_reconciliation.subprocess, "run",
         return_value=SimpleNamespace(returncode=0, stdout='{"id": "t_12345678"}'),
     )
+    registered = mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-execution")
     run()
     cmd = subprocess_run.call_args.args[0]
-    return cmd[cmd.index("--body") + 1]
+    body = cmd[cmd.index("--body") + 1]
+    assert "tpo-agent-supervisor" in body
+    assert registered.call_args.kwargs["prompt"] not in body
+    return registered.call_args.kwargs["result_template"], registered.call_args.kwargs["prompt"]
 
 
 def test_review_card_delimited_prompt_is_exactly_the_profile_prompt(tmp_path, mocker):
@@ -385,12 +384,11 @@ def test_native_policy_initial_worker_cards(tmp_path, client, manifest, mode):
     baseline = prepare_todo_phases(**kwargs)
     cards = prepare_todo_phases(**kwargs, profile_name="native-sdd", agent_policy_mode=mode)
     assert [c.phase_key for c in cards] == (
-        ["phase_4_development"] if manifest else
         ["phase_4_development", "phase_5_review", "phase_8_finish_branch"]
     )
     for card, original in zip(cards, baseline, strict=True):
-        dispatcher, payload = _split_card_body(card.body)
-        original_dispatcher, original_payload = _split_card_body(original.body)
+        dispatcher, payload = _split_card_body(card)
+        original_dispatcher, original_payload = _split_card_body(original)
         assert dispatcher == original_dispatcher
         prefix = "AGENT-POLICY-MODE: delegated\n\n" if mode == "delegated" else ""
         assert payload == prefix + original_payload
@@ -461,9 +459,9 @@ def test_native_policy_keeps_prose_and_inline_mentions_byte_exact(tmp_path):
                     + json.dumps(text) + "\n")
     cards = prepare_todo_phases(todo_id="TODO-41", tick_id="01TICK", board_slug="demo",
                                phases_path=path, profile_name="native-sdd", agent_policy_mode="delegated")
-    _, payload = _split_card_body(cards[0].body)
+    _, payload = _split_card_body(cards[0])
     assert payload.startswith("AGENT-POLICY-MODE: delegated\n\n")
-    assert payload.endswith(text + "\n")
+    assert payload.endswith(text)
 
 
 @pytest.mark.parametrize("phase_key", ["phase_5_review", "phase_8_finish_branch"])
@@ -515,8 +513,8 @@ def test_native_policy_preserves_leading_inline_code_mentions(tmp_path, mode, te
     kwargs = dict(todo_id="TODO-41", tick_id="01TICK", board_slug="demo", phases_path=path)
     original = prepare_todo_phases(**kwargs)[0]
     card = prepare_todo_phases(**kwargs, profile_name="native-sdd", agent_policy_mode=mode)[0]
-    dispatcher, payload = _split_card_body(card.body)
-    original_dispatcher, original_payload = _split_card_body(original.body)
+    dispatcher, payload = _split_card_body(card)
+    original_dispatcher, original_payload = _split_card_body(original)
     assert dispatcher == original_dispatcher
     prefix = "AGENT-POLICY-MODE: delegated\n\n" if mode == "delegated" else ""
     assert payload == prefix + original_payload
