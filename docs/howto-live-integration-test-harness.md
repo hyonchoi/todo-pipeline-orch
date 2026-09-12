@@ -82,7 +82,7 @@ default branch; every push is a plain fast-forward. It pushes one
 | Seed file | Purpose |
 |-----------|---------|
 | `README.md` | Placeholder for the sandbox project |
-| `.gitignore` | Ignores `.hermes/` (per-run state never lands in a PR), agent scratch (`.superpowers/`, `.code-review-graph/`), and Python artifacts (`__pycache__/`, `*.py[cod]`, `.venv/`) |
+| `.gitignore` | Ignores runtime state (`.hermes/`, `.serena/`, `uv.lock`), agent scratch (`.superpowers/`, `.code-review-graph/`), and Python artifacts (`__pycache__/`, `*.py[cod]`, `.venv/`) |
 | `pyproject.toml` | `pytest` dev group and `testpaths` so the agent's tests run |
 | `tests/__init__.py` | Test package marker |
 | `docs/harness/SANDBOX.md` | Marker that this repo is a harness sandbox |
@@ -95,13 +95,13 @@ Behavior:
   `sandbox_not_empty` when any tracked path is neither a seed file nor under
   `.github/**`. README-only and minimal-scaffold repos are seedable by design;
   a real project is not. Missing seed files are added and a `.gitignore` that
-  does not ignore `.hermes/` is replaced, then the result is pushed to the
+  does not carry all required runtime-state rules is replaced, then the result is pushed to the
   default branch, whatever its name.
 - Returns `already_seeded` (no writes, no push) when every seed file is tracked
-  and `.gitignore` already carries the required rule.
+  and `.gitignore` already carries all required runtime-state rules.
 - Per-run `sandbox_seed_check` requires only `pyproject.toml`,
   `tests/__init__.py`, `docs/harness/SANDBOX.md` tracked at HEAD and a
-  `.gitignore` containing `.hermes/`; `README.md` is seeded but not required.
+  `.gitignore` containing `.hermes/`, `.serena/`, and `uv.lock`; `README.md` is seeded but not required.
 
 The repository can also be supplied through the `TPO_HARNESS_REPO` environment
 variable; `--repo` takes precedence.
@@ -342,7 +342,7 @@ expected to be `blocked`: a blocked card classifies the run as failed.
 | `gh_permission` | Viewer lacks WRITE/MAINTAIN/ADMIN on the sandbox |
 | `gh_viewer_unknown` | `gh api user` returned no usable login; re-run `gh auth login` |
 | `gh_override_forbidden` | `TPO_GH_BIN` is set; unset it |
-| `sandbox_not_seeded` | Seed files or the `.hermes/` ignore rule are missing; run `--init-sandbox` |
+| `sandbox_not_seeded` | Seed files or a required runtime-state ignore rule (`.hermes/`, `.serena/`, `uv.lock`) is missing; run `--init-sandbox` |
 | `sandbox_not_empty` | `--init-sandbox` refused a repo tracking files outside the seed set / `.github/**` |
 | `seed_incomplete` | `--init-sandbox` committed but a seed file is not a blob at HEAD; the init workspace is removed again, so re-run `--init-sandbox` (nothing was pushed) |
 | `default_branch_unknown` | `--init-sandbox`: `gh` reports no default branch but `git ls-remote` advertises refs; set the default branch on GitHub |

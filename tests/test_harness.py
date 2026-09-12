@@ -3279,9 +3279,10 @@ class TestCloneSandbox:
 
     @pytest.mark.real_git
     @pytest.mark.parametrize(
-        "gitignore", [None, "# no runtime ignores\n__pycache__/\n"], ids=["absent", "lacks_hermes"]
+        "gitignore", [None, "# no runtime ignores\n__pycache__/\n", ".hermes/\n"],
+        ids=["absent", "lacks_hermes", "lacks_agent_runtime_rules"]
     )
-    def test_seed_check_requires_gitignore_with_hermes_rule(self, tmp_path, gitignore):
+    def test_seed_check_requires_gitignore_with_runtime_rules(self, tmp_path, gitignore):
         files = {".gitignore": gitignore} if gitignore is not None else {".gitignore": ""}
         bare, _sha = _seed_bare_remote(tmp_path, seed_paths=_ALL_SEED_PATHS, files=files)
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
@@ -3300,6 +3301,9 @@ class TestCloneSandbox:
         assert exc_info.value.code == "sandbox_not_seeded"
         assert ".gitignore" in exc_info.value.detail
         assert ".hermes/" in exc_info.value.detail
+        if gitignore == ".hermes/\n":
+            assert ".serena/" in exc_info.value.detail
+            assert "uv.lock" in exc_info.value.detail
         assert "tpo test --repo acme/sandbox --init-sandbox" in exc_info.value.detail
 
     @pytest.mark.real_git
