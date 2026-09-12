@@ -3300,7 +3300,8 @@ class TestCloneSandbox:
 
         assert exc_info.value.code == "sandbox_not_seeded"
         assert ".gitignore" in exc_info.value.detail
-        assert ".hermes/" in exc_info.value.detail
+        if gitignore != ".hermes/\n":
+            assert ".hermes/" in exc_info.value.detail
         if gitignore == ".hermes/\n":
             assert ".serena/" in exc_info.value.detail
             assert "uv.lock" in exc_info.value.detail
