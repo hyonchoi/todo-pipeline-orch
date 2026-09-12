@@ -391,20 +391,32 @@ class ExecutionStore:
     def prompt(self, execution_id: str) -> bytes:
         return base64.b64decode(self.load(execution_id)["registration"]["prompt_base64"])
 
+    def worktree_lock_id(self, execution_id: str) -> str:
+        """Compute the lock id for a worktree without side effects."""
+        worktree = Path(self.load(execution_id)["registration"]["worktree"]).resolve()
+        return "worktree-" + hashlib.sha256(os.fsencode(worktree)).hexdigest()
+
+    def assert_worktree_peers_resolved(self, execution_id: str) -> None:
+        """Verify no peer executions on the worktree have unresolved attempts.
+
+        Call this while holding the worktree lock (via locked(worktree_id)).
+        """
+        worktree = Path(self.load(execution_id)["registration"]["worktree"]).resolve()
+        for path in self.root.glob("*/record.json"):
+            if path.parent.name == execution_id:
+                continue
+            other = self.load(path.parent.name)
+            if Path(other["registration"]["worktree"]).resolve() != worktree:
+                continue
+            if any(attempt["cleanup"] != "confirmed" or attempt["status"] not in TERMINAL for attempt in other["attempts"]):
+                raise ExecutionError("worktree has an unresolved owned attempt")
+
     @contextmanager
     def worktree_locked(self, execution_id: str) -> Iterator[None]:
         """Retain alongside ``locked`` throughout the supervisor ownership interval."""
-        worktree = Path(self.load(execution_id)["registration"]["worktree"]).resolve()
-        lock_id = "worktree-" + hashlib.sha256(os.fsencode(worktree)).hexdigest()
+        lock_id = self.worktree_lock_id(execution_id)
         with self.locked(lock_id):
-            for path in self.root.glob("*/record.json"):
-                if path.parent.name == execution_id:
-                    continue
-                other = self.load(path.parent.name)
-                if Path(other["registration"]["worktree"]).resolve() != worktree:
-                    continue
-                if any(attempt["cleanup"] != "confirmed" or attempt["status"] not in TERMINAL for attempt in other["attempts"]):
-                    raise ExecutionError("worktree has an unresolved owned attempt")
+            self.assert_worktree_peers_resolved(execution_id)
             yield
 
     def admit(self, execution_id: str, *, recovery_event: str | None = None) -> tuple[dict, bool]:
