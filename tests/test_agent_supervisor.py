@@ -22,6 +22,15 @@ from hermes_pipeline.agent_git import CollectionTimedOut
 from hermes_pipeline.result_contract import ResultContractError
 
 
+def _final_report(capsys) -> dict:
+    """The last stdout line is the final report; earlier lines are periodic status."""
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def _status_lines(capsys) -> list[dict]:
+    return [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
+
+
 @pytest.mark.parametrize('failure', ['timeout', 'supervisor_loss', 'loss_after_timeout_receipt'])
 def test_collection_preserves_primary_exit_and_owns_attempt_outcome(execution, monkeypatch, failure):
     from hermes_pipeline import agent_collector as collector
@@ -303,7 +312,7 @@ def test_prerequisite_disappears_between_attach_and_daemon(execution, monkeypatc
         capsys.readouterr()  # Detached daemon stdout would normally be discarded.
     monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
     assert supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"]) == 1
-    assert json.loads(capsys.readouterr().out)["status"] == "client_unavailable"
+    assert _final_report(capsys)["status"] == "client_unavailable"
     assert not store.load("execution-1")["attempts"]
 
 
@@ -332,7 +341,7 @@ def test_actual_admission_lock_remains_distinct_from_capability_refusal(executio
         fcntl.flock(directory, fcntl.LOCK_EX | fcntl.LOCK_NB)
         try:
             assert supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"]) == 1
-            assert json.loads(capsys.readouterr().out)["status"] == "lock_unconfirmed"
+            assert _final_report(capsys)["status"] == "lock_unconfirmed"
         finally:
             fcntl.flock(directory, fcntl.LOCK_UN)
     assert supervisor.status(store, "execution-1")["status"] == "registered"
@@ -364,7 +373,7 @@ def test_explicit_recovery_waits_for_daemon_without_rewriting_terminal_attempt(e
         "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
     result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1",
                               "--recovery-event", event])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
     assert report["status"] == ("timed_out" if daemon_admits else "waiting_for_admission")
     assert report["generation"] == (2 if daemon_admits else 1)
     assert result == (1 if daemon_admits else 0)
@@ -384,9 +393,9 @@ def test_cli_detach_refusal_remains_visible_to_status(execution, monkeypatch, ca
     command = ["run", "--root", str(store.root), "--execution", "execution-1"]
     expected = "supervisor_unavailable" if failure == "entrypoint" else "launch_unavailable"
     assert supervisor.main(command) == 1
-    assert json.loads(capsys.readouterr().out)["status"] == expected
+    assert _final_report(capsys)["status"] == expected
     assert supervisor.main(["status", *command[1:]]) == 1
-    assert json.loads(capsys.readouterr().out)["status"] == expected
+    assert _final_report(capsys)["status"] == expected
     assert not store.load("execution-1")["attempts"]
 
 
@@ -404,7 +413,7 @@ def test_detach_failure_cannot_write_refusal_over_concurrent_admission(execution
         raise FileNotFoundError("disappeared supervisor")
     monkeypatch.setattr(supervisor.subprocess, "Popen", race)
     assert supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"]) == 1
-    assert json.loads(capsys.readouterr().out)["status"] == "timed_out"
+    assert _final_report(capsys)["status"] == "timed_out"
     assert not (store.root / "execution-1" / "launch-refusal.json").exists()
 
 
@@ -513,12 +522,12 @@ def test_registered_cli_repair_runs_fake_client_once(tmp_path, monkeypatch, caps
     monkeypatch.setattr(supervisor.subprocess, "Popen", daemon_spawn)
     command = ["run", "--root", str(store.root), "--execution", identity]
     assert supervisor.main(command) == 1
-    assert json.loads(capsys.readouterr().out)["status"] == "client_unavailable"
+    assert _final_report(capsys)["status"] == "client_unavailable"
     assert not daemons
     fake_client.write_text("#!" + sys.executable + "\nimport sys\nsys.stdin.buffer.read()\nsys.exit(17)\n")
     fake_client.chmod(0o700)
     assert supervisor.main(command) == 1
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
     assert report["status"] == "exited"
     assert report["exit_code"] == 17
     assert report["generation"] == 1
@@ -770,7 +779,7 @@ def test_worktree_admission_wait_retries_in_code_after_release(execution, monkey
     try:
         for _ in range(2):
             assert supervisor.main(['run', '--root', str(store.root), '--execution', 'execution-1']) == 0
-            report = json.loads(capsys.readouterr().out)
+            report = _final_report(capsys)
             assert report['status'] == 'running_detached'
             assert report['generation'] == 1
     finally:
@@ -792,7 +801,7 @@ def test_unadmitted_daemon_window_stays_honestly_pending(execution, monkeypatch,
     monkeypatch.setattr(supervisor, 'installed_entrypoint', lambda: '/fake/supervisor')
     monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: None)
     assert supervisor.main(['run', '--root', str(store.root), '--execution', 'execution-1']) == 0
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
     assert report['status'] == 'waiting_for_admission'
     assert report['reason'] == 'launch_pending'
     assert report['generation'] == 0
@@ -812,7 +821,7 @@ def test_unsupported_worktree_admission_lock_is_not_retryable(execution, monkeyp
     monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: pytest.fail('unsupported admission'))
     monkeypatch.setattr(supervisor.time, 'sleep', lambda *a: pytest.fail('unsupported lock retried'))
     assert supervisor.main(['run', '--root', str(store.root), '--execution', 'execution-1']) == 1
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
     assert report['status'] == 'lock_unconfirmed'
     assert not report['completion_allowed']
     assert store.load('execution-1')['attempts'] == []
@@ -833,7 +842,7 @@ def test_wait_cli_keeps_original_attempt_budget(execution, monkeypatch, capsys, 
     monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: pytest.fail('duplicate launch'))
     args = ['run', '--wait', '--root', str(store.root), '--execution', 'execution-1']
     assert supervisor.main(args) == (1 if finish_at else 0)
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
     assert report['status'] == ('timed_out' if finish_at else 'running_detached')
     assert (finish_at <= clock[0] <= finish_at + 0.2) if finish_at else (70 <= clock[0] <= 70.2)
     assert store.load('execution-1')['attempts'][0]['deadline_monotonic'] == 10.0
@@ -855,7 +864,7 @@ def test_wait_cli_bounds_unadmitted_wait(execution, monkeypatch, capsys):
     launches = []
     monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: launches.append(a))
     assert supervisor.main(['run', '--wait', '--root', str(store.root), '--execution', 'execution-1']) == 0
-    assert json.loads(capsys.readouterr().out)['status'] == 'waiting_for_admission'
+    assert _final_report(capsys)['status'] == 'waiting_for_admission'
     assert len(launches) == 1
     assert not store.load('execution-1')['attempts']
     assert 90 <= clock[0] <= 90.2
@@ -886,7 +895,7 @@ def test_wait_cli_ignores_unrelated_monotonic_budget(execution, monkeypatch, cap
     monkeypatch.setattr(supervisor, 'status', lambda *a, **k: pending)
     args = ['run', '--wait', '--root', str(store.root), '--execution', 'execution-1']
     assert supervisor.main(args) == 0
-    assert json.loads(capsys.readouterr().out)['status'] == 'waiting_for_admission'
+    assert _final_report(capsys)['status'] == 'waiting_for_admission'
     assert 90 <= clock[0] <= 90.2
     assert len(store.load('execution-1')['attempts']) == 1
 
@@ -1383,7 +1392,7 @@ def test_wait_cli_manifest_ceiling_includes_collection_budget(manifest_execution
     monkeypatch.setattr(supervisor, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
     monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: pytest.fail('duplicate launch'))
     assert supervisor.main(['run', '--wait', '--root', str(store.root), '--execution', 'manifest-1']) == 0
-    assert json.loads(capsys.readouterr().out)['status'] == 'running_detached'
+    assert _final_report(capsys)['status'] == 'running_detached'
     expected = 10.0 + 60 + supervisor.deadline_collection_budget(30) + 60
     assert expected <= clock[0] <= expected + 0.2
 
@@ -1418,7 +1427,7 @@ def test_wait_auto_consumes_tick_approval_without_flag(execution, monkeypatch, c
         "outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": []})
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["generation"] == 2
     assert report["status"] == "timed_out"
@@ -1438,7 +1447,7 @@ def test_wait_without_approval_returns_stored_terminal_status(execution, monkeyp
     monkeypatch.setattr(supervisor.subprocess, "Popen", lambda *a, **k: pytest.fail("should not spawn daemon"))
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["status"] == "timed_out"
     assert report["generation"] == 1
@@ -1472,7 +1481,7 @@ def test_worktree_change_after_tick_approval_yields_recovery_invalidated(executi
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["status"] == "recovery_invalidated"
     assert report.get("reason") == "recovery_state_changed"
@@ -1571,7 +1580,7 @@ def test_explicit_recovery_event_still_supported(execution, monkeypatch, capsys)
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1",
                               "--recovery-event", event])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["generation"] == 2
     assert result == 1
@@ -1625,7 +1634,7 @@ def test_malformed_intent_does_not_block_first_admission(execution, monkeypatch,
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
 
     result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["status"] == "waiting_for_admission"
     assert report["reason"] == "launch_pending"
@@ -1669,7 +1678,7 @@ def test_run_while_daemon_holds_execution_lock_stays_running_detached(execution,
 
     with ExecutionStore(store.root).locked("execution-1"):
         result = supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["status"] == "running_detached"
     assert result == 0
@@ -1709,7 +1718,7 @@ def test_wait_tolerates_daemon_lock_during_admission_window(execution, monkeypat
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert ticks[0] >= 3
     assert report["generation"] == 2
@@ -1824,7 +1833,7 @@ def test_waiter_ends_when_daemon_dies_after_consume(execution, monkeypatch, caps
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["status"] == "recovery_invalidated"
     assert report["reason"] == "recovery_state_changed"
@@ -1855,7 +1864,7 @@ def test_waiter_reports_admission_failed_after_grace(execution, monkeypatch, cap
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["status"] == "admission_failed"
     assert report["reason"] == "daemon_exited"
@@ -1906,7 +1915,7 @@ def test_probe_under_tick_lock_retries_then_admits(execution, monkeypatch, capsy
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert reasons[0] == ("waiting_for_admission", "execution_busy")
     assert released and len(released) == 1
@@ -1963,8 +1972,133 @@ def test_preflight_lock_failure_is_not_translated_to_execution_busy(execution, m
     monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
 
     result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
-    report = json.loads(capsys.readouterr().out)
+    report = _final_report(capsys)
 
     assert report["status"] == "lock_unconfirmed"
     assert result == 1
     assert clock[0] < 1.0
+
+
+def _running_here(store, identity, *, deadline):
+    store.admit(identity)
+    store.update_attempt(identity, 1, status="running", supervisor=supervisor.process_identity(os.getpid()),
+                         deadline_monotonic=deadline)
+
+
+def test_wait_prints_periodic_status_lines_then_final(execution, monkeypatch, capsys):
+    store, _ = execution
+    _running_here(store, "execution-1", deadline=200.0)
+    monkeypatch.setattr(supervisor, "WAIT_STATUS_INTERVAL", 20.0)
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+        if clock[0] >= 50 and store.load("execution-1")["attempts"][-1]["status"] == "running":
+            store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    result = supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"])
+    lines = _status_lines(capsys)
+
+    periodic, final = lines[:-1], lines[-1]
+    assert len(periodic) == 2
+    assert [line["final"] for line in periodic] == [False, False]
+    assert all(line["status"] == "running_detached" and line["generation"] == 1 for line in periodic)
+    assert periodic[0]["elapsed_s"] < periodic[1]["elapsed_s"]
+    assert all(isinstance(line["remaining_s"], float) for line in periodic)
+    assert all("accepted_tasks" in line for line in periodic)
+    assert "event_id" not in json.dumps(lines)
+    assert final["final"] is True
+    assert final["status"] == "timed_out"
+    assert result == 1
+
+
+def test_wait_prints_no_status_line_before_first_interval(execution, monkeypatch, capsys):
+    store, _ = execution
+    _running_here(store, "execution-1", deadline=200.0)
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+        if clock[0] >= 5 and store.load("execution-1")["attempts"][-1]["status"] == "running":
+            store.update_attempt("execution-1", 1, status="timed_out", cleanup="confirmed")
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    assert supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "execution-1"]) == 1
+    lines = _status_lines(capsys)
+
+    assert len(lines) == 1
+    assert lines[0]["final"] is True
+    assert lines[0]["status"] == "timed_out"
+
+
+def test_final_report_carries_final_flag_on_failure_path(execution, capsys):
+    store, _ = execution
+    (store.root / "execution-1" / "record.json").write_text("not json")
+
+    assert supervisor.main(["run", "--root", str(store.root), "--execution", "execution-1"]) == 1
+    lines = _status_lines(capsys)
+
+    assert len(lines) == 1
+    assert lines[0]["final"] is True
+    assert lines[0]["completion_allowed"] is False
+
+
+def test_worker_instructions_direct_final_line_polling():
+    body = supervisor.worker_instructions("execution-1", "/state/executions")
+
+    assert 'one JSON status line per minute with "final": false' in body
+    assert 'until a line with "final": true appears and act only on that line' in body
+    assert "never block, comment, or transition the card on a non-final line" in body
+    assert "run the same command again to reconnect" in body
+    assert "until the command exits" not in body
+    assert "background" in body
+
+
+def test_supervise_writes_supervisor_log_and_client_output(execution, monkeypatch):
+    store, _ = execution
+    monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [
+        sys.executable, "-c", "import sys; print('client-out-marker'); print('client-err-marker', file=sys.stderr)"])
+    seen = {}
+    def fake_run_process(arguments, **kwargs):
+        seen.update(kwargs)
+        kwargs["on_launch"]({"identity": supervisor.process_identity(os.getpid()), "launched_monotonic": 0.0, "deadline": 30.0})
+        for path, text in ((kwargs["stdout_path"], "client-out-marker\n"), (kwargs["stderr_path"], "client-err-marker\n")):
+            Path(path).write_text(text)
+        return {"outcome": "timed_out", "exit_code": None, "signal": None, "cleanup": "confirmed", "processes": [], "deadline": 30.0}
+    monkeypatch.setattr(supervisor, "run_process", fake_run_process)
+
+    report = supervisor.supervise(store, "execution-1")
+
+    assert report["status"] == "timed_out"
+    staging = supervisor.staging_directory(store, "execution-1", 1)
+    assert Path(seen["stdout_path"]) == staging / "client.stdout.log"
+    assert Path(seen["stderr_path"]) == staging / "client.stderr.log"
+    assert (staging / "client.stdout.log").read_text() == "client-out-marker\n"
+    log_text = (store.root / "execution-1" / "supervisor.log").read_text()
+    assert "admission generation=1 recovery=False" in log_text
+    assert "launch client=python" in log_text
+    assert "outcome=timed_out" in log_text
+    assert "terminal generation=1 status=timed_out" in log_text
+    assert "exact" not in log_text and "prompt" not in log_text
+    assert "client-out-marker" not in log_text
+
+
+def test_wait_status_line_cadence_is_one_minute(manifest_execution, monkeypatch, capsys):
+    store, _ = manifest_execution
+    _running_here(store, "manifest-1", deadline=200.0)
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+        if clock[0] >= 130 and store.load("manifest-1")["attempts"][-1]["status"] == "running":
+            store.update_attempt("manifest-1", 1, status="timed_out", cleanup="confirmed")
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    assert supervisor.main(["run", "--wait", "--root", str(store.root), "--execution", "manifest-1"]) == 1
+    lines = _status_lines(capsys)
+
+    periodic = [line for line in lines if line["final"] is False]
+    assert len(periodic) == 2
+    assert 60.0 <= periodic[0]["elapsed_s"] < 60.2
+    assert 120.0 <= periodic[1]["elapsed_s"] < 120.2
+    assert periodic[0]["accepted_tasks"] == 0
+    assert lines[-1]["final"] is True
