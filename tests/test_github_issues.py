@@ -368,6 +368,31 @@ def test_issue_from_api_maps_rest_payload_and_extracts_fields():
     assert issue.entry_hash == snapshot_hash(issue.snapshot)
 
 
+@pytest.mark.parametrize("delimiter", ["`", "``"])
+def test_issue_from_api_normalizes_markdown_references(delimiter):
+    paths = (
+        "docs/ARCHITECTURE.md",
+        "docs/adr/0003-github-issues-are-the-todo-backlog.md",
+        "tests/test_cli_contract.py",
+        "tests/test_todos_create.py",
+    )
+    references = ", ".join(f"{delimiter}{path}{delimiter}" for path in paths)
+    body = f"### Reference\n\n{references}.\n"
+    issue = _issue(102, body=body)
+
+    assert issue.references == paths
+    assert issue.body == body
+    assert issue.snapshot == canonical_issue_snapshot(REPO, 102, issue.title, body)
+
+
+@pytest.mark.parametrize("path", ["docs/plain.md.", "`docs/open.md", "docs/close.md`",
+                                  "`docs/a.md` trailing text", "`docs/a.md``"])
+def test_issue_from_api_preserves_literal_or_malformed_references(path):
+    issue = _issue(102, body=f"### Reference\n\n{path}\n")
+
+    assert issue.references == (path,)
+
+
 def test_issue_from_api_handles_null_body_and_missing_dependency_summary():
     issue = _issue(7, body=None, summary=False)
 
