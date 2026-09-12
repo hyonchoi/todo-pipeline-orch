@@ -63,6 +63,28 @@ _FAILURE_CODES = frozenset({
     "verification_sandbox_unavailable",
 })
 
+DEADLINE_COLLECTION_CAP = 600.0
+
+
+def deadline_collection_budget(timeout: float) -> float:
+    """Compute collection budget as 10% of timeout, capped at DEADLINE_COLLECTION_CAP.
+
+    Rationale: pinned checks already ran once per task during the phase; 10% keeps 30s
+    test phases at 3s; 600s caps the 7200s class.
+    """
+    return min(DEADLINE_COLLECTION_CAP, 0.1 * timeout)
+
+
+def wait_ceiling_tail(registration: dict) -> float:
+    """Compute the tail duration added to wait ceilings.
+
+    When a manifest is present, collection can happen: deadline + cleanup allowance + collection budget.
+    Without a manifest, only the cleanup allowance is added.
+    """
+    if registration["manifest"] is not None:
+        return 60 + deadline_collection_budget(registration["timeout"]) + 60
+    return 60
+
 
 def _failure_code(error: Exception) -> str:
     if isinstance(error, LockUnconfirmed):
@@ -429,6 +451,9 @@ def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) ->
     attempt = record["attempts"][-1]
     report.update(generation=attempt["generation"], status=attempt["status"],
                   exit_code=attempt["exit_code"], signal=attempt["exit_signal"], cleanup=attempt["cleanup"])
+    # For terminal attempts, include reason so operators can distinguish collection outcomes
+    if attempt["status"] in TERMINAL and attempt["reason"] is not None:
+        report["reason"] = attempt["reason"]
     if attempt["status"] not in TERMINAL:
         report["status"] = "running_detached" if identity_matches(attempt["supervisor"]) else "lock_unconfirmed"
     elif attempt["cleanup"] != "confirmed":
@@ -527,9 +552,17 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
         store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable", cleanup="unconfirmed")
     else:
         collecting = result["outcome"] == "exited" and result["exit_code"] == 0 and result["cleanup"] == "confirmed"
-        store.update_attempt(identity, generation, status="running" if collecting else result["outcome"], exit_code=result["exit_code"],
+        deadline_collecting = (result["outcome"] == "timed_out" and result["cleanup"] == "confirmed"
+                              and registration["manifest"] is not None)
+
+        # The terminal status is written once, after any collection; a pending
+        # reason lets recover() finish an interrupted deadline collection.
+        store.update_attempt(identity, generation, status="running" if (collecting or deadline_collecting) else result["outcome"],
+                             exit_code=result["exit_code"],
                              exit_signal=result["signal"], cleanup="confirmed" if result["cleanup"] == "confirmed" else "unconfirmed",
-                             direct_processes=result["processes"])
+                             direct_processes=result["processes"],
+                             **({"reason": "deadline_collection_pending"} if deadline_collecting else {}))
+
         if collecting:
             from .agent_collector import (
                 CollectionInterrupted,
@@ -563,6 +596,31 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
                 # slow fsync cannot turn an eligible success into a late timeout.
                 store.update_attempt(identity, generation, status="exited")
                 return report
+
+        if deadline_collecting:
+            from .agent_collector import collect_checkpoints
+            from .agent_execution import execution_logger
+
+            logger = execution_logger(store, identity)
+            budget_deadline = time.monotonic() + deadline_collection_budget(registration["timeout"])
+            reason = "deadline_collection_incomplete"
+
+            logger.info("deadline_collection_start generation=%s budget_s=%s", generation,
+                        deadline_collection_budget(registration["timeout"]))
+
+            try:
+                with collection_deadline(budget_deadline):
+                    collected = collect_checkpoints(store, identity, generation,
+                                                    deadline_monotonic=budget_deadline)
+                    reason = "deadline_collection_complete" if collected["complete"] else "deadline_collection_partial"
+            except Exception as exc:
+                logger.warning("deadline_collection_failed generation=%s error=%s", generation, type(exc).__name__)
+
+            logger.info("deadline_collection_end generation=%s reason=%s", generation, reason)
+
+            store.update_attempt(identity, generation, status="timed_out", reason=reason)
+            return status(store, identity)
+
     return status(store, identity)
 
 
@@ -646,8 +704,12 @@ def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60
             if attempt["status"] not in TERMINAL:
                 from .agent_collector import collector_timed_out
 
+                # Check collector evidence FIRST (it survives across supervisor crashes)
                 if collector_timed_out(store, identity, attempt["generation"]):
                     changes.update(status="timed_out", reason="checkpoint_deadline_exceeded")
+                # Then check deadline_collection_pending (in-progress collection)
+                elif attempt["reason"] == "deadline_collection_pending":
+                    changes.update(status="timed_out", reason="deadline_collection_incomplete")
                 else:
                     changes.update(status="interrupted", reason="exit_unobservable")
             store.update_attempt(identity, attempt["generation"], **changes)
@@ -718,7 +780,10 @@ def main(argv: list[str] | None = None) -> int:
                                    if args.operation == "run" and args.recovery_event is not None else None)
             report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event)
         if args.operation == "run":
-            stop = started + (store.load(args.execution)["registration"]["timeout"] + 60 if args.wait else 5)
+            registration = store.load(args.execution)["registration"]
+            timeout = registration["timeout"]
+            ceiling_tail = wait_ceiling_tail(registration)
+            stop = started + (timeout + ceiling_tail if args.wait else 5)
             caller = process_identity(os.getpid()) if args.wait else None
             while report["status"] in {"running_detached", "registered", "lock_unconfirmed", "waiting_for_admission"} and time.monotonic() < stop:
                 if args.wait:
@@ -727,7 +792,7 @@ def main(argv: list[str] | None = None) -> int:
                     if (attempt is not None and (expected_generation is None or attempt["generation"] >= expected_generation)
                             and attempt["deadline_monotonic"] is not None and attempt["supervisor"] is not None
                             and all(attempt["supervisor"][key] == caller[key] for key in ("host", "boot_id"))):
-                        stop = min(stop, attempt["deadline_monotonic"] + 60)
+                        stop = min(stop, attempt["deadline_monotonic"] + ceiling_tail)
                     if time.monotonic() >= stop:
                         break
                 time.sleep(min(0.1, max(0, stop - time.monotonic())))

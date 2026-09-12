@@ -10,7 +10,10 @@ from pathlib import Path
 import pytest
 
 from hermes_pipeline import _agent_supervisor as supervisor
+from hermes_pipeline.agent_collector import CollectionInterrupted
 from hermes_pipeline.agent_execution import ExecutionError, ExecutionStore
+from hermes_pipeline.agent_git import CollectionTimedOut
+from hermes_pipeline.result_contract import ResultContractError
 
 
 @pytest.mark.parametrize('failure', ['timeout', 'supervisor_loss', 'loss_after_timeout_receipt'])
@@ -95,6 +98,7 @@ def manifest_execution(execution):
 
 @pytest.mark.parametrize("identity", ["execution-1", "manifest-1"])
 def test_launch_requires_no_verification_sandbox(manifest_execution, monkeypatch, identity):
+    from hermes_pipeline import agent_collector
     store, _ = manifest_execution
     monkeypatch.setattr(supervisor, "validate_registration", lambda *args: None)
     monkeypatch.setattr(supervisor, "confirm_process_capability", lambda: None)
@@ -103,7 +107,17 @@ def test_launch_requires_no_verification_sandbox(manifest_execution, monkeypatch
         "outcome": "timed_out", "exit_code": None, "signal": None,
         "cleanup": "confirmed", "processes": [],
     })
-    assert supervisor.supervise(store, identity)["generation"] == 1
+    collector_called = []
+    def fake_collect(*args, **kwargs):
+        collector_called.append(True)
+        return {"complete": False, "accepted": 0, "subtask_guarantee": True}
+    monkeypatch.setattr(agent_collector, "collect_checkpoints", fake_collect)
+    result = supervisor.supervise(store, identity)
+    assert result["generation"] == 1
+    if identity == "manifest-1":
+        assert len(collector_called) == 1
+    else:
+        assert len(collector_called) == 0
 
 
 def test_codex_direct_execution_preserves_stdin(execution, tmp_path):
@@ -826,7 +840,7 @@ def test_wait_cli_keeps_original_attempt_budget(execution, monkeypatch, capsys, 
     assert supervisor.main(args) == (1 if finish_at else 0)
     report = json.loads(capsys.readouterr().out)
     assert report['status'] == ('timed_out' if finish_at else 'running_detached')
-    assert finish_at <= clock[0] <= finish_at + 0.2 if finish_at else 70 <= clock[0] <= 70.2
+    assert (finish_at <= clock[0] <= finish_at + 0.2) if finish_at else (70 <= clock[0] <= 70.2)
     assert store.load('execution-1')['attempts'][0]['deadline_monotonic'] == 10.0
     if finish_at is None:
         previous = clock[0]
@@ -1110,3 +1124,278 @@ def test_legacy_confirmed_marker_does_not_block_new_generation(execution, versio
     store.admit('execution-1', recovery_event='retry')
     assert store.load('execution-1')['attempts'][-1]['direct_processes'] == []
     assert not agent_collector.collector_launch_pending(store, 'execution-1')
+
+
+def test_deadline_collection_budget_contract():
+    """Verify deadline_collection_budget contract with literal expectations."""
+    assert supervisor.deadline_collection_budget(30) == 3.0
+    assert supervisor.deadline_collection_budget(7200) == 600.0
+    assert supervisor.deadline_collection_budget(6000) == 600.0
+    assert supervisor.deadline_collection_budget(6001) == 600.0
+
+
+def test_timeout_with_unconfirmed_cleanup_skips_collection(manifest_execution, monkeypatch):
+    """With unconfirmed cleanup, collection is skipped."""
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *args: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+
+    deadline = time.monotonic() + 20
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'timed_out', 'exit_code': None, 'signal': None, 'cleanup': 'cleanup_unconfirmed',
+                         'processes': [], 'deadline': deadline})
+
+    collector_calls = []
+    def fake_collect(*args, **kwargs):
+        collector_calls.append(True)
+        return {'complete': True, 'accepted': 1, 'subtask_guarantee': True}
+
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints', fake_collect)
+
+    supervisor.supervise(store, 'manifest-1')
+
+    assert len(collector_calls) == 0
+    attempt = store.load('manifest-1')['attempts'][-1]
+    assert attempt['status'] == 'timed_out'
+    assert attempt['cleanup'] == 'unconfirmed'
+    assert attempt['reason'] is None
+
+
+def test_deadline_collection_respects_budget_deadline(manifest_execution, monkeypatch):
+    """Collection respects the budget deadline constraint."""
+    from hermes_pipeline import agent_collector, agent_git
+
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *args: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+
+    deadline = time.monotonic() + 20
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'timed_out', 'exit_code': None, 'signal': None, 'cleanup': 'confirmed',
+                         'processes': [], 'deadline': deadline})
+
+    remaining_times = []
+    def fake_collect(*args, **kwargs):
+        agent_git.check_collection_deadline()
+        deadline_var = agent_git._collection_deadline.get()
+        if deadline_var is not None:
+            remaining = deadline_var - time.monotonic()
+            remaining_times.append(remaining)
+        return {'complete': True, 'accepted': 1, 'subtask_guarantee': True}
+
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints', fake_collect)
+
+    supervisor.supervise(store, 'manifest-1')
+
+    assert len(remaining_times) == 1
+    budget = supervisor.deadline_collection_budget(30)
+    assert 0 < remaining_times[0] <= budget
+
+
+def test_deadline_collection_budget_window(manifest_execution, monkeypatch):
+    """Budget deadline is constrained within a two-sided time window."""
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *args: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+
+    before = time.monotonic()
+    deadline = before + 20
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'timed_out', 'exit_code': None, 'signal': None, 'cleanup': 'confirmed',
+                         'processes': [], 'deadline': deadline})
+
+    collected_deadline = None
+    def fake_collect(*args, **kwargs):
+        nonlocal collected_deadline
+        collected_deadline = kwargs.get('deadline_monotonic')
+        return {'complete': True, 'accepted': 1, 'subtask_guarantee': True}
+
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints', fake_collect)
+
+    result = supervisor.supervise(store, 'manifest-1')
+    after = time.monotonic()
+
+    budget = supervisor.deadline_collection_budget(30)
+    assert before + budget <= collected_deadline <= after + budget
+
+
+def test_wait_ceiling_tail_includes_budget_for_manifest():
+    """wait_ceiling_tail includes collection budget for manifest executions."""
+    # Manifest registration
+    manifest_reg = {"manifest": {"tasks": []}, "timeout": 30}
+    ceiling = supervisor.wait_ceiling_tail(manifest_reg)
+    expected = 60 + supervisor.deadline_collection_budget(30) + 60
+    assert ceiling == expected
+
+    # Non-manifest registration
+    no_manifest_reg = {"manifest": None, "timeout": 30}
+    ceiling = supervisor.wait_ceiling_tail(no_manifest_reg)
+    assert ceiling == 60
+
+@pytest.mark.parametrize("exception_factory", [
+    lambda: CollectionTimedOut(),
+    lambda: CollectionInterrupted("x"),
+    lambda: supervisor.ExecutionError("x"),
+    lambda: ResultContractError("x"),
+    lambda: OSError(),
+    lambda: KeyError("x"),
+    lambda: RuntimeError("x"),
+])
+
+def test_deadline_collection_exception_swallowing(manifest_execution, monkeypatch, exception_factory):
+    """All exceptions during collection are swallowed."""
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *args: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+
+    deadline = time.monotonic() + 20
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'timed_out', 'exit_code': None, 'signal': None, 'cleanup': 'confirmed',
+                         'processes': [], 'deadline': deadline})
+
+    update_calls = []
+    original_update = store.update_attempt
+    def recording_update(identity, generation, **changes):
+        update_calls.append(changes.copy())
+        return original_update(identity, generation, **changes)
+
+    monkeypatch.setattr(store, 'update_attempt', recording_update)
+
+    def failing_collect(*args, **kwargs):
+        raise exception_factory()
+
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints', failing_collect)
+
+    supervisor.supervise(store, 'manifest-1')
+
+    # Verify terminal status was written exactly once
+    terminal_calls = [c for c in update_calls if c.get('status') == 'timed_out']
+    assert len(terminal_calls) == 1
+    assert terminal_calls[0]['reason'] == 'deadline_collection_incomplete'
+
+    # Verify report
+    attempt = store.load('manifest-1')['attempts'][-1]
+    assert attempt['status'] == 'timed_out'
+    assert attempt['reason'] == 'deadline_collection_incomplete'
+
+
+def test_status_reports_reason_for_terminal_attempt(manifest_execution, monkeypatch):
+    """Status report includes reason for terminal attempts."""
+    store, _ = manifest_execution
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *args: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+
+    deadline = time.monotonic() + 20
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'timed_out', 'exit_code': None, 'signal': None, 'cleanup': 'confirmed',
+                         'processes': [], 'deadline': deadline})
+
+    from hermes_pipeline import agent_collector
+    def fake_collect(*args, **kwargs):
+        return {'complete': True, 'accepted': 1, 'subtask_guarantee': True}
+
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints', fake_collect)
+
+    supervisor.supervise(store, 'manifest-1')
+
+    report = supervisor.status(store, 'manifest-1')
+    assert report['status'] == 'timed_out'
+    assert report['reason'] == 'deadline_collection_complete'
+    assert report['completion_allowed'] is False
+
+
+def _timed_out_run(monkeypatch, *, cleanup='confirmed'):
+    monkeypatch.setattr(supervisor, 'validate_registration', lambda *args: None)
+    monkeypatch.setattr(supervisor, 'client_argv', lambda *args, **kwargs: [sys.executable, '-c', 'pass'])
+    monkeypatch.setattr(supervisor, 'run_process', lambda *args, **kwargs:
+                        {'outcome': 'timed_out', 'exit_code': None, 'signal': None, 'cleanup': cleanup,
+                         'processes': [], 'deadline': time.monotonic() + 20})
+
+
+@pytest.mark.parametrize('complete,reason', [(True, 'deadline_collection_complete'),
+                                             (False, 'deadline_collection_partial')])
+def test_deadline_collection_reason_reports_promotion_outcome(manifest_execution, monkeypatch, complete, reason):
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    _timed_out_run(monkeypatch)
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints', lambda *a, **k:
+                        {'complete': complete, 'accepted': 1 if complete else 0, 'subtask_guarantee': True})
+    report = supervisor.supervise(store, 'manifest-1')
+    attempt = store.load('manifest-1')['attempts'][-1]
+    assert (attempt['status'], attempt['reason']) == ('timed_out', reason)
+    assert report['status'] == 'timed_out'
+    assert report['completion_allowed'] is False
+
+
+def test_deadline_collection_writes_pending_then_terminal_once(manifest_execution, monkeypatch):
+    from hermes_pipeline import agent_collector
+
+    store, _ = manifest_execution
+    _timed_out_run(monkeypatch)
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints', lambda *a, **k:
+                        {'complete': True, 'accepted': 1, 'subtask_guarantee': True})
+    writes = []
+    original = store.update_attempt
+    def recording(identity, generation, **changes):
+        writes.append(dict(changes))
+        return original(identity, generation, **changes)
+    monkeypatch.setattr(store, 'update_attempt', recording)
+    supervisor.supervise(store, 'manifest-1')
+    statuses = [w['status'] for w in writes if 'status' in w]
+    assert statuses.count('timed_out') == 1 and statuses[-1] == 'timed_out'
+    pending = [w for w in writes if w.get('status') == 'running']
+    assert pending and pending[-1]['reason'] == 'deadline_collection_pending'
+    assert pending[-1]['cleanup'] == 'confirmed'
+
+
+def test_timeout_without_manifest_skips_deadline_collection(execution, monkeypatch):
+    from hermes_pipeline import agent_collector
+
+    store, _ = execution
+    _timed_out_run(monkeypatch)
+    monkeypatch.setattr(agent_collector, 'collect_checkpoints',
+                        lambda *a, **k: pytest.fail('collector must not run without a manifest'))
+    supervisor.supervise(store, 'execution-1')
+    attempt = store.load('execution-1')['attempts'][-1]
+    assert (attempt['status'], attempt['reason']) == ('timed_out', None)
+
+
+def test_recover_finishes_interrupted_deadline_collection_as_timed_out(manifest_execution, monkeypatch):
+    from hermes_pipeline.agent_execution import host_boot_identity
+
+    store, _ = manifest_execution
+    store.admit('manifest-1')
+    dead_client = {'pid': 4, 'start_ticks': 1, **host_boot_identity()}
+    store.update_attempt('manifest-1', 1, status='running', reason='deadline_collection_pending',
+                         cleanup='confirmed', client_process=dead_client)
+    monkeypatch.setattr(supervisor, 'cleanup_processes',
+                        lambda processes, **kwargs: {'cleanup': 'confirmed', 'processes': processes})
+    report = supervisor.recover(store, 'manifest-1', cleanup_timeout=0)
+    attempt = store.load('manifest-1')['attempts'][-1]
+    assert (attempt['status'], attempt['reason']) == ('timed_out', 'deadline_collection_incomplete')
+    assert report['status'] == 'timed_out'
+
+
+def test_wait_cli_manifest_ceiling_includes_collection_budget(manifest_execution, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    store, _ = manifest_execution
+    store.admit('manifest-1')
+    store.update_attempt('manifest-1', 1, status='running',
+                         supervisor=supervisor.process_identity(os.getpid()), deadline_monotonic=10.0)
+    clock = [0.0]
+    def sleep(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, 'time', SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep))
+    monkeypatch.setattr(supervisor.subprocess, 'Popen', lambda *a, **k: pytest.fail('duplicate launch'))
+    assert supervisor.main(['run', '--wait', '--root', str(store.root), '--execution', 'manifest-1']) == 0
+    assert json.loads(capsys.readouterr().out)['status'] == 'running_detached'
+    expected = 10.0 + 60 + supervisor.deadline_collection_budget(30) + 60
+    assert expected <= clock[0] <= expected + 0.2
