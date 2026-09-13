@@ -353,7 +353,8 @@ def auto_approve_resume(store, execution_id, *, max_generations=MAX_GENERATIONS,
                 logger.info("auto_approve_resume %s generation=%s", reason, generation)
                 return _verdict(reason, generation)
 
-            if attempt['status'] not in {'timed_out', 'interrupted'}:
+            result_invalid = (attempt['status'] == 'exited' and attempt.get('reason') == 'result_invalid')
+            if attempt['status'] not in {'timed_out', 'interrupted'} and not result_invalid:
                 reason = 'recovery_outcome_ineligible'
                 _retract_stale_tick_approval(store, execution_id, generation)
                 logger.info("auto_approve_resume %s generation=%s", reason, generation)
