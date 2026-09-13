@@ -520,7 +520,8 @@ def invalidate_recovery(store, execution_id, event_id) -> bool:
             intent['status'] = 'invalidated'
             _write(store, execution_id, intent)
             logger = execution_logger(store, execution_id)
-            logger.info("invalidate_recovery %s", event_id)
+            # The event id is a single-use capability token: log the generation only.
+            logger.info("invalidate_recovery generation=%s", intent['preview']['generation'])
             return True
 
         return False
