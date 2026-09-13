@@ -71,7 +71,14 @@ def last_attempt(store: ExecutionStore, identity: str) -> dict | None:
 
 def resumable(attempt: dict) -> bool:
     """A terminal failure with confirmed cleanup; ``exited`` is the ordinary flow."""
-    return attempt["status"] in TERMINAL - {"exited"} and attempt["cleanup"] == "confirmed"
+    if attempt["cleanup"] != "confirmed":
+        return False
+    if attempt["status"] in TERMINAL - {"exited"}:
+        return True
+    # Invalid worker results are recorded as an exited attempt after cleanup;
+    # they are safe to reissue when the tick can prove the cleanup. Ordinary
+    # successful exits remain non-resumable, and human blocks never reach here.
+    return attempt["status"] == "exited" and attempt.get("reason") == "result_invalid"
 
 
 def daemon_alive(attempt: dict) -> bool:

@@ -48,7 +48,7 @@ def _run_dir(tmp_path):
     return path
 
 
-def _terminal_execution(tmp_path, key="design", *, status="timed_out", cleanup="confirmed"):
+def _terminal_execution(tmp_path, key="design", *, status="timed_out", cleanup="confirmed", reason=None):
     """A registered execution for phase ``key`` whose first attempt ended terminally."""
     _run_dir(tmp_path)
     store = ExecutionStore(tmp_path / ".hermes" / "agent-executions")
@@ -60,7 +60,7 @@ def _terminal_execution(tmp_path, key="design", *, status="timed_out", cleanup="
     ProgressJournal(store, identity).initialize()
     store.admit(identity)
     if status == "exited":
-        store.update_attempt(identity, 1, status=status, cleanup=cleanup, exit_code=0)
+        store.update_attempt(identity, 1, status=status, cleanup=cleanup, exit_code=0, **({"reason": reason} if reason else {}))
     elif status is not None:
         store.update_attempt(identity, 1, status=status, cleanup=cleanup)
     return store, identity, tree
@@ -90,6 +90,18 @@ def _cards(monkeypatch, cards):
 
 
 APPROVED = {"approved": True, "event_id": "e" * 32, "reason": "recovery_approved", "generation": 1, "mode": "resume"}
+
+
+def test_result_invalid_with_confirmed_cleanup_reissues_generation_two(tmp_path, monkeypatch):
+    registration, tasks, evidence, created, tick, complete = schedule_fixture(tmp_path, monkeypatch)
+    store, identity, _ = _terminal_execution(tmp_path, status="exited", reason="result_invalid")
+    approvals = _approve(monkeypatch, APPROVED)
+    _cards(monkeypatch, [])
+    monkeypatch.setattr("hermes_pipeline.result_contract._git", lambda *a: "ahead-of-base")
+
+    assert tick() is True
+    assert approvals == [identity]
+    assert [(c["key"], c["generation"], c["execution_identity"]) for c in created] == [("design", 2, identity)]
 
 
 def test_missing_card_with_terminal_record_reissues_generation_two(tmp_path, monkeypatch):
