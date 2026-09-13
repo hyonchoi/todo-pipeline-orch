@@ -5178,6 +5178,7 @@ class TestDiscoverRemoteArtifacts:
                 provenance_dir=project_dir / "provenance",
             )
 
+        assert exc_info.value.code == "pr_discovery_incomplete"
         assert exc_info.value.detail == "provenance_dir must not be inside the clone"
         assert fake_gh.gh_calls() == []
 

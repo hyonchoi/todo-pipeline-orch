@@ -133,7 +133,7 @@ def _serve_github(fake_gh, *, title: str, pr_exists: Callable[[], bool] = lambda
 
 
 @pytest.fixture
-def scripted_kanban(mocker):
+def scripted_kanban(mocker, monkeypatch):
     """Cards advance ready -> running -> done one step per status poll.
 
     ``snapshot`` is the archived-inclusive list ``shutdown_run`` verifies quiescence
@@ -157,6 +157,15 @@ def scripted_kanban(mocker):
     mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
     cancel = mocker.patch("hermes_pipeline.harness._cancel_registered_tasks", return_value=True)
     mocker.patch("hermes_pipeline.kanban_tasks._list_task_snapshot", side_effect=lambda _tenant: list(snapshot))
+    # Polls block on a real Event.wait (harness.time.sleep is patched, but the registered
+    # phases poller waits on the cancel event); keep the multi-tick run fast.
+    fast = {"poll_interval": 0.01, "max_poll_interval": 0.05}
+    for name in ("poll_registered_phases",):
+        real_poll = getattr(harness_mod, name)
+        monkeypatch.setattr(
+            harness_mod, name,
+            lambda *a, _real=real_poll, **k: _real(*a, **{**fast, **k}),
+        )
     return SimpleNamespace(board=board, cancel=cancel, snapshot=snapshot)
 
 

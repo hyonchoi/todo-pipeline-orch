@@ -381,8 +381,10 @@ def test_hermes_call_oserror_exhaust():
         raise OSError("Persistent network failure")
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=always_fail):
-        with pytest.raises(OSError, match="Persistent network failure"):
-            hermes_call(prompt="test")
+        with patch("hermes_pipeline.hermes_adapter.time.sleep") as mock_sleep:
+            with pytest.raises(OSError, match="Persistent network failure"):
+                hermes_call(prompt="test")
+            assert mock_sleep.call_count == HERMES_RETRY_ATTEMPTS
 
     assert call_count[0] == 1 + HERMES_RETRY_ATTEMPTS, "Should attempt 1 + 2 retries = 3 times"
 
@@ -598,8 +600,10 @@ def test_hermes_agent_call_oserror_exhaust():
         raise OSError("Persistent spawn failure")
 
     with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", side_effect=always_fail):
-        with pytest.raises(OSError, match="Persistent spawn failure"):
-            hermes_agent_call(prompt="test")
+        with patch("hermes_pipeline.hermes_adapter.time.sleep") as mock_sleep:
+            with pytest.raises(OSError, match="Persistent spawn failure"):
+                hermes_agent_call(prompt="test")
+            assert mock_sleep.call_count == HERMES_RETRY_ATTEMPTS
 
     assert call_count[0] == 1 + HERMES_RETRY_ATTEMPTS, "Should attempt 1 + 2 retries = 3 times"
 
@@ -649,10 +653,12 @@ def test_hermes_agent_call_timeout_post_kill_communicate_fallback_2s():
 
 
 def test_hermes_call_permission_error_raises():
-    """PermissionError when hermes is not executable should propagate (not retry)."""
+    """PermissionError when hermes is not executable should propagate after the transient-OSError retries are exhausted."""
     with patch("hermes_pipeline.hermes_adapter.subprocess.run", side_effect=PermissionError("not executable")):
-        with pytest.raises(PermissionError, match="not executable"):
-            hermes_call(prompt="test")
+        with patch("hermes_pipeline.hermes_adapter.time.sleep") as mock_sleep:
+            with pytest.raises(PermissionError, match="not executable"):
+                hermes_call(prompt="test")
+            assert mock_sleep.call_count == HERMES_RETRY_ATTEMPTS
 
 
 def test_hermes_call_error_excludes_all_process_output():
@@ -675,10 +681,12 @@ def test_hermes_call_error_excludes_all_process_output():
 
 
 def test_hermes_agent_call_popen_permission_error_raises():
-    """PermissionError from Popen (hermes exists but not executable) should propagate."""
+    """PermissionError from Popen (hermes exists but not executable) should propagate after the transient-OSError retries are exhausted."""
     with patch("hermes_pipeline.hermes_adapter.subprocess.Popen", side_effect=PermissionError("denied")):
-        with pytest.raises(PermissionError, match="denied"):
-            hermes_agent_call(prompt="test")
+        with patch("hermes_pipeline.hermes_adapter.time.sleep") as mock_sleep:
+            with pytest.raises(PermissionError, match="denied"):
+                hermes_agent_call(prompt="test")
+            assert mock_sleep.call_count == HERMES_RETRY_ATTEMPTS
 
 
 def test_hermes_agent_call_none_stdout_stderr_coalesced():
