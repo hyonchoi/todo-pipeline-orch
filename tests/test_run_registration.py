@@ -13,77 +13,29 @@ from hermes_pipeline.github_issues import (
     MAX_ISSUE_SNAPSHOT_CHARS,
     snapshot_hash,
 )
-from hermes_pipeline.plan_manifest import render_embedded_plan
 from hermes_pipeline.result_contract import load_validated_registration
 from hermes_pipeline.run_registration import (
     RunRegistrationError,
     active_registration_issue_numbers,
     ensure_in_progress_label,
-    register_pinned_run,
     registration_state,
 )
 from hermes_pipeline.todos_create import load_create_request, render_create_body
-from tests.gh_fakes import API_ARGV, REPO, issue_payload, make_issue
-from tests.support.git import init_repo
+from tests.gh_fakes import API_ARGV, REPO, issue_payload
 from tests.support.git import run_git as _git
-
-BODY = (
-    "### What\n\nShip it.\n\n### Plan\n\ndocs/plan.md\n\n"
-    "### Branch\n\nfeat/todo-42\n"
+from tests.support.registration import (
+    BODY,
+    _issue,
 )
-EMBEDDED_DOCUMENT = """# Implementation Plan
-
-Ship it safely.
-
-```json tpo-plan
-{"schema_version":1,"todo_id":"TODO-42","tasks":[{"id":"task-1","title":"Ship","instructions":"Do it","acceptance_criteria":["Works"],"verification":["pytest"],"commit_message":"feat: ship"}]}
-```
-"""
-
-
-def _embedded_issue():
-    body = (
-        "### What\n\nShip it.\n\n### Branch\n\nfeat/todo-42\n\n"
-        + render_embedded_plan(EMBEDDED_DOCUMENT, expected_todo_id="TODO-42")
-    )
-    return _issue(body=body)
-
-
-def _issue(number: int = 42, *, body: str = BODY, repo: str = REPO, **extra):
-    return make_issue(number, repo=repo, title="Ship the feature", body=body, **extra)
-
-
-def _repo(tmp_path: Path) -> tuple[Path, str]:
-    return init_repo(
-        tmp_path / "project",
-        branch="main",
-        files={"docs/plan.md": "# Plan\n"},
-        origin=f"https://github.com/{REPO}.git",
-    )
-
-
-def _register(
-    project: Path,
-    *,
-    tick_id: str = "01TICK",
-    step_keys=("task-1", "gate-1"),
-    plan_path: str = "docs/plan.md",
-    issue=None,
-    **kwargs,
-):
-    return register_pinned_run(
-        project_dir=project,
-        state_dir=project / ".hermes",
-        tick_id=tick_id,
-        selected_issue=issue if issue is not None else _issue(),
-        plan_path=plan_path,
-        profile=kwargs.pop("profile", "native-sdd"),
-        prompt_client="codex",
-        assignee="implementer",
-        review_assignee="reviewer",
-        step_keys=step_keys,
-        **kwargs,
-    )
+from tests.support.registration import (
+    embedded_issue as _embedded_issue,
+)
+from tests.support.registration import (
+    register as _register,
+)
+from tests.support.registration import (
+    seeded_repo as _repo,
+)
 
 
 def test_registers_hashes_and_creates_linked_worktree(tmp_path):

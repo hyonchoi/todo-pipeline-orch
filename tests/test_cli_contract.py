@@ -3349,7 +3349,7 @@ class TestTodosComplete:
 
         from hermes_pipeline.cli import _cmd_todos_complete
         from tests.gh_fakes import FakeGh
-        from tests.test_todos_completion import GH_PR_VIEW_JSON_FIELDS
+        from tests.support.completion import GH_PR_VIEW_JSON_FIELDS
 
         config, remote = self._project(tmp_path, fake_gh)
         mocker.patch("hermes_pipeline.todos_completion._pr_view", self.real_pr_view)

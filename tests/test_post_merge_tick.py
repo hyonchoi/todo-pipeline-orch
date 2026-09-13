@@ -10,12 +10,18 @@ from hermes_pipeline.config import CircuitBreakerConfig, Config
 from hermes_pipeline.outcomes import CURRENT_TICK_ID_FILE
 from hermes_pipeline.run_registration import registration_state
 from tests.gh_fakes import seed_project_issues
-from tests.test_todos_completion import (
+from tests.support.completion import (
     MARKER,
     FakeRemoteIssue,
-    _finish_done_fixture,
-    _finish_tasks,
-    _view,
+)
+from tests.support.completion import (
+    finish_done_fixture as _finish_done_fixture,
+)
+from tests.support.completion import (
+    finish_tasks as _finish_tasks,
+)
+from tests.support.completion import (
+    view as _view,
 )
 
 

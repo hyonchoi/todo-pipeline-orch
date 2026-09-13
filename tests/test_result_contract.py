@@ -10,18 +10,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.gh_fakes import REPO, make_issue
-from tests.support.git import init_repo
-from tests.support.git import run_git as _git
-
-ISSUE_BODY = "### What\n\nResult contract.\n\n### Plan\n\nplan.md\n\n### Branch\n\ntodo-42\n"
-
 from hermes_pipeline.github_issues import (
     MAX_ISSUE_SNAPSHOT_CHARS,
     canonical_issue_snapshot,
     snapshot_hash,
 )
 from hermes_pipeline.phases import IMPLEMENTATION_KEY
+from hermes_pipeline.plan_manifest import render_embedded_plan
 from hermes_pipeline.result_contract import (
     _PLACEHOLDER_RE,
     ResultContractError,
@@ -32,49 +27,23 @@ from hermes_pipeline.result_contract import (
     verify_worker_git_result,
     verify_worker_git_topology,
 )
-
-PLAN = '''# Plan
-
-```json tpo-plan
-{"schema_version":1,"todo_id":"TODO-42","tasks":[{"id":"task-1","title":"Do it","instructions":"Implement it.","acceptance_criteria":["Observable criterion"],"verification":["uv run pytest"],"commit_message":"feat: do it"}]}
-```
-'''
-
-PLAN_TWO_TASKS = '''# Plan
-
-```json tpo-plan
-{"schema_version":1,"todo_id":"TODO-42","tasks":[{"id":"task-1","title":"Do it","instructions":"Implement it.","acceptance_criteria":["Observable criterion"],"verification":["uv run pytest"],"commit_message":"feat: do it"},{"id":"task-2","title":"Do it again","instructions":"Implement it again.","acceptance_criteria":["Observable criterion"],"verification":["uv run pytest"],"commit_message":"feat: do it again"}]}
-```
-'''
-
-
-def _result(**updates):
-    value = {
-        "schema_version": 1,
-        "tick_id": "01TICK",
-        "todo_id": "TODO-42",
-        "step_key": "plan:task-1",
-        "verdict": "success",
-        "git": {
-            "expected_parent_sha": "a" * 40,
-            "resulting_head_sha": "b" * 40,
-            "task_commit_sha": "b" * 40,
-            "changed_files": ["src/example.py"],
-        },
-        "acceptance": [{"criterion": "Observable criterion", "status": "passed"}],
-    }
-    value.update(updates)
-    return value
-
-
-def _delivery(*, command="uv run pytest", **check_extra):
-    """A structurally valid ``delivery`` block, mutable one field at a time."""
-    return {
-        "pr_url": "https://github.com/acme/repo/pull/7",
-        "branch": "todo-42",
-        "head_sha": "b" * 40,
-        "checks": [{"command": command, "exit_code": 0, **check_extra}],
-    }
+from hermes_pipeline.run_registration import register_pinned_run
+from tests.gh_fakes import REPO, make_issue
+from tests.support.git import init_repo
+from tests.support.git import run_git as _git
+from tests.support.results import (
+    ISSUE_BODY,
+    PLAN,
+    PLAN_TWO_TASKS,
+    _commit,
+    _delivery,
+    _registered_repo,
+    _result,
+    _rewrite_registration,
+)
+from tests.support.results import (
+    worker_payload as _worker_payload,
+)
 
 
 def test_parse_valid_final_successful_run():
@@ -757,57 +726,6 @@ def test_registration_rejects_unknown_keys_and_mutable_plan_drift(tmp_path):
     assert authority.manifest.tasks[0].id == "task-1"
 
 
-def _registered_repo(
-    tmp_path, *, issue_body: str = ISSUE_BODY, plan_path: str | None = "plan.md",
-    embedded: bool = False, plan: str = PLAN, legacy: bool = False,
-    step_keys: tuple[str, ...] = (IMPLEMENTATION_KEY,),
-):
-    from hermes_pipeline.plan_manifest import render_embedded_plan
-    from hermes_pipeline.run_registration import register_pinned_run
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test")
-    _git(repo, "remote", "add", "origin", f"git@github.com:{REPO}.git")
-    (repo / "plan.md").write_text(plan)
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "base")
-    parent = _git(repo, "rev-parse", "HEAD")
-    state = repo / ".hermes"
-    if embedded:
-        issue_body = ISSUE_BODY.replace("### Plan\n\nplan.md\n\n", "")
-        issue_body += render_embedded_plan(plan, expected_todo_id="TODO-42")
-        plan_path = None
-    registration = register_pinned_run(
-        project_dir=repo,
-        state_dir=state,
-        tick_id="01TICK",
-        selected_issue=make_issue(42, repo=REPO, title="Do it", body=issue_body),
-        plan_path=plan_path,
-        profile="native-sdd",
-        prompt_client="claude",
-        assignee="pipeline",
-        review_assignee=None,
-        step_keys=step_keys,
-    )
-    if legacy:
-        # Explicitly model a pre-supervisor Hermes-only registration.
-        _rewrite_registration(state, lambda payload: (
-            payload.update(schema_version=3), payload.pop("agent_policy_mode")
-        ))
-    return repo, registration.worktree, state, parent
-
-
-def _rewrite_registration(state, mutate):
-    path = state / "runs" / "01TICK" / "registration.json"
-    payload = json.loads(path.read_text())
-    mutate(payload)
-    path.write_text(json.dumps(payload))
-    return payload
-
-
 def test_registration_authority_is_the_issue_snapshot(tmp_path):
     repo, worktree, state, parent = _registered_repo(tmp_path)
 
@@ -847,7 +765,6 @@ def test_registration_accepts_step_keys_beyond_the_plan_tasks(tmp_path):
 
 
 def test_embedded_registration_exposes_verified_artifact_reference(tmp_path):
-    from hermes_pipeline.plan_manifest import render_embedded_plan
     from hermes_pipeline.run_registration import register_pinned_run
 
     repo = tmp_path / "repo"
@@ -1100,36 +1017,6 @@ def test_registration_repo_must_match_live_identity(tmp_path):
     _git(repo, "remote", "remove", "origin")
     with pytest.raises(ResultContractError, match="git_verification_failed"):
         load_validated_registration(repo, state, "01TICK")
-
-
-def _commit(worktree, name: str) -> str:
-    (worktree / name).write_text(name)
-    _git(worktree, "add", ".")
-    _git(worktree, "commit", "-qm", name)
-    return _git(worktree, "rev-parse", "HEAD")
-
-
-def _worker_payload(*, step_key: str, parent: str, head: str, changed: list[str]):
-    result = _result(step_key=step_key)
-    result["git"] = {
-        "expected_parent_sha": parent,
-        "resulting_head_sha": head,
-        "task_commit_sha": head,
-        "changed_files": changed,
-    }
-    # Hermes stamps ``worker_session_id`` on its own tool path only; live runs
-    # also carry worker-authored siblings. The reconciler ignores them all.
-    return {
-        "runs": [
-            {
-                "status": "succeeded",
-                "metadata": {
-                    "tpo_result": result,
-                    "worker_session_id": "20260904_154528_b0f01d",
-                },
-            }
-        ]
-    }
 
 
 def test_reconcile_completed_worker_validates_without_a_controller_gate(
@@ -1498,7 +1385,6 @@ def test_reconcile_invalid_result_reports_no_progress_without_a_blocking_card(
 def test_legacy_registration_bypasses_manifest_only_reconciliation(tmp_path, mocker):
     from hermes_pipeline.kanban_tasks import reconcile_plan_task_results
     from hermes_pipeline.review_reconciliation import reconcile_reviews
-    from hermes_pipeline.run_registration import register_pinned_run
     from hermes_pipeline.todos_completion import reconcile_todo_completion
 
     repo = tmp_path / "legacy"

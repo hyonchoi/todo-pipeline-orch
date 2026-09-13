@@ -14,7 +14,7 @@ from hermes_pipeline.agent_execution import ExecutionStore
 from hermes_pipeline.agent_recovery import auto_approve_resume, recovery_state
 from hermes_pipeline.kanban_tasks import RESULT_VALIDATION_BLOCKED_MARKER
 from tests.support.projects import run_dir
-from tests.test_profile_schedule import schedule_fixture
+from tests.support.schedule import schedule_fixture
 
 TICK = "tick"
 

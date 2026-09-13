@@ -7,7 +7,7 @@ import subprocess
 
 import pytest
 
-from tests import test_hermes_registration_contract as contract
+from tests.support import hermes_contract as contract
 
 
 @pytest.mark.parametrize("opt_in", [None, "", "0", "true"])
@@ -23,7 +23,7 @@ def test_live_contract_requires_explicit_opt_in(monkeypatch, tmp_path, opt_in):
     monkeypatch.setattr(contract.shutil, "which", unexpected_call)
     monkeypatch.setattr(contract.subprocess, "run", unexpected_call)
     with pytest.raises(pytest.skip.Exception, match="TPO_RUN_LIVE_HERMES_CONTRACT"):
-        contract.test_live_hermes_registration_barrier_contract(tmp_path)
+        contract.live_hermes_registration_barrier_contract(tmp_path)
 
 
 def test_opted_in_contract_isolates_every_subprocess(monkeypatch, tmp_path):
@@ -66,7 +66,7 @@ def test_opted_in_contract_isolates_every_subprocess(monkeypatch, tmp_path):
         return subprocess.CompletedProcess(command, 0, stdout=json.dumps(next(responses)))
 
     monkeypatch.setattr(contract.subprocess, "run", fake_run)
-    contract.test_live_hermes_registration_barrier_contract(tmp_path)
+    contract.live_hermes_registration_barrier_contract(tmp_path)
     assert [command[2] for command in commands] == ["create", "create", "dispatch", "complete", "list"]
     assert "--dry-run" in commands[2]
     assert commands[1][commands[1].index("--parent") + 1] == "barrier"

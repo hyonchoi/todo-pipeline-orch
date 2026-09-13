@@ -10,7 +10,7 @@ import pytest
 
 from hermes_pipeline.cli import build_parser
 from hermes_pipeline.config import Config
-from tests.test_todos_create import request
+from tests.support.todos import todo_request as request
 
 SKILL = files("hermes_pipeline").joinpath(
     "data", "skills", "issue-planner", "SKILL.md"

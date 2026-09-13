@@ -20,6 +20,7 @@ from hermes_pipeline.agent_execution import (
 )
 from hermes_pipeline.agent_git import CollectionTimedOut
 from hermes_pipeline.result_contract import ResultContractError
+from tests.support.supervisor import committed_profile as _committed_profile
 
 
 def _final_report(capsys) -> dict:
@@ -497,26 +498,6 @@ def test_binding_pins_manifest_card_ceiling_to_wait_ceiling(manifest_execution, 
 
     registration = store.load("manifest-1")["registration"]
     assert bound[0].max_runtime == supervisor.card_max_runtime(registration) == 30 + 60 + 3 + 60
-
-
-def _committed_profile(tmp_path, monkeypatch):
-    from hermes_pipeline import agent_authority
-
-    worktree = tmp_path / "worktree"
-    worktree.mkdir()
-    subprocess.run(["git", "init", "-b", "task", str(worktree)], check=True, capture_output=True)
-    subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Test", "-c", "user.email=test@example.org",
-                    "commit", "--allow-empty", "-m", "test base"], check=True, capture_output=True)
-    monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: str(Path(sys.executable).parent / "tpo-agent-supervisor"))
-    home = tmp_path / "account"
-    home.mkdir()
-    monkeypatch.setattr(agent_authority, "account_home", lambda: home)
-    root = agent_authority.profile_root(worktree)
-    identity = supervisor.register_execution(
-        project_dir=worktree, state_dir=tmp_path / "control", root=root, tick_id="tick-test",
-        phase="analysis", prompt="Exact prompt: $() `echo no`\x00\n", client="codex", tools="Bash",
-        worktree=worktree, timeout=10, todo_id="TODO-1")
-    return ExecutionStore(root), identity, worktree
 
 
 def test_registered_cli_repair_runs_fake_client_once(tmp_path, monkeypatch, capsys):
