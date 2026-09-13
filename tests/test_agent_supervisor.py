@@ -358,6 +358,7 @@ def test_explicit_recovery_waits_for_daemon_without_rewriting_terminal_attempt(e
     preview = prepare_recovery(store, "execution-1")
     event = approve_recovery(store, "execution-1", preview)
     monkeypatch.setattr(supervisor, "validate_registration", lambda *a: None)
+    monkeypatch.setattr(supervisor, "_prepare_launch", lambda *a: (Path("/tmp"), ["client"]))
     monkeypatch.setattr(supervisor, "client_argv", lambda *a, **k: [sys.executable, "-c", "pass"])
     monkeypatch.setattr(supervisor, "installed_entrypoint", lambda: "/fake/supervisor")
     spawn = supervisor.subprocess.Popen
