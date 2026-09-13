@@ -91,18 +91,25 @@ For every executable phase, its configured deadline follows this exact path:
 Phase.timeout
   -> external Codex/Claude deadline
   -> PreparedPhaseTask.timeout
-  -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
+  -> hermes kanban create --max-runtime <card_max_runtime(registration)> --max-retries 1
 ```
 
-The final minute is cleanup-only. The installed `tpo-agent-supervisor` owns
-client launch, strict deadlines, durable exit collection, and owned process
-cleanup independently of the Hermes worker. Automatic worker re-entry
-attaches to the same attempt. Zero exit requires existing result-contract and
-current Git validation before completion. Unobservable exits and uncertain
-cleanup block another attempt. Hermes reports the structured outcome through
-its supported worker operations; it does not inspect or commit partial work.
-See [supervision and recovery](howto-agent-supervisor.md) for process ownership,
-checkpoint evidence, explicit retry admission, and portability limitations.
+where `card_max_runtime` = ceil(timeout + 60s) for phases without a manifest,
+or ceil(timeout + 120s + deadline-collection-budget) for manifest phases
+(budget = min(600s, 10% of timeout)), ensuring Hermes never kills the worker
+before the supervisor's terminal write.
+
+The installed `tpo-agent-supervisor` owns client launch, strict deadlines, durable
+exit collection, and owned process cleanup independently of the Hermes worker.
+On timeout with cleanup confirmed and a manifest, deadline-time checkpoint collection
+proceeds under a budget of min(600s, 10% of timeout) before final cleanup. Automatic
+worker re-entry attaches to the same attempt and never refreshes its budget.
+Zero exit requires existing result-contract and current Git validation before
+completion. Unobservable exits and uncertain cleanup block another attempt. Hermes
+reports the structured outcome through its supported worker operations; it does not
+inspect or commit partial work. See [supervision and recovery](howto-agent-supervisor.md)
+for process ownership, checkpoint evidence, explicit retry admission, deadline
+collection, and portability limitations.
 Linux and macOS share direct-process supervision for Claude, Codex, checkpoint
 checks, and reviewers. Each launch uses the exact argv, stdin, and environment,
 and persists the launched PID with its native birth identity. Linux uses
@@ -216,19 +223,24 @@ disappearance alone cannot complete a card. See
 Before attempt admission, the launcher reports `waiting_for_admission` for
 verified worktree contention or a pending launch and returns zero for continued
 polling. Plain `run` polls for five seconds; newly generated workers use
-`run --wait`, await its command or background tool session, and reconnect if
-bounded waiting returns a nonterminal state. Waiting is capped by phase timeout
-plus cleanup and, on the same host and boot, the original attempt deadline plus
-cleanup. It never refreshes the execution budget. Worker instructions preserve
-card state while waiting; existing card bodies are not rewritten.
+`run --wait`, which produces multi-line JSON status output (one line every 60s
+with `"final": false`, then a final report with `"final": true`), await its
+command or background tool session, and reconnect if bounded waiting returns a
+nonterminal state. Waiting is capped by phase timeout plus cleanup and, on the
+same host and boot, the original attempt deadline plus cleanup. It never
+refreshes the execution budget. Worker instructions preserve card state while
+waiting; existing card bodies are not rewritten.
 
 New schema-v6 run registrations pin the complete ordered profile phase
 snapshot: exact keys, prompts, tools, timeouts, roles, and gates. Existing v6
 runs reconcile from that snapshot even when current profile definitions change
-or become invalid. The scheduler advances in that declared worker order only after the predecessor validates.
-The full required worker list prevents completion when a deferred card has not
-yet been created. Gates retain their no-worker semantics, including the terminal
-human boundary. Planless profiles retain their static declared card chain.
+or become invalid. The scheduler advances in that declared worker order only after
+the predecessor validates. Each phase produces one card per attempt generation,
+with idempotency key `tick:phase[:gN]` (generation 1 uses `tick:phase`, generation
+2+ use `tick:phase:g2`, etc.) and optional body header `generation: N+1` for
+generations 2+. The full required worker list prevents completion when a deferred
+card has not yet been created. Gates retain their no-worker semantics, including
+the terminal human boundary. Planless profiles retain their static declared card chain.
 
 `Phase.role` defaults to `worker`. Unique optional `implementation`, `review`,
 and `delivery` roles select special validation; an ordinary worker has no
@@ -283,10 +295,14 @@ execution authority uses the trusted account state root described in the
 | `blocked` | `failed_at_phase_<key>` with `kanban_status: "blocked"` |
 
 A `blocked` card is sticky and holds new project selection until resolved or
-explicitly abandoned. `all_phases_complete` accepts only `done` and `failed`;
-blocked phases still produce failure outcomes and no-progress diagnostics, but
-never an `all_phases_complete` sentinel. Repeated observations do not duplicate
-the same phase/status failure outcome.
+explicitly abandoned. A worker giving up on a live daemon (card `blocked` while
+the execution is running) may be unblocked by the tick at most once per card
+generation; a second block parked in `triage` triggers automatic resume evaluation.
+`all_phases_complete` accepts only `done` and `failed`; blocked phases still
+produce failure outcomes and no-progress diagnostics, but never an
+`all_phases_complete` sentinel. Repeated observations do not duplicate the same
+phase/status failure outcome. When all phase cards are archived (marked `done`
+or `failed`), selection is released for the next tick.
 
 After reconciling the current tick, the scheduler also checks older active
 registrations that have not reached verified delivery. Unresolved execution

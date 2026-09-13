@@ -30,3 +30,9 @@ destructive Git recovery and no automated merge. What replaced the breaker is
 not a gate but a terminal card status; see
 [howto-review-outcomes.md](../howto-review-outcomes.md) for what a `blocked`
 review card actually causes in each context.
+
+## Amendment: automatic resume under the tick policy
+
+See [ADR-0005](0005-tick-owned-attempt-recovery.md) for automatic resume of
+timed-out and interrupted attempts with confirmed cleanup and manifest evidence,
+owned by the tick within the same run.

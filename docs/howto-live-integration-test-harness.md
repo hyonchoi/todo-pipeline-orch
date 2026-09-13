@@ -38,10 +38,13 @@ prompt bytes directly through stdin and owns launch, deadlines, exit collection,
 and result validation. There is no Hermes prompt-marker extraction or unmanaged
 shell client launch in a new card. Historical cards retain their old instructions;
 start a new harness run to exercise current dispatch and admission-waiting
-instructions. New cards use `run --wait` to await a bounded terminal response;
-if it returns a nonterminal status, they reconnect without changing card state.
-Existing workers may require an explicit operator refresh or
-recovery through supported Kanban operations; upgrading does not rewrite them.
+instructions. New cards use `run --wait`, which produces multi-line JSON status
+output: one line every 60 seconds with `"final": false` (fields: status,
+generation, elapsed_s, remaining_s, accepted_tasks), then a final report with
+`"final": true`. Consumers act only on the final line. If it returns a nonterminal
+status, they reconnect without changing card state. Existing workers may require
+an explicit operator refresh or recovery through supported Kanban operations;
+upgrading does not rewrite them.
 
 The selected client must satisfy the
 [client and platform prerequisites](howto-agent-supervisor.md#client-and-platform-prerequisites).

@@ -10,6 +10,7 @@ import base64
 import errno
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -28,6 +29,8 @@ from .agent_execution import (
     _atomic_write,
     _open_directory,
     _safe_read,
+    close_execution_logger,
+    execution_logger,
     identity_matches,
     process_identity,
 )
@@ -62,6 +65,49 @@ _FAILURE_CODES = frozenset({
     "git_permissions_unconfirmed", "execution_invalid", "launch_unavailable",
     "verification_sandbox_unavailable",
 })
+# "recovery_invalidated" is a terminal wait report, not a dispatcher refusal,
+# so it is deliberately absent from _FAILURE_CODES.
+
+DEADLINE_COLLECTION_CAP = 600.0
+# A daemon retries its execution lock this long against a polling waiter and
+# its worktree lock this long against a tick's run-authority window (Kanban
+# list, archive and create calls); a waiter gives an approved daemon longer
+# than both to admit before failing.
+ADMISSION_LOCK_RETRY_S = 2.0
+ADMISSION_WORKTREE_RETRY_S = 60.0
+DAEMON_ADMISSION_GRACE_S = 90.0
+# `run --wait` prints a non-final status line this often so a worker polling a
+# silent background session can tell a live wait from a hung one.
+WAIT_STATUS_INTERVAL = 60.0
+
+
+def deadline_collection_budget(timeout: float) -> float:
+    """Compute collection budget as 10% of timeout, capped at DEADLINE_COLLECTION_CAP.
+
+    Rationale: pinned checks already ran once per task during the phase; 10% keeps 30s
+    test phases at 3s; 600s caps the 7200s class.
+    """
+    return min(DEADLINE_COLLECTION_CAP, 0.1 * timeout)
+
+
+def card_max_runtime(registration: dict) -> int:
+    """The Hermes card ceiling for a registration: its own `run --wait` ceiling.
+
+    Card and wait derive from the same pinned registration, so a manifest
+    phase's card outlives deadline collection instead of being killed first.
+    """
+    return math.ceil(registration["timeout"] + wait_ceiling_tail(registration))
+
+
+def wait_ceiling_tail(registration: dict) -> float:
+    """Compute the tail duration added to wait ceilings.
+
+    When a manifest is present, collection can happen: deadline + cleanup allowance + collection budget.
+    Without a manifest, only the cleanup allowance is added.
+    """
+    if registration["manifest"] is not None:
+        return 60 + deadline_collection_budget(registration["timeout"]) + 60
+    return 60
 
 
 def _failure_code(error: Exception) -> str:
@@ -181,8 +227,10 @@ def worker_instructions(identity: str, root: str) -> str:
         "Use only this installed interface. A missing supervisor blocks dispatch. "
         "Automatic worker retry reconnects to the same generation; never authorize a new attempt. "
         "The supervisor owns monitoring, deadline, cleanup and result validation. "
-        "Await this command until it finishes; if the terminal tool returns a background session, "
-        "keep polling that session until the command exits. Do not end the worker while it runs. "
+        "Await this command until it finishes. While it runs it prints one JSON status line per minute with \"final\": false; "
+        "if the terminal tool returns a background session, poll that session until a line with \"final\": true appears and act only on that line; "
+        "never block, comment, or transition the card on a non-final line. "
+        "If the session ends without a final line, run the same command again to reconnect. Do not end the worker while it runs. "
         "Never use kanban_block for running_detached or waiting_for_admission. "
         "If its bounded wait returns either status, reconnect using the same command without changing card state. "
         "waiting_for_admission is not a terminal failure: the command owns bounded "
@@ -197,8 +245,11 @@ def worker_instructions(identity: str, root: str) -> str:
         'metadata={"tpo_result": <validated result>}. '
         "Keep the nested tpo_result unchanged. Never pass report.metadata.tpo_result alone as the metadata argument. "
         "Otherwise report its structured status through Kanban "
-        "kanban_comment and kanban_block worker tools; retain interrupted, timed_out, cleanup_unconfirmed and lock_unconfirmed "
-        "as distinct reasons. Never infer completion from zero exit or missing processes.\n"
+        "kanban_comment and kanban_block worker tools; retain interrupted, timed_out, cleanup_unconfirmed, lock_unconfirmed, "
+        "recovery_invalidated, and admission_failed as distinct reasons. recovery_invalidated and admission_failed are terminal for this worker: "
+        "report them with kanban_comment and kanban_block, retaining the reason. Automatic worker retry reconnects to the same generation; "
+        "the worker never authorizes a new attempt itself, but a pipeline-tick approval may start the next generation automatically through this same command. "
+        "Never infer completion from zero exit or missing processes.\n"
     )
 
 
@@ -420,7 +471,8 @@ def status(store: ExecutionStore, identity: str) -> dict:
 def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) -> dict:
     record = store.load(identity)
     report = {"version": 1, "execution_id": identity, "generation": 0,
-              "status": "registered", "completion_allowed": False}
+              "status": "registered", "completion_allowed": False,
+              "recovery": None, "supervisor_alive": False, "remaining_s": None, "accepted_tasks": None}
     if not record["attempts"]:
         refusal = _launch_refusal(store, identity, record)
         if refusal is not None:
@@ -429,8 +481,12 @@ def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) ->
     attempt = record["attempts"][-1]
     report.update(generation=attempt["generation"], status=attempt["status"],
                   exit_code=attempt["exit_code"], signal=attempt["exit_signal"], cleanup=attempt["cleanup"])
+    # For terminal attempts, include reason so operators can distinguish collection outcomes
+    if attempt["status"] in TERMINAL and attempt["reason"] is not None:
+        report["reason"] = attempt["reason"]
+    alive = attempt["status"] not in TERMINAL and identity_matches(attempt["supervisor"])
     if attempt["status"] not in TERMINAL:
-        report["status"] = "running_detached" if identity_matches(attempt["supervisor"]) else "lock_unconfirmed"
+        report["status"] = "running_detached" if alive else "lock_unconfirmed"
     elif attempt["cleanup"] != "confirmed":
         report["status"] = "cleanup_unconfirmed"
     elif revalidate and attempt["status"] == "exited" and attempt["exit_code"] == 0:
@@ -440,6 +496,25 @@ def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) ->
             report["status"] = "result_invalid"
         else:
             report.update(status="completed", completion_allowed=True, metadata={"tpo_result": raw})
+
+    from .agent_recovery import recovery_state
+
+    # Observability fields for the wait loop and the tick. A live daemon holds
+    # the execution lock, so a contended read degrades to None, never fails.
+    try:
+        report["recovery"] = recovery_state(store, identity)
+    except (ExecutionError, OSError, ValueError):
+        report["recovery"] = None
+    report["supervisor_alive"] = alive
+    report["remaining_s"] = (max(0.0, attempt["deadline_monotonic"] - time.monotonic())
+                             if alive and attempt["deadline_monotonic"] is not None else None)
+    if record["registration"]["manifest"] is not None:
+        from .agent_checkpoint import ProgressJournal
+
+        try:
+            report["accepted_tasks"] = ProgressJournal(store, identity).accepted_count()
+        except (ExecutionError, OSError, ValueError):
+            pass
     return report
 
 
@@ -450,14 +525,23 @@ class _AdmissionBusy(ExecutionError):
 
 @contextmanager
 def _admission_worktree_lock(store: ExecutionStore, identity: str):
+    """Take the worktree lock, retrying verified contention for ADMISSION_WORKTREE_RETRY_S.
+
+    A tick holds this lock while it lists, archives and creates Kanban cards;
+    a daemon spawned for the card it just created must outlast that window.
+    """
+    deadline = time.monotonic() + ADMISSION_WORKTREE_RETRY_S
     with ExitStack() as stack:
-        try:
-            stack.enter_context(store.worktree_locked(identity))
-        except LockUnconfirmed as exc:
-            cause = exc.__cause__
-            if isinstance(cause, OSError) and cause.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                raise _AdmissionBusy from exc
-            raise
+        while True:
+            try:
+                stack.enter_context(store.worktree_locked(identity))
+                break
+            except LockUnconfirmed as exc:
+                if not _is_lock_contention(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise _AdmissionBusy from exc
+                time.sleep(0.5)
         # Do not translate contention on the execution lock or inside preflight.
         yield
 
@@ -467,9 +551,54 @@ def _waiting_for_admission(store: ExecutionStore, identity: str, *, reason: str)
     return {"version": 1, "execution_id": identity, "generation": len(record["attempts"]),
             "status": "waiting_for_admission", "reason": reason, "completion_allowed": False}
 
+
+def _admission_failed(store: ExecutionStore, identity: str) -> dict:
+    """Terminal wait report: the daemon spawned for an approved retry never admitted it.
+
+    The approval stays on disk; the tick decides whether to reissue the card.
+    """
+    return {"version": 1, "execution_id": identity, "generation": len(store.load(identity)["attempts"]),
+            "status": "admission_failed", "reason": "daemon_exited", "completion_allowed": False}
+
+
+def _recovery_invalidated(store: ExecutionStore, identity: str) -> dict:
+    """Terminal wait report: the approved intent no longer matches the worktree.
+
+    Only the tick may approve again; the worker reports this and blocks.
+    """
+    return {"version": 1, "execution_id": identity, "generation": len(store.load(identity)["attempts"]),
+            "status": "recovery_invalidated", "reason": "recovery_state_changed", "completion_allowed": False}
+
+
+def _is_lock_contention(error: LockUnconfirmed) -> bool:
+    cause = error.__cause__
+    return isinstance(cause, OSError) and cause.errno in (errno.EAGAIN, errno.EWOULDBLOCK)
+
+
+@contextmanager
+def _execution_lock_retrying(store: ExecutionStore, identity: str):
+    """Retry store.locked(identity) on transient lock contention during admission.
+
+    The waiter's polling may hold the lock, causing the daemon's store.locked
+    to fail with LockUnconfirmed(OSError(EAGAIN/EWOULDBLOCK)). Retry with
+    backoff for at most ADMISSION_LOCK_RETRY_S; other causes re-raise immediately.
+    """
+    deadline = time.monotonic() + ADMISSION_LOCK_RETRY_S
+    with ExitStack() as stack:
+        while True:
+            try:
+                stack.enter_context(store.locked(identity))
+                break
+            except LockUnconfirmed as exc:
+                if not _is_lock_contention(exc) or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.02)
+        yield
+
+
 def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
     try:
-        with _admission_worktree_lock(store, identity), store.locked(identity):
+        with _admission_worktree_lock(store, identity), _execution_lock_retrying(store, identity):
             try:
                 return _supervise_locked(store, identity, recovery_event=recovery_event)
             except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
@@ -477,6 +606,8 @@ def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | Non
                 raise
     except _AdmissionBusy:
         return _waiting_for_admission(store, identity, reason="worktree_busy")
+    finally:
+        close_execution_logger(store, identity)
 
 
 def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: str | None) -> dict:
@@ -485,9 +616,17 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
         return status(store, identity)
     staging, arguments = _prepare_launch(store, identity, current)
     if recovery_event is not None:
-        from .agent_recovery import consume_recovery
+        from .agent_recovery import (
+            RecoveryStateChanged,
+            consume_recovery,
+            invalidate_recovery,
+        )
 
-        preview = consume_recovery(store, identity, recovery_event)
+        try:
+            preview = consume_recovery(store, identity, recovery_event)
+        except RecoveryStateChanged:
+            invalidate_recovery(store, identity, recovery_event)
+            return _recovery_invalidated(store, identity)
         store.authorize_retry(identity, expected_generation=preview["generation"], event_id=recovery_event,
                               recovery_context=json.dumps(preview["context"], sort_keys=True))
     record, created = store.admit(identity, recovery_event=recovery_event)
@@ -496,6 +635,10 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
     generation = record["attempts"][-1]["generation"]
     registration = record["registration"]
     store.update_attempt(identity, generation, supervisor=process_identity(os.getpid()))
+    # This module logs identifiers and outcomes only: never the prompt, the
+    # environment, or client output.
+    logger = execution_logger(store, identity)
+    logger.info("admission generation=%s recovery=%s", generation, recovery_event is not None)
     context_path = ""
     if generation > 1:
         from .agent_checkpoint import ProgressJournal
@@ -505,31 +648,51 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
         with _open_directory(staging) as directory:
             _atomic_write(Path("recovery-context.json"), context, directory_fd=directory)
         context_path = str(staging / "recovery-context.json")
+
+    def launched(receipt: dict) -> None:
+        store.update_attempt(identity, generation, status="running", client_process=receipt["identity"],
+                             started_monotonic=receipt["launched_monotonic"], deadline_monotonic=receipt["deadline"])
+        logger.info("launch client=%s timeout_s=%s deadline_monotonic=%s",
+                    Path(arguments[0]).name, registration["timeout"], receipt["deadline"])
+
     try:
         result = run_process(
             arguments, cwd=Path(registration["worktree"]),
             stdin_bytes=base64.b64decode(registration["prompt_base64"]), timeout=registration["timeout"],
+            stdout_path=staging / "client.stdout.log", stderr_path=staging / "client.stderr.log",
             env={**os.environ, "TPO_RESULT_PATH": str(staging / "result.json"), "TPO_CHECKPOINT_DIR": str(staging),
                  "TPO_ATTEMPT_GENERATION": str(generation),
                  "TPO_RECOVERY_CONTEXT_PATH": context_path},
-            on_launch=lambda receipt: store.update_attempt(
-                identity, generation, status="running", client_process=receipt["identity"],
-                started_monotonic=receipt["launched_monotonic"], deadline_monotonic=receipt["deadline"]),
+            on_launch=launched,
             on_processes=lambda processes: store.update_attempt(identity, generation, direct_processes=processes),
         )
     except ProcessLaunchError as exc:
+        logger.warning("terminal generation=%s status=blocked reason=client_not_launched cleanup=%s", generation, exc.cleanup)
         store.update_attempt(identity, generation, status="blocked", reason="client_not_launched",
                              cleanup="confirmed" if exc.cleanup == "confirmed" else "unconfirmed")
     except ProcessOwnershipError as exc:
+        logger.warning("terminal generation=%s status=interrupted reason=exit_unobservable", generation)
         store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable",
                              cleanup="unconfirmed", direct_processes=exc.processes)
-    except Exception:
+    except Exception as exc:
+        logger.warning("terminal generation=%s status=interrupted reason=exit_unobservable error=%s",
+                       generation, type(exc).__name__)
         store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable", cleanup="unconfirmed")
     else:
+        logger.info("outcome=%s exit_code=%s signal=%s cleanup=%s", result["outcome"], result["exit_code"],
+                    result["signal"], result["cleanup"])
         collecting = result["outcome"] == "exited" and result["exit_code"] == 0 and result["cleanup"] == "confirmed"
-        store.update_attempt(identity, generation, status="running" if collecting else result["outcome"], exit_code=result["exit_code"],
+        deadline_collecting = (result["outcome"] == "timed_out" and result["cleanup"] == "confirmed"
+                              and registration["manifest"] is not None)
+
+        # The terminal status is written once, after any collection; a pending
+        # reason lets recover() finish an interrupted deadline collection.
+        store.update_attempt(identity, generation, status="running" if (collecting or deadline_collecting) else result["outcome"],
+                             exit_code=result["exit_code"],
                              exit_signal=result["signal"], cleanup="confirmed" if result["cleanup"] == "confirmed" else "unconfirmed",
-                             direct_processes=result["processes"])
+                             direct_processes=result["processes"],
+                             **({"reason": "deadline_collection_pending"} if deadline_collecting else {}))
+
         if collecting:
             from .agent_collector import (
                 CollectionInterrupted,
@@ -550,10 +713,14 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
                     report = _status(store, identity, revalidate=False)
                     report.update(status="completed", completion_allowed=True, metadata={"tpo_result": raw})
             except CollectionTimedOut:
+                logger.warning("terminal generation=%s status=timed_out reason=checkpoint_deadline_exceeded", generation)
                 store.update_attempt(identity, generation, status="timed_out", reason="checkpoint_deadline_exceeded")
             except CollectionInterrupted:
+                logger.warning("terminal generation=%s status=interrupted reason=exit_unobservable", generation)
                 store.update_attempt(identity, generation, status="interrupted", reason="exit_unobservable")
-            except (ExecutionError, ResultContractError, OSError, ValueError, KeyError):
+            except (ExecutionError, ResultContractError, OSError, ValueError, KeyError) as exc:
+                logger.warning("terminal generation=%s status=exited reason=result_invalid error=%s",
+                               generation, type(exc).__name__)
                 store.update_attempt(identity, generation, status="exited", reason="result_invalid")
                 report = _status(store, identity, revalidate=False)
                 report["status"] = "result_invalid"
@@ -561,31 +728,86 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
             else:
                 # Eligibility is final before the immutable terminal write. A
                 # slow fsync cannot turn an eligible success into a late timeout.
+                logger.info("terminal generation=%s status=exited completed=True", generation)
                 store.update_attempt(identity, generation, status="exited")
                 return report
+
+        if deadline_collecting:
+            from .agent_collector import collect_checkpoints
+
+            budget_deadline = time.monotonic() + deadline_collection_budget(registration["timeout"])
+            reason = "deadline_collection_incomplete"
+
+            logger.info("deadline_collection_start generation=%s budget_s=%s", generation,
+                        deadline_collection_budget(registration["timeout"]))
+
+            try:
+                with collection_deadline(budget_deadline):
+                    collected = collect_checkpoints(store, identity, generation,
+                                                    deadline_monotonic=budget_deadline)
+                    reason = "deadline_collection_complete" if collected["complete"] else "deadline_collection_partial"
+            except Exception as exc:
+                logger.warning("deadline_collection_failed generation=%s error=%s", generation, type(exc).__name__)
+
+            logger.info("terminal generation=%s status=timed_out reason=%s", generation, reason)
+            store.update_attempt(identity, generation, status="timed_out", reason=reason)
+            return status(store, identity)
+
+        if not collecting:
+            logger.info("terminal generation=%s status=%s", generation, result["outcome"])
     return status(store, identity)
 
 
 def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
     record = store.load(identity)
-    if record["attempts"] and recovery_event is None:
-        return status(store, identity)
+    last = record["attempts"][-1] if record["attempts"] else None
+    if last is not None and recovery_event is None and last["status"] not in TERMINAL:
+        return status(store, identity)  # live or lost daemon: unchanged fast path
     try:
         with _admission_worktree_lock(store, identity), store.locked(identity):
             record = store.load(identity)
             if record["attempts"] and recovery_event is None:
-                return status(store, identity)
+                # Probe for auto-recovery approval inside lock
+                from .agent_recovery import pending_auto_recovery
+
+                try:
+                    recovery_event = pending_auto_recovery(store, identity)
+                except ExecutionError:
+                    recovery_event = None
+                if recovery_event is None:
+                    return status(store, identity)
             try:
                 if recovery_event is not None:
-                    from .agent_recovery import validate_recovery
+                    from .agent_recovery import (
+                        RecoveryStateChanged,
+                        invalidate_recovery,
+                        validate_recovery,
+                    )
 
-                    validate_recovery(store, identity, recovery_event)
+                    try:
+                        validate_recovery(store, identity, recovery_event)
+                    except RecoveryStateChanged:
+                        invalidate_recovery(store, identity, recovery_event)
+                        return _recovery_invalidated(store, identity)
+                    except ExecutionError:
+                        if any(a["recovery_event"] == recovery_event for a in store.load(identity)["attempts"]):
+                            return status(store, identity)  # another waiter's daemon already admitted this event
+                        raise
                 _prepare_launch(store, identity, record)
             except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
                 _remember_launch_refusal(store, identity, error)
                 raise
+            expected_generation = len(record["attempts"]) + 1 if recovery_event is not None else None
     except _AdmissionBusy:
         return _waiting_for_admission(store, identity, reason="worktree_busy")
+    except LockUnconfirmed as exc:
+        # Contention on acquiring the execution lock of a recorded execution
+        # means a daemon or the tick owns it: retry instead of reporting a stale
+        # terminal outcome. Any other lock failure (including one raised inside
+        # preflight) stays the refusal it always was.
+        if _is_lock_contention(exc) and store.load(identity)["attempts"]:
+            return _waiting_for_admission(store, identity, reason="execution_busy")
+        raise
     # Each daemon races only for kernel locks; only the winner admits a client.
     try:
         command = [installed_entrypoint(), "_supervise", "--root", str(store.root), "--execution", identity]
@@ -594,6 +816,11 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
         subprocess.Popen(command,
                          stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                          start_new_session=True, close_fds=True)
+        try:
+            execution_logger(store, identity).info("spawn daemon generation=%s recovery=%s",
+                                                   len(record["attempts"]) + 1, recovery_event is not None)
+        finally:
+            close_execution_logger(store, identity)
     except (ExecutionError, OSError, ValueError) as error:
         with store.worktree_locked(identity), store.locked(identity):
             latest = store.load(identity)
@@ -604,12 +831,17 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
             _remember_launch_refusal(store, identity, error)
         raise
     report = status(store, identity)
+    if expected_generation is not None:
+        report["expected_generation"] = expected_generation
     if report["status"] == "registered" or (
         recovery_event is not None and report["generation"] == len(record["attempts"])
     ):
         # An explicitly requested recovery may still be waiting for admission.
         # Retain the existing generation's durable outcome while polling.
-        return _waiting_for_admission(store, identity, reason="launch_pending")
+        waiting_report = _waiting_for_admission(store, identity, reason="launch_pending")
+        if expected_generation is not None:
+            waiting_report["expected_generation"] = expected_generation
+        return waiting_report
     return report
 
 
@@ -646,8 +878,12 @@ def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60
             if attempt["status"] not in TERMINAL:
                 from .agent_collector import collector_timed_out
 
+                # Check collector evidence FIRST (it survives across supervisor crashes)
                 if collector_timed_out(store, identity, attempt["generation"]):
                     changes.update(status="timed_out", reason="checkpoint_deadline_exceeded")
+                # Then check deadline_collection_pending (in-progress collection)
+                elif attempt["reason"] == "deadline_collection_pending":
+                    changes.update(status="timed_out", reason="deadline_collection_incomplete")
                 else:
                     changes.update(status="interrupted", reason="exit_unobservable")
             store.update_attempt(identity, attempt["generation"], **changes)
@@ -714,33 +950,71 @@ def main(argv: list[str] | None = None) -> int:
         if args.operation == "status":
             report = status(store, args.execution)
         else:
-            expected_generation = (len(store.load(args.execution)["attempts"]) + 1
-                                   if args.operation == "run" and args.recovery_event is not None else None)
             report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event)
+            expected_generation = report.get("expected_generation")
         if args.operation == "run":
-            stop = started + (store.load(args.execution)["registration"]["timeout"] + 60 if args.wait else 5)
+            registration = store.load(args.execution)["registration"]
+            timeout = registration["timeout"]
+            ceiling_tail = wait_ceiling_tail(registration)
+            stop = started + (timeout + ceiling_tail if args.wait else 5)
             caller = process_identity(os.getpid()) if args.wait else None
+            spawned_at = time.monotonic() if expected_generation is not None else None
+            observed = report
+            last_status_line = started
             while report["status"] in {"running_detached", "registered", "lock_unconfirmed", "waiting_for_admission"} and time.monotonic() < stop:
                 if args.wait:
+                    now = time.monotonic()
+                    if now - last_status_line >= WAIT_STATUS_INTERVAL:
+                        # status/generation follow the tracked report; the two
+                        # observability fields come from the last status() read
+                        # and may lag while admission is being retried.
+                        print(json.dumps({"status": report["status"], "generation": report.get("generation", 0),
+                                          "elapsed_s": now - started, "remaining_s": observed.get("remaining_s"),
+                                          "accepted_tasks": observed.get("accepted_tasks"), "final": False},
+                                         sort_keys=True), flush=True)
+                        last_status_line = now
                     attempts = store.load(args.execution)["attempts"]
                     attempt = attempts[-1] if attempts else None
                     if (attempt is not None and (expected_generation is None or attempt["generation"] >= expected_generation)
                             and attempt["deadline_monotonic"] is not None and attempt["supervisor"] is not None
                             and all(attempt["supervisor"][key] == caller[key] for key in ("host", "boot_id"))):
-                        stop = min(stop, attempt["deadline_monotonic"] + 60)
+                        stop = min(stop, attempt["deadline_monotonic"] + ceiling_tail)
                     if time.monotonic() >= stop:
                         break
                 time.sleep(min(0.1, max(0, stop - time.monotonic())))
-                if report["status"] == "waiting_for_admission" and report.get("reason") == "worktree_busy":
-                    # Only verified worktree contention is retried, without
-                    # admitting a generation or starting its execution budget.
+                if report["status"] == "waiting_for_admission" and report.get("reason") in {"worktree_busy", "execution_busy"}:
+                    # Retry verified worktree or execution contention without admitting.
                     report = attach(store, args.execution, recovery_event=args.recovery_event)
+                    if report.get("expected_generation") is not None:
+                        expected_generation = report["expected_generation"]
+                        spawned_at = time.monotonic()
                     continue
                 observed = status(store, args.execution)
                 if (expected_generation is not None and observed["generation"] < expected_generation
                         and report["status"] in {"running_detached", "waiting_for_admission"}):
                     # The previous terminal outcome remains authoritative for
                     # that generation, but cannot settle this requested retry.
+                    from .agent_recovery import recovery_state
+
+                    try:
+                        with store.locked(args.execution):  # consistent with the daemon's consume->admit critical section
+                            attempts = store.load(args.execution)["attempts"]
+                            if len(attempts) >= expected_generation:
+                                continue  # admitted; observed next iteration
+                            try:
+                                recovery = recovery_state(store, args.execution)
+                            except ExecutionError:
+                                recovery = None
+                            pending = (recovery is not None and recovery["state"] == "approved"
+                                       and recovery["generation"] == expected_generation - 1)
+                    except LockUnconfirmed:
+                        continue  # a daemon holds the lock: admission in progress
+                    if not pending:
+                        report = _recovery_invalidated(store, args.execution)
+                        break  # consumed-by-dead-daemon, invalidated, malformed
+                    if time.monotonic() - spawned_at >= DAEMON_ADMISSION_GRACE_S:
+                        report = _admission_failed(store, args.execution)
+                        break
                     continue
                 if observed["status"] == "registered" and report["status"] == "waiting_for_admission":
                     # A detached daemon has not admitted yet. Do not turn that
@@ -754,5 +1028,6 @@ def main(argv: list[str] | None = None) -> int:
             report.update(execution_id=record["execution_id"], generation=len(record["attempts"]))
         except (ExecutionError, OSError, ValueError):
             pass
-    print(json.dumps(report, sort_keys=True))
+    report["final"] = True
+    print(json.dumps(report, sort_keys=True), flush=True)
     return 0 if report["completion_allowed"] or report["status"] in {"running_detached", "waiting_for_admission"} else 1

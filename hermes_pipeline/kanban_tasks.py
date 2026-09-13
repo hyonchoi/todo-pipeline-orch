@@ -92,17 +92,39 @@ def _build_json_header(
     phase_key: str,
     todo_id: str,
     project_slug: str,
+    generation: int = 1,
 ) -> str:
     """Build the JSON header line for a kanban task body."""
-    return json.dumps(
-        {
-            "tick_id": tick_id,
-            "phase_key": phase_key,
-            "todo_id": todo_id,
-            "project_slug": project_slug,
-        },
-        sort_keys=True,
-    )
+    header = {
+        "tick_id": tick_id,
+        "phase_key": phase_key,
+        "todo_id": todo_id,
+        "project_slug": project_slug,
+    }
+    if generation > 1:
+        header["generation"] = generation
+    return json.dumps(header, sort_keys=True)
+
+
+def _header_generation(header: dict) -> int:
+    """Card generation from an untrusted header: a positive int, else 1 (legacy, bool, or malformed)."""
+    generation = header.get("generation")
+    if type(generation) is int and generation >= 1:
+        return generation
+    return 1
+
+
+def phase_idempotency_key(tick_id: str, phase_key: str, generation: int) -> str:
+    """Build idempotency key for a phase card.
+
+    Generation 1 uses classic format: tick_id:phase_key
+    Generation > 1 uses: tick_id:phase_key:gN
+    """
+    if generation < 1:
+        raise ValueError(f"generation must be >= 1, got {generation}")
+    if generation == 1:
+        return f"{tick_id}:{phase_key}"
+    return f"{tick_id}:{phase_key}:g{generation}"
 
 
 @dataclass(frozen=True)
@@ -120,6 +142,8 @@ class PreparedPhaseTask:
     result_template: str | None = None
     execution_id: str | None = None
     phase_role: str = "worker"
+    # Hermes card ceiling pinned from the registration; None means unbound.
+    max_runtime: int | None = None
 
 
 @dataclass(frozen=True)
@@ -490,13 +514,47 @@ def _task_status_in_snapshot(*, tenant: str, task_id: str) -> str | None:
 
 
 def _find_task_id_in_snapshot(
-    *, tenant: str, tick_id: str, phase_key: str
+    *, tenant: str, tick_id: str, phase_key: str, generation: int = 1
 ) -> str | None:
-    """Resolve a task after an inconclusive idempotent create retry."""
+    """Resolve a task after an inconclusive idempotent create retry.
+
+    Requires the header generation to match the requested generation. An
+    archived card never resolves the retry: Hermes deduplicates only against
+    live cards, and a card the tick retired must be replaced, not adopted.
+    """
     tasks = _list_task_snapshot(tenant)
     if tasks is None:
         return None
     for task in tasks:
+        if task.get("status") == "archived":
+            continue
+        header = _parse_task_header(task)
+        if header is None:
+            continue
+        if (
+            header.get("tick_id") == tick_id
+            and header.get("phase_key") == phase_key
+            and _header_generation(header) == generation
+        ):
+            return _parse_task_id(json.dumps({"id": task.get("id")}))
+    return None
+
+
+def phase_cards_in_snapshot(
+    *, tenant: str, tick_id: str, phase_key: str
+) -> list[dict] | None:
+    """Return non-archived cards for this tick+phase as {"id", "status", "generation"}.
+
+    Returns None when the snapshot cannot be read.
+    """
+    tasks = _list_task_snapshot(tenant)
+    if tasks is None:
+        return None
+
+    cards = []
+    for task in tasks:
+        if task.get("status") == "archived":
+            continue
         header = _parse_task_header(task)
         if header is None:
             continue
@@ -504,8 +562,16 @@ def _find_task_id_in_snapshot(
             header.get("tick_id") == tick_id
             and header.get("phase_key") == phase_key
         ):
-            return _parse_task_id(json.dumps({"id": task.get("id")}))
-    return None
+            task_id = task.get("id")
+            status = task.get("status")
+            if isinstance(task_id, str) and isinstance(status, str):
+                cards.append({
+                    "id": task_id,
+                    "status": status,
+                    "generation": _header_generation(header),
+                })
+
+    return cards
 
 
 def _recover_uncertain_task_id(
@@ -771,9 +837,15 @@ def bind_prepared_executions(prepared: list[PreparedPhaseTask], *, project_dir: 
                              state_dir: Path, root: Path, tick_id: str,
                              worktree: Path, todo_id: str) -> list[PreparedPhaseTask]:
     """Pin every prepared execution before creating any Kanban card."""
-    from ._agent_supervisor import register_execution, worker_instructions
+    from ._agent_supervisor import (
+        card_max_runtime,
+        register_execution,
+        worker_instructions,
+    )
+    from .agent_execution import ExecutionStore
 
     bound = []
+    store = ExecutionStore(root)
     authority = state_dir / "runs" / tick_id / "registration.json"
     if authority.exists():
         from .result_contract import load_validated_registration
@@ -792,7 +864,9 @@ def bind_prepared_executions(prepared: list[PreparedPhaseTask], *, project_dir: 
         )
         header = json.loads(phase.body.split("\n", 1)[0])
         header["execution_id"] = identity
-        bound.append(replace(phase, execution_id=identity, body=json.dumps(header, sort_keys=True) + "\n" + worker_instructions(identity, str(root))))
+        max_runtime = card_max_runtime(store.load(identity)["registration"])
+        bound.append(replace(phase, execution_id=identity, max_runtime=max_runtime,
+                             body=json.dumps(header, sort_keys=True) + "\n" + worker_instructions(identity, str(root))))
     return bound
 
 
@@ -1048,7 +1122,8 @@ def create_prepared_todo_phases(
         cmd.extend(
             [
                 "--max-runtime",
-                str(phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+                str(phase.max_runtime if phase.max_runtime is not None
+                    else phase.timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
                 "--max-retries",
                 "1",
                 "--goal",
@@ -1516,6 +1591,7 @@ class KanbanTaskInfo:
     phase_key: str
     status: str
     todo_id: str
+    generation: int = 1
 
 
 def get_todo_kanban_tasks(tenant: str, tick_id: str) -> dict[str, KanbanTaskInfo]:
@@ -1560,11 +1636,16 @@ def get_todo_kanban_tasks(tenant: str, tick_id: str) -> dict[str, KanbanTaskInfo
             for value in (phase_key, task_id, status, todo_id)
         ):
             continue
+        generation = _header_generation(header)
+        # Keep the card with highest generation for this phase; on tie, last-wins
+        if phase_key in out and out[phase_key].generation > generation:
+            continue
         out[phase_key] = KanbanTaskInfo(
             task_id=task_id,
             phase_key=phase_key,
             status=status,
             todo_id=todo_id,
+            generation=generation,
         )
     return out
 

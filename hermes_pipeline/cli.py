@@ -27,6 +27,8 @@ import tomllib
 from dataclasses import fields, replace
 from pathlib import Path
 
+import yaml
+
 from hermes_pipeline import __version__
 
 from .circuit import CircuitBreaker
@@ -620,6 +622,261 @@ def _strip_global_flags(argv: list[str] | None) -> tuple[bool, bool, list[str]]:
         else:
             remaining.append(arg)
     return verbose, debug, remaining
+
+
+def _profile_path_from_show(stdout: str) -> Path | None:
+    """Extract the profile path from 'hermes profile show' output.
+
+    Looks for a line starting with 'Path:' and returns Path(value) or None.
+    """
+    for line in stdout.splitlines():
+        if line.strip().startswith("Path:"):
+            path_value = line.split(":", 1)[1].strip()
+            return Path(path_value) if path_value else None
+    return None
+
+
+def _kanban_auto_decompose_state(config_path: Path) -> str:
+    """Check the state of kanban.auto_decompose in a config file.
+
+    Returns:
+        - "false": auto_decompose is set to false
+        - "true": auto_decompose is set to true (truthy value)
+        - "missing": key or file absent
+        - "unreadable": file cannot be read or parsed
+
+    Non-boolean values are mapped to "unreadable"; null/0 collapse to "false".
+    """
+    if not config_path.exists():
+        return "missing"
+
+    try:
+        # Check size BEFORE reading to avoid loading huge files
+        try:
+            if config_path.stat().st_size > 1024 * 1024:  # 1 MiB limit
+                return "unreadable"
+        except OSError:
+            return "unreadable"
+
+        content = config_path.read_bytes()
+        doc = yaml.safe_load(content.decode("utf-8"))
+        # Non-dict documents are malformed
+        if not isinstance(doc, dict):
+            return "unreadable"
+
+        if "kanban" not in doc:
+            return "missing"
+
+        kanban = doc.get("kanban")
+        if not isinstance(kanban, dict) or "auto_decompose" not in kanban:
+            return "missing"
+
+        value = kanban.get("auto_decompose")
+        if value is False:
+            return "false"
+        elif value is True:
+            return "true"
+        else:
+            # Non-bool value: map to "unreadable"
+            return "unreadable"
+    except (OSError, PermissionError, UnicodeDecodeError, yaml.YAMLError, RecursionError, MemoryError, TypeError, ValueError):
+        return "unreadable"
+
+
+def _set_kanban_auto_decompose_false(config_path: Path) -> tuple[bool, str]:
+    """Set kanban.auto_decompose to false in a YAML config file.
+
+    Preserves comments, indentation, line endings, and CRLF. Handles quoted values.
+    Only modifies child-level auto_decompose keys in kanban blocks; nested keys are ignored.
+    Returns (success, message).
+    Messages:
+        - (True, "updated"): file was modified
+        - (True, "unchanged"): file already has auto_decompose: false
+        - (False, "unreadable"): read error (permission, encoding, etc)
+        - (False, "config too large"): file exceeds 1 MiB
+        - (False, "unverified"): YAML error or verification failed
+    """
+    # Read the file (treat missing as empty)
+    if config_path.exists():
+        # Check size BEFORE reading to avoid loading huge files
+        try:
+            if config_path.stat().st_size > 1024 * 1024:  # 1 MiB limit
+                return False, "config too large"
+        except OSError:
+            return False, "unreadable"
+        try:
+            content_bytes = config_path.read_bytes()
+        except (OSError, PermissionError):
+            return False, "unreadable"
+        try:
+            content = content_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            return False, "unreadable"
+    else:
+        content = ""
+
+    # Check if already correct
+    try:
+        doc = yaml.safe_load(content) if content else {}
+        if isinstance(doc, dict) and doc.get("kanban", {}).get("auto_decompose") is False:
+            return True, "unchanged"
+    except (yaml.YAMLError, RecursionError, MemoryError, TypeError, ValueError):
+        return False, "unverified"
+
+    # Detect line ending style (preserve original)
+    has_crlf = "\r\n" in content
+    line_ending = "\r\n" if has_crlf else "\n"
+
+    # Modify the file using line-based editing to preserve comments
+    lines = content.splitlines(keepends=True) if content else []
+
+    # Find or create the kanban block
+    kanban_start = None
+    kanban_end = None
+    auto_decompose_line = None
+    is_flow_mapping = False
+
+    for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        col = len(line) - len(stripped)
+
+        if col == 0 and stripped.startswith("kanban:"):
+            kanban_start = i
+            # Check if this is a flow mapping (contains { })
+            if "{" in line:
+                is_flow_mapping = True
+        elif kanban_start is not None and col == 0 and stripped and not stripped.startswith("#"):
+            kanban_end = i
+            break
+
+    if kanban_end is None and kanban_start is not None:
+        kanban_end = len(lines)
+
+    # Determine indentation for the kanban block (child indent level)
+    kanban_indent = "  "
+    kanban_child_indent = None
+    if kanban_start is not None:
+        for i in range(kanban_start + 1, kanban_end or len(lines)):
+            line = lines[i]
+            if line.strip() and not line.strip().startswith("#"):
+                match = re.match(r"^(\s+)", line)
+                if match:
+                    kanban_indent = match.group(1)
+                    kanban_child_indent = len(kanban_indent)
+                    break
+
+    # Find auto_decompose at exactly child indentation level
+    if kanban_start is not None and not is_flow_mapping:
+        for i in range(kanban_start + 1, kanban_end or len(lines)):
+            line = lines[i]
+            stripped = line.lstrip()
+            col = len(line) - len(stripped)
+
+            if stripped.startswith("auto_decompose:"):
+                # Only match if at exactly the child indentation level
+                if kanban_child_indent is not None and col == kanban_child_indent:
+                    auto_decompose_line = i
+                    break
+                elif kanban_child_indent is None and col > 0:
+                    # No child lines found yet, accept first non-zero indent
+                    auto_decompose_line = i
+                    break
+
+    if is_flow_mapping and kanban_start is not None:
+        # Handle flow-style YAML: kanban: {auto_decompose: true, ...}
+        line = lines[kanban_start]
+        line_without_ending = line.rstrip('\r\n')
+
+        # Check if auto_decompose key exists in the flow mapping
+        if re.search(r'\bauto_decompose\s*:', line_without_ending):
+            # Update existing auto_decompose value: replace true/false/etc with false
+            # Pattern matches: auto_decompose: <value> inside the flow mapping
+            new_line = re.sub(
+                r'(\bauto_decompose\s*:\s*)(?:["\']?(true|false|yes|no|on|off)["\']?)',
+                r'\1false',
+                line_without_ending,
+                flags=re.IGNORECASE
+            )
+            lines[kanban_start] = new_line + line_ending
+        else:
+            # Insert auto_decompose: false into the flow mapping before the closing }
+            # Check if the mapping is empty (only whitespace between braces)
+            if re.search(r'\{\s*\}', line_without_ending):
+                # Empty mapping: replace {} with {auto_decompose: false}
+                new_line = re.sub(
+                    r'(\{)\s*(\})',
+                    r'\1auto_decompose: false\2',
+                    line_without_ending
+                )
+            else:
+                # Non-empty mapping: insert before closing }
+                new_line = re.sub(
+                    r'(\{[^}]*?)(\s*\})',
+                    r'\1, auto_decompose: false\2',
+                    line_without_ending
+                )
+            lines[kanban_start] = new_line + line_ending
+    elif kanban_start is None:
+        # No kanban block; add one at the end
+        if lines and not lines[-1].endswith("\n") and not lines[-1].endswith("\r\n"):
+            lines[-1] += line_ending
+        lines.append(f"\nkanban:{line_ending}")
+        lines.append(f"{kanban_indent}auto_decompose: false{line_ending}")
+    elif auto_decompose_line is not None:
+        # Update existing auto_decompose line, preserving comment
+        line = lines[auto_decompose_line]
+        # Remove the line ending to process it
+        line_without_ending = line.rstrip('\r\n')
+        # Accept bare values, quoted values, and YAML boolean representations
+        # Pattern: optional indent, auto_decompose:, optional whitespace, value (bare or quoted), optional comment
+        match = re.match(
+            r'^(\s*)auto_decompose:\s*(?:(["\'])?(true|false|yes|no|on|off)\2|true|false|yes|no|on|off)(\s*#.*)?$',
+            line_without_ending,
+            re.IGNORECASE
+        )
+        if match:
+            indent = match.group(1)
+            comment = match.group(4) or ""
+            lines[auto_decompose_line] = f"{indent}auto_decompose: false{comment}{line_ending}"
+    else:
+        # kanban block exists but no auto_decompose key at child level; add it
+        if kanban_start is not None:
+            # Insert after the kanban: line
+            lines.insert(kanban_start + 1, f"{kanban_indent}auto_decompose: false{line_ending}")
+
+    new_content = "".join(lines)
+
+    # Verify the result
+    try:
+        doc = yaml.safe_load(new_content)
+        if not isinstance(doc, dict) or doc.get("kanban", {}).get("auto_decompose") is not False:
+            return False, "unverified"
+    except (yaml.YAMLError, RecursionError, MemoryError, TypeError, ValueError):
+        return False, "unverified"
+
+    # Write atomically using tempfile.mkstemp in the resolved parent directory
+    try:
+        import tempfile
+        resolved_config = config_path.resolve()
+        parent_dir = resolved_config.parent
+        fd, tmp_path_str = tempfile.mkstemp(dir=str(parent_dir))
+        try:
+            tmp_path = Path(tmp_path_str)
+            tmp_path.write_text(new_content)
+            os.replace(tmp_path_str, str(resolved_config))
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            try:
+                os.unlink(tmp_path_str)
+            except OSError:
+                pass
+    except OSError:
+        return False, "unverified"
+
+    return True, "updated"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1654,13 +1911,9 @@ _PLAN_TRACKED_TIMEOUT = 30.0
 
 def _abandon_run_if_registered(state_dir: Path, tick_id: str, reason: str) -> bool:
     """Durably retire a pre-dispatch registration while preserving its evidence."""
-    run_dir = state_dir / "runs" / tick_id
-    if not (run_dir / "registration.json").is_file():
-        return False
-    from .state import _atomic_write_text
+    from .run_registration import abandon_run_if_registered
 
-    _atomic_write_text(run_dir / "abandoned", reason + "\n")
-    return True
+    return abandon_run_if_registered(state_dir, tick_id, reason)
 
 
 def _plan_tracked_at_head(project_dir: Path, plan_path: str) -> bool:
@@ -3366,6 +3619,7 @@ def _cmd_doctor(args, config: Config) -> int:
         return 1
 
     # Verify the assigned profile is actually installed (non-default assignee only)
+    auto_decompose_ok = True
     if contract.assignee != "default":
         try:
             verify_result = _cli_sp.run(
@@ -3395,6 +3649,21 @@ def _cmd_doctor(args, config: Config) -> int:
                 f"with `hermes profile create {contract.assignee}`."
             )
             return 2
+
+        # Check kanban.auto_decompose setting in the profile
+        profile_path = _profile_path_from_show(verify_result.stdout)
+        if profile_path:
+            auto_decompose_state = _kanban_auto_decompose_state(profile_path / "config.yaml")
+            if auto_decompose_state == "true":
+                print(
+                    f"DRIFT: kanban.auto_decompose must be false in {profile_path / 'config.yaml'}"
+                )
+                print("Fix: run tpo install-profile --force or set kanban.auto_decompose: false")
+                auto_decompose_ok = False
+            elif auto_decompose_state in ("false", "missing"):
+                print("kanban.auto_decompose: off")
+            elif auto_decompose_state == "unreadable":
+                print(f"WARNING: could not read {profile_path / 'config.yaml'} to verify kanban.auto_decompose")
 
     print(
         f"prompt client: {config.prompt_client} "
@@ -3479,7 +3748,7 @@ def _cmd_doctor(args, config: Config) -> int:
         for report in diagnostics(root):
             print(f"Execution {report['execution_id']}: {report['status']}")
 
-    if not _doctor_active_registration(project_dir, project_state) or not github_ok:
+    if not _doctor_active_registration(project_dir, project_state) or not github_ok or not auto_decompose_ok:
         return 1
 
     print(
@@ -3587,12 +3856,8 @@ def _cmd_install_profile(args, config: Config) -> int:
         print("Fix: Run `hermes profile list` to check installed profiles.")
         return 1
 
-    profile_path = None
-    for line in show.stdout.splitlines():
-        if line.strip().startswith("Path:"):
-            profile_path = line.split(":", 1)[1].strip()
-            break
-    if not profile_path or not Path(profile_path).is_dir():
+    profile_path = _profile_path_from_show(show.stdout)
+    if not profile_path or not profile_path.is_dir():
         print(
             f"Problem: Could not determine the profile path from `hermes profile show {profile_name}` output."
         )
@@ -3612,6 +3877,16 @@ def _cmd_install_profile(args, config: Config) -> int:
         print(f"Details: {exc}")
         return 1
 
+    # Enforce kanban.auto_decompose: false
+    config_yaml = profile_path / "config.yaml"
+    success, msg = _set_kanban_auto_decompose_false(config_yaml)
+    if not success:
+        print(f"Problem: could not force kanban.auto_decompose to false in {config_yaml}.")
+        print(f"Cause: {msg}")
+        print("Fix: set kanban.auto_decompose: false in that file and re-run tpo install-profile.")
+        return 1
+
+    print(f"kanban.auto_decompose: false ({msg})")
     print("Pipeline profile installed successfully.")
     print()
     print("Next step: set the assignee in your project contract:")

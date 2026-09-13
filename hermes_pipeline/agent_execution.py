@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import math
 import os
 import re
@@ -19,6 +20,7 @@ import socket
 import stat
 import sys
 import threading
+import time
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
@@ -389,20 +391,32 @@ class ExecutionStore:
     def prompt(self, execution_id: str) -> bytes:
         return base64.b64decode(self.load(execution_id)["registration"]["prompt_base64"])
 
+    def worktree_lock_id(self, execution_id: str) -> str:
+        """Compute the lock id for a worktree without side effects."""
+        worktree = Path(self.load(execution_id)["registration"]["worktree"]).resolve()
+        return "worktree-" + hashlib.sha256(os.fsencode(worktree)).hexdigest()
+
+    def assert_worktree_peers_resolved(self, execution_id: str) -> None:
+        """Verify no peer executions on the worktree have unresolved attempts.
+
+        Call this while holding the worktree lock (via locked(worktree_id)).
+        """
+        worktree = Path(self.load(execution_id)["registration"]["worktree"]).resolve()
+        for path in self.root.glob("*/record.json"):
+            if path.parent.name == execution_id:
+                continue
+            other = self.load(path.parent.name)
+            if Path(other["registration"]["worktree"]).resolve() != worktree:
+                continue
+            if any(attempt["cleanup"] != "confirmed" or attempt["status"] not in TERMINAL for attempt in other["attempts"]):
+                raise ExecutionError("worktree has an unresolved owned attempt")
+
     @contextmanager
     def worktree_locked(self, execution_id: str) -> Iterator[None]:
         """Retain alongside ``locked`` throughout the supervisor ownership interval."""
-        worktree = Path(self.load(execution_id)["registration"]["worktree"]).resolve()
-        lock_id = "worktree-" + hashlib.sha256(os.fsencode(worktree)).hexdigest()
+        lock_id = self.worktree_lock_id(execution_id)
         with self.locked(lock_id):
-            for path in self.root.glob("*/record.json"):
-                if path.parent.name == execution_id:
-                    continue
-                other = self.load(path.parent.name)
-                if Path(other["registration"]["worktree"]).resolve() != worktree:
-                    continue
-                if any(attempt["cleanup"] != "confirmed" or attempt["status"] not in TERMINAL for attempt in other["attempts"]):
-                    raise ExecutionError("worktree has an unresolved owned attempt")
+            self.assert_worktree_peers_resolved(execution_id)
             yield
 
     def admit(self, execution_id: str, *, recovery_event: str | None = None) -> tuple[dict, bool]:
@@ -470,3 +484,58 @@ class ExecutionStore:
             _validate(record)
             self._write(execution_id, record)
             return record
+
+
+def _logger_name(store: ExecutionStore, execution_id: str) -> str:
+    store_hash = hashlib.sha256(os.fsencode(store.root.resolve())).hexdigest()[:16]
+    return f"tpo.execution.{store_hash}.{execution_id}"
+
+
+def execution_logger(store: ExecutionStore, execution_id: str) -> logging.Logger:
+    """Per-execution logger writing to supervisor.log in the execution directory.
+
+    Messages carry only identifiers, generation numbers, statuses, reason codes,
+    monotonic seconds, and argv[0]. Never log prompt bytes, environment variables,
+    or client output.
+    """
+    logger = logging.getLogger(_logger_name(store, execution_id))
+    logger.propagate = False
+    logger.setLevel(logging.INFO)
+
+    if any(not isinstance(handler, logging.NullHandler) for handler in logger.handlers):
+        return logger
+
+    try:
+        with store._directory_handle(execution_id) as directory:
+            fd = os.open(
+                "supervisor.log",
+                os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC,
+                0o600,
+                dir_fd=directory,
+            )
+            try:
+                file_obj = os.fdopen(fd, "a", encoding="utf-8")
+            except OSError:
+                os.close(fd)
+                raise
+            handler = logging.StreamHandler(file_obj)
+            formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s", datefmt="%Y-%m-%dT%H:%M:%SZ")
+            formatter.converter = time.gmtime
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
+    except (OSError, ExecutionError):
+        if not any(isinstance(h, logging.NullHandler) for h in logger.handlers):
+            logger.addHandler(logging.NullHandler())
+
+    return logger
+
+
+def close_execution_logger(store: ExecutionStore, execution_id: str) -> None:
+    """Remove every handler from the logger, closing stream handlers' streams."""
+    logger = logging.getLogger(_logger_name(store, execution_id))
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+        stream = getattr(handler, "stream", None)
+        if stream is not None:
+            stream.close()

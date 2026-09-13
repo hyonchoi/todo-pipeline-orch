@@ -183,6 +183,7 @@ def _created_card_body(mocker, tmp_path, run):
         return_value=SimpleNamespace(returncode=0, stdout='{"id": "t_12345678"}'),
     )
     registered = mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-execution")
+    mocker.patch("hermes_pipeline.agent_execution.ExecutionStore").return_value.load.return_value = {"registration": {"timeout": 2400, "manifest": None}}
     run()
     cmd = subprocess_run.call_args.args[0]
     body = cmd[cmd.index("--body") + 1]

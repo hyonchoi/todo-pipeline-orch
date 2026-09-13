@@ -26,17 +26,31 @@ Attempt generations identify retries separately and never rename the phase.
 
 The supervisor survives the worker that invokes it. Re-entering the worker
 attaches to the same attempt and never refreshes its budget. Each explicitly
-admitted attempt receives `Phase.timeout` when its client launches. Hermes keeps
-its existing `timeout + 60` ceiling and one worker retry.
+admitted attempt receives `Phase.timeout` when its client launches. Hermes Kanban
+worker receives `card_max_runtime(registration)` as its ceiling: timeout + 60s
+for phases without a manifest, or timeout + 120s + deadline-collection-budget
+for manifest phases (budget = min 600s, 10% of timeout). One worker retry applies.
 
 Before admission, `waiting_for_admission` with reason `worktree_busy` or
-`launch_pending` is an ephemeral waiting response, not a stored terminal outcome.
+`execution_busy` is an ephemeral waiting response, not a stored terminal outcome.
 The launcher returns exit code zero so the worker can reconnect. Plain `run`
 polls for up to five seconds; new worker cards use `run --wait` and await the
-command, including any background tool session. `--wait` is bounded by the phase
-timeout plus 60 seconds from the call, and by the original attempt deadline plus
-60 seconds when its host and boot match. It retries attachment only for verified
-worktree contention. Waiting neither admits an attempt nor refreshes its budget.
+command, including any background tool session.
+
+`run --wait` produces multi-line JSON output: one status line every 60 seconds
+with `"final": false` (fields: status, generation, elapsed_s, remaining_s,
+accepted_tasks), then a final report with `"final": true`. Consumers act only on
+the final line. New terminal wait statuses: `recovery_invalidated` (approved
+recovery intent no longer matches the worktree; only the tick may approve again)
+and `admission_failed` (daemon spawned for an approved retry never admitted within
+90 seconds). `waiting_for_admission` with reason `worktree_busy` or `execution_busy`
+is retried by `run --wait`.
+
+`--wait` is bounded by the phase timeout plus 60s for non-manifest phases, or
+plus 120s + deadline-collection-budget for manifest phases (budget = min 600s, 10%
+of timeout), from the call; it is also bounded by the original attempt deadline
+plus the same tail when its host and boot match. It retries attachment only for
+verified contention. Waiting neither admits an attempt nor refreshes its budget.
 If bounded waiting returns a nonterminal state, the worker reconnects without
 changing card state. Newly generated instructions prohibit `kanban_block` for
 `running_detached` or `waiting_for_admission`. Existing card bodies are not
@@ -47,10 +61,20 @@ On timeout, the supervisor attempts graceful then forced termination within the
 60-second cleanup allowance, including stopped processes where supported. A
 deadline outcome remains `timed_out` even if a late exit is zero. An exit observed
 before the deadline remains eligible for result validation; zero exit alone
-never completes a card. Git inspection, snapshot collection, reviewer execution,
-revalidation, and checkpoint promotion all share the original attempt deadline.
-The terminal outcome is written once, after eligibility checks; a successful
-review cannot refresh the budget or override an expired attempt.
+never completes a card.
+
+Deadline-time checkpoint collection: when a timed-out attempt has confirmed
+cleanup and a manifest, the supervisor collects already-committed checkpoint
+tasks under a deadline budget of min(600s, 10% of timeout). Status reports:
+`deadline_collection_pending` (transient) then `deadline_collection_complete`,
+`deadline_collection_partial`, or `deadline_collection_incomplete` (terminal).
+A timeout never becomes success; `recover()` finishes an interrupted collection
+as `timed_out/deadline_collection_incomplete`.
+
+Git inspection, snapshot collection, reviewer execution, revalidation, and
+checkpoint promotion all share the original attempt deadline. The terminal
+outcome is written once, after eligibility checks; a successful review cannot
+refresh the budget or override an expired attempt.
 
 Versioned records are atomically persisted outside the execution worktree.
 Kernel-held advisory locks serialize admission. Host, boot, and process birth
@@ -65,6 +89,25 @@ describe execution/admission state, not permission to complete a Kanban card.
 Unknown ownership or cleanup blocks another attempt. Worker transitions use the
 supported Kanban worker tools and their current run identity, preserving newer
 attempts and unrelated or manual blocks.
+
+### Status fields and observability
+
+`tpo-agent-supervisor status` and `run --wait` reports include:
+- `recovery`: object with `state`, `approver`, `generation`, and `reissues` fields
+  (no event id), or `null` if no recovery intent
+- `supervisor_alive`: boolean indicating if a supervisor still holds the
+  execution lock
+- `remaining_s`: seconds until deadline (null if not live or deadline unknown)
+- `accepted_tasks`: count of accepted checkpoint tasks from manifest (null if no
+  manifest)
+- `reason`: for terminal attempts, a short code distinguishing outcome types
+  (e.g., `deadline_collection_partial`)
+
+Per-execution logs:
+- `<execution-root>/<exec-dir>/supervisor.log`: identifiers, generations,
+  statuses, and reason codes only
+- `<execution-root>/<exec-dir>/client.stdout.log`: prompt client stdout
+- `<execution-root>/<exec-dir>/client.stderr.log`: prompt client stderr
 
 ### Direct process ownership on Linux and macOS
 
@@ -94,7 +137,27 @@ Historical qualification evidence and its outstanding gates remain in the
 [validation report](operations/supervisor-validation-2026-09-10.md); those older
 results do not establish qualification of this direct-process contract.
 
-## Operator recovery
+## Recovery
+
+### Automatic tick resume
+
+When a supervised execution completes `timed_out` or `interrupted` with confirmed
+cleanup and a manifest records accepted checkpoint progress, the tick automatically
+evaluates resume: checking execution generation count (max 3 generations), progress
+journal readability, and HEAD descent from the journal base. On approval, the tick
+archives quiescent phase cards and creates one card for the next generation with
+body header `generation: N+1` and idempotency key `tick:phase:gN+1` (generation 1
+omits the header, key is `tick:phase`). Cards never carry `--recovery-event`;
+the supervisor consumes the tick approval automatically.
+
+Non-manifest profiles and refusals remain the human boundary: `tpo-agent-supervisor
+prepare-recovery` / `approve-recovery` provide the operator fallback below.
+Refusal codes distinguish transient contention (tick retries) from permanent
+blocks: `recovery_generation_exhausted` (max generations reached; tick archives
+the cards and writes `runs/<tick>/abandoned`), and validation-blocked markers
+for human operator recovery.
+
+### Operator fallback
 
 Refresh the card and its runs through supported Kanban operations first. Verify
 the registered execution identity and phase, current branch/HEAD, cleanup state,
@@ -195,6 +258,21 @@ unconfirmed. For a legacy collector marker belonging to an unconfirmed attempt,
 even `pending=false` only proves that launch registration finished; it does not
 prove collector termination. Recovery preserves that uncertainty without
 signaling historical descendants. Already-confirmed terminal records are preserved.
+
+Recovery intent (`recovery-intent.json`) gains fields `approver` (operator or tick)
+and `status` (`prepared`, `approved`, `consumed`, `invalidated`), and `reissues`
+count. Legacy 3-key operator intents (`version`, `status`, `preview`) still read;
+operator intents remain 3-key on disk. A pre-change `recover()` maps an interrupted
+deadline collection to `interrupted/exit_unobservable`. Pre-change ticks do not
+understand generation headers (they see only generation-1 keys); state the
+downgrade consequence honestly.
+
+Migration note for a run stuck before this change: the first tick after deployment
+sees a record with a missing or not-done card, triggering `auto_approve_resume`.
+If approved, it creates a generation-2 card with key `tick:phase:g2`. Manual
+cleanup (if needed): archive the parent card and any Hermes-created children
+(child-first), then run `tpo install-profile --force` to ensure
+`kanban.auto_decompose: false` in the Hermes profile.
 
 Registrations and journals remain authoritative protocol records, but are not
 isolated from clients or checks running as the same OS user. Checkpoint input

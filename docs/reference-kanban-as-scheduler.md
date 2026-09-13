@@ -63,8 +63,11 @@ The deadline follows this path:
 Phase.timeout
   -> external Codex/Claude deadline
   -> PreparedPhaseTask.timeout
-  -> hermes kanban create --max-runtime <timeout + 60> --max-retries 1
+  -> hermes kanban create --max-runtime <card_max_runtime(registration)> --max-retries 1
 ```
+
+(ceiling of timeout + 60s for non-manifest phases, or timeout + 120s + min(600s, 10% of
+timeout) for manifest phases with deadline-time collection)
 
 The installed deterministic supervisor runs independently of the Hermes worker
 and owns client launch, monitoring, and durable exit collection. Worker re-entry
@@ -449,17 +452,21 @@ each prepared phase, it then runs `hermes kanban create` with:
 
 - `--tenant <board_slug>` — target board
 - `--workspace dir:<project_dir>` — project context
-- `--idempotency-key <tick_id>:<phase_key>` — dedup key (e.g.,
-  `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`)
+- `--idempotency-key <tick_id>:<phase_key>[:gN]` — dedup key (e.g.,
+  `01HA6PH2V0ZJ7GK0S39D243TQX:phase_2_autoplan`); automatic resume creates one
+  card per generation with key `tick:phase:gN` (generation 1 uses `tick:phase`,
+  generation 2+ use `tick:phase:g2`, `tick:phase:g3`, etc.)
 - `--parent <prev_task_id>` — dependency chain for every phase; the first phase
   uses the registration barrier and each later phase uses its predecessor
 - `--assignee -` for the barrier and gates; executable tasks use `assignee`
 - `--body <json_header>\n<registered_execution_instructions>` — task body with
   JSON header and thin supervisor invocation instructions; the rendered prompt
-  is pinned in the durable registration
-- `--max-runtime <timeout + 60>` and `--max-retries 1` for executable tasks —
-  the selected phase deadline plus cleanup-only grace and a terminal single
-  attempt
+  is pinned in the durable registration; automatic resume adds `generation: N+1`
+  header field to generation 2+ cards
+- `--max-runtime <card_max_runtime(registration)>` and `--max-retries 1` for executable
+  tasks — timeout plus 60s cleanup for phases without a manifest, or timeout plus
+  120s plus deadline-collection-budget (min 600s, 10% of timeout) for manifest
+  phases, ensuring Hermes never kills the worker before the supervisor's terminal write
 
 No `hermes kanban block` call is ever made, for a gate or for anything else: a
 gate phase is skipped before any create. After the expected-phase sentinel is
@@ -575,16 +582,23 @@ observe_outcomes(
 
 `blocked` holds new selection until resolved or explicitly abandoned. It
 records a failure outcome and no-progress diagnostics while held, but never an
-`all_phases_complete` sentinel.
+`all_phases_complete` sentinel. A worker giving up on a live daemon (card
+`blocked` while the execution is running) may be unblocked by the tick at most
+once per card generation; a second block parked in `triage` triggers automatic
+resume. Timeout flows directly to deadline collection (if manifest-bearing and
+cleanup confirmed) or to `timed_out` terminal status, triggering automatic
+resume evaluation.
 
-After current-tick reconciliation, older active registrations also hold fresh
-selection until execution is resolved. Runs with an `issue-closed`,
-`abandoned`, or `finish-verified` marker are exempt. For a legacy manifest-free
-run, release requires a valid pinned registration and all registered steps in `done` or
-`failed`; successful Phase 8 requires a merged PR whose head is the exact pinned
-branch. Malformed registrations, missing steps, or unavailable Kanban/PR
-verification hold selection. This gate does not restart historical runs, change
-the current pointer, or interrupt already-running current work.
+After all phase cards for a tick are archived (marked `failed` or `done`),
+selection is released and the next tick may run. After current-tick reconciliation,
+older active registrations also hold fresh selection until execution is resolved.
+Runs with an `issue-closed`, `abandoned`, or `finish-verified` marker are exempt.
+For a legacy manifest-free run, release requires a valid pinned registration and
+all registered steps in `done` or `failed`; successful Phase 8 requires a merged
+PR whose head is the exact pinned branch. Malformed registrations, missing steps,
+or unavailable Kanban/PR verification hold selection. This gate does not restart
+historical runs, change the current pointer, or interrupt already-running current
+work.
 
 **High-watermark dedup:** Completion outcomes are deduplicated by phase key;
 failure outcomes by phase and Kanban status. Repeated observations of the same

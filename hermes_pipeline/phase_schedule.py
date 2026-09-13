@@ -127,8 +127,20 @@ def validated_predecessor_head(registration, *, state_dir, tick_id, stop_key=Non
     return head
 
 
+def _route_phase_recovery(*, state_dir, tenant, tick_id, key, worker, reissue) -> str:
+    """Tick-owned resume for a phase whose card is missing or not done (ADR-0005)."""
+    from ._agent_supervisor import execution_id
+    from .agent_execution import ExecutionStore
+    from .phase_recovery import route_recovery
+
+    store = ExecutionStore(state_dir / "agent-executions")
+    return route_recovery(store=store, identity=execution_id(tick_id, key), state_dir=state_dir, tenant=tenant,
+                          tick_id=tick_id, key=key, worker=worker, reissue=reissue)
+
+
 def reconcile_schedule(*, project_dir, state_dir, tenant, tick_id, registration, repo=None):
     """Admit at most one missing worker, only after validated declared predecessors."""
+    from ._agent_supervisor import execution_id
     from .authority_result import (
         RunAuthorityBusy,
         locked_run_authority,
@@ -140,6 +152,7 @@ def reconcile_schedule(*, project_dir, state_dir, tenant, tick_id, registration,
         _show_task_payload,
         get_todo_kanban_tasks,
     )
+    from .phase_recovery import PROCEED, REFUSED, REISSUED
     from .result_contract import (
         ResultContractError,
         _git,
@@ -164,13 +177,8 @@ def reconcile_schedule(*, project_dir, state_dir, tenant, tick_id, registration,
             for index, phase in enumerate(phases):
                 key = phase.phase_key
                 worker = tasks.get(key)
-                if worker is None:
-                    if any(p.phase_key in tasks for p in phases[index + 1:]):
-                        raise ResultContractError("phase_order_mismatch")
-                    if _git(registration.worktree, "rev-parse", "HEAD") != head:
-                        raise ResultContractError("head_mismatch")
-                    if phase.role == "delivery" and registration.manifest is not None:
-                        _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo, create=True)
+
+                def create_card(generation: int = 1, execution_identity: str | None = None) -> None:
                     from .result_contract import manifest_acceptance_criteria
                     criteria = (manifest_acceptance_criteria(registration.manifest)
                                 if phase.role == "implementation" and registration.manifest else ())
@@ -191,11 +199,32 @@ def reconcile_schedule(*, project_dir, state_dir, tenant, tick_id, registration,
                         tools=phase_tools(phase, profile=registration.profile,
                                           prompt_client=registration.prompt_client),
                         turns=phase.turns, timeout=phase.timeout,
+                        generation=generation, execution_identity=execution_identity,
                     )
-                    return True
-                if worker.status != "done":
+
+                if worker is None or worker.status != "done":
                     if any(p.phase_key in tasks for p in phases[index + 1:]):
                         raise ResultContractError("phase_order_mismatch")
+                    # A recorded attempt owns this phase: a live daemon or worker
+                    # is awaited, a terminal failure is resumed by a new card
+                    # generation, and a refused resume parks the run.
+                    outcome = _route_phase_recovery(state_dir=state_dir, tenant=tenant, tick_id=tick_id,
+                                                    key=key, worker=worker, reissue=lambda generation: create_card(
+                                                        generation, execution_id(tick_id, key)))
+                    if outcome == REFUSED:
+                        return False
+                    if outcome == REISSUED:
+                        _clear_validation_blocked(state_dir, tick_id)
+                    if outcome != PROCEED:
+                        return True
+                if worker is None:
+                    if _git(registration.worktree, "rev-parse", "HEAD") != head:
+                        raise ResultContractError("head_mismatch")
+                    if phase.role == "delivery" and registration.manifest is not None:
+                        _delivery_authority(state_dir, tick_id, registration.worktree, repo=repo, create=True)
+                    create_card()
+                    return True
+                if worker.status != "done":
                     return True
                 result, contract = _promoted_result(registration, state_dir=state_dir, tick_id=tick_id, key=key)
                 # Worker contracts retain the existing Kanban/promoted-result identity check.

@@ -28,7 +28,7 @@ _READ_COMMANDS = frozenset({
 
 
 class CollectionTimedOut(ExecutionError):
-    """Collection consumed the original attempt's absolute deadline."""
+    """Collection consumed its deadline (the original attempt deadline, or the bounded deadline-time collection budget)."""
 
 
 _collection_deadline = ContextVar('collection_deadline', default=None)
