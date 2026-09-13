@@ -37,8 +37,9 @@ uv run tpo --version
 For pipeline execution, install **Hermes >= 0.19.0** on `PATH` and configure an
 agent runtime/profile. Provider authentication is model-specific and is not a
 baseline `tpo` prerequisite. `tpo doctor <project>` verifies the version floor,
-profile prerequisites, GitHub auth, the label vocabulary, run registrations,
-and Plan readiness for Plan-required profiles.
+profile prerequisites (including `kanban.auto_decompose: false`), GitHub auth,
+the label vocabulary, run registrations, and Plan readiness for Plan-required
+profiles.
 
 Install the bundled pipeline profile when you want unattended pipeline phase execution:
 
@@ -211,7 +212,7 @@ tpo tick my-project
 | `todos audit` | Check TODO issue bodies against the backlog contract and normalize mirror labels. |
 | `skills install/uninstall/recover` | Transactionally manage `issue-planner` and the deprecated `todo-manager` namespace. |
 | `plan validate` | Validate a TODO's Plan attachment and optional `tpo-plan` manifest. |
-| `install-profile` | Install or refresh the bundled pipeline Hermes profile. |
+| `install-profile` | Install or refresh the bundled pipeline Hermes profile and set `kanban.auto_decompose: false`. |
 | `config` | Read and write global `tpo` configuration. |
 | `test` | Run the live integration test harness against a GitHub sandbox repository. |
 
