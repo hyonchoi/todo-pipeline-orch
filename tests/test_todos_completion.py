@@ -2057,6 +2057,7 @@ def test_the_finish_card_writes_its_pending_marker_under_the_clone(tmp_path, moc
     card already passed the clone; the finish card did not.
     """
     mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-finish")
+    mocker.patch("hermes_pipeline.agent_execution.ExecutionStore").return_value.load.return_value = {"registration": {"timeout": 2400, "manifest": None}}
     from hermes_pipeline.todos_completion import reconcile_todo_completion
 
     state, run_dir = _run_dir(tmp_path)
@@ -2116,6 +2117,7 @@ def test_an_ambiguous_finish_create_stays_retryable_instead_of_raising(
     rather than costing one tick.
     """
     mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-finish")
+    mocker.patch("hermes_pipeline.agent_execution.ExecutionStore").return_value.load.return_value = {"registration": {"timeout": 2400, "manifest": None}}
     from hermes_pipeline.todos_completion import reconcile_todo_completion
 
     state, run_dir = _run_dir(tmp_path)

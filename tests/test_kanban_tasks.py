@@ -674,11 +674,17 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
         "hermes_pipeline._agent_supervisor.register_execution",
         side_effect=["execution-one", "execution-two"],
     )
+    # The faked registration writes no record; pin manifest-free registrations
+    # so the bound card ceilings stay timeout + 60.
+    store = mocker.patch("hermes_pipeline.agent_execution.ExecutionStore")
+    store.return_value.load.side_effect = lambda identity: {
+        "registration": {"timeout": {"execution-one": 2400, "execution-two": 7200}[identity], "manifest": None}}
     prepared = bind_prepared_executions(
         prepared, project_dir=tmp_path, state_dir=tmp_path / ".hermes",
         root=tmp_path / "executions", tick_id="01CLIENT", worktree=tmp_path,
         todo_id="TODO-41",
     )
+    assert [phase.max_runtime for phase in prepared] == [2460, 7260]
     mock_run.assert_not_called()
     assert [call.kwargs["prompt"] for call in register.call_args_list] == [
         "already rendered $body", "second body",
@@ -717,6 +723,32 @@ def test_create_prepared_todo_phases_preserves_command_chain(tmp_path, mocker):
     assert create_commands[1][create_commands[1].index("--max-retries") + 1] == "1"
     assert create_commands[2][create_commands[2].index("--max-runtime") + 1] == "7260"
     assert create_commands[2][create_commands[2].index("--max-retries") + 1] == "1"
+
+
+def test_bound_phase_card_uses_pinned_max_runtime(tmp_path, mocker):
+    """A bound phase carries the registration's card ceiling; unbound phases keep timeout + grace."""
+    from hermes_pipeline.kanban_tasks import (
+        PreparedPhaseTask,
+        create_prepared_todo_phases,
+    )
+
+    mock_run = mocker.patch("hermes_pipeline.kanban_tasks.subprocess.run")
+    mock_run.side_effect = [
+        mocker.Mock(returncode=0, stdout='{"id": "t_0000000b"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000001"}', stderr=""),
+        mocker.Mock(returncode=0, stdout='{"id": "t_00000002"}', stderr=""),
+        mocker.Mock(returncode=0, stdout="", stderr=""),
+    ]
+    prepared = [
+        PreparedPhaseTask("phase_1", "One", '{"phase_key":"phase_1"}\nbody', 5, 7200, execution_id="execution-one", max_runtime=7920),
+        PreparedPhaseTask("phase_2", "Two", '{"phase_key":"phase_2"}\nbody', 5, 2400, execution_id="execution-two"),
+    ]
+
+    create_prepared_todo_phases(prepared=prepared, tick_id="01CLIENT", board_slug="demo", project_dir=tmp_path)
+
+    creates = [call.args[0] for call in mock_run.call_args_list if call.args[0][:3] == ["hermes", "kanban", "create"]]
+    assert creates[1][creates[1].index("--max-runtime") + 1] == "7920"
+    assert creates[2][creates[2].index("--max-runtime") + 1] == "2460"
 
 
 def test_durable_create_failure_does_not_expose_hermes_stderr(
@@ -3145,3 +3177,267 @@ def test_unbound_preparation_cannot_create_even_the_barrier(tmp_path, mocker):
         )
     run.assert_not_called()
     assert not (tmp_path / ".hermes").exists()
+
+
+def test_highest_generation_wins_and_legacy_defaults_to_one(mocker):
+    """Multiple cards for the same phase return the one with highest generation."""
+    from hermes_pipeline.kanban_tasks import (
+        _build_json_header,
+        get_todo_kanban_tasks,
+    )
+
+    # Mock hermes kanban list to return multiple cards for same phase
+    snapshot = {
+        "tasks": [
+            {
+                "id": "card-gen-1",
+                "status": "pending",
+                "body": _build_json_header(
+                    tick_id="01TICK",
+                    phase_key="phase_4_development",
+                    todo_id="TODO-42",
+                    project_slug="demo",
+                ) + "\nTask body",
+            },
+            {
+                "id": "card-gen-2",
+                "status": "pending",
+                "body": json.dumps({
+                    "tick_id": "01TICK",
+                    "phase_key": "phase_4_development",
+                    "todo_id": "TODO-42",
+                    "project_slug": "demo",
+                    "generation": 2,
+                }, sort_keys=True) + "\nTask body",
+            },
+            {
+                "id": "card-gen-3",
+                "status": "pending",
+                "body": json.dumps({
+                    "tick_id": "01TICK",
+                    "phase_key": "phase_4_development",
+                    "todo_id": "TODO-42",
+                    "project_slug": "demo",
+                    "generation": 3,
+                }, sort_keys=True) + "\nTask body",
+            },
+        ]
+    }
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout=json.dumps(snapshot)),
+    )
+
+    tasks = get_todo_kanban_tasks("demo", "01TICK")
+    assert "phase_4_development" in tasks
+    task = tasks["phase_4_development"]
+    assert task.task_id == "card-gen-3"
+    assert task.generation == 3
+
+
+def test_phase_idempotency_key_shapes():
+    """phase_idempotency_key shapes correctly for generation 1 and >1."""
+    from hermes_pipeline.kanban_tasks import phase_idempotency_key
+
+    # Generation 1 uses classic format
+    key = phase_idempotency_key("01TICK", "phase_4_development", 1)
+    assert key == "01TICK:phase_4_development"
+
+    # Generation 2+ use :gN format
+    key = phase_idempotency_key("01TICK", "phase_4_development", 2)
+    assert key == "01TICK:phase_4_development:g2"
+
+    key = phase_idempotency_key("01TICK", "phase_4_development", 5)
+    assert key == "01TICK:phase_4_development:g5"
+
+    # Invalid generation raises ValueError
+    with pytest.raises(ValueError):
+        phase_idempotency_key("01TICK", "phase_4_development", 0)
+
+    with pytest.raises(ValueError):
+        phase_idempotency_key("01TICK", "phase_4_development", -1)
+
+
+def test_phase_cards_in_snapshot_excludes_archived(mocker):
+    """phase_cards_in_snapshot returns non-archived cards with generation."""
+    from hermes_pipeline.kanban_tasks import (
+        _build_json_header,
+        phase_cards_in_snapshot,
+    )
+
+    snapshot = [
+        {
+            "id": "card-1",
+            "status": "pending",
+            "body": _build_json_header(
+                tick_id="01TICK",
+                phase_key="phase_4_development",
+                todo_id="TODO-42",
+                project_slug="demo",
+            ) + "\nTask body",
+        },
+        {
+            "id": "card-2-archived",
+            "status": "archived",
+            "body": json.dumps({
+                "tick_id": "01TICK",
+                "phase_key": "phase_4_development",
+                "todo_id": "TODO-42",
+                "project_slug": "demo",
+                "generation": 1,
+            }, sort_keys=True) + "\nTask body",
+        },
+        {
+            "id": "card-3",
+            "status": "pending",
+            "body": json.dumps({
+                "tick_id": "01TICK",
+                "phase_key": "phase_4_development",
+                "todo_id": "TODO-42",
+                "project_slug": "demo",
+                "generation": 2,
+            }, sort_keys=True) + "\nTask body",
+        },
+    ]
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._list_task_snapshot",
+        return_value=snapshot,
+    )
+
+    cards = phase_cards_in_snapshot(
+        tenant="demo", tick_id="01TICK", phase_key="phase_4_development"
+    )
+    assert len(cards) == 2
+    assert cards[0]["id"] == "card-1"
+    assert cards[0]["generation"] == 1
+    assert cards[1]["id"] == "card-3"
+    assert cards[1]["generation"] == 2
+    # Archived card is excluded
+    assert not any(c["id"] == "card-2-archived" for c in cards)
+
+    # Test returns None when snapshot cannot be read
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks._list_task_snapshot",
+        return_value=None,
+    )
+    result = phase_cards_in_snapshot(
+        tenant="demo", tick_id="01TICK", phase_key="phase_4_development"
+    )
+    assert result is None
+
+
+def test_get_todo_kanban_tasks_highest_generation_with_order(mocker):
+    """get_todo_kanban_tasks keeps highest generation regardless of snapshot order."""
+    from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+
+    # Snapshot with gen 3, 1, 2 (not in order)
+    snapshot = {
+        "tasks": [
+            {
+                "id": "card-gen-3",
+                "status": "pending",
+                "body": json.dumps({
+                    "tick_id": "01TICK", "phase_key": "phase_4", "todo_id": "TODO-42",
+                    "project_slug": "demo", "generation": 3
+                }),
+            },
+            {
+                "id": "card-gen-1",
+                "status": "pending",
+                "body": json.dumps({
+                    "tick_id": "01TICK", "phase_key": "phase_4", "todo_id": "TODO-42",
+                    "project_slug": "demo",
+                }),
+            },
+            {
+                "id": "card-gen-2",
+                "status": "pending",
+                "body": json.dumps({
+                    "tick_id": "01TICK", "phase_key": "phase_4", "todo_id": "TODO-42",
+                    "project_slug": "demo", "generation": 2
+                }),
+            },
+        ]
+    }
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(
+            returncode=0,
+            stdout=json.dumps(snapshot),
+            stderr="",
+        ),
+    )
+
+    tasks = get_todo_kanban_tasks("demo", "01TICK")
+    assert tasks["phase_4"].task_id == "card-gen-3"
+    assert tasks["phase_4"].generation == 3
+
+
+def test_get_todo_kanban_tasks_tie_goes_to_last(mocker):
+    """get_todo_kanban_tasks on same generation keeps last one."""
+    from hermes_pipeline.kanban_tasks import get_todo_kanban_tasks
+
+    snapshot = {
+        "tasks": [
+            {
+                "id": "card-first",
+                "status": "pending",
+                "body": json.dumps({
+                    "tick_id": "01TICK", "phase_key": "phase_4", "todo_id": "TODO-42",
+                    "project_slug": "demo", "generation": 2
+                }),
+            },
+            {
+                "id": "card-last",
+                "status": "pending",
+                "body": json.dumps({
+                    "tick_id": "01TICK", "phase_key": "phase_4", "todo_id": "TODO-42",
+                    "project_slug": "demo", "generation": 2
+                }),
+            },
+        ]
+    }
+    mocker.patch(
+        "hermes_pipeline.kanban_tasks.subprocess.run",
+        return_value=mocker.Mock(
+            returncode=0,
+            stdout=json.dumps(snapshot),
+            stderr="",
+        ),
+    )
+
+    tasks = get_todo_kanban_tasks("demo", "01TICK")
+    assert tasks["phase_4"].task_id == "card-last"
+
+
+def test_header_generation_rejects_bool(mocker):
+    """_header_generation rejects bool True/False, treats as legacy."""
+    from hermes_pipeline.kanban_tasks import _header_generation
+
+    # bool True should not be accepted as int
+    assert _header_generation({"generation": True}) == 1
+    assert _header_generation({"generation": False}) == 1
+
+    # int 1 and 2 should work
+    assert _header_generation({"generation": 1}) == 1
+    assert _header_generation({"generation": 2}) == 2
+
+
+def test_find_task_id_in_snapshot_matches_generation(mocker):
+    """A generation-2 lookup must not resolve to the archived generation-1 card of the same phase."""
+    from hermes_pipeline.kanban_tasks import _find_task_id_in_snapshot
+
+    def card(task_id, status, generation):
+        header = {"tick_id": "01TICK", "phase_key": "phase_4_development", "todo_id": "TODO-42", "project_slug": "demo"}
+        if generation > 1:
+            header["generation"] = generation
+        return {"id": task_id, "status": status, "body": json.dumps(header, sort_keys=True) + "\nTask body"}
+
+    mocker.patch("hermes_pipeline.kanban_tasks._list_task_snapshot", return_value=[
+        card("t_1a1a1a1a", "archived", 1),
+        card("t_2b2b2b2b", "pending", 2),
+    ])
+
+    assert _find_task_id_in_snapshot(tenant="demo", tick_id="01TICK", phase_key="phase_4_development", generation=2) == "t_2b2b2b2b"
+    assert _find_task_id_in_snapshot(tenant="demo", tick_id="01TICK", phase_key="phase_4_development") == "t_1a1a1a1a"
+    assert _find_task_id_in_snapshot(tenant="demo", tick_id="01TICK", phase_key="phase_4_development", generation=3) is None

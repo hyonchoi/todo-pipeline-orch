@@ -13,7 +13,6 @@ from .authority_result import (
 )
 from .kanban_tasks import (
     KANBAN_QUERY_TIMEOUT,
-    PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS,
     _build_json_header,
     _find_task_id_in_snapshot,
     _parse_task_id,
@@ -97,6 +96,8 @@ def _create_task(
     parent: str | None = None,
     prompt_client: str,
     tools: str, turns: int, timeout: int,
+    generation: int = 1,
+    execution_identity: str | None = None,
 ) -> str:
     """Create one assigned worker card. ``parent`` omitted means immediately ready.
 
@@ -119,31 +120,61 @@ def _create_task(
     scope; ``load_validated_registration`` validated the registration's
     containment against exactly this value.
     """
-    from ._agent_supervisor import register_execution, worker_instructions
+    from ._agent_supervisor import (
+        card_max_runtime,
+        register_execution,
+        worker_instructions,
+    )
+    from .agent_execution import ExecutionError, ExecutionStore, LockUnconfirmed
+    from .kanban_tasks import phase_idempotency_key
 
     root = project_dir / ".hermes" / "agent-executions"
-    identity = register_execution(
-        project_dir=project_dir, state_dir=project_dir / ".hermes", root=root,
-        tick_id=tick_id, phase=key, prompt=prompt, client=prompt_client, tools=tools,
-        worktree=worktree, timeout=timeout, todo_id=todo_id, result_template=result_template,
-    )
+
+    # A reissued generation reuses the pinned registration; re-registering
+    # would be reported as registration drift.
+    if execution_identity is not None:
+        identity = execution_identity
+    else:
+        identity = register_execution(
+            project_dir=project_dir, state_dir=project_dir / ".hermes", root=root,
+            tick_id=tick_id, phase=key, prompt=prompt, client=prompt_client, tools=tools,
+            worktree=worktree, timeout=timeout, todo_id=todo_id, result_template=result_template,
+        )
+
+    # The card ceiling is the supervisor's own `run --wait` ceiling for the
+    # pinned registration, so the two cannot drift.
+    try:
+        store = ExecutionStore(root)
+        record = store.load(identity)
+        registration = record["registration"]
+    except (ExecutionError, LockUnconfirmed, OSError, KeyError) as exc:
+        raise RetryableReviewRegistration("review task registration record unavailable") from exc
+
+    max_runtime = card_max_runtime(registration)
+
     task_prompt = worker_instructions(identity, str(root))
-    header = json.loads(_build_json_header(tick_id=tick_id, phase_key=key, todo_id=todo_id, project_slug=tenant))
+    header = json.loads(_build_json_header(
+        tick_id=tick_id, phase_key=key, todo_id=todo_id, project_slug=tenant,
+        generation=generation
+    ))
     header["execution_id"] = identity
+
+    idempotency_key = phase_idempotency_key(tick_id, key, generation)
+
     cmd = [
         "hermes", "kanban", "create", "--tenant", tenant, title,
         "--body", json.dumps(header, sort_keys=True) + "\n" + task_prompt,
-        "--workspace", f"dir:{worktree}", "--idempotency-key", f"{tick_id}:{key}",
+        "--workspace", f"dir:{worktree}", "--idempotency-key", idempotency_key,
         "--assignee", assignee or "default",
         "--json",
-        "--max-runtime", str(timeout + PHASE_TIMEOUT_CLEANUP_GRACE_SECONDS),
+        "--max-runtime", str(max_runtime),
         "--max-retries", "1", "--goal", "--goal-max-turns", str(turns),
     ]
     if parent is not None:
         cmd.extend(["--parent", parent])
     marker = _persist_pending_create(project_dir, tick_id, key)
     task_id = _find_task_id_in_snapshot(
-        tenant=tenant, tick_id=tick_id, phase_key=key
+        tenant=tenant, tick_id=tick_id, phase_key=key, generation=generation
     )
     if task_id is None:
         try:

@@ -10,6 +10,7 @@ import base64
 import errno
 import hashlib
 import json
+import math
 import os
 import shlex
 import shutil
@@ -84,6 +85,15 @@ def deadline_collection_budget(timeout: float) -> float:
     test phases at 3s; 600s caps the 7200s class.
     """
     return min(DEADLINE_COLLECTION_CAP, 0.1 * timeout)
+
+
+def card_max_runtime(registration: dict) -> int:
+    """The Hermes card ceiling for a registration: its own `run --wait` ceiling.
+
+    Card and wait derive from the same pinned registration, so a manifest
+    phase's card outlives deadline collection instead of being killed first.
+    """
+    return math.ceil(registration["timeout"] + wait_ceiling_tail(registration))
 
 
 def wait_ceiling_tail(registration: dict) -> float:

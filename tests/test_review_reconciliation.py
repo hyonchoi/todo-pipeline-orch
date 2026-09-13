@@ -186,6 +186,7 @@ def test_timeout_during_initial_review_create_is_retryable_and_recovers_by_key(
         "hermes_pipeline.review_reconciliation._find_task_id_in_snapshot",
         return_value=None,
     )
+    mocker.patch("hermes_pipeline.agent_execution.ExecutionStore").return_value.load.return_value = {"registration": {"timeout": 2400, "manifest": None}}
     run = mocker.patch(
         "hermes_pipeline.review_reconciliation.subprocess.run",
         side_effect=subprocess.TimeoutExpired(["hermes"], 30),
@@ -690,3 +691,111 @@ def test_a_genuine_head_mismatch_is_still_a_head_mismatch(tmp_path, mocker, capl
     ) is False
     assert "head_mismatch" in caplog.text
     assert "review_round_upgrade_discontinuity" not in caplog.text
+
+
+def test_create_task_generation_two_skips_register_and_uses_g_key(tmp_path, mocker):
+    """_create_task with generation > 1 skips register_execution and uses generation key."""
+    import json
+
+    from hermes_pipeline.review_reconciliation import _create_task
+
+    (tmp_path / ".hermes" / "runs" / "01TICK").mkdir(parents=True)
+
+    mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-execution")
+    mocker.patch("hermes_pipeline.review_reconciliation._find_task_id_in_snapshot", return_value=None)
+    run = mocker.patch(
+        "hermes_pipeline.review_reconciliation.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout='{"id": "t_12345678"}'),
+    )
+    store = mocker.patch("hermes_pipeline.agent_execution.ExecutionStore")
+    store.return_value.load.return_value = {"registration": {"timeout": 1800, "manifest": None}}
+
+    task_id = _create_task(
+        project_dir=tmp_path, tenant="demo", tick_id="01TICK", todo_id="TODO-42",
+        key="review:0", title="Review", prompt="p", result_template="t",
+        worktree=tmp_path / "wt", assignee="worker", prompt_client="codex",
+        tools="write", turns=40, timeout=1800,
+        generation=2, execution_identity="pinned-execution"
+    )
+
+    # Verify the command used generation-2 key
+    cmd = run.call_args.args[0]
+    assert cmd[cmd.index("--idempotency-key") + 1] == "01TICK:review:0:g2"
+
+    # Verify header has generation: 2 and execution_id
+    header_line = json.loads(cmd[cmd.index("--body") + 1].split("\n")[0])
+    assert header_line["generation"] == 2
+    assert header_line["execution_id"] == "pinned-execution"
+
+
+def test_create_task_manifest_card_runtime_includes_collection_budget(tmp_path, mocker):
+    """_create_task --max-runtime equals timeout + wait_ceiling_tail for both paths."""
+    import math
+
+    from hermes_pipeline.review_reconciliation import _create_task
+
+    (tmp_path / ".hermes" / "runs" / "01TICK").mkdir(parents=True)
+
+    mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-execution")
+    mocker.patch("hermes_pipeline.review_reconciliation._find_task_id_in_snapshot", return_value=None)
+    run = mocker.patch(
+        "hermes_pipeline.review_reconciliation.subprocess.run",
+        return_value=SimpleNamespace(returncode=0, stdout='{"id": "t_12345678"}'),
+    )
+
+    # With a manifest: registration timeout + 60 + collection budget + 60. The
+    # pinned registration, not the caller's timeout argument, is the base.
+    store = mocker.patch("hermes_pipeline.agent_execution.ExecutionStore")
+    store.return_value.load.return_value = {"registration": {"timeout": 7200, "manifest": {"tasks": []}}}
+
+    _create_task(
+        project_dir=tmp_path, tenant="demo", tick_id="01TICK", todo_id="TODO-42",
+        key="review:0", title="Review", prompt="p", result_template="t",
+        worktree=tmp_path / "wt", assignee="worker", prompt_client="codex",
+        tools="write", turns=40, timeout=100, generation=2, execution_identity="pinned-execution",
+    )
+
+    cmd = run.call_args.args[0]
+    runtime_str = cmd[cmd.index("--max-runtime") + 1]
+    assert int(runtime_str) == math.ceil(7200 + 60 + min(600, 0.1 * 7200) + 60)
+
+    # Manifest-free: registration timeout + 60, unchanged from before.
+    run.reset_mock()
+    store.return_value.load.return_value = {"registration": {"timeout": 7200, "manifest": None}}
+
+    _create_task(
+        project_dir=tmp_path, tenant="demo", tick_id="01TICK", todo_id="TODO-42",
+        key="review:0", title="Review", prompt="p", result_template="t",
+        worktree=tmp_path / "wt", assignee="worker", prompt_client="codex",
+        tools="write", turns=40, timeout=7200
+    )
+
+    cmd = run.call_args.args[0]
+    runtime_str = cmd[cmd.index("--max-runtime") + 1]
+    assert int(runtime_str) == math.ceil(7200 + 60)  # manifest-free: timeout + 60
+
+
+def test_create_task_unreadable_registration_record_is_retryable(tmp_path, mocker):
+    from hermes_pipeline.agent_execution import ExecutionError
+    from hermes_pipeline.review_reconciliation import (
+        RetryableReviewRegistration,
+        _create_task,
+    )
+
+    (tmp_path / ".hermes" / "runs" / "01TICK").mkdir(parents=True)
+    mocker.patch("hermes_pipeline._agent_supervisor.register_execution", return_value="registered-execution")
+    mocker.patch("hermes_pipeline.review_reconciliation._find_task_id_in_snapshot", return_value=None)
+    run = mocker.patch("hermes_pipeline.review_reconciliation.subprocess.run")
+    store = mocker.patch("hermes_pipeline.agent_execution.ExecutionStore")
+    store.return_value.load.side_effect = ExecutionError("secret-detail-boom")
+
+    with pytest.raises(RetryableReviewRegistration) as excinfo:
+        _create_task(
+            project_dir=tmp_path, tenant="demo", tick_id="01TICK", todo_id="TODO-42",
+            key="review:0", title="Review", prompt="p", result_template="t",
+            worktree=tmp_path / "wt", assignee="worker", prompt_client="codex",
+            tools="write", turns=40, timeout=7200,
+        )
+
+    assert "secret-detail-boom" not in str(excinfo.value)
+    run.assert_not_called()

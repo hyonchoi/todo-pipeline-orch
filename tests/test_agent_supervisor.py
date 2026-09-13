@@ -483,6 +483,20 @@ def test_binding_pins_prompt_before_replacing_card(execution, monkeypatch):
     assert captured[0]["prompt"] == "exact\n"
     assert "old unmanaged body" not in bound[0].body
     assert "tpo-agent-supervisor" in bound[0].body
+    assert bound[0].max_runtime == 30 + 60  # manifest-free registration: the plain wait ceiling
+
+
+def test_binding_pins_manifest_card_ceiling_to_wait_ceiling(manifest_execution, monkeypatch):
+    from hermes_pipeline.kanban_tasks import PreparedPhaseTask, bind_prepared_executions
+    store, worktree = manifest_execution
+    monkeypatch.setattr(supervisor, "register_execution", lambda **kwargs: "manifest-1")
+    prepared = [PreparedPhaseTask("development", "Develop", '{"phase_key":"development"}\nbody', 5, timeout=30)]
+
+    bound = bind_prepared_executions(prepared, project_dir=worktree, state_dir=store.root.parent,
+                                     root=store.root, tick_id="tick", worktree=worktree, todo_id="TODO-1")
+
+    registration = store.load("manifest-1")["registration"]
+    assert bound[0].max_runtime == supervisor.card_max_runtime(registration) == 30 + 60 + 3 + 60
 
 
 def _committed_profile(tmp_path, monkeypatch):
