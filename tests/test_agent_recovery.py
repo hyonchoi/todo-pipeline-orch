@@ -276,6 +276,18 @@ def test_auto_approve_resume_refusals(recovery, refusal):
     path = store.root / execution_id / 'recovery-intent.json'
     assert not path.exists()
 
+def test_auto_approve_resume_accepts_result_invalid(recovery):
+    store, tree = recovery
+    execution_id = "run_result_invalid"
+    store.register(execution_id, registration_id="registration", plan_identity="a" * 64,
+                   phase="development", prompt=b"plan", client={"name": "codex", "tools": []},
+                   worktree=str(tree), branch="task", result_contract={}, timeout=30)
+    ProgressJournal(store, execution_id).initialize()
+    store.admit(execution_id)
+    store.update_attempt(execution_id, 1, status="exited", reason="result_invalid", cleanup="confirmed", exit_code=1)
+    result = auto_approve_resume(store, execution_id)
+    assert result["approved"] is True
+
 def test_auto_approve_ignores_worker_environment(recovery, monkeypatch):
     """auto_approve_resume should work even with worker env vars set."""
     store, tree = recovery
