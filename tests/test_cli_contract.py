@@ -2598,6 +2598,615 @@ class TestCmdInstallProfile:
         assert "not found" in capsys.readouterr().out
 
 
+class TestSetKanbanAutoDecomposeFalse:
+    """Tests for _set_kanban_auto_decompose_false helper."""
+
+    def test_set_kanban_auto_decompose_false_preserves_comments(self, tmp_path):
+        """Preserve comments and other kanban keys when updating auto_decompose."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "kanban:\n"
+            "  # This is a comment\n"
+            "  auto_decompose: true  # keep this comment\n"
+            "  other_key: value\n"
+        )
+
+        # First call should update and return (True, "updated")
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+
+        # Verify content: comment preserved, value changed
+        content = config_file.read_text()
+        assert "auto_decompose: false  # keep this comment" in content
+        assert "# This is a comment" in content
+        assert "other_key: value" in content
+        assert "auto_decompose: true" not in content
+
+        # Second call should return (True, "unchanged")
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "unchanged"
+        assert content == config_file.read_text()
+
+    def test_set_kanban_auto_decompose_false_inserts_key_or_block(self, tmp_path):
+        """Insert key into existing block, or create new block if missing."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        # Test 1: kanban block exists without the key
+        config_file = tmp_path / "test1.yaml"
+        config_file.write_text(
+            "other_top_level:\n"
+            "  key: value\n"
+            "kanban:\n"
+            "  other_option: true\n"
+        )
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        assert "auto_decompose: false" in content
+        assert "other_option: true" in content
+
+        # Test 2: no kanban block at all
+        config_file = tmp_path / "test2.yaml"
+        config_file.write_text(
+            "other_top_level:\n"
+            "  key: value\n"
+        )
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        assert "kanban:" in content
+        assert "auto_decompose: false" in content
+
+        # Test 3: empty/missing file
+        config_file = tmp_path / "test3.yaml"
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        assert "kanban:" in content
+        assert "auto_decompose: false" in content
+
+    def test_set_kanban_auto_decompose_false_refuses_unverifiable_yaml(self, tmp_path):
+        """Reject garbage YAML; file unchanged."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        bad_yaml = "kanban:\n  key: [unclosed\n"
+        config_file.write_text(bad_yaml)
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is False
+        assert msg == "unverified"
+        assert config_file.read_text() == bad_yaml  # Unchanged
+
+    def test_kanban_auto_decompose_state(self, tmp_path):
+        """Test _kanban_auto_decompose_state returns correct state strings."""
+        from hermes_pipeline.cli import _kanban_auto_decompose_state
+
+        # Test: false
+        config_file = tmp_path / "test_false.yaml"
+        config_file.write_text("kanban:\n  auto_decompose: false\n")
+        assert _kanban_auto_decompose_state(config_file) == "false"
+
+        # Test: true
+        config_file = tmp_path / "test_true.yaml"
+        config_file.write_text("kanban:\n  auto_decompose: true\n")
+        assert _kanban_auto_decompose_state(config_file) == "true"
+
+        # Test: missing key
+        config_file = tmp_path / "test_missing.yaml"
+        config_file.write_text("other: value\n")
+        assert _kanban_auto_decompose_state(config_file) == "missing"
+
+        # Test: missing file
+        config_file = tmp_path / "test_nonexistent.yaml"
+        assert _kanban_auto_decompose_state(config_file) == "missing"
+
+        # Test: unreadable (bad YAML)
+        config_file = tmp_path / "test_unreadable.yaml"
+        config_file.write_text("[unclosed")
+        assert _kanban_auto_decompose_state(config_file) == "unreadable"
+
+    def test_set_kanban_auto_decompose_false_handles_permission_error(self, tmp_path, mocker):
+        """_set_kanban_auto_decompose_false handles PermissionError gracefully."""
+        from pathlib import Path
+
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban:\n  auto_decompose: true\n")
+
+        # Mock Path.read_bytes to raise PermissionError
+        mocker.patch.object(Path, 'read_bytes', side_effect=PermissionError("Access denied"))
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is False
+        assert msg == "unreadable"
+
+    def test_kanban_auto_decompose_state_handles_permission_error(self, tmp_path, mocker):
+        """_kanban_auto_decompose_state handles PermissionError gracefully."""
+        from pathlib import Path
+
+        from hermes_pipeline.cli import _kanban_auto_decompose_state
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban:\n  auto_decompose: true\n")
+
+        mocker.patch.object(Path, 'read_bytes', side_effect=PermissionError("Access denied"))
+        state = _kanban_auto_decompose_state(config_file)
+        assert state == "unreadable"
+
+    def test_set_kanban_auto_decompose_false_handles_unicode_decode_error(self, tmp_path, mocker):
+        """_set_kanban_auto_decompose_false handles UnicodeDecodeError gracefully."""
+        from pathlib import Path
+
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban:\n  auto_decompose: true\n")
+
+        mocker.patch.object(Path, 'read_bytes', return_value=b'\xff\xfe')
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is False
+        assert msg == "unreadable"
+
+    def test_kanban_auto_decompose_state_handles_unicode_decode_error(self, tmp_path, mocker):
+        """_kanban_auto_decompose_state handles UnicodeDecodeError gracefully."""
+        from pathlib import Path
+
+        from hermes_pipeline.cli import _kanban_auto_decompose_state
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban:\n  auto_decompose: true\n")
+
+        mocker.patch.object(Path, 'read_bytes', return_value=b'\xff\xfe')
+        state = _kanban_auto_decompose_state(config_file)
+        assert state == "unreadable"
+
+    def test_kanban_auto_decompose_state_non_dict_yaml_returns_unreadable(self, tmp_path):
+        """Non-dict YAML document returns 'unreadable' not 'missing'."""
+        from hermes_pipeline.cli import _kanban_auto_decompose_state
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("- item1\n- item2\n")
+        state = _kanban_auto_decompose_state(config_file)
+        assert state == "unreadable"
+
+    def test_set_kanban_auto_decompose_false_config_too_large(self, tmp_path, mocker):
+        """Test config too large returns (False, 'config too large').
+
+        This test uses monkeypatch to ensure the size check happens BEFORE
+        reading the file: if read_bytes is called, it fails the test.
+        """
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        large_content = "x" * (1024 * 1024 + 1)
+        config_file.write_text(large_content)
+
+        # Monkeypatch read_bytes to fail the test if called on this file
+        original_read = type(config_file).read_bytes
+        def failing_read(self):
+            if self == config_file:
+                # File should not be read if size check happens first
+                pytest.fail("read_bytes was called on a large file - size check did not happen first!")
+            return original_read(self)
+
+        mocker.patch.object(type(config_file), 'read_bytes', failing_read)
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is False
+        assert msg == "config too large"
+
+    def test_set_kanban_auto_decompose_false_quoted_values(self, tmp_path):
+        """Handle quoted boolean values like 'true' or \"false\"."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        for quoted_val in ['"true"', "'true'", '"false"', "'false'"]:
+            config_file = tmp_path / f"config_{hash(quoted_val)}.yaml"
+            config_file.write_text(f"kanban:\n  auto_decompose: {quoted_val}\n")
+            success, msg = _set_kanban_auto_decompose_false(config_file)
+            assert success is True
+
+    def test_set_kanban_auto_decompose_false_crlf_line_endings(self, tmp_path):
+        """Preserve CRLF line endings."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_bytes(b"kanban:\r\n  auto_decompose: true\r\n")
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_bytes()
+        assert b"\r\n" in content
+
+    def test_set_kanban_auto_decompose_false_flow_mapping_with_auto_decompose(self, tmp_path):
+        """Handle flow-style YAML: kanban: {auto_decompose: true} - update existing key."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban: {auto_decompose: true, other: value}\n")
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        # Should update auto_decompose to false in the flow mapping
+        assert "auto_decompose: false" in content
+        assert "other: value" in content
+        # Verify it parses as valid YAML and has the right value
+        import yaml
+        doc = yaml.safe_load(content)
+        assert doc["kanban"]["auto_decompose"] is False
+
+        # Second call should be unchanged
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "unchanged"
+
+    def test_set_kanban_auto_decompose_false_flow_mapping_without_auto_decompose(self, tmp_path):
+        """Handle flow-style YAML: kanban: {other: value} - insert missing key."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban: {other: value}\n")
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        # Should insert auto_decompose: false
+        assert "auto_decompose: false" in content
+        # Verify it parses and has the right value
+        import yaml
+        doc = yaml.safe_load(content)
+        assert doc["kanban"]["auto_decompose"] is False
+
+    def test_set_kanban_auto_decompose_false_nested_auto_decompose_ignored(self, tmp_path):
+        """Nested auto_decompose keys should be ignored, only child-level matters."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "kanban:\n"
+            "  auto_decompose: true\n"
+            "  sub:\n"
+            "    auto_decompose: true\n"
+        )
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        content = config_file.read_text()
+        lines = content.split('\n')
+        found_top_level = False
+        for i, line in enumerate(lines):
+            if line.startswith("  auto_decompose:"):
+                assert "false" in line
+                found_top_level = True
+        assert found_top_level
+
+    def test_set_kanban_auto_decompose_false_no_top_level_insert_at_child_indent(self, tmp_path):
+        """When only nested auto_decompose exists, insert at child level, leave nested untouched."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "kanban:\n"
+            "  sub:\n"
+            "    auto_decompose: true\n"
+        )
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        # Should insert at child level (2 spaces)
+        assert "  auto_decompose: false\n" in content
+        # Nested key should be untouched
+        assert "    auto_decompose: true\n" in content
+
+    def test_set_kanban_auto_decompose_false_empty_flow_mapping(self, tmp_path):
+        """Handle empty flow mapping: kanban: {} produces valid YAML."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban: {}\n")
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        # Should produce valid YAML: kanban: {auto_decompose: false}
+        assert content == "kanban: {auto_decompose: false}\n"
+        # Verify it parses correctly
+        import yaml
+        doc = yaml.safe_load(content)
+        assert doc["kanban"]["auto_decompose"] is False
+
+    def test_set_kanban_auto_decompose_false_empty_flow_mapping_with_comment(self, tmp_path):
+        """Handle empty flow mapping with trailing comment."""
+        from hermes_pipeline.cli import _set_kanban_auto_decompose_false
+
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text("kanban: {}  # comment\n")
+
+        success, msg = _set_kanban_auto_decompose_false(config_file)
+        assert success is True
+        assert msg == "updated"
+        content = config_file.read_text()
+        # Should preserve comment
+        assert "auto_decompose: false" in content
+        assert "# comment" in content
+        # Verify it parses correctly
+        import yaml
+        doc = yaml.safe_load(content)
+        assert doc["kanban"]["auto_decompose"] is False
+
+
+class TestInstallProfileAutoDecompose:
+    """Tests for install-profile command with auto_decompose enforcement."""
+
+    def test_install_profile_writes_auto_decompose_false(self, mocker, tmp_path, capsys):
+        """install-profile ensures kanban.auto_decompose is false after overlay."""
+        from hermes_pipeline.cli import _cmd_install_profile
+
+        # Create a temporary profile directory
+        profile_dir = tmp_path / "profiles" / "pipeline"
+        profile_dir.mkdir(parents=True)
+
+        show_out = f"Profile: pipeline\nPath:    {profile_dir}\n"
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=[
+                MagicMock(returncode=0, stderr="", stdout=""),  # create
+                MagicMock(returncode=0, stderr="", stdout=show_out),  # show
+            ],
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 0
+        out = capsys.readouterr().out
+        assert "kanban.auto_decompose: false" in out
+        assert "installed successfully" in out
+        assert (profile_dir / "SOUL.md").is_file()
+        assert (profile_dir / "config.yaml").is_file()
+        config_content = (profile_dir / "config.yaml").read_text()
+        assert "kanban:" in config_content
+        assert "auto_decompose: false" in config_content
+
+    def test_install_profile_failure_path(self, tmp_path, mocker, capsys):
+        """install-profile prints Problem/Cause/Fix on auto_decompose failure."""
+        from hermes_pipeline.cli import _cmd_install_profile
+
+        profile_dir = tmp_path / "profiles" / "pipeline"
+        profile_dir.mkdir(parents=True)
+
+        config_file = profile_dir / "config.yaml"
+        config_file.write_bytes(b"x" * (1024 * 1024 + 1))
+
+        show_out = f"Profile: pipeline\nPath:    {profile_dir}\n"
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=[
+                MagicMock(returncode=0, stderr="", stdout=""),  # create
+                MagicMock(returncode=0, stderr="", stdout=show_out),  # show
+            ],
+        )
+
+        result = _cmd_install_profile(FakeArgs(force=False), config=None)
+
+        assert result == 1
+        out = capsys.readouterr().out
+        assert "Problem:" in out
+        assert "Cause:" in out
+        assert "Fix:" in out
+
+
+class TestDoctorAutoDecompose:
+    """Tests for doctor command with auto_decompose drift detection."""
+
+    def test_doctor_reports_auto_decompose_drift(self, tmp_path, mocker, capsys, fake_gh):
+        """doctor reports DRIFT when kanban.auto_decompose is true."""
+        from hermes_pipeline.cli import _cmd_doctor
+
+        args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+        # Set assignee to a custom profile
+        contract_path = tmp_path / "demo" / ".hermes" / "pipeline.toml"
+        contract_path.write_text(
+            "schema_version = 2\n"
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "native-sdd"\n'
+            'assignee = "custom-agent"\n'
+        )
+
+        profile_dir = tmp_path / "hermes" / "custom-agent"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text(
+            "kanban:\n  auto_decompose: true\n"
+        )
+
+        _seed_doctor_github(fake_gh, [])
+
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=lambda *a, **kw: (
+                MagicMock(
+                    returncode=0,
+                    stderr="",
+                    stdout=f"Profile: custom-agent\nPath:    {profile_dir}\n",
+                )
+                if a[0][:3] == ["hermes", "profile", "show"]
+                else _allow_hermes_registry_skill_check(*a, **kw)
+            ),
+        )
+
+        result = _cmd_doctor(args, Config(projects_dir=tmp_path))
+        out = capsys.readouterr().out
+        assert "DRIFT: kanban.auto_decompose must be false" in out
+        assert result == 1
+
+    def test_doctor_accepts_auto_decompose_false_or_missing(self, tmp_path, mocker, capsys, fake_gh):
+        """doctor accepts false value or missing key/file."""
+        from hermes_pipeline.cli import _cmd_doctor
+
+        for config_content in [
+            "kanban:\n  auto_decompose: false\n",
+            "other: value\n",
+            "",
+        ]:
+            tmp_dir = tmp_path / f"test_{hash(config_content) % 1000000}"
+            tmp_dir.mkdir()
+            args = _create_valid_doctor_project(tmp_dir, profile="native-sdd")
+            # Set assignee to a custom profile
+            contract_path = tmp_dir / "demo" / ".hermes" / "pipeline.toml"
+            contract_path.write_text(
+                "schema_version = 2\n"
+                'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+                'profile = "native-sdd"\n'
+                'assignee = "custom-agent"\n'
+            )
+
+            profile_dir = tmp_dir / "hermes" / "custom-agent"
+            profile_dir.mkdir(parents=True)
+            (profile_dir / "config.yaml").write_text(config_content)
+
+            _seed_doctor_github(fake_gh, [])
+
+            mocker.patch(
+                "hermes_pipeline.cli._cli_sp.run",
+                side_effect=lambda *a, **kw: (
+                    MagicMock(
+                        returncode=0,
+                        stderr="",
+                        stdout=f"Profile: custom-agent\nPath:    {profile_dir}\n",
+                    )
+                    if a[0][:3] == ["hermes", "profile", "show"]
+                    else _allow_hermes_registry_skill_check(*a, **kw)
+                ),
+            )
+
+            result = _cmd_doctor(args, Config(projects_dir=tmp_dir))
+            out = capsys.readouterr().out
+            # Should not have DRIFT about auto_decompose
+            assert "DRIFT: kanban.auto_decompose" not in out
+            assert result == 0
+
+    def test_doctor_warns_on_unreadable_profile_config(self, tmp_path, mocker, capsys, fake_gh):
+        """doctor warns if config.yaml exists but cannot be parsed."""
+        from hermes_pipeline.cli import _cmd_doctor
+
+        args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+        # Set assignee to a custom profile
+        contract_path = tmp_path / "demo" / ".hermes" / "pipeline.toml"
+        contract_path.write_text(
+            "schema_version = 2\n"
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "native-sdd"\n'
+            'assignee = "custom-agent"\n'
+        )
+
+        profile_dir = tmp_path / "hermes" / "custom-agent"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text("[unclosed")
+
+        _seed_doctor_github(fake_gh, [])
+
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=lambda *a, **kw: (
+                MagicMock(
+                    returncode=0,
+                    stderr="",
+                    stdout=f"Profile: custom-agent\nPath:    {profile_dir}\n",
+                )
+                if a[0][:3] == ["hermes", "profile", "show"]
+                else _allow_hermes_registry_skill_check(*a, **kw)
+            ),
+        )
+
+        result = _cmd_doctor(args, Config(projects_dir=tmp_path))
+        out = capsys.readouterr().out
+        assert "WARNING: could not read" in out
+        assert result == 0  # Warning, not error
+
+    def test_doctor_skips_auto_decompose_when_profile_path_unknown(self, tmp_path, mocker, capsys, fake_gh):
+        """doctor skips auto_decompose check when hermes profile show has no Path line."""
+        from hermes_pipeline.cli import _cmd_doctor
+
+        args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+        # Set assignee to a custom profile
+        contract_path = tmp_path / "demo" / ".hermes" / "pipeline.toml"
+        contract_path.write_text(
+            "schema_version = 2\n"
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "native-sdd"\n'
+            'assignee = "custom-agent"\n'
+        )
+
+        show_out = "Profile: custom-agent\n"  # No Path line
+
+        _seed_doctor_github(fake_gh, [])
+
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=lambda *a, **kw: (
+                MagicMock(returncode=0, stderr="", stdout=show_out)
+                if a[0][:3] == ["hermes", "profile", "show"]
+                else _allow_hermes_registry_skill_check(*a, **kw)
+            ),
+        )
+
+        result = _cmd_doctor(args, Config(projects_dir=tmp_path))
+        out = capsys.readouterr().out
+        # Should not mention auto_decompose at all if no Path
+        assert "auto_decompose" not in out
+        assert result == 0
+
+    def test_doctor_prints_off_for_missing_key(self, tmp_path, mocker, capsys, fake_gh):
+        """doctor prints 'off' for missing auto_decompose key, not just false."""
+        from hermes_pipeline.cli import _cmd_doctor
+
+        args = _create_valid_doctor_project(tmp_path, profile="native-sdd")
+        contract_path = tmp_path / "demo" / ".hermes" / "pipeline.toml"
+        contract_path.write_text(
+            "schema_version = 2\n"
+            'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
+            'profile = "native-sdd"\n'
+            'assignee = "custom-agent"\n'
+        )
+
+        profile_dir = tmp_path / "hermes" / "custom-agent"
+        profile_dir.mkdir(parents=True)
+        (profile_dir / "config.yaml").write_text("other: value\n")
+
+        _seed_doctor_github(fake_gh, [])
+
+        mocker.patch(
+            "hermes_pipeline.cli._cli_sp.run",
+            side_effect=lambda *a, **kw: (
+                MagicMock(
+                    returncode=0,
+                    stderr="",
+                    stdout=f"Profile: custom-agent\nPath:    {profile_dir}\n",
+                )
+                if a[0][:3] == ["hermes", "profile", "show"]
+                else _allow_hermes_registry_skill_check(*a, **kw)
+            ),
+        )
+
+        result = _cmd_doctor(args, Config(projects_dir=tmp_path))
+        out = capsys.readouterr().out
+        assert "kanban.auto_decompose: off" in out
+        assert result == 0
+
+
 class TestTodosComplete:
     """``tpo todos complete <project> --todo N --pr N`` drives the issue-close state machine."""
 
