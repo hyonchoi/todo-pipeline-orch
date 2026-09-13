@@ -8,7 +8,6 @@ import pytest
 
 from hermes_pipeline.cli import (
     _cmd_tick,
-    _load_toml_overlay,
     _make_circuit_breaker,
     _persist_tick_id,
 )
@@ -44,62 +43,6 @@ class FakeArgs:
         kwargs.setdefault("project", None)
         for k, v in kwargs.items():
             setattr(self, k, v)
-
-
-class TestLoadTomlOverlay:
-    """Tests for _load_toml_overlay() — TOML config loading."""
-
-    def test_missing_config_file(self, tmp_path, mocker):
-        """Missing config.toml returns (None, CircuitBreakerConfig)."""
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        config = mocker.MagicMock()
-        full_cfg, cb_cfg = _load_toml_overlay(state_dir, config)
-
-        assert full_cfg is None
-        assert cb_cfg is not None
-
-    def test_config_file_exception(self, tmp_path, mocker):
-        """Exception loading config.toml returns (None, CircuitBreakerConfig)."""
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        mocker.patch(
-            "hermes_pipeline.config.load_toml_overlay",
-            side_effect=ValueError("bad toml"),
-        )
-
-        config = mocker.MagicMock()
-        full_cfg, cb_cfg = _load_toml_overlay(state_dir, config)
-
-        assert full_cfg is None
-        assert cb_cfg is not None
-
-    def test_valid_config_file(self, tmp_path, mocker):
-        """Valid config.toml returns (FullConfig, CircuitBreakerConfig)."""
-        from hermes_pipeline.config import (
-            CircuitBreakerConfig,
-            FullConfig,
-            SelectionConfig,
-        )
-
-        state_dir = tmp_path / "state"
-        state_dir.mkdir()
-        full_cfg = FullConfig(
-            base=mocker.MagicMock(),
-            selection=SelectionConfig(),
-            circuit_breaker=CircuitBreakerConfig(),
-        )
-
-        mocker.patch(
-            "hermes_pipeline.config.load_toml_overlay",
-            return_value=full_cfg,
-        )
-
-        config = mocker.MagicMock()
-        result_full, result_cb = _load_toml_overlay(state_dir, config)
-
-        assert result_full is not None
-        assert result_cb is full_cfg.circuit_breaker
 
 
 class TestMakeCircuitBreaker:

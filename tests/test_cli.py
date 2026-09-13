@@ -447,3 +447,19 @@ class TestVerboseDebugFlags:
         # the real subcommand ran after the flag was stripped.
         assert main(argv) == 2
         assert logging.getLogger().level == level
+
+
+# From test_cli_entrypoint.py
+
+def test_cli_entrypoint_module_runs():
+    """Verify the hermes_pipeline.cli module is runnable as a CLI entry point."""
+    import re
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [sys.executable, "-m", "hermes_pipeline.cli", "--version"],
+        capture_output=True, text=True
+    )
+    assert result.returncode == 0, f"stderr: {result.stderr}"
+    assert re.search(r"\d+\.\d+\.\d+", result.stdout), f"stdout: {result.stdout}"
