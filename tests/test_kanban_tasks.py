@@ -3424,7 +3424,7 @@ def test_header_generation_rejects_bool(mocker):
 
 
 def test_find_task_id_in_snapshot_matches_generation(mocker):
-    """A generation-2 lookup must not resolve to the archived generation-1 card of the same phase."""
+    """A lookup matches the requested generation and never resolves to an archived card."""
     from hermes_pipeline.kanban_tasks import _find_task_id_in_snapshot
 
     def card(task_id, status, generation):
@@ -3436,8 +3436,10 @@ def test_find_task_id_in_snapshot_matches_generation(mocker):
     mocker.patch("hermes_pipeline.kanban_tasks._list_task_snapshot", return_value=[
         card("t_1a1a1a1a", "archived", 1),
         card("t_2b2b2b2b", "pending", 2),
+        card("t_3c3c3c3c", "archived", 3),
     ])
 
     assert _find_task_id_in_snapshot(tenant="demo", tick_id="01TICK", phase_key="phase_4_development", generation=2) == "t_2b2b2b2b"
-    assert _find_task_id_in_snapshot(tenant="demo", tick_id="01TICK", phase_key="phase_4_development") == "t_1a1a1a1a"
+    assert _find_task_id_in_snapshot(tenant="demo", tick_id="01TICK", phase_key="phase_4_development") is None
+    # The archived generation-3 card was retired by the tick; the retry must create, not adopt it.
     assert _find_task_id_in_snapshot(tenant="demo", tick_id="01TICK", phase_key="phase_4_development", generation=3) is None

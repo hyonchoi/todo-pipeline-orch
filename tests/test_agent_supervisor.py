@@ -1797,6 +1797,43 @@ def test_execution_lock_retrying_gives_up_after_window(execution, monkeypatch):
     assert supervisor.ADMISSION_LOCK_RETRY_S <= clock[0] <= supervisor.ADMISSION_LOCK_RETRY_S + 0.05
 
 
+def test_admission_worktree_lock_retries_while_a_tick_holds_authority(execution, monkeypatch):
+    """A tick's authority window (list, archive, create) must not make the daemon exit unadmitted."""
+    store, _ = execution
+    tick = ExecutionStore(store.root).worktree_locked("execution-1")
+    tick.__enter__()
+    clock = [0.0]
+    released = []
+    def wait(interval):
+        clock[0] += interval
+        if not released and clock[0] >= 20.0:
+            tick.__exit__(None, None, None)
+            released.append(clock[0])
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    with supervisor._admission_worktree_lock(store, "execution-1"):
+        with store.worktree_locked("execution-1"):  # re-entrant: the lock is ours now
+            pass
+
+    assert released and released[0] < supervisor.ADMISSION_WORKTREE_RETRY_S
+    assert clock[0] < supervisor.ADMISSION_WORKTREE_RETRY_S
+
+
+def test_admission_worktree_lock_gives_up_after_window(execution, monkeypatch):
+    store, _ = execution
+    clock = [0.0]
+    def wait(interval):
+        clock[0] += interval
+    monkeypatch.setattr(supervisor, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=wait))
+
+    with ExecutionStore(store.root).worktree_locked("execution-1"):
+        with pytest.raises(supervisor._AdmissionBusy):
+            with supervisor._admission_worktree_lock(store, "execution-1"):
+                pytest.fail("the worktree lock was never free")
+
+    assert supervisor.ADMISSION_WORKTREE_RETRY_S <= clock[0] <= supervisor.ADMISSION_WORKTREE_RETRY_S + 1.0
+
+
 def test_stale_event_after_admission_reports_that_generation(execution, monkeypatch):
     """A second waiter holding an event another daemon already admitted sees that generation, not an invalidation."""
     from hermes_pipeline.agent_recovery import (

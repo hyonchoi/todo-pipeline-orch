@@ -1654,13 +1654,9 @@ _PLAN_TRACKED_TIMEOUT = 30.0
 
 def _abandon_run_if_registered(state_dir: Path, tick_id: str, reason: str) -> bool:
     """Durably retire a pre-dispatch registration while preserving its evidence."""
-    run_dir = state_dir / "runs" / tick_id
-    if not (run_dir / "registration.json").is_file():
-        return False
-    from .state import _atomic_write_text
+    from .run_registration import abandon_run_if_registered
 
-    _atomic_write_text(run_dir / "abandoned", reason + "\n")
-    return True
+    return abandon_run_if_registered(state_dir, tick_id, reason)
 
 
 def _plan_tracked_at_head(project_dir: Path, plan_path: str) -> bool:

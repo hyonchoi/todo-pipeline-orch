@@ -69,10 +69,13 @@ _FAILURE_CODES = frozenset({
 # so it is deliberately absent from _FAILURE_CODES.
 
 DEADLINE_COLLECTION_CAP = 600.0
-# A daemon retries its admission lock this long against a polling waiter;
-# a waiter gives an approved daemon this long to admit before failing.
+# A daemon retries its execution lock this long against a polling waiter and
+# its worktree lock this long against a tick's run-authority window (Kanban
+# list, archive and create calls); a waiter gives an approved daemon longer
+# than both to admit before failing.
 ADMISSION_LOCK_RETRY_S = 2.0
-DAEMON_ADMISSION_GRACE_S = 15.0
+ADMISSION_WORKTREE_RETRY_S = 60.0
+DAEMON_ADMISSION_GRACE_S = 90.0
 # `run --wait` prints a non-final status line this often so a worker polling a
 # silent background session can tell a live wait from a hung one.
 WAIT_STATUS_INTERVAL = 60.0
@@ -522,14 +525,23 @@ class _AdmissionBusy(ExecutionError):
 
 @contextmanager
 def _admission_worktree_lock(store: ExecutionStore, identity: str):
+    """Take the worktree lock, retrying verified contention for ADMISSION_WORKTREE_RETRY_S.
+
+    A tick holds this lock while it lists, archives and creates Kanban cards;
+    a daemon spawned for the card it just created must outlast that window.
+    """
+    deadline = time.monotonic() + ADMISSION_WORKTREE_RETRY_S
     with ExitStack() as stack:
-        try:
-            stack.enter_context(store.worktree_locked(identity))
-        except LockUnconfirmed as exc:
-            cause = exc.__cause__
-            if isinstance(cause, OSError) and cause.errno in (errno.EAGAIN, errno.EWOULDBLOCK):
-                raise _AdmissionBusy from exc
-            raise
+        while True:
+            try:
+                stack.enter_context(store.worktree_locked(identity))
+                break
+            except LockUnconfirmed as exc:
+                if not _is_lock_contention(exc):
+                    raise
+                if time.monotonic() >= deadline:
+                    raise _AdmissionBusy from exc
+                time.sleep(0.5)
         # Do not translate contention on the execution lock or inside preflight.
         yield
 

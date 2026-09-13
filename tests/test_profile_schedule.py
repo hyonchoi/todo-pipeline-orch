@@ -110,6 +110,8 @@ def schedule_fixture(tmp_path, monkeypatch, keys=("design", "build", "audit", "d
     # Load consumer aliases before patching their source modules, so lazy
     # imports cannot retain fixture fakes after monkeypatch restores them.
     import_module("hermes_pipeline.todos_completion")
+    import_module("hermes_pipeline._agent_supervisor")
+    import_module("hermes_pipeline.phase_recovery")
 
     phases = load_phase_profile(profile_file(tmp_path, keys)).phases
     registration = SimpleNamespace(phase_definitions=phases, step_keys=tuple(p.phase_key for p in phases if not p.gate),
@@ -124,7 +126,7 @@ def schedule_fixture(tmp_path, monkeypatch, keys=("design", "build", "audit", "d
     monkeypatch.setattr(schedule, "_promoted_result", lambda *a, key, **kw: evidence[key])
     def create(**kw):
         created.append(kw)
-        tasks[kw["key"]] = SimpleNamespace(task_id=kw["key"], status="ready")
+        tasks[kw["key"]] = SimpleNamespace(task_id=kw["key"], status="ready", generation=kw.get("generation", 1))
     monkeypatch.setattr("hermes_pipeline.review_reconciliation._create_task", create)
     def tick():
         return schedule.reconcile_schedule(project_dir=tmp_path, state_dir=tmp_path / ".hermes",

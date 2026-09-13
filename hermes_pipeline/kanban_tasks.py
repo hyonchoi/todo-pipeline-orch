@@ -518,12 +518,16 @@ def _find_task_id_in_snapshot(
 ) -> str | None:
     """Resolve a task after an inconclusive idempotent create retry.
 
-    Requires the header generation to match the requested generation.
+    Requires the header generation to match the requested generation. An
+    archived card never resolves the retry: Hermes deduplicates only against
+    live cards, and a card the tick retired must be replaced, not adopted.
     """
     tasks = _list_task_snapshot(tenant)
     if tasks is None:
         return None
     for task in tasks:
+        if task.get("status") == "archived":
+            continue
         header = _parse_task_header(task)
         if header is None:
             continue

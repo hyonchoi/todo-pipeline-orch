@@ -826,3 +826,12 @@ def ensure_in_progress_label(
         IN_PROGRESS_LABEL, number, github_issues.ON_HOLD_LABEL,
     )
     return True
+
+
+def abandon_run_if_registered(state_dir: Path, tick_id: str, reason: str) -> bool:
+    """Durably retire a pre-dispatch registration while preserving its evidence."""
+    run_dir = state_dir / "runs" / tick_id
+    if not (run_dir / "registration.json").is_file():
+        return False
+    _atomic_write_text(run_dir / "abandoned", reason + "\n")
+    return True
