@@ -10,6 +10,7 @@ import pytest
 from hermes_pipeline.cli import _cmd_tick, build_parser
 from hermes_pipeline.config import Config
 from tests.gh_fakes import seed_project_issues, todo_payload
+from tests.support.decisions import make_decision
 
 PIPELINE_TOML = (
     'schema_version = 2\nassignee = "default"\n'
@@ -21,15 +22,6 @@ PIPELINE_TOML = (
 def _github_todo_10(fake_gh):
     """Every tick reads TODOs from GitHub: serve #10 as the sole candidate."""
     return seed_project_issues(fake_gh, [todo_payload(10, title="test")])
-
-
-def _make_decision(picked=None, **kwargs):
-    """Create a mock HermesSelectionDecision with the right shape."""
-    decision = MagicMock()
-    decision.picked = picked or kwargs.get("picked")
-    decision.rationale = "test"
-    decision.candidates_considered = kwargs.get("candidates_considered", [])
-    return decision
 
 
 def _create_project(projects_dir, name, contract=True):
@@ -169,7 +161,7 @@ class TestTickSubcommand:
             "hermes_pipeline.cli.all_phases_complete", return_value=True
         )
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -292,7 +284,7 @@ class TestTickSubcommand:
             return_value={"phase_8_finish_branch": "done"},
         )
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
         mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
         mock_run.side_effect = [
             mocker.Mock(
@@ -356,7 +348,7 @@ class TestTickSubcommand:
         )
         mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
         mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
         mock_run.side_effect = [
             mocker.Mock(
@@ -464,7 +456,7 @@ class TestTickSubcommand:
         )
         mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
         mock_run = mocker.patch("hermes_pipeline.cli._cli_sp.run")
 
         projects_dir = tmp_path / "projects"
@@ -627,7 +619,7 @@ class TestTickSubcommand:
     def test_tick_no_prior_proceeds(self, tmp_path, mocker, caplog):
         """No prior tick -> proceed normally; undeclared profile warns once."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -652,7 +644,7 @@ class TestTickSubcommand:
         ]
 
     def test_tick_explicit_gstack_profile_warns_deprecated(self, tmp_path, mocker, caplog):
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision())
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -674,7 +666,7 @@ class TestTickSubcommand:
         ]
 
     def test_tick_native_sdd_profile_emits_no_deprecation(self, tmp_path, mocker, caplog):
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision())
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
         project_dir = _create_project(projects_dir, "demo")
@@ -711,7 +703,7 @@ class TestTickSubcommand:
         )
         mocker.patch(
             "hermes_pipeline.cli.run_selection",
-            return_value=_make_decision(picked="TODO-10"),
+            return_value=make_decision(picked="TODO-10"),
         )
         create = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
@@ -747,7 +739,7 @@ class TestTickSubcommand:
     def test_tick_selection_uses_project_state_dir(self, tmp_path, mocker):
         """Selection decisions are persisted under the project, not global state."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -771,7 +763,7 @@ class TestTickSubcommand:
         is simply skipped (its selection never runs) and the loop continues.
         """
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -814,7 +806,7 @@ class TestTickSubcommand:
     def test_tick_invalid_slug_skipped(self, tmp_path, mocker):
         """Invalid project slug is skipped by discover, tick proceeds."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -833,7 +825,7 @@ class TestTickSubcommand:
     def test_tick_project_without_contract_skipped(self, tmp_path, mocker):
         """Project without .hermes/pipeline.toml is skipped by discover."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -1142,7 +1134,7 @@ class TestTickSubcommand:
         )
         select_mock = mocker.patch(
             "hermes_pipeline.cli.run_selection",
-            return_value=_make_decision(picked="TODO-10"),
+            return_value=make_decision(picked="TODO-10"),
         )
         mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
@@ -1239,7 +1231,7 @@ class TestCliHelpers:
 
 class TestTickProjectContractWarning:
     def test_tick_project_without_contract_warns_but_runs(self, tmp_path, mocker, caplog):
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision())
         # ``cli._cli_sp`` IS the ``subprocess`` module, so this patch reaches
         # every subprocess call in the tick, ``fetch_kanban_snapshot``
         # included. ``stdout`` must therefore be real text: a bare MagicMock
@@ -1320,7 +1312,7 @@ class TestTickLegacyPathPlan:
         seed_project_issues(fake_gh, [todo_payload(10, title="test", body=body)])
         mocker.patch(
             "hermes_pipeline.cli.run_selection",
-            return_value=_make_decision(picked="TODO-10"),
+            return_value=make_decision(picked="TODO-10"),
         )
         create = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
@@ -1359,7 +1351,7 @@ class TestBlockedSelectionGate:
         project = _create_project(tmp_path / "projects", "demo")
         state = project / ".hermes"
         config = Config(projects_dir=project.parent, state_dir=tmp_path / "state")
-        selection = mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision())
+        selection = mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision())
         cb = mocker.patch("hermes_pipeline.cli._make_circuit_breaker").return_value
         mocker.patch("hermes_pipeline.ship.maybe_ship_ready")
         mocker.patch("hermes_pipeline.todos_completion.reconcile_pending_deliveries")

@@ -8,10 +8,7 @@ import pytest
 
 from hermes_pipeline.agent_checkpoint import ProgressJournal
 from hermes_pipeline.agent_execution import ExecutionError, ExecutionStore
-
-
-def git(work, *args):
-    return subprocess.check_output(['git', '-C', str(work), *args], text=True).strip()
+from tests.support.git import run_git as git
 
 
 @pytest.fixture

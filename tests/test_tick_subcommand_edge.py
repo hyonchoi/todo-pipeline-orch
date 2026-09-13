@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -15,6 +14,7 @@ from hermes_pipeline.cli import (
 )
 from hermes_pipeline.config import Config
 from tests.gh_fakes import seed_project_issues, todo_payload
+from tests.support.decisions import make_decision
 
 PIPELINE_TOML = (
     'schema_version = 2\nassignee = "default"\n'
@@ -26,15 +26,6 @@ PIPELINE_TOML = (
 def _github_todo_10(fake_gh):
     """Every tick reads TODOs from GitHub: serve #10 as the sole candidate."""
     return seed_project_issues(fake_gh, [todo_payload(10, title="test")])
-
-
-def _make_decision(picked=None, **kwargs):
-    """Create a mock HermesSelectionDecision with the right shape."""
-    decision = MagicMock()
-    decision.picked = picked or kwargs.get("picked")
-    decision.rationale = "test"
-    decision.candidates_considered = kwargs.get("candidates_considered", [])
-    return decision
 
 
 def _create_project(projects_dir, name, contract=True):
@@ -243,7 +234,7 @@ class TestTickPicked:
         )
         mock_observe = mocker.patch("hermes_pipeline.cli.observe_outcomes")
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -413,7 +404,7 @@ class TestPerProjectLockScanning:
     def test_per_project_lock_held_skips_only_that_project(self, tmp_path, mocker):
         """A held lock on project-a should not block project-b."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()
@@ -475,7 +466,7 @@ class TestSelectionTimeout:
     def test_run_selection_receives_timeout(self, tmp_path, mocker):
         """_tick_project derives a per-project timeout and passes it."""
         mock_selection = mocker.patch("hermes_pipeline.cli.run_selection")
-        mock_selection.return_value = _make_decision()
+        mock_selection.return_value = make_decision()
 
         projects_dir = tmp_path / "projects"
         projects_dir.mkdir()

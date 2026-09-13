@@ -19,6 +19,9 @@ from hermes_pipeline.todos_completion import (
     close_issue_for_delivery,
     reconcile_todo_completion,
 )
+from tests.gh_fakes import REPO
+from tests.support.git import init_repo
+from tests.support.projects import run_dir as shared_run_dir
 
 
 @pytest.mark.parametrize(
@@ -300,15 +303,7 @@ def test_finish_card_renders_the_profile_phase_verbatim_with_its_limits(
 
 
 def _finish_repo(tmp_path, name):
-    repo = tmp_path / name
-    repo.mkdir()
-    for args in (
-        ("init", "-q"),
-        ("config", "user.email", "test@example.com"),
-        ("config", "user.name", "Test"),
-    ):
-        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    return repo
+    return init_repo(tmp_path / name)[0]
 
 
 def _finish_commit(repo, name):
@@ -1201,7 +1196,6 @@ def test_pr_identity_rejects_origin_that_is_not_the_project_repo(tmp_path, mocke
 
 
 API = ("gh", "api", "-H", "Accept: application/vnd.github+json")
-REPO = "acme/repo"
 PR_URL = f"https://github.com/{REPO}/pull/7"
 # A DIFFERENT pull request in the same repository, so it clears the `pr_url`
 # regex and only the echoed `url` can tell it apart from the delivered PR.
@@ -1268,10 +1262,8 @@ class FakeRemoteIssue:
 
 
 def _run_dir(tmp_path):
-    state = tmp_path / ".hermes"
-    run_dir = state / "runs" / "01TICK"
-    run_dir.mkdir(parents=True)
-    return state, run_dir
+    run_dir = shared_run_dir(tmp_path, tick_id="01TICK")
+    return tmp_path / ".hermes", run_dir
 
 
 def _close(tmp_path, state, **overrides):

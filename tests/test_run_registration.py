@@ -23,9 +23,10 @@ from hermes_pipeline.run_registration import (
     registration_state,
 )
 from hermes_pipeline.todos_create import load_create_request, render_create_body
-from tests.gh_fakes import API_ARGV, issue_payload, make_issue
+from tests.gh_fakes import API_ARGV, REPO, issue_payload, make_issue
+from tests.support.git import init_repo
+from tests.support.git import run_git as _git
 
-REPO = "acme/repo"
 BODY = (
     "### What\n\nShip it.\n\n### Plan\n\ndocs/plan.md\n\n"
     "### Branch\n\nfeat/todo-42\n"
@@ -52,25 +53,13 @@ def _issue(number: int = 42, *, body: str = BODY, repo: str = REPO, **extra):
     return make_issue(number, repo=repo, title="Ship the feature", body=body, **extra)
 
 
-def _git(repo: Path, *args: str) -> str:
-    result = subprocess.run(
-        ["git", *args], cwd=repo, check=True, capture_output=True, text=True
-    )
-    return result.stdout.strip()
-
-
 def _repo(tmp_path: Path) -> tuple[Path, str]:
-    repo = tmp_path / "project"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    _git(repo, "config", "user.name", "Test")
-    _git(repo, "config", "user.email", "test@example.com")
-    (repo / "docs").mkdir()
-    (repo / "docs" / "plan.md").write_text("# Plan\n")
-    _git(repo, "add", "docs/plan.md")
-    _git(repo, "commit", "-m", "base")
-    _git(repo, "remote", "add", "origin", f"https://github.com/{REPO}.git")
-    return repo, _git(repo, "rev-parse", "HEAD")
+    return init_repo(
+        tmp_path / "project",
+        branch="main",
+        files={"docs/plan.md": "# Plan\n"},
+        origin=f"https://github.com/{REPO}.git",
+    )
 
 
 def _register(

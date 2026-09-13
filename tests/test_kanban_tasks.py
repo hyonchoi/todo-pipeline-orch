@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_pipeline.phases import IMPLEMENTATION_KEY
+from tests.support.git import init_repo
 
 
 def _register_todo_phases(**kwargs):
@@ -2861,23 +2862,7 @@ def test_get_todo_kanban_tasks_warns_on_nonzero_exit(mocker, caplog):
 
 
 def _git_tracked_project(tmp_path, files):
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    for name in files:
-        path = repo / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"# {name}\n")
-    for command in (
-        ("init", "-q", "-b", "main"),
-        ("config", "user.email", "t@example.com"),
-        ("config", "user.name", "T"),
-        ("add", "."),
-        ("commit", "-qm", "base"),
-    ):
-        subprocess.run(["git", *command], cwd=repo, check=True, capture_output=True)
-    return repo
+    return init_repo(tmp_path / "repo", branch="main", files={n: f"# {n}\n" for n in files})[0]
 
 
 _TWO_PHASES = (

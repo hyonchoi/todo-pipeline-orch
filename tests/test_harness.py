@@ -90,6 +90,15 @@ from hermes_pipeline.phases import (
     resolve_profile_phases_path,
 )
 from tests.gh_fakes import API_ARGV, issue_payload, seed_project_issues, todo_payload
+from tests.support.git import (
+    advance_remote,
+    make_bare_remote,
+    push_files,
+    remote_branches,
+    remote_tree,
+    run_git,
+)
+from tests.support.kanban import kanban_task
 
 
 class TestPreflightCheck:
@@ -3462,59 +3471,7 @@ _SEED_SUBJECT = "chore(harness): seed sandbox"
 def _real_git(*args: str, cwd: Path) -> str:
     # Env is read at call time so monkeypatched variables reach the helper; the
     # global config is nulled so operator settings never leak into fixtures.
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null"}
-    return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=env
-    ).stdout.strip()
-
-
-def _push_files(bare: Path, work: Path, files: dict[str, str], *, branch: str, subject: str = "seed") -> str:
-    """Init *work*, commit *files* on *branch*, push to *bare*; return the commit sha."""
-    work.mkdir()
-    _real_git("init", "-b", branch, cwd=work)
-    _real_git("config", "user.email", "seed@localhost", cwd=work)
-    _real_git("config", "user.name", "Seed", cwd=work)
-    for rel, content in files.items():
-        target = work / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-    _real_git("add", ".", cwd=work)
-    _real_git("commit", "-m", subject, cwd=work)
-    _real_git("remote", "add", "origin", f"file://{bare}", cwd=work)
-    _real_git("push", "origin", branch, cwd=work)
-    return _real_git("rev-parse", "HEAD", cwd=work)
-
-
-def _make_bare_remote(tmp_path: Path, files: dict[str, str], *, branch: str = "main") -> Path:
-    """Bare remote on *branch* tracking *files*; no commits at all when *files* is empty."""
-    bare = tmp_path / "remote.git"
-    bare.mkdir()
-    _real_git("init", "--bare", "-b", branch, cwd=bare)
-    if files:
-        _push_files(bare, tmp_path / "seed", files, branch=branch)
-    return bare
-
-
-def _advance_remote(bare: Path, tmp_path: Path, branch: str) -> str:
-    """Add one commit on *branch* of *bare* from a fresh clone; return the new tip."""
-    work = tmp_path / "advance"
-    _real_git("clone", "-b", branch, f"file://{bare}", str(work), cwd=tmp_path)
-    _real_git("config", "user.email", "other@localhost", cwd=work)
-    _real_git("config", "user.name", "Other", cwd=work)
-    (work / "RACE.txt").write_text("racing commit\n")
-    _real_git("add", "RACE.txt", cwd=work)
-    _real_git("commit", "-m", "race", cwd=work)
-    _real_git("push", "origin", branch, cwd=work)
-    return _real_git("rev-parse", "HEAD", cwd=work)
-
-
-def _remote_branches(bare: Path) -> list[str]:
-    return _real_git("for-each-ref", "--format=%(refname:short)", "refs/heads", cwd=bare).splitlines()
-
-
-def _remote_tree(bare: Path, branch: str) -> dict[str, str]:
-    names = _real_git("ls-tree", "-r", "--name-only", branch, cwd=bare).splitlines()
-    return {n: _real_git("show", f"{branch}:{n}", cwd=bare) for n in names}
+    return run_git(cwd, *args, isolated_env=True)
 
 
 def _assert_porcelain_clean_with_runtime_junk(clone: Path) -> None:
@@ -3557,7 +3514,7 @@ class TestInitSandbox:
         """
 
         def branches() -> list[str]:
-            return _remote_branches(bare) if bare is not None else []
+            return remote_branches(bare) if bare is not None else []
 
         def view(argv):
             if default_branch is not None:
@@ -3591,15 +3548,15 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_empty_remote_creates_main_and_seeds(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {})
+        bare = make_bare_remote(tmp_path, {})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare)
         workspace = tmp_path / "workspace"
 
         assert init_sandbox(sandbox, workspace) == "seeded"
 
-        assert _remote_branches(bare) == ["main"]
-        tree = _remote_tree(bare, "refs/heads/main")
+        assert remote_branches(bare) == ["main"]
+        tree = remote_tree(bare, "refs/heads/main")
         assert set(tree) == set(harness_mod._SANDBOX_SEED_FILES)
         assert _real_git("log", "-1", "--format=%s", "main", cwd=bare) == _SEED_SUBJECT
         assert "seed_version: 1" in tree["docs/harness/SANDBOX.md"]
@@ -3614,7 +3571,7 @@ class TestInitSandbox:
     def test_empty_path_commits_even_when_clone_config_requires_signing(self, fake_gh, tmp_path, monkeypatch):
         # Global config is disabled by ``_git_env``; repo-LOCAL config still applies, so the
         # ``-c commit.gpgsign=false`` pin is what keeps the seed commit unsigned.
-        bare = _make_bare_remote(tmp_path, {})
+        bare = make_bare_remote(tmp_path, {})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare)
         real_git = harness_mod._git
@@ -3630,7 +3587,7 @@ class TestInitSandbox:
 
         assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
 
-        assert _remote_branches(bare) == ["main"]
+        assert remote_branches(bare) == ["main"]
 
     def test_default_branch_not_set_after_patch_raises(self, fake_gh, tmp_path, monkeypatch):
         # Defensive: the view handler ignores remote state and keeps answering "" even
@@ -3650,7 +3607,7 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_refs_present_but_gh_reports_no_default_branch_is_refused(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {"README.md": "# x\n"}, branch="develop")
+        bare = make_bare_remote(tmp_path, {"README.md": "# x\n"}, branch="develop")
         before = _real_git("rev-parse", "develop", cwd=bare)
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="")
@@ -3660,14 +3617,14 @@ class TestInitSandbox:
 
         assert exc_info.value.code == "default_branch_unknown"
         assert "refs/heads/develop" in exc_info.value.detail
-        assert _remote_branches(bare) == ["develop"]
+        assert remote_branches(bare) == ["develop"]
         assert _real_git("rev-parse", "develop", cwd=bare) == before
         assert _SANDBOX_PATCH_ARGV not in fake_gh.gh_calls()
         assert not (tmp_path / "workspace" / "sandbox").exists()
 
     @pytest.mark.real_git
     def test_empty_path_refuses_existing_workspace_dir(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {})
+        bare = make_bare_remote(tmp_path, {})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare)
         project_dir = tmp_path / "workspace" / "sandbox"
@@ -3679,11 +3636,11 @@ class TestInitSandbox:
 
         assert exc_info.value.code == "workspace_exists"
         assert (project_dir / "keep").is_file()
-        assert _remote_branches(bare) == []
+        assert remote_branches(bare) == []
 
     @pytest.mark.real_git
     def test_failed_patch_propagates_and_removes_project_dir(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {})
+        bare = make_bare_remote(tmp_path, {})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare)
         fake_gh.on("gh", *_SANDBOX_PATCH_ARGV, rc=1, stderr="HTTP 500: boom\n")
@@ -3777,7 +3734,7 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_already_seeded_is_noop(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, dict(harness_mod._SANDBOX_SEED_FILES), branch="trunk")
+        bare = make_bare_remote(tmp_path, dict(harness_mod._SANDBOX_SEED_FILES), branch="trunk")
         before = _real_git("rev-parse", "trunk", cwd=bare)
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="trunk")
@@ -3789,7 +3746,7 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_refuses_repo_with_foreign_tracked_files(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {"src/app.py": "print(1)\n", "README.md": "# app\n"})
+        bare = make_bare_remote(tmp_path, {"src/app.py": "print(1)\n", "README.md": "# app\n"})
         before = _real_git("rev-parse", "main", cwd=bare)
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
@@ -3807,7 +3764,7 @@ class TestInitSandbox:
     @pytest.mark.real_git
     def test_fully_seeded_repo_with_foreign_files_is_still_refused(self, fake_gh, tmp_path):
         files = {**harness_mod._SANDBOX_SEED_FILES, "src/app.py": "print(1)\n"}
-        bare = _make_bare_remote(tmp_path, files)
+        bare = make_bare_remote(tmp_path, files)
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
 
@@ -3819,7 +3776,7 @@ class TestInitSandbox:
     @pytest.mark.real_git
     def test_foreign_detail_truncates_with_count(self, fake_gh, tmp_path):
         files = {f"src/m{i}.py": "x\n" for i in range(8)}
-        bare = _make_bare_remote(tmp_path, files)
+        bare = make_bare_remote(tmp_path, files)
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
 
@@ -3831,7 +3788,7 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_allows_github_dir_and_seeds_missing_files(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(
+        bare = make_bare_remote(
             tmp_path, {".github/workflows/ci.yml": "on: push\n", "README.md": "# custom readme\n"}
         )
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
@@ -3839,7 +3796,7 @@ class TestInitSandbox:
 
         assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
 
-        tree = _remote_tree(bare, "main")
+        tree = remote_tree(bare, "main")
         assert set(tree) == set(harness_mod._SANDBOX_SEED_FILES) | {".github/workflows/ci.yml"}
         assert tree["README.md"] == "# custom readme"
         assert tree[".gitignore"] == harness_mod._SANDBOX_GITIGNORE.rstrip("\n")
@@ -3848,21 +3805,21 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_partial_seed_pushes_to_non_main_default_branch(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {"pyproject.toml": "[project]\n"}, branch="develop")
+        bare = make_bare_remote(tmp_path, {"pyproject.toml": "[project]\n"}, branch="develop")
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="develop")
 
         assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
 
-        tree = _remote_tree(bare, "develop")
+        tree = remote_tree(bare, "develop")
         assert set(tree) == set(harness_mod._SANDBOX_SEED_FILES)
         assert tree["pyproject.toml"] == "[project]"
-        assert _remote_branches(bare) == ["develop"]
+        assert remote_branches(bare) == ["develop"]
 
     @pytest.mark.real_git
     def test_clones_gh_default_branch_not_remote_head(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {"NOTES.md": "dev\n"}, branch="develop")
-        _push_files(bare, tmp_path / "main-seed", {"README.md": "# main\n"}, branch="main")
+        bare = make_bare_remote(tmp_path, {"NOTES.md": "dev\n"}, branch="develop")
+        push_files(bare, tmp_path / "main-seed", {"README.md": "# main\n"}, branch="main")
         develop_before = _real_git("rev-parse", "develop", cwd=bare)
         assert _real_git("symbolic-ref", "HEAD", cwd=bare) == "refs/heads/develop"
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
@@ -3872,37 +3829,37 @@ class TestInitSandbox:
         assert init_sandbox(sandbox, workspace) == "seeded"
 
         assert _real_git("symbolic-ref", "--short", "HEAD", cwd=workspace / "sandbox") == "main"
-        assert set(_remote_tree(bare, "main")) == set(harness_mod._SANDBOX_SEED_FILES)
+        assert set(remote_tree(bare, "main")) == set(harness_mod._SANDBOX_SEED_FILES)
         assert _real_git("rev-parse", "develop", cwd=bare) == develop_before
 
     @pytest.mark.real_git
     def test_tracked_gitignore_without_hermes_rule_is_replaced(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, {".gitignore": "*.log\n"})
+        bare = make_bare_remote(tmp_path, {".gitignore": "*.log\n"})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
         workspace = tmp_path / "workspace"
 
         assert init_sandbox(sandbox, workspace) == "seeded"
 
-        assert ".hermes/" in _remote_tree(bare, "main")[".gitignore"].splitlines()
+        assert ".hermes/" in remote_tree(bare, "main")[".gitignore"].splitlines()
         _assert_porcelain_clean_with_runtime_junk(workspace / "sandbox")
 
     @pytest.mark.real_git
     def test_tracked_gitignore_hiding_docs_does_not_block_seed(self, fake_gh, tmp_path):
         # Missing harness ignore rules are refreshed before the seed marker is added.
-        bare = _make_bare_remote(tmp_path, {".gitignore": ".hermes/\ndocs/\n"})
+        bare = make_bare_remote(tmp_path, {".gitignore": ".hermes/\ndocs/\n"})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
 
         assert init_sandbox(sandbox, tmp_path / "workspace") == "seeded"
 
-        tree = _remote_tree(bare, "main")
+        tree = remote_tree(bare, "main")
         assert "docs/harness/SANDBOX.md" in tree
         assert tree[".gitignore"] == harness_mod._SANDBOX_GITIGNORE.rstrip("\n")
 
     @pytest.mark.real_git
     def test_non_empty_path_never_removes_preexisting_project_dir(self, fake_gh, tmp_path):
-        bare = _make_bare_remote(tmp_path, dict(harness_mod._SANDBOX_SEED_FILES))
+        bare = make_bare_remote(tmp_path, dict(harness_mod._SANDBOX_SEED_FILES))
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
         project_dir = tmp_path / "workspace" / "sandbox"
@@ -3930,7 +3887,7 @@ class TestInitSandbox:
 
     @pytest.mark.real_git
     def test_non_fast_forward_push_fails_and_leaves_remote_unchanged(self, fake_gh, tmp_path, monkeypatch):
-        bare = _make_bare_remote(tmp_path, {"README.md": "# x\n"})
+        bare = make_bare_remote(tmp_path, {"README.md": "# x\n"})
         sandbox = dataclasses.replace(self.sandbox, url=f"file://{bare}")
         self._serve_gh(fake_gh, bare, default_branch="main")
         real_clone = harness_mod.clone_sandbox
@@ -3938,7 +3895,7 @@ class TestInitSandbox:
 
         def racing_clone(*args, **kwargs):
             real_clone(*args, **kwargs)
-            raced["tip"] = _advance_remote(bare, tmp_path, "main")
+            raced["tip"] = advance_remote(bare, tmp_path, "main")
 
         monkeypatch.setattr(harness_mod, "clone_sandbox", racing_clone)
 
@@ -3948,7 +3905,7 @@ class TestInitSandbox:
         assert exc_info.value.code == "git_error"
         assert exc_info.value.detail.startswith("git push failed")
         assert _real_git("rev-parse", "main", cwd=bare) == raced["tip"]
-        assert "RACE.txt" in _remote_tree(bare, "main")
+        assert "RACE.txt" in remote_tree(bare, "main")
         assert not (tmp_path / "workspace" / "sandbox").exists()
 
 
@@ -3971,7 +3928,7 @@ def _baseline() -> RunBaseline:
 
 
 def _seeded_clone(tmp_path: Path) -> tuple[Path, SandboxRepo]:
-    bare = _make_bare_remote(tmp_path, harness_mod._SANDBOX_SEED_FILES)
+    bare = make_bare_remote(tmp_path, harness_mod._SANDBOX_SEED_FILES)
     sandbox = SandboxRepo(repo="acme/sandbox", slug="sandbox", url=f"file://{bare}")
     project_dir = tmp_path / "workspace" / "sandbox"
     clone_sandbox(sandbox, project_dir)
@@ -5187,7 +5144,7 @@ class TestDiscoverRemoteArtifacts:
         run_base_sha, _ = _run_branch(project_dir, _issue7(), "feat/x")
         other = tmp_path / "other"
         other.mkdir()
-        other_bare = _make_bare_remote(other, {"README.md": "other\n"})
+        other_bare = make_bare_remote(other, {"README.md": "other\n"})
         _real_git("clone", "-q", f"file://{other_bare}", str(other / "work"), cwd=other)
         _push_new_branch(other / "work", "X", email="test@localhost")
         _real_git("remote", "set-url", "origin", f"file://{other_bare}", cwd=project_dir)
@@ -5424,7 +5381,7 @@ class TestCleanupRemote:
         project_dir, sandbox, shas = self._setup(tmp_path, fake_gh, "feat/x", "feat/y")
         fake_gh.on("gh", "pr", "close", "6", "--repo", "acme/sandbox", "--comment", "Closed by tpo test cleanup.")
         bare = Path(sandbox.url.removeprefix("file://"))
-        _advance_remote(bare, tmp_path, "feat/y")
+        advance_remote(bare, tmp_path, "feat/y")
         artifacts = RemoteArtifacts(
             issue_number=7, prs=(_pr(5), _pr(6, head_ref="feat/y")),
             deletable_branches=(("feat/x", shas["feat/x"]), ("feat/y", shas["feat/y"])), leftovers=(),
@@ -5445,7 +5402,7 @@ class TestCleanupRemote:
         project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
         sha = shas["feat/x"]
         bare = Path(sandbox.url.removeprefix("file://"))
-        _advance_remote(bare, tmp_path, "feat/x")
+        advance_remote(bare, tmp_path, "feat/x")
         artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(("feat/x", sha),), leftovers=())
 
         all_ok, leftovers = self._cleanup(project_dir, sandbox, artifacts, tmp_path / "staging")
@@ -5468,7 +5425,7 @@ class TestCleanupRemote:
         project_dir, sandbox, shas = self._setup(tmp_path, fake_gh)
         sha = shas["feat/x"]
         bare = Path(sandbox.url.removeprefix("file://"))
-        _advance_remote(bare, tmp_path, "feat/x")
+        advance_remote(bare, tmp_path, "feat/x")
         # Pretend the URL carried a token; the push still fails (stale) and the leftover must not echo it.
         tainted = dataclasses.replace(sandbox, url=f"file://x-access-token:ghs_SECRET@localhost{bare}")
         artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(("feat/x", sha),), leftovers=())
@@ -5822,14 +5779,6 @@ class TestRunGitHardening:
         assert exc_info.value.detail.startswith("fresh provenance dir carries config:")
 
 
-def _kanban_task(tick_id: str, phase_key: str, status: str) -> dict[str, object]:
-    return {
-        "id": f"task-{phase_key}",
-        "status": status,
-        "body": json.dumps({"tick_id": tick_id, "phase_key": phase_key, "todo_id": "TODO-7"}) + "\nbody",
-    }
-
-
 class TestShutdownRun:
     """Fail-closed shutdown: destructive remote cleanup only after proven kanban quiescence (R-11.1)."""
 
@@ -5864,7 +5813,7 @@ class TestShutdownRun:
     @pytest.fixture
     def stubs(self):
         artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(), leftovers=())
-        terminal = [_kanban_task("tick-1", "impl", "archived"), _kanban_task("tick-1", "review", "done")]
+        terminal = [kanban_task("tick-1", "impl", "archived", todo_id="TODO-7"), kanban_task("tick-1", "review", "done", todo_id="TODO-7")]
         with (
             patch.object(harness_mod, "_cancel_registered_tasks", return_value=True) as cancel,
             patch("hermes_pipeline.kanban_tasks._list_task_snapshot", return_value=terminal) as snapshot,
@@ -5988,7 +5937,7 @@ class TestShutdownRun:
         stubs.close.assert_called_once_with(tmp_path / "clone", 7, repo="acme/sandbox")
 
     def test_terminal_including_archived_after_two_polls_then_cleanup(self, stubs, tmp_path: Path):
-        running = [_kanban_task("tick-1", "impl", "running"), _kanban_task("tick-1", "review", "backlog")]
+        running = [kanban_task("tick-1", "impl", "running", todo_id="TODO-7"), kanban_task("tick-1", "review", "backlog", todo_id="TODO-7")]
         stubs.snapshot.side_effect = [running, running, stubs.snapshot.return_value]
 
         report, sleeps = self._run(tmp_path)
@@ -6010,7 +5959,7 @@ class TestShutdownRun:
 
     def test_other_ticks_cards_are_ignored(self, stubs, tmp_path: Path):
         stubs.snapshot.return_value = [
-            *stubs.snapshot.return_value, _kanban_task("tick-0", "impl", "running"),
+            *stubs.snapshot.return_value, kanban_task("tick-0", "impl", "running", todo_id="TODO-7"),
         ]
 
         report, _ = self._run(tmp_path)
@@ -6018,7 +5967,7 @@ class TestShutdownRun:
         assert report.kanban_quiescent is True
 
     def test_missing_expected_key_is_not_quiescent(self, stubs, tmp_path: Path):
-        stubs.snapshot.return_value = [_kanban_task("tick-1", "impl", "archived")]
+        stubs.snapshot.return_value = [kanban_task("tick-1", "impl", "archived", todo_id="TODO-7")]
 
         report, _ = self._run(tmp_path)
 
@@ -6027,7 +5976,7 @@ class TestShutdownRun:
         stubs.close.assert_called_once()
 
     def test_unknown_expected_keys_requires_only_nonempty_terminal(self, stubs, tmp_path: Path):
-        stubs.snapshot.return_value = [_kanban_task("tick-1", "impl", "archived")]
+        stubs.snapshot.return_value = [kanban_task("tick-1", "impl", "archived", todo_id="TODO-7")]
 
         report, _ = self._run(tmp_path, expected_phase_keys=None)
 
@@ -6192,9 +6141,9 @@ class TestShutdownRun:
 
     @pytest.mark.parametrize("live_first", [True, False])
     def test_duplicate_phase_key_folds_to_worst_status(self, stubs, tmp_path: Path, live_first):
-        live = {**_kanban_task("tick-1", "impl", "running"), "id": "task-impl-dup"}
-        archived = _kanban_task("tick-1", "impl", "archived")
-        review = _kanban_task("tick-1", "review", "done")
+        live = {**kanban_task("tick-1", "impl", "running", todo_id="TODO-7"), "id": "task-impl-dup"}
+        archived = kanban_task("tick-1", "impl", "archived", todo_id="TODO-7")
+        review = kanban_task("tick-1", "review", "done", todo_id="TODO-7")
         stubs.snapshot.return_value = [live, archived, review] if live_first else [archived, live, review]
 
         report, _ = self._run(tmp_path)
@@ -6204,11 +6153,11 @@ class TestShutdownRun:
 
     def test_archived_status_map_reads_archived_snapshot(self):
         tasks = [
-            _kanban_task("tick-1", "impl", "archived"), _kanban_task("tick-1", "impl", "running"),
-            _kanban_task("tick-1", "review", "done"), _kanban_task("tick-1", "review", "archived"),
-            _kanban_task("tick-9", "impl", "running"), {"id": "x", "status": "running", "body": "not json"},
-            {**_kanban_task("tick-1", "gate", "done"), "status": None},
-            {k: v for k, v in _kanban_task("tick-1", "ship", "done").items() if k != "status"},
+            kanban_task("tick-1", "impl", "archived", todo_id="TODO-7"), kanban_task("tick-1", "impl", "running", todo_id="TODO-7"),
+            kanban_task("tick-1", "review", "done", todo_id="TODO-7"), kanban_task("tick-1", "review", "archived", todo_id="TODO-7"),
+            kanban_task("tick-9", "impl", "running", todo_id="TODO-7"), {"id": "x", "status": "running", "body": "not json"},
+            {**kanban_task("tick-1", "gate", "done", todo_id="TODO-7"), "status": None},
+            {k: v for k, v in kanban_task("tick-1", "ship", "done", todo_id="TODO-7").items() if k != "status"},
         ]
         with patch("hermes_pipeline.kanban_tasks._list_task_snapshot", return_value=tasks) as snap:
             assert harness_mod._archived_status_map("sandbox", "tick-1") == {
@@ -6220,8 +6169,8 @@ class TestShutdownRun:
 
     def test_card_without_status_is_not_quiescent(self, stubs, tmp_path: Path):
         stubs.snapshot.return_value = [
-            _kanban_task("tick-1", "impl", "archived"),
-            {k: v for k, v in _kanban_task("tick-1", "review", "done").items() if k != "status"},
+            kanban_task("tick-1", "impl", "archived", todo_id="TODO-7"),
+            {k: v for k, v in kanban_task("tick-1", "review", "done", todo_id="TODO-7").items() if k != "status"},
         ]
 
         report, _ = self._run(tmp_path)
@@ -6272,7 +6221,7 @@ class TestShutdownRun:
 
     def test_real_snapshot_reader_success_is_quiescent(self, tmp_path: Path):
         artifacts = RemoteArtifacts(issue_number=7, prs=(), deletable_branches=(), leftovers=())
-        stdout = json.dumps([_kanban_task("tick-1", "impl", "archived"), _kanban_task("tick-1", "review", "done")])
+        stdout = json.dumps([kanban_task("tick-1", "impl", "archived", todo_id="TODO-7"), kanban_task("tick-1", "review", "done", todo_id="TODO-7")])
         ok = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr="")
         with (
             patch.object(harness_mod, "_cancel_registered_tasks", return_value=True),

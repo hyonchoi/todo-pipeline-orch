@@ -1,5 +1,4 @@
 import json
-import subprocess
 
 import pytest
 
@@ -15,10 +14,7 @@ from hermes_pipeline.agent_recovery import (
     recovery_state,
     validate_recovery,
 )
-
-
-def git(path, *args):
-    return subprocess.run(['git', '-C', str(path), *args], check=True, capture_output=True)
+from tests.support.git import run_git_cp as git
 
 
 @pytest.fixture

@@ -6,6 +6,7 @@ import pytest
 from hermes_pipeline.cli import _cmd_tick
 from hermes_pipeline.config import Config
 from tests.gh_fakes import seed_project_issues, todo_payload
+from tests.support.decisions import make_decision
 
 PIPELINE_TOML = (
     'schema_version = 2\nassignee = "default"\n'
@@ -34,15 +35,6 @@ class FakeArgs:
             setattr(self, k, v)
 
 
-def _make_decision(picked=None):
-    """Create a mock HermesSelectionDecision with the right shape."""
-    decision = MagicMock()
-    decision.picked = picked
-    decision.rationale = "test rationale"
-    decision.candidates_considered = []
-    return decision
-
-
 def test_tick_scans_multiple_projects(tmp_path: Path):
     """tick should iterate over discovered projects and run selection for each."""
     projects_dir = tmp_path / "projects"
@@ -61,7 +53,7 @@ def test_tick_scans_multiple_projects(tmp_path: Path):
 
     def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
         selection_calls.append(ctx.project_slug)
-        return _make_decision()
+        return make_decision(rationale="test rationale")
 
     args = FakeArgs()
 
@@ -93,7 +85,7 @@ def test_tick_skips_disabled_projects(tmp_path: Path):
 
     def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
         selection_calls.append(ctx.project_slug)
-        return _make_decision()
+        return make_decision(rationale="test rationale")
 
     args = FakeArgs()
 
@@ -130,7 +122,7 @@ def test_tick_error_isolation(tmp_path: Path):
         if ctx.project_slug == "project-a":
             raise RuntimeError("simulated error in project-a")
         selection_calls.append(ctx.project_slug)
-        return _make_decision()
+        return make_decision(rationale="test rationale")
 
     args = FakeArgs()
 
@@ -162,7 +154,7 @@ def test_tick_uses_per_project_state_dir(tmp_path: Path):
         return ctx
 
     def mock_selection(*, tick_id, ctx, cfg, timeout=None, eligible_todo_ids=None):
-        return _make_decision()
+        return make_decision(rationale="test rationale")
 
     args = FakeArgs()
 
@@ -185,7 +177,7 @@ def test_tick_never_copies_global_state_into_a_project(tmp_path: Path):
     (state_dir / "current_tick_id.txt").write_text("old-tick-123\n")
     config = Config(projects_dir=projects_dir, state_dir=state_dir)
 
-    with patch("hermes_pipeline.cli.run_selection", lambda **kwargs: _make_decision()):
+    with patch("hermes_pipeline.cli.run_selection", lambda **kwargs: make_decision(rationale="test rationale")):
         _cmd_tick(FakeArgs(), config)
 
     assert (pa / ".hermes" / "current_tick_id.txt").read_text().strip() != "old-tick-123"

@@ -1,14 +1,13 @@
 """Real Git regressions: inspecting worker output must not execute worker code."""
-import subprocess
+import functools
 
 import pytest
 
 from hermes_pipeline.agent_checkpoint import ProgressJournal
 from hermes_pipeline.agent_execution import ExecutionStore
+from tests.support.git import run_git
 
-
-def git(tree, *args):
-    return subprocess.check_output(['git', '-C', str(tree), *args], text=True, errors='surrogateescape').strip()
+git = functools.partial(run_git, errors='surrogateescape')
 
 
 @pytest.mark.parametrize('attack', ['fsmonitor', 'filter'])

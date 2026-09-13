@@ -24,6 +24,7 @@ from hermes_pipeline.contract import (
     bundled_profile_dir,
 )
 from hermes_pipeline.phases import Phase
+from tests.support.projects import make_project
 
 
 class TestPlanValidate:
@@ -141,10 +142,7 @@ class FakeArgs:
 
 
 def _create_project(projects_dir, name):
-    project_dir = projects_dir / name
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "TODOS.md").write_text("# TODOS\n")
-    return project_dir
+    return make_project(projects_dir, name, contract=False, todos=True)
 
 
 def _serve_issue_plan(fake_gh, plan, *, number=42):

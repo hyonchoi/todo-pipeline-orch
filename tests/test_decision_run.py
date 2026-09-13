@@ -25,6 +25,7 @@ from hermes_pipeline.hermes_adapter import (
     HermesCallError,
     HermesDependencyError,
 )
+from tests.support.decisions import selection_context
 
 
 def _synthetic_error(error_type, message="SECRET", returncode=None):
@@ -61,15 +62,7 @@ def _ctx(
     candidate_ids: tuple[str, ...] = ("TODO-1", "TODO-2"),
     in_flight: list[str] | None = None,
 ) -> SelectionContext:
-    markdown = "\n".join(f"- [ ] **{todo_id}: Title**" for todo_id in candidate_ids)
-    return SelectionContext(
-        selection_markdown=markdown,
-        candidate_ids=candidate_ids,
-        in_flight=in_flight or [],
-        recent_decisions=[],
-        kanban_snapshot={},
-        project_slug="demo",
-    )
+    return selection_context(candidate_ids=candidate_ids, in_flight=in_flight)
 
 def test_happy_path_persists_decision(tmp_path):
     state = tmp_path / "state"

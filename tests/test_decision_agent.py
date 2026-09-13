@@ -15,6 +15,7 @@ from hermes_pipeline.decision.agent import (
     call_agent,
     compute_prompt_sha,
 )
+from tests.support.decisions import selection_context
 
 PROMPT_BODY = """\
 You are the TODO selector. Given <candidate_todos> below, pick one TODO-N to run.
@@ -27,14 +28,7 @@ def _write_prompt(tmp_path: Path, body: str = PROMPT_BODY) -> Path:
     return p
 
 def _ctx(selection_markdown: str = "- [ ] **TODO-1: do thing**") -> SelectionContext:
-    return SelectionContext(
-        selection_markdown=selection_markdown,
-        candidate_ids=("TODO-1",),
-        in_flight=[],
-        recent_decisions=[],
-        kanban_snapshot={"columns": []},
-        project_slug="demo",
-    )
+    return selection_context(selection_markdown=selection_markdown, candidate_ids=("TODO-1",), kanban_snapshot={"columns": []})
 
 def test_compute_sha_matches_hashlib(tmp_path):
     p = _write_prompt(tmp_path)

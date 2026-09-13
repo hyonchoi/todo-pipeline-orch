@@ -10,9 +10,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tests.gh_fakes import make_issue
+from tests.gh_fakes import REPO, make_issue
+from tests.support.git import init_repo
+from tests.support.git import run_git as _git
 
-REPO = "acme/repo"
 ISSUE_BODY = "### What\n\nResult contract.\n\n### Plan\n\nplan.md\n\n### Branch\n\ntodo-42\n"
 
 from hermes_pipeline.github_issues import (
@@ -532,12 +533,6 @@ def test_delivery_evidence_accepts_only_successful_checks_and_exact_pr_identity(
             )
 
 
-def _git(cwd: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
-    ).stdout.strip()
-
-
 def test_verify_git_requires_exactly_one_commit_and_matching_changed_files(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
@@ -579,15 +574,7 @@ def test_verify_git_requires_exactly_one_commit_and_matching_changed_files(tmp_p
 
 
 def _repo(tmp_path, name):
-    repo = tmp_path / name
-    repo.mkdir()
-    _git(repo, "init", "-q")
-    _git(repo, "config", "user.email", "test@example.com")
-    _git(repo, "config", "user.name", "Test")
-    (repo / "base.txt").write_text("base")
-    _git(repo, "add", ".")
-    _git(repo, "commit", "-qm", "base")
-    return repo
+    return init_repo(tmp_path / name, files={"base.txt": "base"})[0]
 
 
 def _add_commit(repo, name):
@@ -1984,15 +1971,7 @@ def test_delivery_body_demands_every_gate_it_ran():
 
 
 def _scratch_repo(tmp_path, name):
-    repo = tmp_path / name
-    repo.mkdir()
-    for args in (
-        ("init", "-q", "-b", "main"),
-        ("config", "user.email", "test@example.com"),
-        ("config", "user.name", "Test"),
-    ):
-        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
-    return repo
+    return init_repo(tmp_path / name, branch="main")[0]
 
 
 def _scratch_commit(repo, *paths, message="c"):

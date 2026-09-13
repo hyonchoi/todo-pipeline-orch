@@ -16,9 +16,9 @@ from hermes_pipeline import cli, harness, phases
 from hermes_pipeline.config import Config
 from hermes_pipeline.github_issues import LABEL_VOCABULARY
 from hermes_pipeline.result_contract import load_validated_registration
-from tests.gh_fakes import API_ARGV, ORIGIN_ARGV, issue_payload
+from tests.gh_fakes import API_ARGV, ORIGIN_ARGV, REPO, issue_payload
+from tests.support.git import run_git as _git
 
-REPO = "acme/repo"
 TRANSACTION = "12345678-1234-4234-9234-123456789abc"
 GOLDEN = '''# Mock Name Normalization Plan
 
@@ -57,11 +57,6 @@ fixture worktree to be clean after its implementation phases complete.
 }
 ```
 '''
-
-
-def _git(project, *args):
-    return subprocess.run(["git", *args], cwd=project, check=True,
-                          capture_output=True, text=True).stdout.strip()
 
 
 @pytest.mark.parametrize("line_endings,client,policy_mode,review_fix", [
