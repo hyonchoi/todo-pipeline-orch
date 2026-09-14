@@ -12,7 +12,13 @@ from hermes_pipeline.result_contract import (
     ResultContractError,
     load_validated_registration,
 )
-from tests.test_result_contract import _commit, _registered_repo, _worker_payload
+from tests.support.results import (
+    _commit,
+    _registered_repo,
+)
+from tests.support.results import (
+    worker_payload as _worker_payload,
+)
 
 
 def registered(tmp_path, mocker, *, phase=IMPLEMENTATION_KEY, legacy=False):
@@ -324,7 +330,7 @@ def test_active_worktree_owner_is_polled_without_acceptance(tmp_path, mocker, co
 def test_review_retry_cannot_race_finish_delivery(tmp_path, mocker):
     from hermes_pipeline import todos_completion
     from hermes_pipeline.agent_execution import LockUnconfirmed
-    from tests.test_result_contract import _git
+    from tests.support.git import run_git as _git
     repo, work, state, head, store, identities, tasks, payloads = accepted_chain(tmp_path, mocker, finish=True)
     review_reconciliation._persist_accepted_head(state, '01TICK', head)
     _git(work, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')

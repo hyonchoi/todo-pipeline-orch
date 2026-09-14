@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_pipeline.phases import IMPLEMENTATION_KEY
+from tests.support.git import init_repo
 
 
 def _register_todo_phases(**kwargs):
@@ -25,8 +26,9 @@ def _register_todo_phases(**kwargs):
 
     assignee = kwargs.pop("assignee", "default")
     cancel_event = kwargs.pop("cancel_event", None)
+    execution_id = kwargs.pop("execution_id", "test-execution")
     prepared = [
-        replace(phase, execution_id="test-execution")
+        replace(phase, execution_id=execution_id)
         for phase in prepare_todo_phases(**kwargs)
     ]
     return create_prepared_todo_phases(
@@ -1491,6 +1493,188 @@ class TestPrepareAndCreateTodoPhases:
             for call in mock_run.call_args_list
         )
 
+    # From test_kanban_tasks_legacy.py: these tests isolate legacy Hermes output
+    # parsing after registration, hence execution_id="registered-phase".
+    def test_legacy_cli_output_format(self, tmp_path, mocker):
+        """Old CLI returns 'Created t_xxx  (ready, assignee=-)' — fallback parsing."""
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="Created t_cafebabe  (ready, assignee=-)",
+        )
+
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        task_ids = _register_todo_phases(
+            todo_id="TODO-10",
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            board_slug="demo",
+            project_dir=str(tmp_path),
+            phases_path=str(phases_cfg),
+            execution_id="registered-phase",
+        )
+
+        assert task_ids == ["t_cafebabe"]
+
+    def test_unparseable_task_id_raises(self, tmp_path, mocker):
+        """Output that is neither JSON nor 'Created t_xxx' raises RuntimeError."""
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0,
+            stdout="Some unexpected output",
+        )
+
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        with pytest.raises(RuntimeError, match="failed to parse"):
+            _register_todo_phases(
+                todo_id="TODO-10",
+                tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+                board_slug="demo",
+                project_dir=str(tmp_path),
+                phases_path=str(phases_cfg),
+                execution_id="registered-phase",
+            )
+
+    def test_invalid_todo_id_format(self, tmp_path):
+        """Invalid todo_id format raises ValueError before any subprocess calls."""
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        with pytest.raises(ValueError, match="invalid todo_id"):
+            _register_todo_phases(
+                todo_id="INVALID",
+                tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+                board_slug="demo",
+                project_dir=str(tmp_path),
+                phases_path=str(phases_cfg),
+                execution_id="registered-phase",
+            )
+
+    def test_invalid_todo_id_shell_injection(self, tmp_path):
+        """todo_id with shell metacharacters is rejected."""
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        with pytest.raises(ValueError, match="invalid todo_id"):
+            _register_todo_phases(
+                todo_id="TODO-10; rm -rf /",
+                tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+                board_slug="demo",
+                project_dir=str(tmp_path),
+                phases_path=str(phases_cfg),
+                execution_id="registered-phase",
+            )
+
+    def test_goal_flags_present(self, tmp_path, mocker):
+        """--goal and --goal-max-turns flags are included in the command."""
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0, stdout=json.dumps({"id": "t_00000001"})
+        )
+
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        _register_todo_phases(
+            todo_id="TODO-10",
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            board_slug="demo",
+            project_dir=str(tmp_path),
+            phases_path=str(phases_cfg),
+            execution_id="registered-phase",
+        )
+
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
+        assert "--goal" in call_args
+        assert "--goal-max-turns" in call_args
+        idx = call_args.index("--goal-max-turns")
+        assert call_args[idx + 1] == "20"
+
+    def test_assignee_flag_present(self, tmp_path, mocker):
+        """--assignee flag defaults to 'default' in the command."""
+        mock_run = mocker.patch("subprocess.run")
+        mock_run.return_value = mocker.MagicMock(
+            returncode=0, stdout=json.dumps({"id": "t_00000001"})
+        )
+
+        phases_cfg = tmp_path / "phases.yaml"
+        phases_cfg.write_text(
+            "phases:\n"
+            '  - phase_key: "phase_2_autoplan"\n'
+            '    name: "Phase 2: Autoplan"\n'
+            '    prompt: "Do the plan"\n'
+            '    tools: "Read,Write"\n'
+            "    turns: 20\n"
+            "    timeout: 1800\n"
+        )
+
+        _register_todo_phases(
+            todo_id="TODO-10",
+            tick_id="01HA6PH2V0ZJ7GK0S39D243TQX",
+            board_slug="demo",
+            project_dir=str(tmp_path),
+            phases_path=str(phases_cfg),
+            execution_id="registered-phase",
+        )
+
+        create_commands = [
+            call.args[0]
+            for call in mock_run.call_args_list
+            if call.args[0][:3] == ["hermes", "kanban", "create"]
+        ]
+        call_args = create_commands[1]
+        assert "--assignee" in call_args
+        idx = call_args.index("--assignee")
+        assert call_args[idx + 1] == "default"
+
 
 class TestAllPhasesComplete:
     """Tests for all_phases_complete() and get_todo_kanban_status()."""
@@ -1649,6 +1833,77 @@ class TestAllPhasesComplete:
         )
         assert result is False  # Partial registration detected
 
+    def test_all_done_and_failed_is_complete(self, mocker):
+        """Mixed done and failed tasks -> all complete (both are completion statuses)."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = [
+            {"status": "done", "body": '{"tick_id":"01HA","phase_key":"phase_2_autoplan","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "failed", "body": '{"tick_id":"01HA","phase_key":"phase_4_development","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+            {"status": "failed", "body": '{"tick_id":"01HA","phase_key":"phase_6_1_cso","todo_id":"TODO-10","project_slug":"demo"}\n...'},
+        ]
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        assert all_phases_complete("demo", "01HA") is True
+
+    def test_tick_started_sentinel_returns_true(self, mocker, tmp_path):
+        """tick_started sentinel + no kanban tasks -> False (stall, not complete).
+
+        When the prior tick crashed after writing tick_started but before
+        registering any kanban tasks, it's a stall — not a completion.
+        The circuit breaker should detect this as no-progress.
+        """
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = []
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        # Create the tick_started sentinel
+        outcomes_dir = tmp_path / "outcomes"
+        outcomes_dir.mkdir()
+        sentinel = outcomes_dir / "01HA-phases.json"
+        sentinel.write_text('{"outcome": "tick_started"}\n')
+
+        assert all_phases_complete("demo", "01HA", state_dir=str(tmp_path)) is False
+
+    def test_no_state_dir_no_tasks_returns_false(self, mocker):
+        """No state_dir and no tasks -> conservative False."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = []
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        # No state_dir — conservative: don't release lock
+        assert all_phases_complete("demo", "01HA") is False
+
+    def test_json_parse_error_in_sentinel(self, mocker, tmp_path):
+        """Sentinel file with invalid JSON — treated as not found, return False."""
+        from hermes_pipeline.kanban_tasks import all_phases_complete
+
+        mock_data = []
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        outcomes_dir = tmp_path / "outcomes"
+        outcomes_dir.mkdir()
+        sentinel = outcomes_dir / "01HA-phases.json"
+        sentinel.write_text("not valid json\n")
+
+        # Should not raise — JSONDecodeError is caught
+        assert all_phases_complete("demo", "01HA", state_dir=str(tmp_path)) is False
+
 
 class TestGetTodoKanbanStatus:
     """Tests for get_todo_kanban_status()."""
@@ -1687,6 +1942,48 @@ class TestGetTodoKanbanStatus:
         mock_result.returncode = 0
         mock_result.stdout = json.dumps(mock_data)
         mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {}
+
+    def test_returncode_nonzero_returns_empty(self, mocker):
+        """Kanban list returns non-zero -> empty dict."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 1
+        mock_result.stdout = ""
+        mock_result.stderr = "error"
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {}
+
+    def test_skips_task_without_tick_id(self, mocker):
+        """Tasks without tick_id in header are skipped."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mock_data = [
+            {"status": "done", "body": '{"phase_key":"phase_2_autoplan"}\n...'},
+        ]
+
+        mock_result = mocker.MagicMock()
+        mock_result.returncode = 0
+        mock_result.stdout = json.dumps(mock_data)
+        mocker.patch("subprocess.run", return_value=mock_result)
+
+        result = get_todo_kanban_status("demo", "01HA")
+        assert result == {}
+
+    @pytest.mark.parametrize("exc_factory", [
+        lambda: FileNotFoundError("hermes not found"),
+        lambda: subprocess.TimeoutExpired("hermes", 10),
+    ], ids=["file_not_found", "timeout"])
+    def test_subprocess_failure_returns_empty(self, mocker, exc_factory):
+        """get_todo_kanban_status handles subprocess failures gracefully."""
+        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
+
+        mocker.patch("subprocess.run", side_effect=exc_factory())
 
         result = get_todo_kanban_status("demo", "01HA")
         assert result == {}
@@ -2135,17 +2432,6 @@ class TestObserveOutcomes:
             "phase_2_autoplan": "done",
             "phase_4_development": "running",
         }
-
-    def test_get_todo_kanban_status_timeout(self, mocker):
-        """get_todo_kanban_status handles subprocess timeout."""
-        import subprocess
-
-        from hermes_pipeline.kanban_tasks import get_todo_kanban_status
-
-        mocker.patch("subprocess.run", side_effect=subprocess.TimeoutExpired("hermes", 10))
-
-        result = get_todo_kanban_status("demo", "01HA")
-        assert result == {}
 
     def test_get_todo_kanban_status_malformed_header(self, mocker):
         """get_todo_kanban_status skips tasks with malformed JSON header."""
@@ -2861,23 +3147,7 @@ def test_get_todo_kanban_tasks_warns_on_nonzero_exit(mocker, caplog):
 
 
 def _git_tracked_project(tmp_path, files):
-    import subprocess
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    for name in files:
-        path = repo / name
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(f"# {name}\n")
-    for command in (
-        ("init", "-q", "-b", "main"),
-        ("config", "user.email", "t@example.com"),
-        ("config", "user.name", "T"),
-        ("add", "."),
-        ("commit", "-qm", "base"),
-    ):
-        subprocess.run(["git", *command], cwd=repo, check=True, capture_output=True)
-    return repo
+    return init_repo(tmp_path / "repo", branch="main", files={n: f"# {n}\n" for n in files})[0]
 
 
 _TWO_PHASES = (

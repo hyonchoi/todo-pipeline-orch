@@ -11,19 +11,14 @@ from __future__ import annotations
 import json
 import subprocess
 import time
-from pathlib import Path
 
 import pytest
+
+from tests.support.git import run_git as _git
 
 TASK_COUNT = 50
 TICK_ID = "01STRESS"
 TODO_ID = "TODO-50"
-
-
-def _git(cwd: Path, *args: str) -> str:
-    return subprocess.run(
-        ["git", *args], cwd=cwd, text=True, capture_output=True, check=True
-    ).stdout.strip()
 
 
 def _manifest() -> str:

@@ -29,11 +29,13 @@ from tests.gh_fakes import (
     API_ARGV,
     ELIGIBLE_BODY,
     ORIGIN_ARGV,
+    REPO,
     seed_project_issues,
     todo_payload,
 )
+from tests.support.decisions import make_decision
+from tests.support.git import init_repo
 
-REPO = "acme/repo"
 PLAN_BODY = "### What\n\nTest\n\n### Plan\n\ndocs/plan.md\n\n### Branch\n\nfeat/todo-10\n"
 
 
@@ -41,14 +43,6 @@ PLAN_BODY = "### What\n\nTest\n\n### Plan\n\ndocs/plan.md\n\n### Branch\n\nfeat/
 def _github_todo_10(fake_gh):
     """Every tick reads TODOs from GitHub: serve #10 as the default candidate."""
     return seed_project_issues(fake_gh, [todo_payload(10, title="test")])
-
-
-def _make_decision(picked):
-    decision = MagicMock()
-    decision.picked = picked
-    decision.rationale = "test"
-    decision.candidates_considered = []
-    return decision
 
 
 def _create_project(projects_dir, name):
@@ -90,7 +84,7 @@ def _run_project_tick(
     mocker.patch("hermes_pipeline.cli._make_circuit_breaker", return_value=cb)
     selection = mocker.patch(
         "hermes_pipeline.cli.run_selection",
-        return_value=_make_decision(picked),
+        return_value=make_decision(picked),
     )
     registration = None
     if patch_registration:
@@ -196,7 +190,7 @@ class TestTickContractAssignee:
 
     def test_tick_uses_contract_assignee(self, tmp_path, mocker):
         """create_prepared_todo_phases is called with the contract's assignee."""
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             return_value=["t_1"],
@@ -219,7 +213,7 @@ class TestTickContractAssignee:
 
     def test_tick_no_contract_falls_back_to_pipeline_assignee(self, tmp_path, mocker):
         """No pipeline.toml -> verifies and falls back to assignee='pipeline'."""
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             return_value=["t_1"],
@@ -245,7 +239,7 @@ class TestTickContractAssignee:
 
     def test_tick_no_contract_warns_when_pipeline_profile_missing(self, tmp_path, mocker, caplog):
         """Implicit fallback verifies the pipeline profile and warns if unavailable."""
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             return_value=["t_1"],
@@ -267,7 +261,7 @@ class TestTickContractAssignee:
 
     def test_tick_no_contract_warns_when_hermes_missing(self, tmp_path, mocker, caplog):
         """Missing Hermes binary warns but does not skip the implicit fallback."""
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases",
             return_value=["t_1"],
@@ -288,7 +282,7 @@ class TestTickContractAssignee:
 
     def test_tick_capability_mismatch_skips_project_not_whole_scan(self, tmp_path, mocker):
         """A project with a capability-deficient contract is skipped, scan continues."""
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
         )
@@ -311,7 +305,7 @@ class TestTickContractAssignee:
 
     def test_tick_stale_contract_version_skips_project(self, tmp_path, mocker):
         """A contract with a stale schema_version fails closed for that project."""
-        mocker.patch("hermes_pipeline.cli.run_selection", return_value=_make_decision("TODO-10"))
+        mocker.patch("hermes_pipeline.cli.run_selection", return_value=make_decision("TODO-10"))
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
         )
@@ -335,7 +329,7 @@ class TestTickContractAssignee:
         non-gstack profile is checked against the wrong phase requirements."""
         run_selection = mocker.patch(
             "hermes_pipeline.cli.run_selection",
-            return_value=_make_decision("TODO-10"),
+            return_value=make_decision("TODO-10"),
         )
         mock_register = mocker.patch(
             "hermes_pipeline.kanban_tasks.create_prepared_todo_phases"
@@ -641,7 +635,7 @@ class TestTickPromptPreparation:
         )
         mocker.patch(
             "hermes_pipeline.cli.run_selection",
-            return_value=_make_decision("TODO-10"),
+            return_value=make_decision("TODO-10"),
         )
         mocker.patch(
             "hermes_pipeline.kanban_tasks.prepare_todo_phases",
@@ -1386,17 +1380,7 @@ class TestTickGitHubSource:
 
 def _git_project(tmp_path):
     """A real git repository with a tracked Plan so register_pinned_run can run unmocked."""
-    project_dir = tmp_path / "demo"
-    (project_dir / "docs").mkdir(parents=True)
-    (project_dir / "docs" / "plan.md").write_text(MANIFEST_PLAN)
-    for command in (
-        ("init", "-q", "-b", "main"),
-        ("config", "user.email", "test@example.com"),
-        ("config", "user.name", "Test"),
-        ("add", "docs/plan.md"),
-        ("commit", "-qm", "base"),
-    ):
-        subprocess.run(["git", *command], cwd=project_dir, check=True, capture_output=True)
+    project_dir, _ = init_repo(tmp_path / "demo", branch="main", files={"docs/plan.md": MANIFEST_PLAN})
     (project_dir / ".hermes").mkdir()
     return project_dir
 

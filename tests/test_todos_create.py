@@ -15,40 +15,7 @@ from hermes_pipeline.todos_create import (
     render_create_body,
 )
 from tests.gh_fakes import API_ARGV, FakeGh, issue_payload
-
-FIELDS = {
-    "Summary": "Ship it",
-    "What": "Build it",
-    "Why": "Users need it",
-    "Pros": "Faster",
-    "Cons": "Risk",
-    "Context": "None",
-    "Assumptions": "None",
-    "Spec": "docs/spec.md",
-    "Reference": "README.md",
-    "Branch": "feat/embed",
-    "Priority": "P1",
-    "Effort": "M",
-    "Phase": "4 (Development)",
-    "Test Coverage": "required",
-    "Security Review": "required",
-    "UI Review": "not-required",
-}
-
-
-def request() -> dict:
-    return {
-        "schema_version": 1,
-        "transaction_id": "12345678-1234-4234-9234-123456789abc",
-        "title": "Embed implementation plan",
-        "fields": FIELDS,
-        "plan_markdown": "# Implementation Plan\n\nDo the work.\n",
-        "tasks": [{
-            "id": "task-1", "title": "Implement", "instructions": "Implement safely",
-            "acceptance_criteria": ["Works"], "verification": ["uv run pytest"],
-            "commit_message": "feat: implement",
-        }],
-    }
+from tests.support.todos import todo_request as request
 
 
 def write_request(path: Path, payload: dict) -> None:

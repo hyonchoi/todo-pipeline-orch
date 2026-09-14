@@ -13,7 +13,8 @@ from hermes_pipeline.agent_checkpoint import ProgressJournal
 from hermes_pipeline.agent_execution import ExecutionStore
 from hermes_pipeline.agent_recovery import auto_approve_resume, recovery_state
 from hermes_pipeline.kanban_tasks import RESULT_VALIDATION_BLOCKED_MARKER
-from tests.test_profile_schedule import schedule_fixture
+from tests.support.projects import run_dir
+from tests.support.schedule import schedule_fixture
 
 TICK = "tick"
 
@@ -43,9 +44,7 @@ def _worktree(tmp_path):
 
 def _run_dir(tmp_path):
     """The run directory exists in production (registration.json lives there)."""
-    path = tmp_path / ".hermes" / "runs" / TICK
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    return run_dir(tmp_path, TICK)
 
 
 def _terminal_execution(tmp_path, key="design", *, status="timed_out", cleanup="confirmed", reason=None):

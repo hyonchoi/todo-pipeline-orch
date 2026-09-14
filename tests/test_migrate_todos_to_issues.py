@@ -23,9 +23,8 @@ from scripts.migrate_todos_to_issues import (
     main,
     parse_todo_entries,
 )
-from tests.gh_fakes import issue_payload
+from tests.gh_fakes import REPO, issue_payload, label_list_stdout
 
-REPO = "acme/repo"
 ACCEPT = ["-H", "Accept: application/vnd.github+json"]
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FORM_PATH = REPO_ROOT / ".github" / "ISSUE_TEMPLATE" / "tpo-todo.yml"
@@ -155,10 +154,6 @@ LEGACY_43 = f"repos/{REPO}/issues?state=all&labels=legacy-id%3ATODO-43&per_page=
 LEGACY_50 = f"repos/{REPO}/issues?state=all&labels=legacy-id%3ATODO-50&per_page=100"
 
 
-def _label_list_stdout(names) -> str:
-    return json.dumps([{"name": name} for name in names])
-
-
 def _write_fixture(tmp_path: Path, text: str = FIXTURE, archive: str | None = ARCHIVE) -> Path:
     todos = tmp_path / "TODOS.md"
     todos.write_text(text, encoding="utf-8")
@@ -189,7 +184,7 @@ def _wire_live(fake_gh, numbers: dict[str, int], *, origin: str = f"git@github.c
     """Auth ok, origin matches, labels present, empty legacy lookups, numbered creates."""
     fake_gh.on("git", "remote", "get-url", "origin", stdout=origin + "\n")
     fake_gh.on(*AUTH_OK)
-    fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(n for n, _, _ in gi.LABEL_VOCABULARY))
+    fake_gh.on("gh", "label", "list", stdout=label_list_stdout(n for n, _, _ in gi.LABEL_VOCABULARY))
     fake_gh.on("gh", "label", "create")
     fake_gh.on("gh", "api", *ACCEPT, "--paginate", "--slurp", stdout="[[]]")
 

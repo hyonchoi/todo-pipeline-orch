@@ -1,16 +1,13 @@
 import pytest
 
+from tests.gh_fakes import seed_project_issues, todo_payload
+from tests.support.projects import make_project
+
 
 @pytest.fixture
 def tmp_project(tmp_path):
     """A scratch project dir marked by its .hermes/pipeline.toml contract."""
-    proj = tmp_path / "demo"
-    (proj / ".hermes").mkdir(parents=True)
-    (proj / ".hermes" / "pipeline.toml").write_text(
-        'schema_version = 2\nassignee = "default"\n'
-        'capabilities = ["Read", "Write", "Edit", "Bash"]\n'
-    )
-    return proj
+    return make_project(tmp_path, "demo")
 
 @pytest.fixture
 def state_dir(tmp_path, monkeypatch):
@@ -33,3 +30,12 @@ def fake_gh(monkeypatch):
 
     monkeypatch.setattr(github_issues, "_run", fake)
     return fake
+
+
+@pytest.fixture
+def github_todo(fake_gh):
+    """Factory for seeding GitHub issues with todo_payload."""
+    def seed(number=10, title="test"):
+        return seed_project_issues(fake_gh, [todo_payload(number, title=title)])
+
+    return seed

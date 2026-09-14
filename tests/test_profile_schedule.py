@@ -8,17 +8,19 @@ import yaml
 
 from hermes_pipeline.kanban_tasks import all_phases_complete, planned_phase_keys
 from hermes_pipeline.phases import load_phase_profile, resolve_profile_phases_path
-from tests.test_run_registration import _embedded_issue, _register, _repo
-
-
-def profile_file(tmp_path, keys=("design", "build", "audit", "docs", "publish")):
-    roles = {"build": "implementation", "audit": "review", "publish": "delivery"}
-    phases = [dict(phase_key=k, name=k, prompt=f"Pinned {k}", tools="Read", turns=10,
-                   **({"role": roles[k]} if k in roles else {})) for k in keys]
-    phases.append(dict(phase_key="human", name="Human", gate=True, terminal=True, kind="human_gate"))
-    path = tmp_path / "phases.yaml"
-    path.write_text(yaml.safe_dump(dict(requires_plan=True, phases=phases)))
-    return path
+from tests.support.registration import (
+    _issue,
+)
+from tests.support.registration import (
+    embedded_issue as _embedded_issue,
+)
+from tests.support.registration import (
+    register as _register,
+)
+from tests.support.registration import (
+    seeded_repo as _repo,
+)
+from tests.support.schedule import profile_file, schedule_fixture
 
 
 def test_registration_pins_complete_ordered_native_profile(tmp_path):
@@ -101,44 +103,6 @@ def test_manifest_requires_reachable_implementation_role(tmp_path):
     assert not (repo / ".hermes/runs/01TICK/registration.json").exists()
 
 
-def schedule_fixture(tmp_path, monkeypatch, keys=("design", "build", "audit", "docs", "publish")):
-    from contextlib import nullcontext
-    from importlib import import_module
-
-    from hermes_pipeline import phase_schedule as schedule
-
-    # Load consumer aliases before patching their source modules, so lazy
-    # imports cannot retain fixture fakes after monkeypatch restores them.
-    import_module("hermes_pipeline.todos_completion")
-    import_module("hermes_pipeline._agent_supervisor")
-    import_module("hermes_pipeline.phase_recovery")
-
-    phases = load_phase_profile(profile_file(tmp_path, keys)).phases
-    registration = SimpleNamespace(phase_definitions=phases, step_keys=tuple(p.phase_key for p in phases if not p.gate),
-        base_sha="base", repository=tmp_path, worktree=tmp_path, todo_id="TODO-42", manifest=None,
-        branch="task", prompt_client="codex", profile="custom", assignee="worker", review_assignee="reviewer")
-    tasks, evidence, created = {}, {}, []
-    current = ["base"]
-    monkeypatch.setattr("hermes_pipeline.authority_result.locked_run_authority", lambda **kw: nullcontext())
-    monkeypatch.setattr("hermes_pipeline.authority_result.require_authorized_result", lambda **kw: nullcontext())
-    monkeypatch.setattr("hermes_pipeline.kanban_tasks.get_todo_kanban_tasks", lambda *a: tasks)
-    monkeypatch.setattr("hermes_pipeline.result_contract._git", lambda *a: current[0])
-    monkeypatch.setattr(schedule, "_promoted_result", lambda *a, key, **kw: evidence[key])
-    def create(**kw):
-        created.append(kw)
-        tasks[kw["key"]] = SimpleNamespace(task_id=kw["key"], status="ready", generation=kw.get("generation", 1))
-    monkeypatch.setattr("hermes_pipeline.review_reconciliation._create_task", create)
-    def tick():
-        return schedule.reconcile_schedule(project_dir=tmp_path, state_dir=tmp_path / ".hermes",
-            tenant="board", tick_id="tick", registration=registration, repo="acme/repo")
-    def complete(key):
-        parent = current[0]
-        current[0] += "-" + key
-        tasks[key].status = "done"
-        evidence[key] = ({"head_sha": current[0]}, {"base_sha": parent, "result_kind": "phase"})
-    return registration, tasks, evidence, created, tick, complete
-
-
 def test_schedule_advances_in_profile_order_with_renamed_roles_and_extra_workers(tmp_path, monkeypatch):
     registration, tasks, evidence, created, tick, complete = schedule_fixture(tmp_path, monkeypatch)
     for index, key in enumerate(registration.step_keys):
@@ -178,7 +142,7 @@ def test_schedule_rejects_unvalidated_predecessor_and_out_of_order_cards(tmp_pat
 def test_modern_supervisor_implementation_uses_actual_phase_entry_head(tmp_path, monkeypatch):
     from hermes_pipeline import _agent_supervisor as supervisor
     from hermes_pipeline.agent_execution import ExecutionStore
-    from tests.test_run_registration import _git
+    from tests.support.git import run_git as _git
 
     repo, base = _repo(tmp_path)
     phases = load_phase_profile(profile_file(tmp_path)).phases
@@ -213,8 +177,8 @@ def test_real_promoted_results_drive_exact_profile_cards_and_phase_entry_heads(t
     from hermes_pipeline.agent_checkpoint import ProgressJournal
     from hermes_pipeline.agent_execution import ExecutionStore
     from hermes_pipeline.result_contract import load_validated_registration
-    from tests.test_result_contract import _result
-    from tests.test_run_registration import _git
+    from tests.support.git import run_git as _git
+    from tests.support.results import _result
 
     repo, _ = _repo(tmp_path)
     keys = ("design", "build", "audit", "docs") + (("publish",) if include_delivery else ())
@@ -322,7 +286,8 @@ def test_deferred_native_claude_implementation_retains_agent_grant(tmp_path, mon
 def test_delivery_does_not_close_before_or_beyond_profile_suffix(tmp_path, mocker, suffix_status, head, expected, pr_state):
     from hermes_pipeline import todos_completion as completion
     from hermes_pipeline.phases import Phase
-    from tests.test_todos_completion import _finish_done_fixture, _view
+    from tests.support.completion import finish_done_fixture as _finish_done_fixture
+    from tests.support.completion import view as _view
 
     tasks = {"publish": SimpleNamespace(task_id="finish-id", status="done"),
              "after": SimpleNamespace(task_id="after-id", status=suffix_status)}
@@ -375,7 +340,7 @@ def test_schema5_registration_binds_only_legacy_initial_worker(tmp_path, monkeyp
 def test_legacy_execution_reentry_preserves_record_without_role_field(tmp_path, monkeypatch):
     from hermes_pipeline import _agent_supervisor as supervisor
     from hermes_pipeline.agent_execution import ExecutionStore
-    from tests.test_agent_supervisor import _committed_profile
+    from tests.support.supervisor import committed_profile as _committed_profile
     store, identity, worktree = _committed_profile(tmp_path, monkeypatch)
     path = store.root / identity / "record.json"
     raw = json.loads(path.read_text())
@@ -436,7 +401,7 @@ def test_delivery_validation_can_admit_missing_suffix_without_closing(tmp_path, 
 def test_deferred_prompt_retains_snapshot_spec_references_and_decisions(tmp_path):
     from hermes_pipeline.result_contract import load_validated_registration
     from hermes_pipeline.review_reconciliation import render_profile_prompt
-    from tests.test_run_registration import _git, _issue
+    from tests.support.git import run_git as _git
     repo, _ = _repo(tmp_path)
     for name in ("spec.md", "reference.md"):
         (repo / "docs" / name).write_text("Pinned context")

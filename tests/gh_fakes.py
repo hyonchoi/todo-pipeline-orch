@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from types import SimpleNamespace
 from typing import Any
 
 Handler = Callable[[list[str]], tuple[int, str, str]]
 
+REPO = "acme/repo"
 ORIGIN_ARGV = ("git", "remote", "get-url", "origin")
 API_ARGV = ("gh", "api", "-H", "Accept: application/vnd.github+json")
 
@@ -78,9 +79,15 @@ class FakeGh:
         return [call[1:] for call in self.calls if call and call[0] == "gh"]
 
 
+def label_list_stdout(names: Iterable[str]) -> str:
+    """Format label names as JSON stdout for ``gh label list``."""
+    return json.dumps([{"name": name} for name in names])
+
+
 def issue_payload(
     number: int = 7,
     *,
+    repo: str = REPO,
     title: str = "Ship the widget",
     body: str = "### What\n\nWidget\n",
     state: str = "open",
@@ -97,12 +104,12 @@ def issue_payload(
         "state": state,
         "labels": [{"name": name} for name in labels],
         "assignees": [],
-        "html_url": f"https://github.com/acme/repo/issues/{number}",
+        "html_url": f"https://github.com/{repo}/issues/{number}",
     }
     if blocked_by is not None:
         payload["issue_dependencies_summary"] = {"blocked_by": blocked_by}
     if pull_request:
-        payload["pull_request"] = {"url": f"https://api.github.com/repos/acme/repo/pulls/{number}"}
+        payload["pull_request"] = {"url": f"https://api.github.com/repos/{repo}/pulls/{number}"}
     payload.update(extra)
     return payload
 
@@ -119,7 +126,7 @@ def todo_payload(number: int = 7, **kwargs: Any) -> dict[str, Any]:
 def make_issue(
     number: int = 7,
     *,
-    repo: str = "acme/repo",
+    repo: str = REPO,
     title: str = "Ship the widget",
     body: str = "### What\n\nWidget\n",
     **extra: Any,
@@ -131,7 +138,7 @@ def make_issue(
 
 
 def seed_project_issues(
-    fake: FakeGh, issues: Sequence[dict[str, Any]] = (), *, repo: str = "acme/repo"
+    fake: FakeGh, issues: Sequence[dict[str, Any]] = (), *, repo: str = REPO
 ) -> FakeGh:
     """Serve ``repo`` as ``origin`` plus ``issues`` for the tick's GitHub reads and label edits.
 

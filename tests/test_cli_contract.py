@@ -24,6 +24,7 @@ from hermes_pipeline.contract import (
     bundled_profile_dir,
 )
 from hermes_pipeline.phases import Phase
+from tests.support.projects import make_project
 
 
 class TestPlanValidate:
@@ -141,10 +142,7 @@ class FakeArgs:
 
 
 def _create_project(projects_dir, name):
-    project_dir = projects_dir / name
-    project_dir.mkdir(parents=True, exist_ok=True)
-    (project_dir / "TODOS.md").write_text("# TODOS\n")
-    return project_dir
+    return make_project(projects_dir, name, contract=False, todos=True)
 
 
 def _serve_issue_plan(fake_gh, plan, *, number=42):
@@ -3351,7 +3349,7 @@ class TestTodosComplete:
 
         from hermes_pipeline.cli import _cmd_todos_complete
         from tests.gh_fakes import FakeGh
-        from tests.test_todos_completion import GH_PR_VIEW_JSON_FIELDS
+        from tests.support.completion import GH_PR_VIEW_JSON_FIELDS
 
         config, remote = self._project(tmp_path, fake_gh)
         mocker.patch("hermes_pipeline.todos_completion._pr_view", self.real_pr_view)

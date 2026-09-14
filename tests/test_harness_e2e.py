@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -37,6 +36,8 @@ from hermes_pipeline.phases import (
 )
 from hermes_pipeline.run_registration import register_pinned_run
 from tests.gh_fakes import API_ARGV, issue_payload
+from tests.support.git import make_bare_remote, remote_branches, run_git
+from tests.support.kanban import kanban_task
 
 _RUN_TOKEN = "e2e00000"
 _ISSUE = 42
@@ -49,39 +50,7 @@ _KEYS = [phase.phase_key for phase in load_phases(resolve_profile_phases_path("g
 
 
 def _git(*args: str, cwd: Path) -> str:
-    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "GIT_CONFIG_GLOBAL": "/dev/null"}
-    return subprocess.run(
-        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True, env=env
-    ).stdout.strip()
-
-
-def _make_bare_remote(tmp_path: Path, files: dict[str, str]) -> Path:
-    bare = tmp_path / "remote.git"
-    bare.mkdir()
-    _git("init", "--bare", "-b", "main", cwd=bare)
-    work = tmp_path / "seed"
-    work.mkdir()
-    _git("init", "-b", "main", cwd=work)
-    _git("config", "user.email", "seed@localhost", cwd=work)
-    _git("config", "user.name", "Seed", cwd=work)
-    for rel, content in files.items():
-        target = work / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content)
-    _git("add", ".", cwd=work)
-    _git("commit", "-m", "chore(harness): seed sandbox", cwd=work)
-    _git("remote", "add", "origin", f"file://{bare}", cwd=work)
-    _git("push", "origin", "main", cwd=work)
-    return bare
-
-
-def _remote_branches(bare: Path) -> list[str]:
-    return _git("for-each-ref", "--format=%(refname:short)", "refs/heads", cwd=bare).splitlines()
-
-
-def _kanban_task(tick_id: str, phase_key: str, status: str) -> dict[str, object]:
-    header = {"tick_id": tick_id, "phase_key": phase_key, "todo_id": f"TODO-{_ISSUE}"}
-    return {"id": f"task-{phase_key}", "status": status, "body": json.dumps(header) + "\nbody"}
+    return run_git(cwd, *args, isolated_env=True)
 
 
 def _serve_github(fake_gh, *, title: str, pr_exists: Callable[[], bool] = lambda: True) -> None:
@@ -164,7 +133,7 @@ def _serve_github(fake_gh, *, title: str, pr_exists: Callable[[], bool] = lambda
 
 
 @pytest.fixture
-def scripted_kanban(mocker):
+def scripted_kanban(mocker, monkeypatch):
     """Cards advance ready -> running -> done one step per status poll.
 
     ``snapshot`` is the archived-inclusive list ``shutdown_run`` verifies quiescence
@@ -181,13 +150,22 @@ def scripted_kanban(mocker):
             board.update(dict.fromkeys(_KEYS, "done"))
         return dict(board)
 
-    snapshot = [_kanban_task(_TICK_ID, key, "archived") for key in _KEYS]
+    snapshot = [kanban_task(_TICK_ID, key, "archived", todo_id=f"TODO-{_ISSUE}") for key in _KEYS]
     mocker.patch("hermes_pipeline.harness._kanban_preflight")
     mocker.patch("hermes_pipeline.harness.time.sleep")
     mocker.patch("hermes_pipeline.kanban_tasks.observe_outcomes")
     mocker.patch("hermes_pipeline.kanban_tasks.get_todo_kanban_status", side_effect=status)
     cancel = mocker.patch("hermes_pipeline.harness._cancel_registered_tasks", return_value=True)
     mocker.patch("hermes_pipeline.kanban_tasks._list_task_snapshot", side_effect=lambda _tenant: list(snapshot))
+    # Polls block on a real Event.wait (harness.time.sleep is patched, but the registered
+    # phases poller waits on the cancel event); keep the multi-tick run fast.
+    fast = {"poll_interval": 0.01, "max_poll_interval": 0.05}
+    for name in ("poll_registered_phases",):
+        real_poll = getattr(harness_mod, name)
+        monkeypatch.setattr(
+            harness_mod, name,
+            lambda *a, _real=real_poll, **k: _real(*a, **{**fast, **k}),
+        )
     return SimpleNamespace(board=board, cancel=cancel, snapshot=snapshot)
 
 
@@ -195,7 +173,7 @@ class _LiveSandbox:
     """A seeded bare remote, a fake ``gh``, a fake tick runner, and a hermetic workspace."""
 
     def __init__(self, tmp_path: Path, monkeypatch, fake_gh) -> None:
-        self.bare = _make_bare_remote(tmp_path, harness_mod._SANDBOX_SEED_FILES)
+        self.bare = make_bare_remote(tmp_path, harness_mod._SANDBOX_SEED_FILES)
         self.sandbox = SandboxRepo(repo=_REPO, slug="sandbox", url=f"file://{self.bare}")
         self.tmp_root = tmp_path / "hermes-tmp"
         self.workspace = self.tmp_root / "harness-run"
@@ -229,7 +207,7 @@ class _LiveSandbox:
         _serve_github(
             fake_gh,
             title=harness_mod._issue_title(_RUN_TOKEN),
-            pr_exists=lambda: _BRANCH in _remote_branches(self.bare),
+            pr_exists=lambda: _BRANCH in remote_branches(self.bare),
         )
 
     def _fake_tick(self, argv, *, cwd, env, **kwargs):
@@ -310,7 +288,7 @@ def test_happy_path_live_flow_with_local_bare_remote(live, capsys, scripted_kanb
 
     # Shutdown cancelled the tick, then cleaned the remote: branch gone, issue and PR closed.
     scripted_kanban.cancel.assert_called_once()
-    assert _remote_branches(live.bare) == ["main"]
+    assert remote_branches(live.bare) == ["main"]
     gh_calls = live.fake_gh.gh_calls()
     assert ["issue", "close", str(_ISSUE), "--repo", _REPO, "--reason", "completed"] in gh_calls
     assert [call[:5] for call in gh_calls if call[:2] == ["pr", "close"]] == [
@@ -322,7 +300,7 @@ def test_happy_path_live_flow_with_local_bare_remote(live, capsys, scripted_kanb
 
 def test_non_quiescent_board_closes_issue_but_deletes_nothing(live, monkeypatch, scripted_kanban):
     """One card still live after cancel: fail closed — issue closed, branch and PR left, workspace kept."""
-    scripted_kanban.snapshot[0] = _kanban_task(_TICK_ID, _KEYS[0], "running")
+    scripted_kanban.snapshot[0] = kanban_task(_TICK_ID, _KEYS[0], "running", todo_id=f"TODO-{_ISSUE}")
     real_shutdown = harness_mod.shutdown_run
     monkeypatch.setattr(
         harness_mod, "shutdown_run",
@@ -339,7 +317,7 @@ def test_non_quiescent_board_closes_issue_but_deletes_nothing(live, monkeypatch,
     scripted_kanban.cancel.assert_called_once()
     assert live.workspace not in live.removed
     assert live.workspace.is_dir()
-    assert _remote_branches(live.bare) == [_BRANCH, "main"]
+    assert remote_branches(live.bare) == [_BRANCH, "main"]
     gh_calls = live.fake_gh.gh_calls()
     assert ["issue", "close", str(_ISSUE), "--repo", _REPO, "--reason", "completed"] in gh_calls
     assert not any(call[:2] == ["pr", "close"] for call in gh_calls)
@@ -358,7 +336,7 @@ def test_keep_dir_touches_nothing_remote_and_prunes_only_the_config(live, script
     )
     assert live.workspace not in live.removed
     scripted_kanban.cancel.assert_called_once()  # workers are still stopped
-    assert _remote_branches(live.bare) == [_BRANCH, "main"]
+    assert remote_branches(live.bare) == [_BRANCH, "main"]
     verbs = live.gh_verbs()
     assert ("issue", "close") not in verbs
     assert ("pr", "close") not in verbs
@@ -412,7 +390,7 @@ def native_sdd_kanban(mocker, monkeypatch):
 
     def snapshot(_tenant):
         return [
-            _kanban_task(_TICK_ID, key, snapshot_overrides.get(key, "archived")) for key in board
+            kanban_task(_TICK_ID, key, snapshot_overrides.get(key, "archived"), todo_id=f"TODO-{_ISSUE}") for key in board
         ]
 
     mocker.patch("hermes_pipeline.harness._kanban_preflight")
@@ -595,7 +573,7 @@ def test_native_sdd_multi_tick_live_flow(tmp_path, monkeypatch, fake_gh, native_
 
     # Shutdown cancelled the run once, then cleaned the remote: branch gone, issue and PR closed.
     native_sdd_kanban.cancel.assert_called_once()
-    assert _remote_branches(live.bare) == ["main"]
+    assert remote_branches(live.bare) == ["main"]
     gh_calls = live.fake_gh.gh_calls()
     assert ["issue", "close", str(_ISSUE), "--repo", _REPO, "--reason", "completed"] in gh_calls
     assert [call[:5] for call in gh_calls if call[:2] == ["pr", "close"]] == [
@@ -625,7 +603,7 @@ def test_native_sdd_stall_fails_closed(tmp_path, monkeypatch, fake_gh, native_sd
     gh_calls = live.fake_gh.gh_calls()
     assert ["issue", "close", str(_ISSUE), "--repo", _REPO, "--reason", "completed"] in gh_calls
     assert not any(call[:2] == ["pr", "close"] for call in gh_calls)
-    assert _remote_branches(live.bare) == ["main"]  # nothing was pushed, so nothing to delete
+    assert remote_branches(live.bare) == ["main"]  # nothing was pushed, so nothing to delete
     assert live.removed[-1] == live.workspace  # the board is quiescent, so the workspace goes
 
 
@@ -656,7 +634,7 @@ def test_non_quiescent_pinned_board_leaves_branch_and_pr(
     assert live.workspace not in live.removed
     assert live.workspace.is_dir()
     # Nothing destructive: the delivery branch and its PR survive for a human.
-    assert _remote_branches(live.bare) == [_BRANCH, "main"]
+    assert remote_branches(live.bare) == [_BRANCH, "main"]
     gh_calls = live.fake_gh.gh_calls()
     assert ["issue", "close", str(_ISSUE), "--repo", _REPO, "--reason", "completed"] in gh_calls
     assert not any(call[:2] == ["pr", "close"] for call in gh_calls)

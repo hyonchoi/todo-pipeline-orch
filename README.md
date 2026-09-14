@@ -288,7 +288,8 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 
 Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orch/issues).
 
-For contributor checks, run `uv run pytest`. The installed-Hermes
+For contributor checks, run `uv run pytest`. Shared test helpers live in
+`tests/support/` alongside `tests/gh_fakes.py`. The installed-Hermes
 registration contract test is skipped by default; opt in explicitly to check
 the installed CLI:
 

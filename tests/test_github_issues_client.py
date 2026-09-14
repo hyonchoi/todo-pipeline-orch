@@ -31,9 +31,8 @@ from hermes_pipeline.github_issues import (
     remove_label,
     repository_identity,
 )
-from tests.gh_fakes import issue_payload
+from tests.gh_fakes import REPO, issue_payload, label_list_stdout
 
-REPO = "acme/repo"
 TOKEN = "ghp_" + "A" * 36
 ORIGIN = ("git", "remote", "get-url", "origin")
 ACCEPT = ["-H", "Accept: application/vnd.github+json"]
@@ -453,7 +452,7 @@ def test_list_labels(fake_gh, tmp_path):
 
 
 def test_list_labels_rejects_truncated_listing(fake_gh, tmp_path):
-    fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(f"l{i}" for i in range(1000)))
+    fake_gh.on("gh", "label", "list", stdout=label_list_stdout(f"l{i}" for i in range(1000)))
     with pytest.raises(GitHubIssuesError, match="gh_truncated: gh label list"):
         list_labels(tmp_path, repo=REPO)
 
@@ -520,20 +519,16 @@ def test_close_issue_argv_and_idempotency(fake_gh, tmp_path):
         close_issue(tmp_path, 7, repo=REPO)
 
 
-def _label_list_stdout(names) -> str:
-    return json.dumps([{"name": name} for name in names])
-
-
 def test_ensure_labels_zero_writes_when_all_present_case_insensitively(fake_gh, tmp_path):
     names = [n.upper() if i % 2 else n for i, (n, _, _) in enumerate(gi.LABEL_VOCABULARY)]
-    fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(names))
+    fake_gh.on("gh", "label", "list", stdout=label_list_stdout(names))
     assert ensure_labels(tmp_path, repo=REPO) == ()
     assert [c[:2] for c in fake_gh.gh_calls()] == [["label", "list"]]
 
 
 def test_ensure_labels_creates_only_missing_including_extra(fake_gh, tmp_path):
     present = [n for n, _, _ in gi.LABEL_VOCABULARY if n not in {"tpo:on-hold", "effort:L"}]
-    fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(present))
+    fake_gh.on("gh", "label", "list", stdout=label_list_stdout(present))
     fake_gh.on("gh", "label", "create")
     created = ensure_labels(
         tmp_path, repo=REPO, extra=[("phase:9-custom", "abcdef", "Phase 9")]
@@ -552,7 +547,7 @@ def test_ensure_labels_creates_only_missing_including_extra(fake_gh, tmp_path):
 
 def test_ensure_labels_propagates_rejected_create_with_progress(fake_gh, tmp_path):
     present = [n for n, _, _ in gi.LABEL_VOCABULARY if n not in {"tpo:on-hold", "effort:L"}]
-    fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(present))
+    fake_gh.on("gh", "label", "list", stdout=label_list_stdout(present))
     fake_gh.on("gh", "label", "create")
     fake_gh.on("gh", "label", "create", handler=lambda argv: (
         (1, "", "Validation Failed: already_exists (HTTP 422)")
@@ -568,7 +563,7 @@ def test_ensure_labels_propagates_rejected_create_with_progress(fake_gh, tmp_pat
 
 def test_ensure_labels_attaches_partial_progress_on_hard_failure(fake_gh, tmp_path):
     present = [n for n, _, _ in gi.LABEL_VOCABULARY if n not in {"tpo:on-hold", "effort:L"}]
-    fake_gh.on("gh", "label", "list", stdout=_label_list_stdout(present))
+    fake_gh.on("gh", "label", "list", stdout=label_list_stdout(present))
     fake_gh.on("gh", "label", "create")
     fake_gh.on("gh", "label", "create", handler=lambda argv: (
         (1, "", "HTTP 401") if argv[-1] == "effort:L" else (0, "", "")
