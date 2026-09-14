@@ -146,6 +146,17 @@ def approve_lock(state_dir: Path | str):
 GH_TIMEOUT = 60
 GIT_TIMEOUT = 60
 HERMES_TIMEOUT = 60  # timeout for `hermes` subprocess calls (kanban, etc.)
+
+
+def _run(*args, **kwargs):
+    """Subprocess seam for ``gh``, ``git``, ``uv`` and ``hermes kanban`` calls.
+
+    Late-bound so ``patch("subprocess.run")`` in existing tests still intercepts;
+    new tests should ``monkeypatch.setattr(ship, "_run", fake)`` instead.
+    """
+    return subprocess.run(*args, **kwargs)
+
+
 _GH_PR_VIEW_FIELDS = "number,state,headRefOid,baseRefName,headRefName,statusCheckRollup"
 
 
@@ -154,7 +165,7 @@ class ShipError(Exception):
 
 
 def gh_pr_view(branch: str, *, cwd: Path | str) -> dict:
-    result = subprocess.run(
+    result = _run(
         ["gh", "pr", "view", branch, "--json", _GH_PR_VIEW_FIELDS],
         cwd=str(cwd), capture_output=True, text=True, timeout=GH_TIMEOUT,
     )
@@ -167,7 +178,7 @@ def gh_pr_view(branch: str, *, cwd: Path | str) -> dict:
 
 
 def gh_pr_merge_squash(branch: str, *, match_head: str, cwd: Path | str) -> None:
-    result = subprocess.run(
+    result = _run(
         ["gh", "pr", "merge", branch, "--squash", "--match-head-commit", match_head],
         cwd=str(cwd), capture_output=True, text=True, timeout=GH_TIMEOUT,
     )
@@ -176,7 +187,7 @@ def gh_pr_merge_squash(branch: str, *, match_head: str, cwd: Path | str) -> None
 
 
 def git_tree_clean(cwd: Path | str) -> bool:
-    result = subprocess.run(
+    result = _run(
         ["git", "status", "--porcelain"],
         cwd=str(cwd), capture_output=True, text=True, timeout=GIT_TIMEOUT,
     )
@@ -251,7 +262,7 @@ def ci_is_green(checks: list) -> bool:
 
 
 def _run_git(args: list[str], *, cwd: Path | str) -> str:
-    result = subprocess.run(
+    result = _run(
         ["git", *args],
         cwd=str(cwd), capture_output=True, text=True, timeout=GIT_TIMEOUT,
     )
@@ -334,7 +345,7 @@ def bump_in_pr(*, project_dir: Path | str, work_branch: str, todo_id: int) -> tu
             pyproject.write_text(new_text)
             staged.append("pyproject.toml")
             if (project_dir / "uv.lock").exists():
-                subprocess.run(
+                _run(
                     ["uv", "lock"],
                     cwd=project_dir,
                     check=True,
@@ -554,7 +565,7 @@ def _bump_and_merge(
 
 def complete_gate_task(task_id: str) -> None:
     """Complete the gate task in kanban so the tick can advance."""
-    result = subprocess.run(
+    result = _run(
         ["hermes", "kanban", "complete", task_id],
         capture_output=True, text=True, timeout=HERMES_TIMEOUT,
     )

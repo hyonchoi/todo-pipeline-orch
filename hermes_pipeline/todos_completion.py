@@ -45,9 +45,18 @@ FINISH_KEY = "finish"
 FINISH_PHASE_KEY = "phase_8_finish_branch"
 
 
+def _run(*args, **kwargs):
+    """Subprocess seam for ``gh`` and ``git`` calls.
+
+    Late-bound so ``patch("subprocess.run")`` in existing tests still intercepts;
+    new tests should ``monkeypatch.setattr(todos_completion, "_run", fake)`` instead.
+    """
+    return subprocess.run(*args, **kwargs)
+
+
 def _git(worktree: Path, *args: str) -> str:
     try:
-        result = subprocess.run(
+        result = _run(
             ["git", *args], cwd=worktree, capture_output=True, text=True, timeout=60
         )
     except (OSError, subprocess.TimeoutExpired, UnicodeError) as exc:
@@ -59,7 +68,7 @@ def _git(worktree: Path, *args: str) -> str:
 
 def _pr_view(worktree: Path, pr_url: str) -> dict[str, object]:
     try:
-        result = subprocess.run(
+        result = _run(
             ["gh", "pr", "view", pr_url, "--json",
              "state,url,headRefName,headRefOid,baseRefName,headRepository,isCrossRepository"],
             cwd=worktree, capture_output=True, text=True, timeout=60,
@@ -79,7 +88,7 @@ def _pr_view(worktree: Path, pr_url: str) -> dict[str, object]:
 
 def _remote_head(worktree: Path, branch: str) -> str:
     try:
-        result = subprocess.run(
+        result = _run(
             ["git", "ls-remote", "--heads", "origin", f"refs/heads/{branch}"],
             cwd=worktree, capture_output=True, text=True, timeout=60,
         )
@@ -183,7 +192,7 @@ def _corroborating_api(worktree: Path, endpoint: str, jq: str) -> str:
     is not proof of the negative.
     """
     try:
-        result = subprocess.run(
+        result = _run(
             ["gh", "api", endpoint, "--jq", jq], cwd=worktree,
             capture_output=True, text=True, timeout=60,
         )
@@ -357,7 +366,7 @@ def _check_state(worktree: Path, pr_url: str, *, repo: str, head_sha: str) -> st
     this module already refused.
     """
     try:
-        result = subprocess.run(
+        result = _run(
             ["gh", "pr", "checks", pr_url, "--json", "state"], cwd=worktree,
             capture_output=True, text=True, timeout=60,
         )

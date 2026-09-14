@@ -35,6 +35,17 @@ from .state import _atomic_write_text
 log = logging.getLogger(__name__)
 
 REVIEW_KEY = "review:0"
+
+
+def _run(*args, **kwargs):
+    """Subprocess seam for ``hermes kanban`` calls.
+
+    Late-bound so ``patch("subprocess.run")`` in existing tests still intercepts;
+    new tests should ``monkeypatch.setattr(review_reconciliation, "_run", fake)`` instead.
+    """
+    return subprocess.run(*args, **kwargs)
+
+
 REVIEW_PHASE_KEY = "phase_5_review"
 
 
@@ -178,7 +189,7 @@ def _create_task(
     )
     if task_id is None:
         try:
-            result = subprocess.run(
+            result = _run(
                 cmd, capture_output=True, text=True, timeout=KANBAN_QUERY_TIMEOUT,
                 check=False,
             )
