@@ -77,6 +77,15 @@ KANBAN_QUERY_TIMEOUT = 60       # kanban create (task registration)
 HERMES_COMMAND_TIMEOUT = 10     # kanban list, archive (utility commands)
 
 
+def _run(*args, **kwargs):
+    """Subprocess seam for ``hermes kanban`` and ``git`` calls.
+
+    Late-bound so ``patch("subprocess.run")`` in existing tests still intercepts;
+    new tests should ``monkeypatch.setattr(kanban_tasks, "_run", fake)`` instead.
+    """
+    return subprocess.run(*args, **kwargs)
+
+
 def _persist_pending_payload(
     project_dir: str | Path, payload: dict[str, object]
 ) -> None:
@@ -477,7 +486,7 @@ def _parse_task_header(task: dict[str, object]) -> dict[str, object] | None:
 def _list_task_snapshot(tenant: str) -> list[dict[str, object]] | None:
     """Return the current Hermes task snapshot, including archived tasks."""
     try:
-        result = subprocess.run(
+        result = _run(
             [
                 "hermes",
                 "kanban",
@@ -579,7 +588,7 @@ def _recover_uncertain_task_id(
 ) -> str | None:
     """Repeat an idempotent create once to recover a remotely-created task ID."""
     try:
-        result = subprocess.run(
+        result = _run(
             cmd,
             capture_output=True,
             text=True,
@@ -645,7 +654,7 @@ def _recover_and_archive_uncertain_task(
 def _complete_registration_barrier(task_id: str) -> None:
     """Commit a durable phase registration by completing its barrier."""
     try:
-        result = subprocess.run(
+        result = _run(
             ["hermes", "kanban", "complete", task_id],
             capture_output=True,
             text=True,
@@ -668,7 +677,7 @@ _MAX_REFERENCE_PATHS = 10
 
 
 def _tracked_at_head(project_dir: Path, relative_path: str) -> bool:
-    result = subprocess.run(
+    result = _run(
         ["git", "cat-file", "-e", f"HEAD:{relative_path}"],
         cwd=project_dir, capture_output=True, check=False, timeout=HERMES_COMMAND_TIMEOUT,
     )
@@ -936,7 +945,7 @@ def _run_durable_task_create(
         ) from exc
 
     try:
-        result = subprocess.run(
+        result = _run(
             cmd,
             capture_output=True,
             text=True,
@@ -1256,7 +1265,7 @@ def _archive_tasks(task_ids: list[str], *, tenant: str | None = None) -> bool:
         command_succeeded = True
         for task_id in task_ids:
             try:
-                result = subprocess.run(
+                result = _run(
                     ["hermes", "kanban", "archive", task_id],
                     capture_output=True,
                     text=True,
@@ -1291,7 +1300,7 @@ def _archive_tasks(task_ids: list[str], *, tenant: str | None = None) -> bool:
         if statuses.get(task_id) == "archived":
             continue
         try:
-            result = subprocess.run(
+            result = _run(
                 ["hermes", "kanban", "archive", task_id],
                 capture_output=True,
                 text=True,
@@ -1333,7 +1342,7 @@ def complete_todo_kanban_task(tenant: str, task_id: str) -> bool:
     failure from success instead of assuming this always worked.
     """
     try:
-        result = subprocess.run(
+        result = _run(
             ["hermes", "kanban", "complete", task_id],
             capture_output=True,
             text=True,
@@ -1552,7 +1561,7 @@ def get_todo_kanban_status(tenant: str, tick_id: str) -> dict[str, str]:
         Empty dict if no tasks found or CLI fails.
     """
     try:
-        result = subprocess.run(
+        result = _run(
             ["hermes", "kanban", "list", "--tenant", tenant, "--json"],
             capture_output=True,
             text=True,
@@ -1602,7 +1611,7 @@ def get_todo_kanban_tasks(tenant: str, tick_id: str) -> dict[str, KanbanTaskInfo
     Returns an empty dict if no tasks match or the CLI fails.
     """
     try:
-        result = subprocess.run(
+        result = _run(
             ["hermes", "kanban", "list", "--tenant", tenant, "--json"],
             capture_output=True,
             text=True,
@@ -1662,7 +1671,7 @@ def _task_run_terminated(task_id: str, *, require_kill_confirmation: bool) -> bo
 def _show_task_payload(task_id: str) -> dict[str, object] | None:
     """Fetch one validated Hermes task-detail envelope."""
     try:
-        result = subprocess.run(
+        result = _run(
             ["hermes", "kanban", "show", task_id, "--json"],
             capture_output=True,
             text=True,
@@ -1830,7 +1839,7 @@ def cancel_todo_kanban_tasks(
         if task.get("status") != "running":
             continue
         try:
-            result = subprocess.run(
+            result = _run(
                 [
                     "hermes",
                     "kanban",
@@ -1857,7 +1866,7 @@ def cancel_todo_kanban_tasks(
             continue
         task_id = task["id"]
         try:
-            result = subprocess.run(
+            result = _run(
                 ["hermes", "kanban", "archive", task_id],
                 capture_output=True,
                 text=True,

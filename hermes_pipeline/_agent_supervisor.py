@@ -453,13 +453,15 @@ def _validate_worker_result(registration: dict, contract: dict, raw: dict) -> No
         verify_optional_single_commit(Path(registration["worktree"]), result.git, expected_parent_sha=contract["base_sha"])
 
 
-def status(store: ExecutionStore, identity: str) -> dict:
+def status(store: ExecutionStore, identity: str, *, now=None) -> dict:
+    if now is None:
+        now = time.monotonic
     record = store.load(identity)
     if not record["attempts"] or record["attempts"][-1]["status"] not in TERMINAL:
-        return _status(store, identity)
+        return _status(store, identity, now=now)
     try:
         with store.locked(identity):
-            return _status(store, identity)
+            return _status(store, identity, now=now)
     except LockUnconfirmed:
         record = store.load(identity)
         attempt = record["attempts"][-1] if record["attempts"] else None
@@ -468,7 +470,7 @@ def status(store: ExecutionStore, identity: str) -> dict:
                 "completion_allowed": False}
 
 
-def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) -> dict:
+def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True, now) -> dict:
     record = store.load(identity)
     report = {"version": 1, "execution_id": identity, "generation": 0,
               "status": "registered", "completion_allowed": False,
@@ -506,7 +508,9 @@ def _status(store: ExecutionStore, identity: str, *, revalidate: bool = True) ->
     except (ExecutionError, OSError, ValueError):
         report["recovery"] = None
     report["supervisor_alive"] = alive
-    report["remaining_s"] = (max(0.0, attempt["deadline_monotonic"] - time.monotonic())
+    # Note: deadline_monotonic is written by the daemon's real clock (agent_process/agent_collector),
+    # so an injected `now` is only coherent for tests that also control that value.
+    report["remaining_s"] = (max(0.0, attempt["deadline_monotonic"] - now())
                              if alive and attempt["deadline_monotonic"] is not None else None)
     if record["registration"]["manifest"] is not None:
         from .agent_checkpoint import ProgressJournal
@@ -524,13 +528,18 @@ class _AdmissionBusy(ExecutionError):
 
 
 @contextmanager
-def _admission_worktree_lock(store: ExecutionStore, identity: str):
+def _admission_worktree_lock(store: ExecutionStore, identity: str, *, sleep=None, now=None):
     """Take the worktree lock, retrying verified contention for ADMISSION_WORKTREE_RETRY_S.
 
     A tick holds this lock while it lists, archives and creates Kanban cards;
     a daemon spawned for the card it just created must outlast that window.
     """
-    deadline = time.monotonic() + ADMISSION_WORKTREE_RETRY_S
+    # Optional only because existing tests enter this helper directly; callers inside this module must always pass sleep/now.
+    if sleep is None:
+        sleep = time.sleep
+    if now is None:
+        now = time.monotonic
+    deadline = now() + ADMISSION_WORKTREE_RETRY_S
     with ExitStack() as stack:
         while True:
             try:
@@ -539,9 +548,9 @@ def _admission_worktree_lock(store: ExecutionStore, identity: str):
             except LockUnconfirmed as exc:
                 if not _is_lock_contention(exc):
                     raise
-                if time.monotonic() >= deadline:
+                if now() >= deadline:
                     raise _AdmissionBusy from exc
-                time.sleep(0.5)
+                sleep(0.5)
         # Do not translate contention on the execution lock or inside preflight.
         yield
 
@@ -576,31 +585,40 @@ def _is_lock_contention(error: LockUnconfirmed) -> bool:
 
 
 @contextmanager
-def _execution_lock_retrying(store: ExecutionStore, identity: str):
+def _execution_lock_retrying(store: ExecutionStore, identity: str, *, sleep=None, now=None):
     """Retry store.locked(identity) on transient lock contention during admission.
 
     The waiter's polling may hold the lock, causing the daemon's store.locked
     to fail with LockUnconfirmed(OSError(EAGAIN/EWOULDBLOCK)). Retry with
     backoff for at most ADMISSION_LOCK_RETRY_S; other causes re-raise immediately.
     """
-    deadline = time.monotonic() + ADMISSION_LOCK_RETRY_S
+    # Optional only because existing tests enter this helper directly; callers inside this module must always pass sleep/now.
+    if sleep is None:
+        sleep = time.sleep
+    if now is None:
+        now = time.monotonic
+    deadline = now() + ADMISSION_LOCK_RETRY_S
     with ExitStack() as stack:
         while True:
             try:
                 stack.enter_context(store.locked(identity))
                 break
             except LockUnconfirmed as exc:
-                if not _is_lock_contention(exc) or time.monotonic() >= deadline:
+                if not _is_lock_contention(exc) or now() >= deadline:
                     raise
-                time.sleep(0.02)
+                sleep(0.02)
         yield
 
 
-def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
+def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | None = None, sleep=None, now=None) -> dict:
+    if sleep is None:
+        sleep = time.sleep
+    if now is None:
+        now = time.monotonic
     try:
-        with _admission_worktree_lock(store, identity), _execution_lock_retrying(store, identity):
+        with _admission_worktree_lock(store, identity, sleep=sleep, now=now), _execution_lock_retrying(store, identity, sleep=sleep, now=now):
             try:
-                return _supervise_locked(store, identity, recovery_event=recovery_event)
+                return _supervise_locked(store, identity, recovery_event=recovery_event, now=now)
             except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
                 _remember_launch_refusal(store, identity, error)
                 raise
@@ -610,10 +628,10 @@ def supervise(store: ExecutionStore, identity: str, *, recovery_event: str | Non
         close_execution_logger(store, identity)
 
 
-def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: str | None) -> dict:
+def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: str | None, now) -> dict:
     current = store.load(identity)
     if current["attempts"] and recovery_event is None:
-        return status(store, identity)
+        return status(store, identity, now=now)
     staging, arguments = _prepare_launch(store, identity, current)
     if recovery_event is not None:
         from .agent_recovery import (
@@ -631,7 +649,7 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
                               recovery_context=json.dumps(preview["context"], sort_keys=True))
     record, created = store.admit(identity, recovery_event=recovery_event)
     if not created:
-        return status(store, identity)
+        return status(store, identity, now=now)
     generation = record["attempts"][-1]["generation"]
     registration = record["registration"]
     store.update_attempt(identity, generation, supervisor=process_identity(os.getpid()))
@@ -710,7 +728,7 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
                                            deadline_monotonic=result["deadline"])
                     # This exact result was just validated while holding both locks.
                     # Historical status calls revalidate independently of this budget.
-                    report = _status(store, identity, revalidate=False)
+                    report = _status(store, identity, revalidate=False, now=now)
                     report.update(status="completed", completion_allowed=True, metadata={"tpo_result": raw})
             except CollectionTimedOut:
                 logger.warning("terminal generation=%s status=timed_out reason=checkpoint_deadline_exceeded", generation)
@@ -722,7 +740,7 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
                 logger.warning("terminal generation=%s status=exited reason=result_invalid error=%s",
                                generation, type(exc).__name__)
                 store.update_attempt(identity, generation, status="exited", reason="result_invalid")
-                report = _status(store, identity, revalidate=False)
+                report = _status(store, identity, revalidate=False, now=now)
                 report["status"] = "result_invalid"
                 return report
             else:
@@ -735,7 +753,7 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
         if deadline_collecting:
             from .agent_collector import collect_checkpoints
 
-            budget_deadline = time.monotonic() + deadline_collection_budget(registration["timeout"])
+            budget_deadline = now() + deadline_collection_budget(registration["timeout"])
             reason = "deadline_collection_incomplete"
 
             logger.info("deadline_collection_start generation=%s budget_s=%s", generation,
@@ -751,20 +769,24 @@ def _supervise_locked(store: ExecutionStore, identity: str, *, recovery_event: s
 
             logger.info("terminal generation=%s status=timed_out reason=%s", generation, reason)
             store.update_attempt(identity, generation, status="timed_out", reason=reason)
-            return status(store, identity)
+            return status(store, identity, now=now)
 
         if not collecting:
             logger.info("terminal generation=%s status=%s", generation, result["outcome"])
-    return status(store, identity)
+    return status(store, identity, now=now)
 
 
-def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None = None) -> dict:
+def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None = None, sleep=None, now=None) -> dict:
+    if sleep is None:
+        sleep = time.sleep
+    if now is None:
+        now = time.monotonic
     record = store.load(identity)
     last = record["attempts"][-1] if record["attempts"] else None
     if last is not None and recovery_event is None and last["status"] not in TERMINAL:
-        return status(store, identity)  # live or lost daemon: unchanged fast path
+        return status(store, identity, now=now)  # live or lost daemon: unchanged fast path
     try:
-        with _admission_worktree_lock(store, identity), store.locked(identity):
+        with _admission_worktree_lock(store, identity, sleep=sleep, now=now), store.locked(identity):
             record = store.load(identity)
             if record["attempts"] and recovery_event is None:
                 # Probe for auto-recovery approval inside lock
@@ -775,7 +797,7 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
                 except ExecutionError:
                     recovery_event = None
                 if recovery_event is None:
-                    return status(store, identity)
+                    return status(store, identity, now=now)
             try:
                 if recovery_event is not None:
                     from .agent_recovery import (
@@ -791,7 +813,7 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
                         return _recovery_invalidated(store, identity)
                     except ExecutionError:
                         if any(a["recovery_event"] == recovery_event for a in store.load(identity)["attempts"]):
-                            return status(store, identity)  # another waiter's daemon already admitted this event
+                            return status(store, identity, now=now)  # another waiter's daemon already admitted this event
                         raise
                 _prepare_launch(store, identity, record)
             except (ExecutionError, ProcessLaunchError, OSError, ValueError) as error:
@@ -827,10 +849,10 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
             if _registration_digest(latest) != _registration_digest(record):
                 raise ExecutionError("registration_drift") from None
             if len(latest["attempts"]) > len(record["attempts"]):
-                return status(store, identity)
+                return status(store, identity, now=now)
             _remember_launch_refusal(store, identity, error)
         raise
-    report = status(store, identity)
+    report = status(store, identity, now=now)
     if expected_generation is not None:
         report["expected_generation"] = expected_generation
     if report["status"] == "registered" or (
@@ -845,7 +867,9 @@ def attach(store: ExecutionStore, identity: str, *, recovery_event: str | None =
     return report
 
 
-def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60) -> dict:
+def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60, now=None) -> dict:
+    if now is None:
+        now = time.monotonic
     try:
         worktree = Path(store.load(identity)["registration"]["worktree"]).resolve()
         worktree_lock = "worktree-" + hashlib.sha256(os.fsencode(worktree)).hexdigest()
@@ -854,15 +878,15 @@ def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60
         with store.locked(worktree_lock), store.locked(identity):
             record = store.load(identity)
             if not record["attempts"]:
-                return status(store, identity)
+                return status(store, identity, now=now)
             attempt = record["attempts"][-1]
             from .agent_collector import collector_launch_pending
 
             pending_launch = collector_launch_pending(store, identity)
             if attempt["status"] in TERMINAL and attempt["cleanup"] == "confirmed" and not pending_launch:
-                return status(store, identity)
+                return status(store, identity, now=now)
             if identity_matches(attempt["supervisor"]):
-                return {**status(store, identity), "status": "lock_unconfirmed"}
+                return {**status(store, identity, now=now), "status": "lock_unconfirmed"}
             known = list(attempt["direct_processes"])
             direct = attempt["client_process"]
             if direct is not None and not any(
@@ -887,40 +911,48 @@ def recover(store: ExecutionStore, identity: str, *, cleanup_timeout: float = 60
                 else:
                     changes.update(status="interrupted", reason="exit_unobservable")
             store.update_attempt(identity, attempt["generation"], **changes)
-            return status(store, identity)
+            return status(store, identity, now=now)
     except LockUnconfirmed:
-        report = status(store, identity)
+        report = status(store, identity, now=now)
         return {**report, "status": "running_detached" if report["status"] == "running_detached" else "lock_unconfirmed"}
 
 
-def sweep(root: Path, *, cleanup_timeout: float = 0) -> list[dict]:
+def sweep(root: Path, *, cleanup_timeout: float = 0, now=None) -> list[dict]:
+    if now is None:
+        now = time.monotonic
     if not root.exists():
         return []
     store = ExecutionStore(root)
     reports = []
     for path in sorted(root.glob("*/record.json")):
         try:
-            reports.append(recover(store, path.parent.name, cleanup_timeout=cleanup_timeout))
+            reports.append(recover(store, path.parent.name, cleanup_timeout=cleanup_timeout, now=now))
         except (ExecutionError, OSError, ValueError):
             reports.append({"execution_id": path.parent.name, "status": "lock_unconfirmed", "completion_allowed": False})
     return reports
 
 
-def diagnostics(root: Path) -> list[dict]:
+def diagnostics(root: Path, *, now=None) -> list[dict]:
     """Read-only status for existing TPO diagnostics; never signal processes."""
+    if now is None:
+        now = time.monotonic
     if not root.exists():
         return []
     store = ExecutionStore(root)
     reports = []
     for path in sorted(root.glob("*/record.json")):
         try:
-            reports.append(status(store, path.parent.name))
+            reports.append(status(store, path.parent.name, now=now))
         except (ExecutionError, OSError, ValueError):
             reports.append({"execution_id": path.parent.name, "status": "lock_unconfirmed", "completion_allowed": False})
     return reports
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, sleep=None, now=None) -> int:
+    if sleep is None:
+        sleep = time.sleep
+    if now is None:
+        now = time.monotonic
     parser = argparse.ArgumentParser(description="Internal TPO registered execution supervisor")
     parser.add_argument("--version", action="version", version="tpo-agent-supervisor 1")
     parser.add_argument("operation", choices=("run", "status", "_supervise", "prepare-recovery", "approve-recovery"))
@@ -932,7 +964,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--preview-file", type=Path)
     args = parser.parse_args(argv)
     try:
-        started = time.monotonic()
+        started = now()
         store = ExecutionStore(args.root)
         if args.operation == "prepare-recovery":
             from .agent_recovery import prepare_recovery
@@ -948,9 +980,9 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps({"recovery_event": event}, sort_keys=True))
             return 0
         if args.operation == "status":
-            report = status(store, args.execution)
+            report = status(store, args.execution, now=now)
         else:
-            report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event)
+            report = {"run": attach, "_supervise": supervise}[args.operation](store, args.execution, recovery_event=args.recovery_event, sleep=sleep, now=now)
             expected_generation = report.get("expected_generation")
         if args.operation == "run":
             registration = store.load(args.execution)["registration"]
@@ -958,38 +990,38 @@ def main(argv: list[str] | None = None) -> int:
             ceiling_tail = wait_ceiling_tail(registration)
             stop = started + (timeout + ceiling_tail if args.wait else 5)
             caller = process_identity(os.getpid()) if args.wait else None
-            spawned_at = time.monotonic() if expected_generation is not None else None
+            spawned_at = now() if expected_generation is not None else None
             observed = report
             last_status_line = started
-            while report["status"] in {"running_detached", "registered", "lock_unconfirmed", "waiting_for_admission"} and time.monotonic() < stop:
+            while report["status"] in {"running_detached", "registered", "lock_unconfirmed", "waiting_for_admission"} and now() < stop:
                 if args.wait:
-                    now = time.monotonic()
-                    if now - last_status_line >= WAIT_STATUS_INTERVAL:
+                    current_time = now()
+                    if current_time - last_status_line >= WAIT_STATUS_INTERVAL:
                         # status/generation follow the tracked report; the two
                         # observability fields come from the last status() read
                         # and may lag while admission is being retried.
                         print(json.dumps({"status": report["status"], "generation": report.get("generation", 0),
-                                          "elapsed_s": now - started, "remaining_s": observed.get("remaining_s"),
+                                          "elapsed_s": current_time - started, "remaining_s": observed.get("remaining_s"),
                                           "accepted_tasks": observed.get("accepted_tasks"), "final": False},
                                          sort_keys=True), flush=True)
-                        last_status_line = now
+                        last_status_line = current_time
                     attempts = store.load(args.execution)["attempts"]
                     attempt = attempts[-1] if attempts else None
                     if (attempt is not None and (expected_generation is None or attempt["generation"] >= expected_generation)
                             and attempt["deadline_monotonic"] is not None and attempt["supervisor"] is not None
                             and all(attempt["supervisor"][key] == caller[key] for key in ("host", "boot_id"))):
                         stop = min(stop, attempt["deadline_monotonic"] + ceiling_tail)
-                    if time.monotonic() >= stop:
+                    if now() >= stop:
                         break
-                time.sleep(min(0.1, max(0, stop - time.monotonic())))
+                sleep(min(0.1, max(0, stop - now())))
                 if report["status"] == "waiting_for_admission" and report.get("reason") in {"worktree_busy", "execution_busy"}:
                     # Retry verified worktree or execution contention without admitting.
-                    report = attach(store, args.execution, recovery_event=args.recovery_event)
+                    report = attach(store, args.execution, recovery_event=args.recovery_event, sleep=sleep, now=now)
                     if report.get("expected_generation") is not None:
                         expected_generation = report["expected_generation"]
-                        spawned_at = time.monotonic()
+                        spawned_at = now()
                     continue
-                observed = status(store, args.execution)
+                observed = status(store, args.execution, now=now)
                 if (expected_generation is not None and observed["generation"] < expected_generation
                         and report["status"] in {"running_detached", "waiting_for_admission"}):
                     # The previous terminal outcome remains authoritative for
@@ -1012,7 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
                     if not pending:
                         report = _recovery_invalidated(store, args.execution)
                         break  # consumed-by-dead-daemon, invalidated, malformed
-                    if time.monotonic() - spawned_at >= DAEMON_ADMISSION_GRACE_S:
+                    if now() - spawned_at >= DAEMON_ADMISSION_GRACE_S:
                         report = _admission_failed(store, args.execution)
                         break
                     continue
