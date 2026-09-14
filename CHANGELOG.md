@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.2.0
+
+### Minor Changes
+
+- Supervisor automatic resume with card generations, deadline-time checkpoint collection, and profile enforcement
+
+- Automatic tick resume of timed-out and interrupted attempts with manifest evidence, with card generations and idempotency keys
+- Legible multi-line JSON status output from `run --wait` with 60-second intervals and per-execution supervisor logs
+- Deadline-time checkpoint collection under budget (min 600s, 10% of timeout) for manifest-bearing phases
+- Doctor verifies and install-profile enforces `kanban.auto_decompose: false` in Hermes profile configuration
+
+### Patch Changes
+
+- Automatically reissue cleanup-confirmed result-invalid phase cards on tick recovery.
+
 ## 1.1.1
 
 ### Patch Changes
