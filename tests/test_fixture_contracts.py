@@ -43,6 +43,7 @@ def test_real_git_fixtures_ignore_hostile_ambient_configuration(tmp_path):
         from hermes_pipeline.github_issues import repository_identity
 
         def test_real_fixture(tmp_path, monkeypatch):
+            assert not list(tmp_path.iterdir())
             repo, sha = init_repo(tmp_path / "repo", branch="main", files={"a": "base"},
                                   origin="https://example.invalid/base.git")
             assert sha and run_git(repo, "branch", "--show-current") == "main"

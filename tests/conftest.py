@@ -7,13 +7,12 @@ from tests.support.projects import make_project
 
 
 @pytest.fixture(autouse=True)
-def isolated_git_environment(tmp_path, monkeypatch):
+def isolated_git_environment(tmp_path_factory, monkeypatch):
     """Ignore developer Git state while allowing explicit test-local overrides."""
     for name in tuple(os.environ):
         if name.startswith("GIT_"):
             monkeypatch.delenv(name)
-    template = tmp_path / "empty-git-template"
-    template.mkdir()
+    template = tmp_path_factory.mktemp("empty-git-template")
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
