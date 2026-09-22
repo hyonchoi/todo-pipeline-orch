@@ -1956,6 +1956,7 @@ def test_legacy_registration_retry_publishes_pinned_policy(tmp_path, mocker, fak
     TestTickPlanRequirement._configure_profile(project, tmp_path, mocker)
     _commit_plan(project, text="# Legacy Plan\nImplement the feature.\n")
     # Preserve registration and worktree artifacts outside tracked fixture work.
+    (project / ".git/info").mkdir(exist_ok=True)
     (project / ".git/info/exclude").write_text(".hermes/\n.worktrees/\n")
     seed_project_issues(fake_gh, [todo_payload(10, title="Test", body=PLAN_BODY)])
     create = mocker.patch("hermes_pipeline.kanban_tasks.create_prepared_todo_phases", return_value=["worker"])

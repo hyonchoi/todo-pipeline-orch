@@ -3,6 +3,7 @@
 import errno
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -714,24 +715,38 @@ def test_supervisor_survives_worker_and_preserves_prompt_bytes(tmp_path, monkeyp
     executable.chmod(0o700)
     client = bindir / "codex"
     captured = tmp_path / "stdin.bin"
+    ready = tmp_path / "client-ready"
+    release = tmp_path / "client-release"
     head = supervisor._git(worktree, "rev-parse", "HEAD")
     client.write_text(f"#!{sys.executable}\n" +
         "import json, os, pathlib, subprocess, sys, time\n" +
         f"pathlib.Path({str(captured)!r}).write_bytes(sys.stdin.buffer.read())\n" +
-        "time.sleep(0.5)\n" +
+        f"pathlib.Path({str(ready)!r}).touch()\n" +
+        "deadline = time.monotonic() + 20\n" +
+        f"while not pathlib.Path({str(release)!r}).exists():\n" +
+        "    if time.monotonic() >= deadline: sys.exit(91)\n" +
+        "    time.sleep(0.02)\n" +
         f"result = {{'schema_version': 1, 'execution_id': {identity!r}, 'generation': int(os.environ['TPO_ATTEMPT_GENERATION']), 'tick_id': 'tick-test', 'todo_id': 'TODO-1', 'step_key': 'analysis', 'verdict': 'success', 'head_sha': {head!r}}}\n" +
         "pathlib.Path(os.environ['TPO_RESULT_PATH']).write_text(json.dumps(result))\n")
     client.chmod(0o700)
-    worker = subprocess.Popen([str(executable), "run", "--root", str(store.root), "--execution", identity],
+    worker = subprocess.Popen([str(executable), "run", "--root", str(store.root), "--execution", identity, "--wait"],
                               env={**os.environ, "PATH": str(bindir) + os.pathsep + os.environ["PATH"]},
                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 8
-        while not captured.exists() and time.monotonic() < deadline:
+        while not ready.exists() and time.monotonic() < deadline:
             time.sleep(0.02)
-        assert captured.exists()
+        assert ready.exists()
+        assert worker.poll() is None
         worker.terminate()
         worker.wait(timeout=2)
+        assert worker.returncode == -signal.SIGTERM
+        report = supervisor.status(store, identity)
+        assert report["status"] == "running_detached"
+        assert not (supervisor.staging_directory(store, identity, 1) / "result.json").exists()
+        assert not (store.root / identity / "result-1.json").exists()
+        release.touch()
+        deadline = time.monotonic() + 8
         while time.monotonic() < deadline:
             report = supervisor.status(store, identity)
             if report["status"] in {"completed", "result_invalid", "cleanup_unconfirmed", "interrupted"}:
@@ -739,8 +754,11 @@ def test_supervisor_survives_worker_and_preserves_prompt_bytes(tmp_path, monkeyp
             time.sleep(0.02)
         assert report["status"] == "completed"
         assert captured.read_bytes() == store.prompt(identity)
-        assert store.load(identity)["attempts"][0]["exit_code"] == 0
+        attempts = store.load(identity)["attempts"]
+        assert len(attempts) == 1
+        assert attempts[0]["exit_code"] == 0
     finally:
+        release.touch()
         if worker.poll() is None:
             worker.terminate()
             worker.wait(timeout=2)

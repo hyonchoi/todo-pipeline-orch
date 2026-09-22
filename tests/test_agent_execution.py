@@ -347,14 +347,12 @@ def test_execution_logger_writes_to_execution_directory(execution):
         close_execution_logger(store, "execution-1")
 
 
-def test_execution_logger_falls_back_to_null_handler_on_unregistered_execution():
+def test_execution_logger_falls_back_to_null_handler_on_unregistered_execution(tmp_path):
     """Unregistered execution -> logger.info() does not raise, only NullHandlers; calling twice leaves exactly one."""
-    import tempfile
-    with tempfile.TemporaryDirectory() as tmpdir:
-        store = ExecutionStore(tmpdir)
-        logger = execution_logger(store, "unregistered-exec")
-        logger.info("x")
-        assert all(isinstance(h, logging.NullHandler) for h in logger.handlers)
-        logger2 = execution_logger(store, "unregistered-exec")
-        null_handlers = [h for h in logger2.handlers if isinstance(h, logging.NullHandler)]
-        assert len(null_handlers) == 1
+    store = ExecutionStore(tmp_path)
+    logger = execution_logger(store, "unregistered-exec")
+    logger.info("x")
+    assert all(isinstance(h, logging.NullHandler) for h in logger.handlers)
+    logger2 = execution_logger(store, "unregistered-exec")
+    null_handlers = [h for h in logger2.handlers if isinstance(h, logging.NullHandler)]
+    assert len(null_handlers) == 1

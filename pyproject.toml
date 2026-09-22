@@ -37,7 +37,7 @@ packages = ["hermes_pipeline"]
 
 [tool.ruff]
 target-version = "py312"
-exclude = ["docs/old-code"]
+extend-exclude = ["docs/old-code"]
 
 [tool.ruff.lint]
 select = [

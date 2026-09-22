@@ -289,9 +289,26 @@ See [CLI reference](docs/reference-cli.md) for arguments, exit codes, and detail
 Found a bug or feature request? [Open an issue on GitHub](https://github.com/hyonchoi/todo-pipeline-orch/issues).
 
 For contributor checks, run `uv run pytest`. Shared test helpers live in
-`tests/support/` alongside `tests/gh_fakes.py`. The installed-Hermes
-registration contract test is skipped by default; opt in explicitly to check
-the installed CLI:
+`tests/support/` alongside `tests/gh_fakes.py`.
+
+Tests isolate inherited `GIT_*` settings, ignore system/global Git configuration,
+disable prompts, and use an empty Git template. Set required commit identities
+and branch names in each repository fixture, and create template directories
+such as `.git/info` explicitly when needed. Tests that exercise configuration
+overrides may set their own environment with `monkeypatch` after fixture setup.
+Use `fake_gh` for the GitHub client seam, or `fake_gh_factory()` for another patch
+target; never construct `FakeGh` directly. Register every expected command,
+including deliberate failures, with `.on(...)`. Unmatched commands fail the test
+even when application code catches the immediate exception; fake diagnostics
+omit recorded command and response payloads.
+
+Fixture regression tests run generated child tests with repository fixtures
+explicitly loaded, inherited pytest/coverage settings cleared, and bounded
+subprocess timeouts. Process-survival tests use readiness/release handshakes to
+prove ordering instead of assuming a delay is long enough.
+
+The installed-Hermes registration contract test is skipped by default; opt in
+explicitly to check the installed CLI:
 
 ```bash
 TPO_RUN_LIVE_HERMES_CONTRACT=1 uv run pytest tests/test_hermes_registration_contract.py -q

@@ -53,6 +53,7 @@ def test_configuration_environment_and_history_overrides_are_ignored(tmp_path, m
     git(tree, 'commit', '--allow-empty', '-m', 'next')
     head = git(tree, 'rev-parse', 'HEAD')
     git(tree, 'replace', head, base)
+    (tree / '.git' / 'info').mkdir(exist_ok=True)
     (tree / '.git' / 'info' / 'grafts').write_text(head + '\n')
     marker = tmp_path / 'marker'
     config = tmp_path / 'config'
@@ -128,6 +129,16 @@ def test_pointer_paths_preserve_whitespace_and_filesystem_bytes(tmp_path, suffix
     tree = tmp_path / 'work'
     tree.mkdir()
     metadata = tmp_path / suffix
+    # Some filesystems reject undecodable filename bytes (for example APFS).
+    import errno
+    try:
+        metadata.mkdir()
+    except OSError as exc:
+        if exc.errno == errno.EILSEQ:
+            pytest.skip("filesystem rejects undecodable filename bytes")
+        raise
+    assert os.fsencode(suffix) in os.listdir(os.fsencode(tmp_path))
+    metadata.rmdir()
     git(tree, 'init', '-b', 'main', '--separate-git-dir', str(metadata))
     git(tree, 'config', 'user.name', 'Test')
     git(tree, 'config', 'user.email', 'test@example.invalid')

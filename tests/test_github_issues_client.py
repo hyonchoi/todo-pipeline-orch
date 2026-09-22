@@ -91,6 +91,8 @@ def test_list_calls_use_long_timeout(fake_gh, tmp_path):
     ("raises", "rc", "stderr", "code"),
     [
         (FileNotFoundError("gh"), None, "", "gh_missing"),
+        (OSError(TOKEN), None, "", "gh_unavailable"),
+        (UnicodeError(TOKEN), None, "", "gh_unavailable"),
         (subprocess.TimeoutExpired("gh", 60), None, "", "gh_unavailable"),
         (None, 4, f"To get started with GitHub CLI, please run: gh auth login {TOKEN}", "gh_auth"),
         (None, 1, "HTTP 401: Bad credentials", "gh_auth"),
@@ -122,6 +124,7 @@ def test_gh_errors_are_classified_without_leaking_stderr(
     exc = info.value
     assert exc.code == code
     assert exc.verb == "api"
+    assert fake_gh.calls == [[*API, "repos/acme/repo/issues/7"]]
     assert str(exc) == f"{code}: gh api"
     assert TOKEN not in str(exc)
     assert "exploded" not in str(exc)
@@ -231,12 +234,18 @@ def test_repository_identity_rejects_bad_origin(fake_gh, tmp_path, rule):
         ({"rc": 128, "stderr": "fatal: no such remote 'origin' secret"}, "no origin remote or not a git repository"),
         ({"raises": FileNotFoundError("git")}, "git not found"),
         ({"raises": subprocess.TimeoutExpired("git", 60)}, "git remote get-url origin failed"),
+        ({"raises": OSError("secret")}, "git remote get-url origin failed"),
+        ({"raises": UnicodeError("secret")}, "git remote get-url origin failed"),
     ],
 )
-def test_repository_identity_attaches_fixed_detail(fake_gh, tmp_path, rule, detail):
+def test_repository_identity_attaches_fixed_detail(fake_gh, tmp_path, caplog, rule, detail):
     fake_gh.on(*ORIGIN, **rule)
     with pytest.raises(GitHubIssuesError) as info:
         repository_identity(tmp_path)
+    assert info.value.code == "origin_identity_invalid"
+    assert info.value.verb == "git remote"
+    assert fake_gh.calls == [list(ORIGIN)]
+    assert "secret" not in caplog.text
     assert info.value.detail == detail
     assert "secret" not in str(info.value) and "secret" not in info.value.detail
     assert str(info.value) == "origin_identity_invalid: gh git remote"
@@ -798,3 +807,16 @@ def test_delivery_closed_issue_exception_preserves_other_drift_checks(
     assert check_issue_drift(
         tmp_path, _drift_registration(), repo=REPO, allow_closed=True
     ) == expected
+
+
+@pytest.mark.parametrize("payload", [{"secret": TOKEN}, [{"secret": TOKEN}], [[TOKEN]], [[None]]])
+def test_malformed_comment_pages_and_items_are_structured_errors(fake_gh, tmp_path, caplog, payload):
+    fake_gh.on(*API, stdout=json.dumps(payload))
+    with pytest.raises(GitHubIssuesError) as info:
+        list_comment_bodies(tmp_path, 7, repo=REPO)
+    assert (info.value.code, info.value.verb) == ("gh_invalid", "api")
+    assert str(info.value) == "gh_invalid: gh api"
+    assert TOKEN not in str(info.value) + caplog.text
+    assert fake_gh.calls == [
+        [*API, "--paginate", "--slurp", "repos/acme/repo/issues/7/comments"]
+    ]
