@@ -32,12 +32,14 @@ class FakeGh:
     ``on("gh", "api", ...)`` and ``on("git", "remote", ...)`` both work). When
     two rules of equal prefix length match, the later registration wins, so a
     test can re-``on()`` to override an earlier default.
-    Unmatched argv fails with rc 1 and ``stderr="fake gh: unsupported"``.
+    Unmatched argv is recorded and rejected without including command payloads.
+    Construct through ``fake_gh_factory`` so swallowed errors fail at teardown.
     """
 
-    calls: list[list[str]] = field(default_factory=list)
-    kwargs: list[dict[str, Any]] = field(default_factory=list)
-    _rules: list[_Rule] = field(default_factory=list)
+    unmatched_calls: int = field(default=0, init=False)
+    calls: list[list[str]] = field(default_factory=list, repr=False)
+    kwargs: list[dict[str, Any]] = field(default_factory=list, repr=False)
+    _rules: list[_Rule] = field(default_factory=list, repr=False)
 
     def on(
         self,
@@ -61,12 +63,14 @@ class FakeGh:
         return best
 
     def __call__(self, argv: Sequence[str], **kwargs: Any) -> SimpleNamespace:
+        __tracebackhide__ = True  # pytest diagnostics must not display argv or input payloads.
         argv = list(argv)
         self.calls.append(argv)
         self.kwargs.append(kwargs)
         rule = self._match(argv)
         if rule is None:
-            return SimpleNamespace(returncode=1, stdout="", stderr="fake gh: unsupported")
+            self.unmatched_calls += 1
+            raise AssertionError("unexpected FakeGh call; configure an explicit rule")
         if rule.raises is not None:
             raise rule.raises
         if rule.handler is not None:

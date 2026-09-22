@@ -14,7 +14,7 @@ from hermes_pipeline.todos_create import (
     load_create_request,
     render_create_body,
 )
-from tests.gh_fakes import API_ARGV, FakeGh, issue_payload
+from tests.gh_fakes import API_ARGV, issue_payload
 from tests.support.todos import todo_request as request
 
 
@@ -304,13 +304,13 @@ def test_completed_held_issue_retry_has_no_remote_mutations(tmp_path, mocker):
         mutation.assert_not_called()
 
 
-def test_marker_discovery_is_unfiltered_and_fully_paginated(tmp_path, mocker):
+def test_marker_discovery_is_unfiltered_and_fully_paginated(tmp_path, mocker, fake_gh_factory):
     from hermes_pipeline import github_issues
     from hermes_pipeline.todos_create import _matching_issues, creation_marker
 
     req = load_create_request(_write(tmp_path / "request.json", request()))
     marker = creation_marker(req.transaction_id)
-    fake = FakeGh().on(
+    fake = fake_gh_factory().on(
         *API_ARGV,
         "--paginate",
         "--slurp",

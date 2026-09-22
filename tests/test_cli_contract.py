@@ -3337,7 +3337,7 @@ class TestTodosComplete:
         assert remote["state"] == "closed"
 
     def test_real_pr_view_drives_completion_from_the_shape_gh_emits(
-        self, tmp_path, fake_gh, mocker, capsys
+        self, tmp_path, fake_gh, mocker, capsys, fake_gh_factory
     ):
         """`tpo todos complete` calls `_pr_view` directly, so the `baseRepository`
         defect made this command fail against every real PR too. Every other test in
@@ -3348,12 +3348,11 @@ class TestTodosComplete:
         import json as _json
 
         from hermes_pipeline.cli import _cmd_todos_complete
-        from tests.gh_fakes import FakeGh
         from tests.support.completion import GH_PR_VIEW_JSON_FIELDS
 
         config, remote = self._project(tmp_path, fake_gh)
         mocker.patch("hermes_pipeline.todos_completion._pr_view", self.real_pr_view)
-        gh = FakeGh().on("gh", "pr", "view", stdout=_json.dumps({
+        gh = fake_gh_factory().on("gh", "pr", "view", stdout=_json.dumps({
             "baseRefName": "main",
             "headRefName": "todo-5-widget",
             "headRefOid": "a" * 40,
